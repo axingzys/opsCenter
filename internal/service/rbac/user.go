@@ -1,0 +1,956 @@
+// Copyright (c) 2026 DYCloud J.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of
+// this software and associated documentation files (the "Software"), to deal in
+// the Software without restriction, including without limitation the rights to
+// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+// the Software, and to permit persons to whom the Software is furnished to do so,
+// subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+// COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+// IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+package rbac
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/ydcloud-dy/opshub/internal/biz/audit"
+	mfabiz "github.com/ydcloud-dy/opshub/internal/biz/mfa"
+	"github.com/ydcloud-dy/opshub/internal/biz/rbac"
+	"github.com/ydcloud-dy/opshub/internal/biz/system"
+	appLogger "github.com/ydcloud-dy/opshub/pkg/logger"
+	"github.com/ydcloud-dy/opshub/pkg/response"
+	"go.uber.org/zap"
+)
+
+type UserService struct {
+	userUseCase     *rbac.UserUseCase
+	authService     *AuthService
+	captchaService  *CaptchaService
+	loginLogUseCase *audit.LoginLogUseCase
+	configUseCase   *system.ConfigUseCase
+	ldapAuthService *LDAPAuthService
+	mfaUseCase      *mfabiz.UseCase
+}
+
+func NewUserService(userUseCase *rbac.UserUseCase, authService *AuthService) *UserService {
+	return &UserService{
+		userUseCase: userUseCase,
+		authService: authService,
+	}
+}
+
+// SetCaptchaService 设置验证码服务（通过依赖注入）
+func (s *UserService) SetCaptchaService(captchaService *CaptchaService) {
+	s.captchaService = captchaService
+}
+
+// SetLoginLogUseCase 设置登录日志用例（通过依赖注入）
+func (s *UserService) SetLoginLogUseCase(loginLogUseCase *audit.LoginLogUseCase) {
+	s.loginLogUseCase = loginLogUseCase
+}
+
+// SetConfigUseCase 设置配置用例（通过依赖注入）
+func (s *UserService) SetConfigUseCase(configUseCase *system.ConfigUseCase) {
+	s.configUseCase = configUseCase
+}
+
+// SetLDAPAuthService 设置LDAP认证服务（通过依赖注入）
+func (s *UserService) SetLDAPAuthService(ldapAuthService *LDAPAuthService) {
+	s.ldapAuthService = ldapAuthService
+}
+
+// SetMFAUseCase 设置MFA用例（通过依赖注入）
+func (s *UserService) SetMFAUseCase(mfaUseCase *mfabiz.UseCase) {
+	s.mfaUseCase = mfaUseCase
+}
+
+// GetUserUseCase 获取用户用例（供外部依赖注入使用）
+func (s *UserService) GetUserUseCase() *rbac.UserUseCase {
+	return s.userUseCase
+}
+
+// GetAuthService 获取认证服务（供OAuth等模块使用）
+func (s *UserService) GetAuthService() *AuthService {
+	return s.authService
+}
+
+// LoginRequest 登录请求
+type LoginRequest struct {
+	Username    string `json:"username" binding:"required"`
+	Password    string `json:"password" binding:"required"`
+	CaptchaId   string `json:"captchaId"`
+	CaptchaId2  string `json:"captchaId2"` // 兼容前端可能的字段名
+	CaptchaCode string `json:"captchaCode"`
+}
+
+// LoginResponse 登录响应
+type LoginResponse struct {
+	Token        string        `json:"token,omitempty"`
+	User         *rbac.SysUser `json:"user,omitempty"`
+	RequireMFA   bool          `json:"requireMfa"`         // 是否需要MFA验证
+	MFAToken     string        `json:"mfaToken,omitempty"` // MFA临时token
+	RequireSetup bool          `json:"requireSetup"`       // 是否需要强制设置MFA
+}
+
+// RegisterRequest 注册请求
+type RegisterRequest struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required,min=6"`
+	RealName string `json:"realName"`
+	Email    string `json:"email" binding:"required,email"`
+	Phone    string `json:"phone"`
+}
+
+// Login 用户登录
+// @Summary 用户登录
+// @Description 用户使用用户名、密码和验证码登录系统
+// @Tags 认证管理
+// @Accept json
+// @Produce json
+// @Param body body LoginRequest true "登录信息"
+// @Success 200 {object} response.Response "登录成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Router /api/v1/public/login [post]
+func (s *UserService) Login(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	// 添加调试日志
+	appLogger.Info("用户登录尝试", zap.String("username", req.Username))
+
+	// 获取客户端信息
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+
+	// 检查账户是否被锁定
+	if s.configUseCase != nil {
+		locked, remainingSeconds, err := s.configUseCase.CheckLoginAttempt(c.Request.Context(), req.Username)
+		if err != nil {
+			appLogger.Error("检查登录锁定失败", zap.Error(err))
+		}
+		appLogger.Info("检查账户锁定状态", zap.String("username", req.Username), zap.Bool("locked", locked), zap.Int("remainingSeconds", remainingSeconds))
+		if locked {
+			s.recordLoginLog(req.Username, "web", "failed", clientIP, userAgent, "账户已锁定", 0)
+			response.ErrorCode(c, http.StatusOK, fmt.Sprintf("账户已锁定，请在 %d 秒后重试", remainingSeconds))
+			return
+		}
+	} else {
+		appLogger.Warn("configUseCase未设置，跳过账户锁定检查")
+	}
+
+	// 检查是否需要验证码
+	captchaEnabled := true
+	if s.configUseCase != nil {
+		captchaEnabled = s.configUseCase.IsCaptchaEnabled(c.Request.Context())
+	}
+
+	if captchaEnabled {
+		// 验证验证码
+		captchaId := req.CaptchaId
+		if captchaId == "" {
+			captchaId = req.CaptchaId2
+		}
+
+		if captchaId == "" || req.CaptchaCode == "" {
+			// 记录登录日志 - 验证码为空
+			s.recordLoginLog(req.Username, "web", "failed", clientIP, userAgent, "验证码为空", 0)
+			response.ErrorCode(c, http.StatusOK, "请输入验证码")
+			return
+		}
+
+		// 使用验证码服务验证
+		if s.captchaService == nil {
+			s.recordLoginLog(req.Username, "web", "failed", clientIP, userAgent, "验证码服务未初始化", 0)
+			response.ErrorCode(c, http.StatusOK, "验证码服务未初始化")
+			return
+		}
+
+		if !s.captchaService.VerifyCaptchaDirect(captchaId, req.CaptchaCode) {
+			appLogger.Info("验证码验证失败", zap.String("username", req.Username), zap.String("captchaId", captchaId))
+			// 记录登录日志 - 验证码错误
+			s.recordLoginLog(req.Username, "web", "failed", clientIP, userAgent, "验证码错误", 0)
+			response.ErrorCode(c, http.StatusOK, "验证码错误，请重新输入")
+			return
+		}
+	}
+
+	user, err := s.userUseCase.ValidatePassword(c.Request.Context(), req.Username, req.Password)
+	if err != nil {
+		// 本地认证失败，尝试LDAP认证
+		if s.ldapAuthService != nil && s.ldapAuthService.IsEnabled(c.Request.Context()) {
+			appLogger.Info("本地认证失败，尝试LDAP认证", zap.String("username", req.Username))
+			ldapUser, ldapErr := s.ldapAuthService.Authenticate(c.Request.Context(), req.Username, req.Password)
+			if ldapErr == nil && ldapUser != nil {
+				// LDAP认证成功
+				appLogger.Info("LDAP认证成功", zap.String("username", req.Username))
+				user = ldapUser
+				err = nil
+				// 记录登录日志 - LDAP登录成功
+				s.recordLoginLog(req.Username, "ldap", "success", clientIP, userAgent, "", ldapUser.ID)
+			} else {
+				appLogger.Info("LDAP认证也失败", zap.String("username", req.Username), zap.Error(ldapErr))
+			}
+		}
+
+		// 本地和LDAP都认证失败
+		if err != nil {
+			appLogger.Error("登录失败", zap.String("username", req.Username), zap.Error(err))
+			// 记录登录日志 - 用户名或密码错误
+			s.recordLoginLog(req.Username, "web", "failed", clientIP, userAgent, err.Error(), 0)
+			// 记录登录失败次数
+			if s.configUseCase != nil {
+				appLogger.Info("记录登录失败次数", zap.String("username", req.Username))
+				if recordErr := s.configUseCase.RecordLoginFailure(c.Request.Context(), req.Username); recordErr != nil {
+					appLogger.Error("记录登录失败次数失败", zap.Error(recordErr))
+				} else {
+					appLogger.Info("登录失败次数记录成功", zap.String("username", req.Username))
+				}
+			} else {
+				appLogger.Warn("configUseCase未设置，无法记录登录失败次数")
+			}
+			response.ErrorCode(c, http.StatusOK, err.Error())
+			return
+		}
+	}
+
+	if user.Status != 1 {
+		// 记录登录日志 - 用户被禁用
+		s.recordLoginLog(req.Username, "web", "failed", clientIP, userAgent, "用户已被禁用", user.ID)
+		response.ErrorCode(c, http.StatusOK, "用户已被禁用")
+		return
+	}
+
+	// 检查是否启用了MFA
+	// 先检查系统是否启用了MFA功能
+	systemMFAEnabled := false
+	mfaEnforced := false
+	if s.configUseCase != nil {
+		securityConfig, err := s.configUseCase.GetSecurityConfig(c.Request.Context())
+		if err == nil {
+			systemMFAEnabled = securityConfig.MFAEnabled
+			mfaEnforced = securityConfig.MFAEnforced
+		}
+	}
+
+	// 检查用户是否已启用MFA
+	userMFAEnabled := false
+	if s.mfaUseCase != nil {
+		userMFAEnabled = s.mfaUseCase.IsMFAEnabled(c.Request.Context(), user.ID)
+	}
+
+	// MFA验证逻辑：
+	// 1. 如果用户已启用MFA，则需要验证（但检查是否为信任设备）
+	// 2. 如果开启了强制MFA但用户未设置，允许登录但需要前端强制引导设置
+	if systemMFAEnabled && s.mfaUseCase != nil {
+		if userMFAEnabled {
+			// 检查是否为信任设备（通过cookie）
+			deviceToken, _ := c.Cookie("mfa_trusted_device")
+			if deviceToken != "" && s.mfaUseCase.IsTrustedDevice(c.Request.Context(), user.ID, deviceToken) {
+				// 信任设备，跳过MFA验证
+				appLogger.Info("MFA信任设备，跳过验证", zap.String("username", req.Username))
+			} else {
+				// 用户已启用MFA，需要验证
+				// 生成临时MFA token（5分钟有效）
+				mfaToken, err := s.authService.GenerateMFAToken(user.ID, user.Username)
+				if err != nil {
+					response.ErrorCode(c, http.StatusInternalServerError, "生成MFA token失败")
+					return
+				}
+				// 返回需要MFA验证的响应
+				response.Success(c, LoginResponse{
+					RequireMFA: true,
+					MFAToken:   mfaToken,
+					User:       nil,
+				})
+				return
+			}
+		}
+	}
+
+	token, err := s.authService.GenerateToken(user.ID, user.Username)
+	if err != nil {
+		// 记录登录日志 - 生成token失败
+		s.recordLoginLog(req.Username, "web", "failed", clientIP, userAgent, "生成token失败", user.ID)
+		response.ErrorCode(c, http.StatusInternalServerError, "生成token失败")
+		return
+	}
+
+	// 登录成功，重置登录失败次数
+	if s.configUseCase != nil {
+		if resetErr := s.configUseCase.ResetLoginAttempt(c.Request.Context(), req.Username); resetErr != nil {
+			appLogger.Error("重置登录失败次数失败", zap.Error(resetErr))
+		}
+	}
+
+	// 清空密码字段，防止返回给前端
+	user.Password = ""
+
+	// 更新最后登录时间
+	_ = s.userUseCase.Update(c.Request.Context(), user)
+
+	// 记录登录日志 - 登录成功
+	s.recordLoginLog(req.Username, "web", "success", clientIP, userAgent, "", user.ID)
+
+	appLogger.Info("用户登录成功", zap.String("username", req.Username))
+
+	// 设置 session cookie（用于 OAuth2 SSO 流程）
+	// 使用 httpOnly cookie 来保持会话，这样浏览器重定向时会自动携带
+	c.SetCookie(
+		"opshub_session", // cookie name
+		token,            // cookie value (JWT token)
+		86400,            // maxAge: 24小时
+		"/",              // path
+		"",               // domain (空表示当前域)
+		false,            // secure (本地开发设为false，生产环境应设为true)
+		true,             // httpOnly
+	)
+
+	response.Success(c, LoginResponse{
+		Token:        token,
+		User:         user,
+		RequireSetup: mfaEnforced && !userMFAEnabled, // 如果强制MFA但用户未设置，需要引导设置
+	})
+}
+
+// recordLoginLog 记录登录日志
+func (s *UserService) recordLoginLog(username, loginType, loginStatus, ip, userAgent, failReason string, userID uint) {
+	if s.loginLogUseCase == nil {
+		return
+	}
+
+	realName := ""
+	if userID != 0 {
+		// 获取用户真实姓名
+		if user, err := s.userUseCase.GetByID(context.Background(), userID); err == nil {
+			realName = user.RealName
+		}
+	}
+
+	log := &audit.SysLoginLog{
+		UserID:      userID,
+		Username:    username,
+		RealName:    realName,
+		LoginType:   loginType,
+		LoginStatus: loginStatus,
+		LoginTime:   time.Now(),
+		IP:          ip,
+		Location:    "", // 可以根据IP解析地理位置
+		UserAgent:   userAgent,
+		FailReason:  failReason,
+	}
+
+	// 异步保存登录日志
+	go func() {
+		if err := s.loginLogUseCase.Create(context.Background(), log); err != nil {
+			appLogger.Error("保存登录日志失败",
+				zap.Error(err),
+				zap.String("username", username),
+			)
+		}
+	}()
+}
+
+// Register 用户注册
+// @Summary 用户注册
+// @Description 新用户使用用户名、密码等信息注册账号
+// @Tags 认证管理
+// @Accept json
+// @Produce json
+// @Param body body RegisterRequest true "注册信息"
+// @Success 200 {object} response.Response{} "注册成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Router /api/v1/public/register [post]
+func (s *UserService) Register(c *gin.Context) {
+	var req RegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	user := &rbac.SysUser{
+		Username: req.Username,
+		Password: req.Password,
+		RealName: req.RealName,
+		Email:    req.Email,
+		Phone:    req.Phone,
+		Status:   1,
+	}
+
+	if err := s.userUseCase.Create(c.Request.Context(), user); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "注册失败: "+err.Error())
+		return
+	}
+
+	response.Success(c, user)
+}
+
+// GetProfile 获取当前用户信息
+// @Summary 获取当前用户信息
+// @Description 获取登录用户的个人信息（需要Bearer Token认证）
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Success 200 {object} response.Response{} "获取成功"
+// @Failure 401 {object} response.Response "未登录"
+// @Router /api/v1/profile [get]
+func (s *UserService) GetProfile(c *gin.Context) {
+	userID := GetUserID(c)
+	if userID == 0 {
+		response.ErrorCode(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	user, err := s.userUseCase.GetByID(c.Request.Context(), userID)
+	if err != nil {
+		response.ErrorCode(c, http.StatusNotFound, "用户不存在")
+		return
+	}
+
+	// 清空密码字段，防止返回给前端
+	user.Password = ""
+
+	response.Success(c, user)
+}
+
+// ChangePasswordRequest 修改密码请求
+type ChangePasswordRequest struct {
+	OldPassword string `json:"oldPassword" binding:"required"`
+	NewPassword string `json:"newPassword" binding:"required,min=6"`
+}
+
+// ChangePassword 修改自己的密码
+// @Summary 修改用户密码
+// @Description 用户修改自己的登录密码
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body ChangePasswordRequest true "密码信息"
+// @Success 200 {object} response.Response "修改成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Router /api/v1/profile/password [put]
+func (s *UserService) ChangePassword(c *gin.Context) {
+	userID := GetUserID(c)
+	if userID == 0 {
+		response.ErrorCode(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	var req ChangePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	// 验证密码长度
+	minLength := 6
+	if s.configUseCase != nil {
+		minLength = s.configUseCase.GetPasswordMinLength(c.Request.Context())
+	}
+	if len(req.NewPassword) < minLength {
+		response.ErrorCode(c, http.StatusBadRequest, fmt.Sprintf("密码长度不能少于 %d 位", minLength))
+		return
+	}
+
+	if err := s.userUseCase.UpdatePassword(c.Request.Context(), userID, req.OldPassword, req.NewPassword); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response.SuccessWithMessage(c, "密码修改成功", nil)
+}
+
+// CreateUser 创建用户
+// @Summary 创建用户
+// @Description 管理员创建新用户
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body rbac.SysUser true "用户信息"
+// @Success 200 {object} response.Response{} "创建成功"
+// @Router /api/v1/users [post]
+func (s *UserService) CreateUser(c *gin.Context) {
+	var req rbac.SysUser
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	// 验证密码长度
+	minLength := 6
+	if s.configUseCase != nil {
+		minLength = s.configUseCase.GetPasswordMinLength(c.Request.Context())
+	}
+	if len(req.Password) < minLength {
+		response.ErrorCode(c, http.StatusBadRequest, fmt.Sprintf("密码长度不能少于 %d 位", minLength))
+		return
+	}
+
+	if err := s.userUseCase.Create(c.Request.Context(), &req); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "创建失败: "+err.Error())
+		return
+	}
+
+	// 清空密码字段，防止返回给前端
+	req.Password = ""
+
+	response.Success(c, req)
+}
+
+// UpdateUser 更新用户
+// @Summary 更新用户信息
+// @Description 管理员更新用户信息
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "用户ID"
+// @Param body body rbac.SysUser true "用户信息"
+// @Success 200 {object} response.Response{} "更新成功"
+// @Router /api/v1/users/{id} [put]
+func (s *UserService) UpdateUser(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的用户ID")
+		return
+	}
+
+	var req rbac.SysUser
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	req.ID = uint(id)
+	if err := s.userUseCase.Update(c.Request.Context(), &req); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "更新失败: "+err.Error())
+		return
+	}
+
+	// 重新获取完整的用户数据，包含Roles和Positions
+	user, err := s.userUseCase.GetByID(c.Request.Context(), uint(id))
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "获取用户信息失败")
+		return
+	}
+
+	// 清空密码字段，防止返回给前端
+	user.Password = ""
+
+	response.Success(c, user)
+}
+
+// DeleteUser 删除用户
+// @Summary 删除用户
+// @Description 管理员删除用户
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "用户ID"
+// @Success 200 {object} response.Response "删除成功"
+// @Router /api/v1/users/{id} [delete]
+func (s *UserService) DeleteUser(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的用户ID")
+		return
+	}
+
+	if err := s.userUseCase.Delete(c.Request.Context(), uint(id)); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "删除失败: "+err.Error())
+		return
+	}
+
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+// GetUser 获取用户详情
+// @Summary 获取用户详情
+// @Description 获取单个用户的详细信息
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "用户ID"
+// @Success 200 {object} response.Response{} "获取成功"
+// @Router /api/v1/users/{id} [get]
+func (s *UserService) GetUser(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的用户ID")
+		return
+	}
+
+	user, err := s.userUseCase.GetByID(c.Request.Context(), uint(id))
+	if err != nil {
+		response.ErrorCode(c, http.StatusNotFound, "用户不存在")
+		return
+	}
+
+	// 清空密码字段，防止返回给前端
+	user.Password = ""
+
+	response.Success(c, user)
+}
+
+// ListUsers 用户列表
+// @Summary 获取用户列表
+// @Description 分页获取用户列表，支持按关键字和部门筛选
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param page query int false "页码" default(1)
+// @Param pageSize query int false "每页数量" default(10)
+// @Param keyword query string false "搜索关键字"
+// @Param departmentId query int false "部门ID"
+// @Success 200 {object} response.Response{} "获取成功"
+// @Router /api/v1/users [get]
+func (s *UserService) ListUsers(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "10"))
+	keyword := c.Query("keyword")
+	departmentID, _ := strconv.ParseUint(c.Query("departmentId"), 10, 32)
+
+	users, total, err := s.userUseCase.List(c.Request.Context(), page, pageSize, keyword, uint(departmentID))
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "查询失败: "+err.Error())
+		return
+	}
+
+	// 构建用户响应，包含锁定状态
+	type UserWithLockStatus struct {
+		*rbac.SysUser
+		IsLocked         bool   `json:"isLocked"`
+		LockedUntil      string `json:"lockedUntil,omitempty"`
+		RemainingSeconds int    `json:"remainingSeconds,omitempty"`
+	}
+
+	result := make([]UserWithLockStatus, 0, len(users))
+	for _, user := range users {
+		user.Password = "" // 清空密码
+
+		userResp := UserWithLockStatus{
+			SysUser: user,
+		}
+
+		// 检查用户是否被锁定
+		if s.configUseCase != nil {
+			locked, remainingSeconds, _ := s.configUseCase.CheckLoginAttempt(c.Request.Context(), user.Username)
+			if locked {
+				userResp.IsLocked = true
+				userResp.RemainingSeconds = remainingSeconds
+			}
+		}
+
+		result = append(result, userResp)
+	}
+
+	response.Success(c, gin.H{
+		"list":     result,
+		"total":    total,
+		"page":     page,
+		"pageSize": pageSize,
+	})
+}
+
+// AssignUserRoles 分配用户角色
+type AssignUserRolesRequest struct {
+	RoleIDs []uint `json:"roleIds" binding:"required"`
+}
+
+// AssignUserRoles 分配用户角色
+// @Summary 分配用户角色
+// @Description 为用户分配角色
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "用户ID"
+// @Param body body AssignUserRolesRequest true "角色IDs"
+// @Success 200 {object} response.Response "分配成功"
+// @Router /api/v1/users/{id}/roles [post]
+func (s *UserService) AssignUserRoles(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的用户ID")
+		return
+	}
+
+	var req AssignUserRolesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	if err := s.userUseCase.AssignRoles(c.Request.Context(), uint(id), req.RoleIDs); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "分配失败: "+err.Error())
+		return
+	}
+
+	response.Success(c, nil)
+}
+
+// AssignUserPositions 分配用户岗位
+type AssignUserPositionsRequest struct {
+	PositionIDs []uint `json:"positionIds"`
+}
+
+// AssignUserPositions 分配用户岗位
+// @Summary 分配用户岗位
+// @Description 为用户分配岗位
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "用户ID"
+// @Param body body AssignUserPositionsRequest true "岗位IDs"
+// @Success 200 {object} response.Response "分配成功"
+// @Router /api/v1/users/{id}/positions [post]
+func (s *UserService) AssignUserPositions(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的用户ID")
+		return
+	}
+
+	var req AssignUserPositionsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	if err := s.userUseCase.AssignPositions(c.Request.Context(), uint(id), req.PositionIDs); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "分配失败: "+err.Error())
+		return
+	}
+
+	response.Success(c, nil)
+}
+
+// ResetPasswordRequest 重置密码请求
+type ResetPasswordRequest struct {
+	Password string `json:"password" binding:"required,min=6"`
+}
+
+// ResetPassword 重置用户密码
+// @Summary 重置用户密码
+// @Description 管理员重置用户密码
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "用户ID"
+// @Param body body ResetPasswordRequest true "新密码"
+// @Success 200 {object} response.Response "重置成功"
+// @Router /api/v1/users/{id}/password/reset [post]
+func (s *UserService) ResetPassword(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的用户ID")
+		return
+	}
+
+	var req ResetPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	// 验证密码长度
+	minLength := 6
+	if s.configUseCase != nil {
+		minLength = s.configUseCase.GetPasswordMinLength(c.Request.Context())
+	}
+	if len(req.Password) < minLength {
+		response.ErrorCode(c, http.StatusBadRequest, fmt.Sprintf("密码长度不能少于 %d 位", minLength))
+		return
+	}
+
+	if err := s.userUseCase.ResetPassword(c.Request.Context(), uint(id), req.Password); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "重置密码失败: "+err.Error())
+		return
+	}
+
+	response.SuccessWithMessage(c, "密码重置成功", nil)
+}
+
+// UnlockUser 解锁用户
+// @Summary 解锁用户
+// @Description 解锁因登录失败次数过多而被锁定的用户
+// @Tags 用户管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "用户ID"
+// @Success 200 {object} response.Response "解锁成功"
+// @Router /api/v1/users/{id}/unlock [post]
+func (s *UserService) UnlockUser(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的用户ID")
+		return
+	}
+
+	// 获取用户信息
+	user, err := s.userUseCase.GetByID(c.Request.Context(), uint(id))
+	if err != nil {
+		response.ErrorCode(c, http.StatusNotFound, "用户不存在")
+		return
+	}
+
+	// 重置登录失败次数
+	if s.configUseCase != nil {
+		if err := s.configUseCase.ResetLoginAttempt(c.Request.Context(), user.Username); err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "解锁失败: "+err.Error())
+			return
+		}
+	}
+
+	response.SuccessWithMessage(c, "用户已解锁", nil)
+}
+
+// MFALoginRequest MFA登录请求
+type MFALoginRequest struct {
+	MFAToken       string `json:"mfaToken" binding:"required"`
+	Code           string `json:"code" binding:"required"`
+	RememberDevice bool   `json:"rememberDevice"`
+}
+
+// MFALogin MFA登录验证
+// @Summary MFA登录验证
+// @Description 使用MFA验证码完成登录
+// @Tags 认证管理
+// @Accept json
+// @Produce json
+// @Param body body MFALoginRequest true "MFA登录信息"
+// @Success 200 {object} response.Response{data=LoginResponse} "登录成功"
+// @Failure 400 {object} response.Response "参数错误"
+// @Router /api/v1/public/auth/mfa/login [post]
+func (s *UserService) MFALogin(c *gin.Context) {
+	var req MFALoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	// 解析MFA Token
+	mfaClaims, err := s.authService.ParseMFAToken(req.MFAToken)
+	if err != nil {
+		response.ErrorCode(c, http.StatusUnauthorized, "MFA token无效或已过期")
+		return
+	}
+
+	// 获取客户端信息
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+
+	// 验证MFA码
+	if s.mfaUseCase == nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "MFA服务未初始化")
+		return
+	}
+
+	valid, err := s.mfaUseCase.ValidateMFACode(c.Request.Context(), mfaClaims.UserID, req.Code, clientIP, userAgent)
+	if err != nil || !valid {
+		s.recordLoginLog(mfaClaims.Username, "mfa", "failed", clientIP, userAgent, "MFA验证码错误", mfaClaims.UserID)
+		response.ErrorCode(c, http.StatusOK, "验证码错误")
+		return
+	}
+
+	// MFA验证成功，生成正式token
+	token, err := s.authService.GenerateToken(mfaClaims.UserID, mfaClaims.Username)
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "生成token失败")
+		return
+	}
+
+	// 获取用户信息
+	user, err := s.userUseCase.GetByID(c.Request.Context(), mfaClaims.UserID)
+	if err != nil {
+		response.ErrorCode(c, http.StatusNotFound, "用户不存在")
+		return
+	}
+
+	// 登录成功，重置登录失败次数
+	if s.configUseCase != nil {
+		if resetErr := s.configUseCase.ResetLoginAttempt(c.Request.Context(), mfaClaims.Username); resetErr != nil {
+			appLogger.Error("重置登录失败次数失败", zap.Error(resetErr))
+		}
+	}
+
+	// 清空密码字段
+	user.Password = ""
+
+	// 更新最后登录时间
+	_ = s.userUseCase.Update(c.Request.Context(), user)
+
+	// 记录登录日志
+	s.recordLoginLog(mfaClaims.Username, "mfa", "success", clientIP, userAgent, "", user.ID)
+
+	appLogger.Info("MFA登录成功", zap.String("username", mfaClaims.Username))
+
+	// 设置 session cookie
+	c.SetCookie(
+		"opshub_session",
+		token,
+		86400,
+		"/",
+		"",
+		false,
+		true,
+	)
+
+	// 如果选择记住设备，保存信任设备并设置cookie
+	if req.RememberDevice && s.configUseCase != nil && s.mfaUseCase != nil {
+		securityConfig, err := s.configUseCase.GetSecurityConfig(c.Request.Context())
+		if err == nil && securityConfig.MFASkipDuration > 0 {
+			deviceToken, err := s.mfaUseCase.SaveTrustedDevice(c.Request.Context(), mfaClaims.UserID, userAgent, clientIP, securityConfig.MFASkipDuration)
+			if err != nil {
+				appLogger.Error("保存MFA信任设备失败", zap.Error(err))
+			} else {
+				c.SetCookie(
+					"mfa_trusted_device",
+					deviceToken,
+					securityConfig.MFASkipDuration,
+					"/",
+					"",
+					false,
+					true,
+				)
+			}
+		}
+	}
+
+	response.Success(c, LoginResponse{
+		Token: token,
+		User:  user,
+	})
+}

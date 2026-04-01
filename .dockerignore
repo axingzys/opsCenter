@@ -1,0 +1,51 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*.test
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Config (will use config.yaml.example)
+config/config.yaml
+.env
+
+# Frontend (will be built separately)
+web/node_modules/
+web/dist/
+web/.vite/
+
+# Documentation (keep swagger docs)
+docs/*.md
+docs/plugins/
+*.md
+!README.md
+
+# OS
+.DS_Store
+Thumbs.db

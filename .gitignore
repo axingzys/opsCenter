@@ -1,0 +1,57 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+*.test
+/opshub
+*.log
+# Test binary, built with `go test -c`
+*.test
+data/terminal-recordings/*.cast
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Config - don't commit sensitive configuration
+config/config.yaml
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend
+web/node_modules/
+web/dist/
+
+web/.vite/
+web/public/uploads/*
+
+
+# SQLite database
+data/*.db.env
+data/
+logs/
+web/node_modules/
+node_modules/
+dist/
+build/
