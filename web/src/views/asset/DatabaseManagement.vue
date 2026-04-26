@@ -132,28 +132,28 @@
             </el-table-column>
             <el-table-column label="操作" width="260" align="center" fixed="right">
               <template #default="{ row }">
-                <el-tooltip :content="hasInstanceCapability(row, 'testEnabled') ? '连接测试' : '该类型暂未接入连接测试'" placement="top">
-                  <el-button link type="primary" :loading="testingId === row.id" :disabled="!hasInstanceCapability(row, 'testEnabled')" @click="handleTest(row)">
+                <el-tooltip :content="canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'testEnabled') ? '连接测试' : '无连接测试权限或该类型暂未接入'" placement="top">
+                  <el-button link type="primary" :loading="testingId === row.id" :disabled="!canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'testEnabled')" @click="handleTest(row)">
                     <el-icon><Connection /></el-icon>
                   </el-button>
                 </el-tooltip>
-                <el-tooltip :content="hasInstanceCapability(row, 'metadataEnabled') ? '同步结构' : '该类型暂未接入元数据同步'" placement="top">
-                  <el-button link type="success" :loading="syncingId === row.id" :disabled="!hasInstanceCapability(row, 'metadataEnabled')" @click="handleSync(row)">
+                <el-tooltip :content="canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'metadataEnabled') ? '同步结构' : '无同步权限或该类型暂未接入'" placement="top">
+                  <el-button link type="success" :loading="syncingId === row.id" :disabled="!canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')" @click="handleSync(row)">
                     <el-icon><Refresh /></el-icon>
                   </el-button>
                 </el-tooltip>
                 <el-tooltip :content="row.status === 'enabled' ? '禁用' : '启用'" placement="top">
-                  <el-button link :type="row.status === 'enabled' ? 'warning' : 'success'" @click="toggleInstanceStatus(row)">
+                  <el-button link :type="row.status === 'enabled' ? 'warning' : 'success'" :disabled="!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)" @click="toggleInstanceStatus(row)">
                     <el-icon><Switch /></el-icon>
                   </el-button>
                 </el-tooltip>
                 <el-tooltip content="编辑" placement="top">
-                  <el-button link type="primary" @click="openInstanceDialog(row)">
+                  <el-button link type="primary" :disabled="!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)" @click="openInstanceDialog(row)">
                     <el-icon><Edit /></el-icon>
                   </el-button>
                 </el-tooltip>
                 <el-tooltip content="删除" placement="top">
-                  <el-button link type="danger" @click="handleDelete(row)">
+                  <el-button link type="danger" :disabled="!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)" @click="handleDelete(row)">
                     <el-icon><Delete /></el-icon>
                   </el-button>
                 </el-tooltip>
@@ -201,7 +201,7 @@
             </div>
             <el-button
               type="primary"
-              :disabled="!metadataInstanceId || !hasInstanceCapability(currentMetadataInstance, 'metadataEnabled')"
+              :disabled="!metadataInstanceId || !canUseDatabaseFeature(currentMetadataInstance, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')"
               :loading="syncingId === metadataInstanceId"
               @click="handleSync()"
             >
@@ -306,7 +306,7 @@
                   <el-button link type="primary" :loading="ddlLoading" @click="handlePreviewDDL">
                     查看 DDL
                   </el-button>
-                  <el-button link type="primary" :loading="dictionaryExporting" @click="handleExportDictionary">
+                  <el-button link type="primary" :loading="dictionaryExporting" :disabled="!hasDatabasePermission(currentMetadataInstance, DATABASE_PERMISSION.EXPORT)" @click="handleExportDictionary">
                     <el-icon style="margin-right: 4px;"><Download /></el-icon>
                     导出字典
                   </el-button>
@@ -430,13 +430,13 @@
             <el-input-number v-model="queryTimeoutSeconds" :min="1" :max="30" class="query-number" />
             <span class="query-option-label">导出上限</span>
             <el-input-number v-model="queryExportLimit" :min="1" :max="5000" :step="100" class="query-number" />
-            <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="executeQuery">
+            <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="executeQuery">
               {{ isRedisQueryInstance ? '执行命令' : '执行查询' }}
             </el-button>
-            <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="handleFormatQuery">
+            <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleFormatQuery">
               {{ isRedisQueryInstance ? '格式化命令' : '格式化 SQL' }}
             </el-button>
-            <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="handleExplainQuery">
+            <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleExplainQuery">
               执行计划
             </el-button>
             <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryWriteChecking" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handleValidateWriteQuery">
@@ -445,7 +445,7 @@
             <el-button v-if="!isRedisQueryInstance" type="danger" plain :loading="queryWritePreparing" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handlePrepareWriteExecute">
               受控写入
             </el-button>
-            <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="handleExportQuery">
+            <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')" @click="handleExportQuery">
               <el-icon style="margin-right: 4px;"><Download /></el-icon>
               导出结果
             </el-button>
@@ -631,7 +631,7 @@
                 @change="handleDiagnosisInstanceChange"
               >
                 <el-option
-                  v-for="item in instances"
+                  v-for="item in diagnosisInstances"
                   :key="item.id"
                   :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
                   :value="item.id"
@@ -652,10 +652,10 @@
               </el-tag>
             </div>
             <div class="backup-toolbar-group">
-              <el-button :disabled="!diagnosisInstanceId" :loading="capacityCollecting" @click="handleCollectCapacity">
+              <el-button :disabled="!diagnosisInstanceId || !hasDatabasePermission(currentDiagnosisInstance, DATABASE_PERMISSION.DIAGNOSIS)" :loading="capacityCollecting" @click="handleCollectCapacity">
                 采集容量
               </el-button>
-              <el-button type="primary" :disabled="!diagnosisInstanceId" :loading="diagnosisLoading" @click="loadDiagnosisData">
+              <el-button type="primary" :disabled="!diagnosisInstanceId || !hasDatabasePermission(currentDiagnosisInstance, DATABASE_PERMISSION.DIAGNOSIS)" :loading="diagnosisLoading" @click="loadDiagnosisData">
                 刷新诊断
               </el-button>
             </div>
@@ -1446,14 +1446,14 @@
                   class="metadata-instance-select"
                 >
                   <el-option
-                    v-for="item in instances"
+                    v-for="item in diagnosisInstances"
                     :key="item.id"
                     :label="`${item.name}（${item.dbTypeText || item.dbType} / ${item.endpoint || `${item.host}:${item.port}`}）`"
                     :value="item.id"
                   />
                 </el-select>
               </div>
-              <el-button type="primary" :loading="inspectionGenerating" @click="handleGenerateInspectionReport">
+              <el-button type="primary" :disabled="!inspectionForm.instanceId" :loading="inspectionGenerating" @click="handleGenerateInspectionReport">
                 生成巡检报告
               </el-button>
             </div>
@@ -1474,7 +1474,7 @@
                   class="audit-select"
                   @change="loadInspectionReports"
                 >
-                  <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+                  <el-option v-for="item in diagnosisInstances" :key="item.id" :label="item.name" :value="item.id" />
                 </el-select>
                 <el-select
                   v-model="inspectionQuery.riskLevel"
@@ -2252,6 +2252,7 @@ import {
 } from '@element-plus/icons-vue'
 import { getCredentials } from '@/api/host'
 import {
+  DATABASE_PERMISSION,
   createDatabaseBackupTask,
   createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
@@ -2338,6 +2339,12 @@ const hasDatabaseCapability = (dbType: string | undefined, capability: DatabaseC
 
 const hasInstanceCapability = (item: any, capability: DatabaseCapabilityKey) =>
   hasDatabaseCapability(item?.dbType, capability)
+
+const hasDatabasePermission = (item: any, permission: number) =>
+  (Number(item?.permissions || 0) & permission) > 0
+
+const canUseDatabaseFeature = (item: any, permission: number, capability?: DatabaseCapabilityKey) =>
+  !!item && hasDatabasePermission(item, permission) && (!capability || hasInstanceCapability(item, capability))
 
 const formRef = ref<FormInstance>()
 const metadataInstanceId = ref<number>()
@@ -2572,7 +2579,7 @@ const currentMetadataInstance = computed(() =>
 )
 
 const metadataInstances = computed(() =>
-  instances.value.filter(item => hasInstanceCapability(item, 'metadataEnabled'))
+  instances.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.VIEW, 'metadataEnabled'))
 )
 
 const currentQueryInstance = computed(() =>
@@ -2580,7 +2587,7 @@ const currentQueryInstance = computed(() =>
 )
 
 const queryInstances = computed(() =>
-  instances.value.filter(item => hasInstanceCapability(item, 'queryEnabled'))
+  instances.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.QUERY, 'queryEnabled'))
 )
 
 const isRedisMetadataInstance = computed(() =>
@@ -2592,7 +2599,8 @@ const isRedisQueryInstance = computed(() =>
 )
 
 const canWriteCurrentQueryInstance = computed(() =>
-  ['mysql', 'mariadb', 'postgresql'].includes(currentQueryInstance.value?.dbType || '')
+  ['mysql', 'mariadb', 'postgresql'].includes(currentQueryInstance.value?.dbType || '') &&
+  hasDatabasePermission(currentQueryInstance.value, DATABASE_PERMISSION.WRITE)
 )
 
 const queryConsoleAlert = computed(() =>
@@ -2615,6 +2623,10 @@ const currentDiagnosisInstance = computed(() =>
   instances.value.find(item => item.id === diagnosisInstanceId.value)
 )
 
+const diagnosisInstances = computed(() =>
+  instances.value.filter(item => hasDatabasePermission(item, DATABASE_PERMISSION.DIAGNOSIS))
+)
+
 const isRedisDiagnosisInstance = computed(() =>
   currentDiagnosisInstance.value?.dbType === 'redis'
 )
@@ -2632,11 +2644,11 @@ let diagnosisRequestSeq = 0
 let capacityTrendRequestSeq = 0
 
 const topologyInstances = computed(() =>
-  instances.value.filter(item => hasInstanceCapability(item, 'topologyEnabled'))
+  instances.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.TOPOLOGY, 'topologyEnabled'))
 )
 
 const supportedBackupInstances = computed(() =>
-  instances.value.filter(item => ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType))
+  instances.value.filter(item => ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
 const selectedBackupTaskInstance = computed(() =>
@@ -2666,8 +2678,11 @@ const normalizeBackupTaskFormBackupType = () => {
 }
 
 const restoreTargetInstances = computed(() =>
-  supportedBackupInstances.value.filter(item =>
-    item.status === 'enabled' && !isProductionEnvironment(item.environment)
+  instances.value.filter(item =>
+    ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType) &&
+    hasDatabasePermission(item, DATABASE_PERMISSION.RESTORE) &&
+    item.status === 'enabled' &&
+    !isProductionEnvironment(item.environment)
   )
 )
 
@@ -2852,17 +2867,17 @@ const loadInstances = async () => {
     total.value = res.total || 0
     if (res.page) query.page = res.page
     if (res.pageSize) query.pageSize = res.pageSize
-    if (metadataInstanceId.value && !instances.value.some(item => item.id === metadataInstanceId.value)) {
+    if (metadataInstanceId.value && !metadataInstances.value.some(item => item.id === metadataInstanceId.value)) {
       metadataInstanceId.value = undefined
       resetMetadataSelection()
     }
-    if (queryInstanceId.value && !instances.value.some(item => item.id === queryInstanceId.value)) {
+    if (queryInstanceId.value && !queryInstances.value.some(item => item.id === queryInstanceId.value)) {
       queryInstanceId.value = undefined
       querySchemaName.value = ''
       querySchemas.value = []
       clearQueryConsoleState()
     }
-    if (diagnosisInstanceId.value && !instances.value.some(item => item.id === diagnosisInstanceId.value)) {
+    if (diagnosisInstanceId.value && !diagnosisInstances.value.some(item => item.id === diagnosisInstanceId.value)) {
       diagnosisInstanceId.value = undefined
       diagnosisMetrics.value = undefined
       diagnosisSessions.value = []
@@ -2870,14 +2885,14 @@ const loadInstances = async () => {
       diagnosisSlowMessage.value = ''
       capacityTrend.value = undefined
     }
-    if (topologyInstanceId.value && !instances.value.some(item => item.id === topologyInstanceId.value)) {
+    if (topologyInstanceId.value && !topologyInstances.value.some(item => item.id === topologyInstanceId.value)) {
       topologyInstanceId.value = undefined
       topologyResult.value = undefined
     }
-    if (backupTaskQuery.instanceId && !instances.value.some(item => item.id === backupTaskQuery.instanceId)) {
+    if (backupTaskQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskQuery.instanceId)) {
       backupTaskQuery.instanceId = undefined
     }
-    if (backupRecordQuery.instanceId && !instances.value.some(item => item.id === backupRecordQuery.instanceId)) {
+    if (backupRecordQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupRecordQuery.instanceId)) {
       backupRecordQuery.instanceId = undefined
     }
     if (restoreJobQuery.sourceInstanceId && !instances.value.some(item => item.id === restoreJobQuery.sourceInstanceId)) {
@@ -2886,13 +2901,13 @@ const loadInstances = async () => {
     if (restoreJobQuery.targetInstanceId && !instances.value.some(item => item.id === restoreJobQuery.targetInstanceId)) {
       restoreJobQuery.targetInstanceId = undefined
     }
-    if (inspectionQuery.instanceId && !instances.value.some(item => item.id === inspectionQuery.instanceId)) {
+    if (inspectionQuery.instanceId && !diagnosisInstances.value.some(item => item.id === inspectionQuery.instanceId)) {
       inspectionQuery.instanceId = undefined
     }
-    if (backupTaskForm.instanceId && !instances.value.some(item => item.id === backupTaskForm.instanceId)) {
+    if (backupTaskForm.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskForm.instanceId)) {
       backupTaskForm.instanceId = 0
     }
-    if (inspectionForm.instanceId && !instances.value.some(item => item.id === inspectionForm.instanceId)) {
+    if (inspectionForm.instanceId && !diagnosisInstances.value.some(item => item.id === inspectionForm.instanceId)) {
       inspectionForm.instanceId = undefined
     }
   } finally {
@@ -2901,8 +2916,8 @@ const loadInstances = async () => {
 }
 
 const ensureMetadataInstance = async () => {
-  if (!metadataInstanceId.value && instances.value.length > 0) {
-    metadataInstanceId.value = instances.value[0].id
+  if (!metadataInstanceId.value && metadataInstances.value.length > 0) {
+    metadataInstanceId.value = metadataInstances.value[0].id
   }
   if (metadataInstanceId.value) {
     await loadSchemas()
@@ -2979,8 +2994,8 @@ const loadTableDetails = async (table: any) => {
 }
 
 const ensureQueryInstance = async () => {
-  if (!queryInstanceId.value && instances.value.length > 0) {
-    queryInstanceId.value = instances.value[0].id
+  if (!queryInstanceId.value && queryInstances.value.length > 0) {
+    queryInstanceId.value = queryInstances.value[0].id
   }
   if (queryInstanceId.value) {
     await loadQuerySchemas()
@@ -3031,8 +3046,8 @@ const resetDiagnosisState = () => {
 }
 
 const ensureDiagnosisInstance = async () => {
-  if (!diagnosisInstanceId.value && instances.value.length > 0) {
-    diagnosisInstanceId.value = instances.value[0].id
+  if (!diagnosisInstanceId.value && diagnosisInstances.value.length > 0) {
+    diagnosisInstanceId.value = diagnosisInstances.value[0].id
   }
   if (diagnosisInstanceId.value) {
     await loadDiagnosisData()
@@ -3316,6 +3331,10 @@ const resetForm = () => {
 }
 
 const openInstanceDialog = (row?: any) => {
+  if (row?.id && !hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)) {
+    ElMessage.warning('无实例管理权限')
+    return
+  }
   resetForm()
   if (row?.id) {
     form.id = row.id
@@ -3373,6 +3392,10 @@ const submitForm = async () => {
 }
 
 const handleDelete = async (row: any) => {
+  if (!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)) {
+    ElMessage.warning('无实例管理权限')
+    return
+  }
   await ElMessageBox.confirm(`确定删除数据库实例「${row.name}」吗？`, '删除确认', {
     type: 'warning',
     confirmButtonText: '删除',
@@ -3384,6 +3407,10 @@ const handleDelete = async (row: any) => {
 }
 
 const toggleInstanceStatus = async (row: any) => {
+  if (!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)) {
+    ElMessage.warning('无实例管理权限')
+    return
+  }
   if (row.status === 'enabled') {
     await disableDatabaseInstance(row.id)
     ElMessage.success('已禁用')
@@ -3395,8 +3422,8 @@ const toggleInstanceStatus = async (row: any) => {
 }
 
 const handleTest = async (row: any) => {
-  if (!hasInstanceCapability(row, 'testEnabled')) {
-    ElMessage.warning('该数据库类型暂未接入连接测试')
+  if (!canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'testEnabled')) {
+    ElMessage.warning('无连接测试权限或该数据库类型暂未接入')
     return
   }
   testingId.value = row.id
@@ -3416,8 +3443,8 @@ const handleSync = async (row?: any) => {
     return
   }
   const instance = row || instances.value.find(item => item.id === id)
-  if (!hasInstanceCapability(instance, 'metadataEnabled')) {
-    ElMessage.warning('该数据库类型暂未接入元数据同步')
+  if (!canUseDatabaseFeature(instance, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')) {
+    ElMessage.warning('无元数据同步权限或该数据库类型暂未接入')
     return
   }
   syncingId.value = id
@@ -3483,6 +3510,10 @@ const handleExportDictionary = async () => {
     ElMessage.warning('请先选择一张表')
     return
   }
+  if (!hasDatabasePermission(currentMetadataInstance.value, DATABASE_PERMISSION.EXPORT)) {
+    ElMessage.warning('无数据字典导出权限')
+    return
+  }
   dictionaryExporting.value = true
   try {
     const blob = await exportDatabaseTableDictionary(metadataInstanceId.value, {
@@ -3537,8 +3568,8 @@ const executeQuery = async () => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
-  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
-    ElMessage.warning('该数据库类型暂未接入查询控制台')
+  if (!canUseDatabaseFeature(currentQueryInstance.value, DATABASE_PERMISSION.QUERY, 'queryEnabled')) {
+    ElMessage.warning('无查询权限或该数据库类型暂未接入查询控制台')
     return
   }
   if (!querySQL.value.trim()) {
@@ -3564,8 +3595,8 @@ const handleFormatQuery = async () => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
-  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
-    ElMessage.warning('该数据库类型暂未接入查询控制台')
+  if (!canUseDatabaseFeature(currentQueryInstance.value, DATABASE_PERMISSION.QUERY, 'queryEnabled')) {
+    ElMessage.warning('无查询权限或该数据库类型暂未接入查询控制台')
     return
   }
   if (!querySQL.value.trim()) {
@@ -3587,8 +3618,8 @@ const handleExplainQuery = async () => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
-  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
-    ElMessage.warning('该数据库类型暂未接入执行计划')
+  if (!canUseDatabaseFeature(currentQueryInstance.value, DATABASE_PERMISSION.QUERY, 'queryEnabled')) {
+    ElMessage.warning('无查询权限或该数据库类型暂未接入执行计划')
     return
   }
   if (!querySQL.value.trim()) {
@@ -3610,8 +3641,8 @@ const handleExportQuery = async () => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
-  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
-    ElMessage.warning('该数据库类型暂未接入查询导出')
+  if (!canUseDatabaseFeature(currentQueryInstance.value, DATABASE_PERMISSION.EXPORT, 'queryEnabled')) {
+    ElMessage.warning('无导出权限或该数据库类型暂未接入查询导出')
     return
   }
   if (!querySQL.value.trim()) {
@@ -3837,8 +3868,8 @@ const resetInspectionQuery = () => {
 }
 
 const ensureInspectionDefaultInstance = () => {
-  if (!inspectionForm.instanceId && instances.value.length > 0) {
-    inspectionForm.instanceId = instances.value.find(item => item.status === 'enabled')?.id || instances.value[0].id
+  if (!inspectionForm.instanceId && diagnosisInstances.value.length > 0) {
+    inspectionForm.instanceId = diagnosisInstances.value.find(item => item.status === 'enabled')?.id || diagnosisInstances.value[0].id
   }
 }
 

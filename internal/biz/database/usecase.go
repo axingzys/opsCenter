@@ -122,53 +122,77 @@ type DatabaseInstanceRequest struct {
 }
 
 type DatabaseInstanceListRequest struct {
-	Page        int    `form:"page"`
-	PageSize    int    `form:"pageSize"`
-	Keyword     string `form:"keyword"`
-	DBType      string `form:"dbType"`
-	Status      string `form:"status"`
-	Environment string `form:"environment"`
+	Page              int    `form:"page"`
+	PageSize          int    `form:"pageSize"`
+	Keyword           string `form:"keyword"`
+	DBType            string `form:"dbType"`
+	Status            string `form:"status"`
+	Environment       string `form:"environment"`
+	RestrictToAllowed bool   `form:"-" json:"-"`
+	AllowedIDs        []uint `form:"-" json:"-"`
 }
 
 type DatabaseQueryAuditListRequest struct {
-	Page       int    `form:"page"`
-	PageSize   int    `form:"pageSize"`
-	Keyword    string `form:"keyword"`
-	InstanceID uint   `form:"instanceId"`
-	Action     string `form:"action"`
-	Status     string `form:"status"`
-	RiskLevel  string `form:"riskLevel"`
-	SQLType    string `form:"sqlType"`
-	StartTime  string `form:"startTime"`
-	EndTime    string `form:"endTime"`
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	Keyword            string `form:"keyword"`
+	InstanceID         uint   `form:"instanceId"`
+	Action             string `form:"action"`
+	Status             string `form:"status"`
+	RiskLevel          string `form:"riskLevel"`
+	SQLType            string `form:"sqlType"`
+	StartTime          string `form:"startTime"`
+	EndTime            string `form:"endTime"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
 type DatabaseBackupTaskListRequest struct {
-	Page       int    `form:"page"`
-	PageSize   int    `form:"pageSize"`
-	Keyword    string `form:"keyword"`
-	InstanceID uint   `form:"instanceId"`
-	Enabled    string `form:"enabled"`
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	Keyword            string `form:"keyword"`
+	InstanceID         uint   `form:"instanceId"`
+	Enabled            string `form:"enabled"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
 type DatabaseBackupRecordListRequest struct {
-	Page        int    `form:"page"`
-	PageSize    int    `form:"pageSize"`
-	TaskID      uint   `form:"taskId"`
-	InstanceID  uint   `form:"instanceId"`
-	Status      string `form:"status"`
-	TriggerType string `form:"triggerType"`
-	DateFrom    string `form:"dateFrom"`
-	DateTo      string `form:"dateTo"`
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	TaskID             uint   `form:"taskId"`
+	InstanceID         uint   `form:"instanceId"`
+	Status             string `form:"status"`
+	TriggerType        string `form:"triggerType"`
+	DateFrom           string `form:"dateFrom"`
+	DateTo             string `form:"dateTo"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
 type DatabaseRestoreJobListRequest struct {
-	Page             int    `form:"page"`
-	PageSize         int    `form:"pageSize"`
-	BackupRecordID   uint   `form:"backupRecordId"`
-	SourceInstanceID uint   `form:"sourceInstanceId"`
-	TargetInstanceID uint   `form:"targetInstanceId"`
-	Status           string `form:"status"`
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	BackupRecordID     uint   `form:"backupRecordId"`
+	SourceInstanceID   uint   `form:"sourceInstanceId"`
+	TargetInstanceID   uint   `form:"targetInstanceId"`
+	Status             string `form:"status"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
+}
+
+type DatabaseInstancePermissionListRequest struct {
+	Page       int    `form:"page"`
+	PageSize   int    `form:"pageSize"`
+	RoleID     uint   `form:"roleId"`
+	InstanceID uint   `form:"instanceId"`
+	Keyword    string `form:"keyword"`
+}
+
+type DatabaseInstancePermissionRequest struct {
+	RoleID      uint `json:"roleId" binding:"required"`
+	InstanceID  uint `json:"instanceId" binding:"required"`
+	Permissions uint `json:"permissions" binding:"required"`
 }
 
 type DatabaseQueryRequest struct {
@@ -241,8 +265,21 @@ type DatabaseInstanceVO struct {
 	CapacityGrowthText    string  `json:"capacityGrowthText,omitempty"`
 	CapacityGrowthPercent float64 `json:"capacityGrowthPercent"`
 	CapacityCollectedAt   string  `json:"capacityCollectedAt,omitempty"`
+	Permissions           uint    `json:"permissions"`
 	CreatedAt             string  `json:"createdAt"`
 	UpdatedAt             string  `json:"updatedAt"`
+}
+
+type DatabaseInstancePermissionVO struct {
+	ID           uint   `json:"id"`
+	RoleID       uint   `json:"roleId"`
+	RoleName     string `json:"roleName"`
+	RoleCode     string `json:"roleCode"`
+	InstanceID   uint   `json:"instanceId"`
+	InstanceName string `json:"instanceName"`
+	Permissions  uint   `json:"permissions"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
 }
 
 type SupportedTypeVO struct {

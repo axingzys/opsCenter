@@ -45,6 +45,7 @@ func (r *backupTaskRepo) List(ctx context.Context, req *dbbiz.DatabaseBackupTask
 
 	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseBackupTask{})
 	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
 		if req.InstanceID > 0 {
 			query = query.Where("instance_id = ?", req.InstanceID)
 		}
@@ -135,6 +136,7 @@ func (r *backupRecordRepo) List(ctx context.Context, req *dbbiz.DatabaseBackupRe
 
 	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseBackupRecord{})
 	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
 		if req.TaskID > 0 {
 			query = query.Where("task_id = ?", req.TaskID)
 		}
@@ -237,6 +239,7 @@ func (r *restoreJobRepo) List(ctx context.Context, req *dbbiz.DatabaseRestoreJob
 
 	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseRestoreJob{})
 	if req != nil {
+		query = applyAllowedRestoreInstanceFilter(query, req.RestrictToAllowed, req.AllowedInstanceIDs)
 		if req.BackupRecordID > 0 {
 			query = query.Where("backup_record_id = ?", req.BackupRecordID)
 		}

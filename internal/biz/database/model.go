@@ -76,6 +76,25 @@ const (
 	DatabaseCapacityObjectTable    = "table"
 
 	DatabaseInspectionReportManual = "manual"
+
+	DatabasePermissionView      uint = 1 << 0
+	DatabasePermissionQuery     uint = 1 << 1
+	DatabasePermissionExport    uint = 1 << 2
+	DatabasePermissionWrite     uint = 1 << 3
+	DatabasePermissionBackup    uint = 1 << 4
+	DatabasePermissionRestore   uint = 1 << 5
+	DatabasePermissionDiagnosis uint = 1 << 6
+	DatabasePermissionTopology  uint = 1 << 7
+	DatabasePermissionManage    uint = 1 << 8
+	DatabasePermissionAll            = DatabasePermissionView |
+		DatabasePermissionQuery |
+		DatabasePermissionExport |
+		DatabasePermissionWrite |
+		DatabasePermissionBackup |
+		DatabasePermissionRestore |
+		DatabasePermissionDiagnosis |
+		DatabasePermissionTopology |
+		DatabasePermissionManage
 )
 
 // DatabaseInstance 数据库实例资产
@@ -103,6 +122,18 @@ type DatabaseInstance struct {
 
 func (DatabaseInstance) TableName() string {
 	return "database_instances"
+}
+
+// DatabaseInstancePermission 角色到数据库实例的对象级权限。
+type DatabaseInstancePermission struct {
+	gorm.Model
+	RoleID      uint `gorm:"column:role_id;not null;uniqueIndex:idx_database_instance_permission;comment:角色ID" json:"roleId"`
+	InstanceID  uint `gorm:"column:instance_id;not null;uniqueIndex:idx_database_instance_permission;index;comment:数据库实例ID" json:"instanceId"`
+	Permissions uint `gorm:"column:permissions;type:int unsigned;not null;default:1;comment:权限位图" json:"permissions"`
+}
+
+func (DatabaseInstancePermission) TableName() string {
+	return "database_instance_permissions"
 }
 
 // DatabaseSchema 数据库或 Schema 元数据

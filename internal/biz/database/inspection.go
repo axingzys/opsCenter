@@ -9,11 +9,13 @@ import (
 )
 
 type DatabaseInspectionReportListRequest struct {
-	Page       int    `form:"page"`
-	PageSize   int    `form:"pageSize"`
-	InstanceID uint   `form:"instanceId"`
-	Status     string `form:"status"`
-	RiskLevel  string `form:"riskLevel"`
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	InstanceID         uint   `form:"instanceId"`
+	Status             string `form:"status"`
+	RiskLevel          string `form:"riskLevel"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
 type DatabaseInspectionReportRequest struct {
@@ -101,6 +103,20 @@ func (uc *UseCase) GetInspectionReport(ctx context.Context, id uint) (*DatabaseI
 		return uc.toInspectionReportVO(item, "", ""), nil
 	}
 	return uc.toInspectionReportVO(item, instance.Name, instance.DBType), nil
+}
+
+func (uc *UseCase) GetInspectionReportInstanceID(ctx context.Context, id uint) (uint, error) {
+	if uc.inspectionReportRepo == nil {
+		return 0, fmt.Errorf("巡检报告仓库未配置")
+	}
+	if id == 0 {
+		return 0, fmt.Errorf("巡检报告ID不能为空")
+	}
+	item, err := uc.inspectionReportRepo.GetByID(ctx, id)
+	if err != nil {
+		return 0, fmt.Errorf("巡检报告不存在")
+	}
+	return item.InstanceID, nil
 }
 
 func (uc *UseCase) GenerateInspectionReport(ctx context.Context, req *DatabaseInspectionReportRequest, operator QueryOperator) (*DatabaseInspectionReportVO, error) {

@@ -28,6 +28,25 @@ export interface DatabaseInstancePayload {
   remark?: string
 }
 
+export const DATABASE_PERMISSION = {
+  VIEW: 1,
+  QUERY: 2,
+  EXPORT: 4,
+  WRITE: 8,
+  BACKUP: 16,
+  RESTORE: 32,
+  DIAGNOSIS: 64,
+  TOPOLOGY: 128,
+  MANAGE: 256,
+  ALL: 511
+} as const
+
+export interface DatabaseInstancePermissionPayload {
+  roleId: number
+  instanceId: number
+  permissions: number
+}
+
 export interface DatabaseQueryPayload {
   schemaName?: string
   sqlText: string
@@ -368,6 +387,20 @@ export interface DatabaseTableDDLPayload {
 
 export const getDatabaseSupportedTypes = () =>
   request.get('/api/v1/databases/supported-types')
+
+export const listDatabaseInstancePermissions = (params?: {
+  page?: number
+  pageSize?: number
+  roleId?: number
+  instanceId?: number
+  keyword?: string
+}) => request.get('/api/v1/databases/instance-permissions', { params })
+
+export const upsertDatabaseInstancePermission = (data: DatabaseInstancePermissionPayload) =>
+  request.post('/api/v1/databases/instance-permissions', data)
+
+export const deleteDatabaseInstancePermission = (id: number) =>
+  request.delete(`/api/v1/databases/instance-permissions/${id}`)
 
 export const listDatabaseInstances = (params: {
   page?: number

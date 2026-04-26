@@ -57,6 +57,7 @@ type HTTPServer struct {
 
 func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTTPServer {
 	instanceRepo := dbdata.NewInstanceRepo(db)
+	permissionRepo := dbdata.NewDatabasePermissionRepo(db)
 	schemaRepo := dbdata.NewSchemaRepo(db)
 	tableRepo := dbdata.NewTableRepo(db)
 	columnRepo := dbdata.NewColumnRepo(db)
@@ -140,7 +141,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	})
 
 	return &HTTPServer{
-		service:           dbservice.NewService(useCase),
+		service:           dbservice.NewService(useCase, permissionRepo),
 		backupScheduler:   backupScheduler,
 		capacityScheduler: capacityScheduler,
 		authMiddleware:    authMiddleware,
@@ -180,6 +181,9 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 	databases := r.Group("/databases")
 	{
 		databases.GET("/supported-types", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.service.GetSupportedTypes)
+		databases.GET("/instance-permissions", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.service.ListInstancePermissions)
+		databases.POST("/instance-permissions", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceUpdate), s.service.UpsertInstancePermission)
+		databases.DELETE("/instance-permissions/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceUpdate), s.service.DeleteInstancePermission)
 		databases.GET("/query-history", s.authMiddleware.RequireMenuPermission(permDatabaseQueryHistory), s.service.ListQueryHistory)
 		databases.GET("/query-audits", s.authMiddleware.RequireMenuPermission(permDatabaseAuditView), s.service.ListQueryAudits)
 		databases.GET("/query-audits/export", s.authMiddleware.RequireMenuPermission(permDatabaseAuditExport), s.service.ExportQueryAudits)

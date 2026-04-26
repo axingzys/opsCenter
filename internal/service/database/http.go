@@ -16,11 +16,19 @@ import (
 )
 
 type Service struct {
-	useCase *dbbiz.UseCase
+	useCase        *dbbiz.UseCase
+	permissionRepo dbbiz.DatabasePermissionRepo
 }
 
-func NewService(useCase *dbbiz.UseCase) *Service {
-	return &Service{useCase: useCase}
+func NewService(useCase *dbbiz.UseCase, permissionRepo dbbiz.DatabasePermissionRepo) *Service {
+	return &Service{useCase: useCase, permissionRepo: permissionRepo}
+}
+
+type databasePermissionScope struct {
+	enforced   bool
+	admin      bool
+	userID     uint
+	allowedIDs []uint
 }
 
 func parseUintParam(c *gin.Context, key, name string) (uint, bool) {
@@ -59,6 +67,129 @@ func writeDatabaseError(c *gin.Context, prefix string, err error) {
 	response.ErrorCode(c, statusCode, prefix+message)
 }
 
+func normalizeDatabasePermissionMask(permissions uint) uint {
+	return permissions & dbbiz.DatabasePermissionAll
+}
+
+func (s *Service) databasePermissionScope(c *gin.Context, required uint) (*databasePermissionScope, bool) {
+	scope := &databasePermissionScope{
+		userID: rbacservice.GetUserID(c),
+	}
+	if s.permissionRepo == nil {
+		return scope, true
+	}
+	if scope.userID == 0 {
+		response.ErrorCode(c, http.StatusUnauthorized, "未登录")
+		return nil, false
+	}
+	hasRules, err := s.permissionRepo.HasAnyRules(c.Request.Context())
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
+		return nil, false
+	}
+	if !hasRules {
+		return scope, true
+	}
+	scope.enforced = true
+
+	admin, err := s.permissionRepo.IsAdmin(c.Request.Context(), scope.userID)
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
+		return nil, false
+	}
+	if admin {
+		scope.admin = true
+		return scope, true
+	}
+
+	allowedIDs, err := s.permissionRepo.GetUserAccessibleInstanceIDs(c.Request.Context(), scope.userID, required)
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
+		return nil, false
+	}
+	scope.allowedIDs = allowedIDs
+	return scope, true
+}
+
+func (s *Service) ensureInstancePermission(c *gin.Context, instanceID uint, required uint) bool {
+	if instanceID == 0 {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的实例ID")
+		return false
+	}
+	scope, ok := s.databasePermissionScope(c, required)
+	if !ok {
+		return false
+	}
+	if !scope.enforced || scope.admin {
+		return true
+	}
+	permissions, err := s.permissionRepo.GetUserInstancePermissions(c.Request.Context(), scope.userID, instanceID)
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
+		return false
+	}
+	if permissions&required == 0 {
+		response.ErrorCode(c, http.StatusForbidden, "权限不足：无权操作该数据库实例")
+		return false
+	}
+	return true
+}
+
+func applyInstancePermissionScope(req *dbbiz.DatabaseInstanceListRequest, scope *databasePermissionScope) {
+	if req == nil || scope == nil || !scope.enforced || scope.admin {
+		return
+	}
+	req.RestrictToAllowed = true
+	req.AllowedIDs = scope.allowedIDs
+}
+
+func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) {
+	if req == nil || scope == nil || !scope.enforced || scope.admin {
+		return
+	}
+	switch item := req.(type) {
+	case *dbbiz.DatabaseQueryAuditListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseBackupTaskListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseBackupRecordListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseRestoreJobListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseInspectionReportListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseQueryHistoryRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	}
+}
+
+func (s *Service) decorateInstancePermissions(c *gin.Context, list []*dbbiz.DatabaseInstanceVO, scope *databasePermissionScope) bool {
+	if len(list) == 0 {
+		return true
+	}
+	if scope == nil || !scope.enforced || scope.admin || s.permissionRepo == nil {
+		for _, item := range list {
+			item.Permissions = dbbiz.DatabasePermissionAll
+		}
+		return true
+	}
+	for _, item := range list {
+		permissions, err := s.permissionRepo.GetUserInstancePermissions(c.Request.Context(), scope.userID, item.ID)
+		if err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
+			return false
+		}
+		item.Permissions = permissions
+	}
+	return true
+}
+
 // GetSupportedTypes 获取支持的数据库类型
 // @Summary 获取支持的数据库类型
 // @Description 返回数据库管理一期支持的类型和能力标记
@@ -70,6 +201,74 @@ func writeDatabaseError(c *gin.Context, prefix string, err error) {
 // @Router /api/v1/databases/supported-types [get]
 func (s *Service) GetSupportedTypes(c *gin.Context) {
 	response.Success(c, s.useCase.SupportedTypes())
+}
+
+// ListInstancePermissions 获取数据库实例对象级权限配置
+func (s *Service) ListInstancePermissions(c *gin.Context) {
+	if s.permissionRepo == nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限仓库未配置")
+		return
+	}
+	var req dbbiz.DatabaseInstancePermissionListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.permissionRepo.List(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+// UpsertInstancePermission 创建或更新数据库实例对象级权限配置
+func (s *Service) UpsertInstancePermission(c *gin.Context) {
+	if s.permissionRepo == nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限仓库未配置")
+		return
+	}
+	var req dbbiz.DatabaseInstancePermissionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	permissions := normalizeDatabasePermissionMask(req.Permissions)
+	if permissions == 0 {
+		response.ErrorCode(c, http.StatusBadRequest, "请选择数据库实例权限")
+		return
+	}
+	if err := s.permissionRepo.Upsert(c.Request.Context(), &dbbiz.DatabaseInstancePermission{
+		RoleID:      req.RoleID,
+		InstanceID:  req.InstanceID,
+		Permissions: permissions,
+	}); err != nil {
+		writeDatabaseError(c, "保存失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "保存成功", nil)
+}
+
+// DeleteInstancePermission 删除数据库实例对象级权限配置
+func (s *Service) DeleteInstancePermission(c *gin.Context) {
+	if s.permissionRepo == nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限仓库未配置")
+		return
+	}
+	id, ok := parseUintParam(c, "id", "权限ID")
+	if !ok {
+		return
+	}
+	if err := s.permissionRepo.Delete(c.Request.Context(), id); err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "删除成功", nil)
 }
 
 // ListQueryHistory 获取当前用户最近 SQL 历史
@@ -86,6 +285,11 @@ func (s *Service) ListQueryHistory(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionQuery)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
 	list, err := s.useCase.ListQueryHistory(c.Request.Context(), &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
@@ -123,6 +327,11 @@ func (s *Service) ListQueryAudits(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionView)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
 	list, total, err := s.useCase.ListQueryAudits(c.Request.Context(), &req)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -150,6 +359,11 @@ func (s *Service) ExportQueryAudits(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionView)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
 	list, _, err := s.useCase.ExportQueryAudits(c.Request.Context(), &req)
 	if err != nil {
 		writeDatabaseError(c, "导出失败: ", err)
@@ -212,6 +426,11 @@ func (s *Service) ListBackupTasks(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
 	list, total, err := s.useCase.ListBackupTasks(c.Request.Context(), &req)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -237,6 +456,9 @@ func (s *Service) CreateBackupTask(c *gin.Context) {
 	var req dbbiz.DatabaseBackupTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
 		return
 	}
 	item, err := s.useCase.CreateBackupTask(c.Request.Context(), &req)
@@ -265,6 +487,17 @@ func (s *Service) UpdateBackupTask(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	existingInstanceID, err := s.useCase.GetBackupTaskInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, existingInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if req.InstanceID != existingInstanceID && !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
 	item, err := s.useCase.UpdateBackupTask(c.Request.Context(), id, &req)
 	if err != nil {
 		writeDatabaseError(c, "更新失败: ", err)
@@ -286,6 +519,14 @@ func (s *Service) DeleteBackupTask(c *gin.Context) {
 	if !ok {
 		return
 	}
+	instanceID, err := s.useCase.GetBackupTaskInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
 	if err := s.useCase.DeleteBackupTask(c.Request.Context(), id); err != nil {
 		writeDatabaseError(c, "删除失败: ", err)
 		return
@@ -304,6 +545,14 @@ func (s *Service) DeleteBackupTask(c *gin.Context) {
 func (s *Service) RunBackupTask(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "任务ID")
 	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupTaskInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "触发失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
 		return
 	}
 	item, err := s.useCase.RunBackupTask(c.Request.Context(), id, dbbiz.QueryOperator{
@@ -332,6 +581,11 @@ func (s *Service) ListBackupRecords(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
 	list, total, err := s.useCase.ListBackupRecords(c.Request.Context(), &req)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -356,6 +610,14 @@ func (s *Service) ListBackupRecords(c *gin.Context) {
 func (s *Service) DownloadBackupRecord(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "记录ID")
 	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupRecordInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "下载失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
 		return
 	}
 	data, err := s.useCase.DownloadBackupRecord(c.Request.Context(), id, dbbiz.QueryOperator{
@@ -391,6 +653,17 @@ func (s *Service) RunRestoreDryRun(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	sourceInstanceID, err := s.useCase.GetBackupRecordInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "恢复演练失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, sourceInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if !s.ensureInstancePermission(c, req.TargetInstanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
 	item, err := s.useCase.RunRestoreDryRun(c.Request.Context(), id, &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
@@ -417,6 +690,11 @@ func (s *Service) ListRestoreJobs(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionRestore)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
 	list, total, err := s.useCase.ListRestoreJobs(c.Request.Context(), &req)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -448,6 +726,9 @@ func (s *Service) GetCapacityTrend(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionDiagnosis) {
+		return
+	}
 	item, err := s.useCase.GetCapacityTrend(c.Request.Context(), id, &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
@@ -471,6 +752,9 @@ func (s *Service) GetCapacityTrend(c *gin.Context) {
 func (s *Service) CollectCapacitySnapshot(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionDiagnosis) {
 		return
 	}
 	item, err := s.useCase.CollectCapacitySnapshotForUser(c.Request.Context(), id, dbbiz.QueryOperator{
@@ -499,6 +783,11 @@ func (s *Service) ListInspectionReports(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionDiagnosis)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
 	list, total, err := s.useCase.ListInspectionReports(c.Request.Context(), &req)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -525,6 +814,14 @@ func (s *Service) GetInspectionReport(c *gin.Context) {
 	if !ok {
 		return
 	}
+	instanceID, err := s.useCase.GetInspectionReportInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionDiagnosis) {
+		return
+	}
 	item, err := s.useCase.GetInspectionReport(c.Request.Context(), id)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -545,6 +842,9 @@ func (s *Service) GenerateInspectionReport(c *gin.Context) {
 	var req dbbiz.DatabaseInspectionReportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionDiagnosis) {
 		return
 	}
 	item, err := s.useCase.GenerateInspectionReport(c.Request.Context(), &req, dbbiz.QueryOperator{
@@ -570,6 +870,9 @@ func (s *Service) GenerateInspectionReport(c *gin.Context) {
 func (s *Service) GetTopology(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionTopology) {
 		return
 	}
 	item, err := s.useCase.GetTopology(c.Request.Context(), id, dbbiz.QueryOperator{
@@ -605,9 +908,17 @@ func (s *Service) ListInstances(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionView)
+	if !ok {
+		return
+	}
+	applyInstancePermissionScope(&req, scope)
 	list, total, err := s.useCase.ListInstances(c.Request.Context(), &req)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.decorateInstancePermissions(c, list, scope) {
 		return
 	}
 	response.Success(c, gin.H{
@@ -657,9 +968,27 @@ func (s *Service) GetInstance(c *gin.Context) {
 	if !ok {
 		return
 	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionView)
+	if !ok {
+		return
+	}
+	if scope.enforced && !scope.admin {
+		permissions, err := s.permissionRepo.GetUserInstancePermissions(c.Request.Context(), scope.userID, id)
+		if err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
+			return
+		}
+		if permissions&dbbiz.DatabasePermissionView == 0 {
+			response.ErrorCode(c, http.StatusForbidden, "权限不足：无权操作该数据库实例")
+			return
+		}
+	}
 	item, err := s.useCase.GetInstance(c.Request.Context(), id)
 	if err != nil {
 		writeDatabaseError(c, "获取失败: ", err)
+		return
+	}
+	if !s.decorateInstancePermissions(c, []*dbbiz.DatabaseInstanceVO{item}, scope) {
 		return
 	}
 	response.Success(c, item)
@@ -686,6 +1015,9 @@ func (s *Service) UpdateInstance(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionManage) {
+		return
+	}
 	req.ID = id
 	if err := s.useCase.UpdateInstance(c.Request.Context(), &req); err != nil {
 		writeDatabaseError(c, "更新失败: ", err)
@@ -707,6 +1039,9 @@ func (s *Service) UpdateInstance(c *gin.Context) {
 func (s *Service) DeleteInstance(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionManage) {
 		return
 	}
 	if err := s.useCase.DeleteInstance(c.Request.Context(), id); err != nil {
@@ -757,6 +1092,9 @@ func (s *Service) TestInstance(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionManage) {
+		return
+	}
 	data, err := s.useCase.TestInstance(c.Request.Context(), id)
 	if err != nil {
 		writeDatabaseError(c, "连接测试失败: ", err)
@@ -778,6 +1116,9 @@ func (s *Service) TestInstance(c *gin.Context) {
 func (s *Service) SyncMetadata(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionManage) {
 		return
 	}
 	data, err := s.useCase.SyncMetadata(c.Request.Context(), id)
@@ -802,6 +1143,9 @@ func (s *Service) ListSchemas(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionView) {
+		return
+	}
 	data, err := s.useCase.ListSchemas(c.Request.Context(), id)
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -823,6 +1167,9 @@ func (s *Service) ListSchemas(c *gin.Context) {
 func (s *Service) ListTables(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionView) {
 		return
 	}
 	data, err := s.useCase.ListTables(c.Request.Context(), id, c.Query("schemaName"))
@@ -849,6 +1196,9 @@ func (s *Service) ListColumns(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionView) {
+		return
+	}
 	data, err := s.useCase.ListColumns(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"))
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -871,6 +1221,9 @@ func (s *Service) ListColumns(c *gin.Context) {
 func (s *Service) ListIndexes(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionView) {
 		return
 	}
 	data, err := s.useCase.ListIndexes(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"))
@@ -898,6 +1251,9 @@ func (s *Service) GetTableDDL(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionView) {
+		return
+	}
 	data, err := s.useCase.GetTableDDL(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"))
 	if err != nil {
 		writeDatabaseError(c, "查询失败: ", err)
@@ -920,6 +1276,9 @@ func (s *Service) GetTableDDL(c *gin.Context) {
 func (s *Service) ExportTableDictionary(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionExport) {
 		return
 	}
 	data, err := s.useCase.ExportTableDictionary(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"), dbbiz.QueryOperator{
@@ -1003,6 +1362,9 @@ func (s *Service) GetDiagnosisMetrics(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionDiagnosis) {
+		return
+	}
 	data, err := s.useCase.GetDiagnosisMetrics(c.Request.Context(), id, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
@@ -1034,6 +1396,9 @@ func (s *Service) ListDiagnosisSessions(c *gin.Context) {
 	var req dbbiz.DatabaseDiagnosisListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionDiagnosis) {
 		return
 	}
 	data, err := s.useCase.ListDiagnosisSessions(c.Request.Context(), id, &req, dbbiz.QueryOperator{
@@ -1069,6 +1434,9 @@ func (s *Service) ListSlowQueries(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionDiagnosis) {
+		return
+	}
 	data, err := s.useCase.ListSlowQueries(c.Request.Context(), id, &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
@@ -1102,6 +1470,9 @@ func (s *Service) FormatQuerySQL(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionQuery) {
+		return
+	}
 	data, err := s.useCase.FormatQuerySQL(c.Request.Context(), id, &req)
 	if err != nil {
 		writeDatabaseError(c, "格式化失败: ", err)
@@ -1131,6 +1502,9 @@ func (s *Service) ValidateWriteQuery(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionWrite) {
+		return
+	}
 	data, err := s.useCase.ValidateWriteQuery(c.Request.Context(), id, &req)
 	if err != nil {
 		writeDatabaseError(c, "预检查失败: ", err)
@@ -1158,6 +1532,9 @@ func (s *Service) ExecuteWriteQuery(c *gin.Context) {
 	var req dbbiz.DatabaseWriteExecuteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionWrite) {
 		return
 	}
 	data, err := s.useCase.ExecuteWriteQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
@@ -1193,6 +1570,9 @@ func (s *Service) ExecuteQuery(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionQuery) {
+		return
+	}
 	data, err := s.useCase.ExecuteQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
@@ -1226,6 +1606,9 @@ func (s *Service) ExplainQuery(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionQuery) {
+		return
+	}
 	data, err := s.useCase.ExplainQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
@@ -1256,6 +1639,9 @@ func (s *Service) ExportQueryResult(c *gin.Context) {
 	var req dbbiz.DatabaseQueryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionExport) {
 		return
 	}
 	data, err := s.useCase.ExportQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
@@ -1299,6 +1685,9 @@ func (s *Service) ExportQueryResult(c *gin.Context) {
 func (s *Service) setInstanceStatus(c *gin.Context, status, message string) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionManage) {
 		return
 	}
 	if err := s.useCase.SetInstanceStatus(c.Request.Context(), id, status); err != nil {

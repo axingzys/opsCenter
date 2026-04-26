@@ -14,6 +14,16 @@ type InstanceRepo interface {
 	ListEnabled(ctx context.Context) ([]*DatabaseInstance, error)
 }
 
+type DatabasePermissionRepo interface {
+	HasAnyRules(ctx context.Context) (bool, error)
+	IsAdmin(ctx context.Context, userID uint) (bool, error)
+	GetUserInstancePermissions(ctx context.Context, userID, instanceID uint) (uint, error)
+	GetUserAccessibleInstanceIDs(ctx context.Context, userID uint, required uint) ([]uint, error)
+	List(ctx context.Context, req *DatabaseInstancePermissionListRequest) ([]*DatabaseInstancePermissionVO, int64, error)
+	Upsert(ctx context.Context, item *DatabaseInstancePermission) error
+	Delete(ctx context.Context, id uint) error
+}
+
 type SchemaRepo interface {
 	ListByInstanceID(ctx context.Context, instanceID uint) ([]*DatabaseSchema, error)
 }

@@ -113,6 +113,7 @@ func (r *inspectionReportRepo) List(ctx context.Context, req *dbbiz.DatabaseInsp
 
 	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseInspectionReport{})
 	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
 		if req.InstanceID > 0 {
 			query = query.Where("instance_id = ?", req.InstanceID)
 		}

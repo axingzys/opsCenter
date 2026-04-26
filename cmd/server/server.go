@@ -214,6 +214,7 @@ func autoMigrate(db *gorm.DB) error {
 		&assetmodel.VirtualizationActionLog{},
 		// 数据库管理相关表
 		&databasemodel.DatabaseInstance{},
+		&databasemodel.DatabaseInstancePermission{},
 		&databasemodel.DatabaseSchema{},
 		&databasemodel.DatabaseTable{},
 		&databasemodel.DatabaseColumn{},

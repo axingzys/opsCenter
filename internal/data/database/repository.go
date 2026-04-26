@@ -44,6 +44,7 @@ func (r *instanceRepo) List(ctx context.Context, req *dbbiz.DatabaseInstanceList
 
 	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseInstance{})
 	if req != nil {
+		query = applyAllowedInstanceFilter(query, "id", req.RestrictToAllowed, req.AllowedIDs)
 		if kw := strings.TrimSpace(req.Keyword); kw != "" {
 			like := "%" + kw + "%"
 			query = query.Where("name LIKE ? OR host LIKE ? OR default_database LIKE ? OR business_system LIKE ? OR owner LIKE ?", like, like, like, like, like)
@@ -335,6 +336,7 @@ func (r *queryAuditRepo) List(ctx context.Context, req *dbbiz.DatabaseQueryAudit
 	)
 	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseQueryAudit{})
 	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
 		if req.InstanceID > 0 {
 			query = query.Where("instance_id = ?", req.InstanceID)
 		}
@@ -397,6 +399,7 @@ func (r *queryAuditRepo) ListHistory(ctx context.Context, operatorID uint, req *
 		Where("operator_id = ?", operatorID).
 		Where("(audit_action IN ? OR audit_action = '' OR audit_action IS NULL)", []string{dbbiz.DatabaseAuditActionQuery, dbbiz.DatabaseAuditActionExplain})
 	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
 		if req.InstanceID > 0 {
 			query = query.Where("instance_id = ?", req.InstanceID)
 		}

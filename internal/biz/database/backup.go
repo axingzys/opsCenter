@@ -34,6 +34,17 @@ func (uc *UseCase) ListBackupTasks(ctx context.Context, req *DatabaseBackupTaskL
 	return list, total, nil
 }
 
+func (uc *UseCase) GetBackupTaskInstanceID(ctx context.Context, id uint) (uint, error) {
+	if id == 0 {
+		return 0, fmt.Errorf("备份任务ID不能为空")
+	}
+	item, err := uc.backupTaskRepo.GetByID(ctx, id)
+	if err != nil {
+		return 0, fmt.Errorf("备份任务不存在")
+	}
+	return item.InstanceID, nil
+}
+
 func (uc *UseCase) CreateBackupTask(ctx context.Context, req *DatabaseBackupTaskRequest) (*DatabaseBackupTaskVO, error) {
 	if err := uc.validateBackupTaskRequest(ctx, req); err != nil {
 		return nil, err
@@ -128,6 +139,17 @@ func (uc *UseCase) ListBackupRecords(ctx context.Context, req *DatabaseBackupRec
 		list = append(list, uc.toBackupRecordVO(item, taskNames[item.TaskID], instanceNames[item.InstanceID]))
 	}
 	return list, total, nil
+}
+
+func (uc *UseCase) GetBackupRecordInstanceID(ctx context.Context, id uint) (uint, error) {
+	if id == 0 {
+		return 0, fmt.Errorf("备份记录ID不能为空")
+	}
+	item, err := uc.backupRecordRepo.GetByID(ctx, id)
+	if err != nil {
+		return 0, fmt.Errorf("备份记录不存在")
+	}
+	return item.InstanceID, nil
 }
 
 func (uc *UseCase) reconcileStaleBackupRecords(ctx context.Context, items []*DatabaseBackupRecord) {

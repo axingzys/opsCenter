@@ -18,10 +18,12 @@ type DatabaseQueryFormatVO struct {
 }
 
 type DatabaseQueryHistoryRequest struct {
-	InstanceID uint   `form:"instanceId"`
-	SchemaName string `form:"schemaName"`
-	Keyword    string `form:"keyword"`
-	Limit      int    `form:"limit"`
+	InstanceID         uint   `form:"instanceId"`
+	SchemaName         string `form:"schemaName"`
+	Keyword            string `form:"keyword"`
+	Limit              int    `form:"limit"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
 func (uc *UseCase) FormatQuerySQL(ctx context.Context, instanceID uint, req *DatabaseQueryFormatRequest) (*DatabaseQueryFormatVO, error) {
