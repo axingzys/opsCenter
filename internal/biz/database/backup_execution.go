@@ -218,7 +218,12 @@ func (uc *UseCase) pruneBackupRecordFile(ctx context.Context, record *DatabaseBa
 		return false, nil
 	}
 
-	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+	securePath, err := uc.secureBackupFilePath(ctx, filePath)
+	if err != nil {
+		return false, err
+	}
+
+	if err := os.Remove(securePath); err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
 

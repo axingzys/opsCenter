@@ -248,6 +248,49 @@ func TestBuildBackupOutputPathRedis(t *testing.T) {
 	}
 }
 
+func TestSecureBackupPathUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "mysql", "backup.sql.gz")
+	if err := os.MkdirAll(filepath.Dir(inside), 0o755); err != nil {
+		t.Fatalf("mkdir inside: %v", err)
+	}
+	if err := os.WriteFile(inside, []byte("backup"), 0o644); err != nil {
+		t.Fatalf("write inside: %v", err)
+	}
+
+	got, err := secureBackupPathUnderRoot(root, inside)
+	if err != nil {
+		t.Fatalf("secureBackupPathUnderRoot(inside) error = %v", err)
+	}
+	if got != inside {
+		t.Fatalf("secureBackupPathUnderRoot(inside) = %q, want %q", got, inside)
+	}
+
+	outside := filepath.Join(t.TempDir(), "backup.sql.gz")
+	if err := os.WriteFile(outside, []byte("backup"), 0o644); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	if _, err := secureBackupPathUnderRoot(root, outside); err == nil {
+		t.Fatalf("expected outside path to be rejected")
+	}
+}
+
+func TestSecureBackupPathUnderRootRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.sql.gz")
+	if err := os.WriteFile(outside, []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	link := filepath.Join(root, "link.sql.gz")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	if _, err := secureBackupPathUnderRoot(root, link); err == nil {
+		t.Fatalf("expected symlink escaping backup root to be rejected")
+	}
+}
+
 func TestBuildBackupRecordMessage(t *testing.T) {
 	success := buildBackupRecordMessage(&DatabaseBackupRecord{
 		Status:   DatabaseBackupStatusSuccess,

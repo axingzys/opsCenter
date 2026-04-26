@@ -187,6 +187,58 @@ func resolveBackupStorageRoot(policy *DatabaseBackupPolicy) (string, error) {
 	return absRoot, nil
 }
 
+func (uc *UseCase) secureBackupFilePath(ctx context.Context, filePath string) (string, error) {
+	policy, err := uc.resolveBackupPolicy(ctx)
+	if err != nil {
+		return "", err
+	}
+	storageRoot, err := resolveBackupStorageRoot(policy)
+	if err != nil {
+		return "", err
+	}
+	return secureBackupPathUnderRoot(storageRoot, filePath)
+}
+
+func secureBackupPathUnderRoot(storageRoot, filePath string) (string, error) {
+	storageRoot = strings.TrimSpace(storageRoot)
+	filePath = strings.TrimSpace(filePath)
+	if storageRoot == "" {
+		return "", fmt.Errorf("备份目录不能为空")
+	}
+	if filePath == "" {
+		return "", fmt.Errorf("备份文件路径不能为空")
+	}
+
+	absRoot, err := filepath.Abs(storageRoot)
+	if err != nil {
+		return "", fmt.Errorf("解析备份目录失败: %w", err)
+	}
+	absFile, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", fmt.Errorf("解析备份文件路径失败: %w", err)
+	}
+	if !isPathUnderRoot(absRoot, absFile) {
+		return "", fmt.Errorf("备份文件路径不在备份目录内")
+	}
+
+	realRoot := absRoot
+	if evaluatedRoot, err := filepath.EvalSymlinks(absRoot); err == nil {
+		realRoot = evaluatedRoot
+	}
+	if evaluatedFile, err := filepath.EvalSymlinks(absFile); err == nil && !isPathUnderRoot(realRoot, evaluatedFile) {
+		return "", fmt.Errorf("备份文件路径不在备份目录内")
+	}
+	return absFile, nil
+}
+
+func isPathUnderRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
+}
+
 func buildBackupOutputPath(storageRoot string, item *DatabaseInstance, task *DatabaseBackupTask, databaseName string, startedAt time.Time, fileExt string) (string, string, error) {
 	if strings.TrimSpace(storageRoot) == "" {
 		return "", "", fmt.Errorf("备份目录不能为空")

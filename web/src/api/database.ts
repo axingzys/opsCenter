@@ -443,17 +443,8 @@ export const listDatabaseBackupRecords = (params?: {
   dateTo?: string
 }) => request.get('/api/v1/databases/backup-records', { params })
 
-const buildNativeDownloadUrl = (path: string) => {
-  const token = localStorage.getItem('token')
-  if (!token) {
-    return path
-  }
-  const params = new URLSearchParams({ token })
-  return `${path}?${params.toString()}`
-}
-
-export const getDatabaseBackupRecordDownloadUrl = (id: number) =>
-  buildNativeDownloadUrl(`/api/v1/databases/backup-records/${id}/download`)
+export const downloadDatabaseBackupRecord = (id: number) =>
+  request.get(`/api/v1/databases/backup-records/${id}/download`, { responseType: 'blob' })
 
 export const runDatabaseRestoreDryRun = (id: number, data: DatabaseRestoreDryRunPayload) =>
   request.post(`/api/v1/databases/backup-records/${id}/restore-dry-run`, data)

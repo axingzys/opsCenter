@@ -2258,6 +2258,7 @@ import {
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
   disableDatabaseInstance,
+  downloadDatabaseBackupRecord,
   explainDatabaseQuery,
   enableDatabaseInstance,
   executeDatabaseQuery,
@@ -2265,7 +2266,6 @@ import {
   generateDatabaseInspectionReport,
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
-  getDatabaseBackupRecordDownloadUrl,
   getDatabaseInspectionReport,
   getDatabaseTopology,
   exportDatabaseQueryResult,
@@ -4011,11 +4011,9 @@ const handleRunBackupTask = async (row: DatabaseBackupTaskResult) => {
   }
 }
 
-const handleDownloadBackupRecord = (row: DatabaseBackupRecordResult) => {
-  triggerNativeDownload(
-    getDatabaseBackupRecordDownloadUrl(row.id),
-    row.fileName || `database-backup-${row.id}.sql.gz`
-  )
+const handleDownloadBackupRecord = async (row: DatabaseBackupRecordResult) => {
+  const blob = await downloadDatabaseBackupRecord(row.id) as Blob
+  downloadBlob(blob, row.fileName || `database-backup-${row.id}.sql.gz`)
   ElMessage.success('备份文件已开始下载')
 }
 
@@ -4300,17 +4298,6 @@ const downloadBlob = (blob: Blob, filename: string) => {
   link.click()
   document.body.removeChild(link)
   window.URL.revokeObjectURL(url)
-}
-
-const triggerNativeDownload = (url: string, filename: string) => {
-  // Let the browser stream large files directly instead of buffering them into a Blob first.
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  link.rel = 'noopener'
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
 }
 
 watch(

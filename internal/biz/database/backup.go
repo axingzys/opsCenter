@@ -151,7 +151,14 @@ func (uc *UseCase) DownloadBackupRecord(ctx context.Context, id uint, operator Q
 		return nil, err
 	}
 
-	info, err := os.Stat(record.FilePath)
+	filePath, err := uc.secureBackupFilePath(ctx, record.FilePath)
+	if err != nil {
+		err = fmt.Errorf("备份文件路径无效: %w", err)
+		uc.recordBackupDownloadAudit(ctx, instance, record, operator, DatabaseQueryStatusFailed, err.Error())
+		return nil, err
+	}
+
+	info, err := os.Stat(filePath)
 	if err != nil {
 		err = fmt.Errorf("备份文件不存在")
 		uc.recordBackupDownloadAudit(ctx, instance, record, operator, DatabaseQueryStatusFailed, err.Error())
@@ -165,7 +172,7 @@ func (uc *UseCase) DownloadBackupRecord(ctx context.Context, id uint, operator Q
 
 	uc.recordBackupDownloadAudit(ctx, instance, record, operator, DatabaseQueryStatusSuccess, "")
 	return &DatabaseBackupDownloadVO{
-		FilePath:    record.FilePath,
+		FilePath:    filePath,
 		FileName:    record.FileName,
 		ContentType: detectBackupContentType(record.FileName),
 	}, nil

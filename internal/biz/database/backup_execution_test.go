@@ -69,7 +69,12 @@ func TestCleanupExpiredBackupFilesByTask(t *testing.T) {
 			},
 		},
 	}
-	uc := &UseCase{backupRecordRepo: recordRepo}
+	uc := &UseCase{
+		backupRecordRepo: recordRepo,
+		backupPolicyResolver: func(context.Context) (*DatabaseBackupPolicy, error) {
+			return &DatabaseBackupPolicy{DefaultRetentionDays: 7, StoragePath: dir}, nil
+		},
+	}
 	task := &DatabaseBackupTask{RetentionDays: 7}
 	task.ID = 1
 	task.CreatedAt = time.Now()
