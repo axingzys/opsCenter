@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -169,6 +170,38 @@ func (r *permissionRepo) List(ctx context.Context, req *dbbiz.DatabaseInstancePe
 		})
 	}
 	return list, total, nil
+}
+
+func (r *permissionRepo) ValidateTarget(ctx context.Context, roleID, instanceID uint) error {
+	if roleID == 0 {
+		return fmt.Errorf("角色不能为空")
+	}
+	if instanceID == 0 {
+		return fmt.Errorf("数据库实例不能为空")
+	}
+
+	var roleCount int64
+	if err := r.db.WithContext(ctx).
+		Table("sys_role").
+		Where("id = ? AND status = 1 AND deleted_at IS NULL", roleID).
+		Count(&roleCount).Error; err != nil {
+		return fmt.Errorf("校验角色失败: %w", err)
+	}
+	if roleCount == 0 {
+		return fmt.Errorf("角色不存在或已禁用")
+	}
+
+	var instanceCount int64
+	if err := r.db.WithContext(ctx).
+		Table("database_instances").
+		Where("id = ? AND deleted_at IS NULL", instanceID).
+		Count(&instanceCount).Error; err != nil {
+		return fmt.Errorf("校验数据库实例失败: %w", err)
+	}
+	if instanceCount == 0 {
+		return fmt.Errorf("数据库实例不存在")
+	}
+	return nil
 }
 
 func (r *permissionRepo) Upsert(ctx context.Context, item *dbbiz.DatabaseInstancePermission) error {

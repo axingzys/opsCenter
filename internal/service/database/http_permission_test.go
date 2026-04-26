@@ -13,11 +13,15 @@ import (
 )
 
 type fakeDatabasePermissionRepo struct {
-	hasRules    bool
-	admin       bool
-	allowedIDs  []uint
-	permissions map[uint]uint
-	err         error
+	hasRules            bool
+	admin               bool
+	allowedIDs          []uint
+	permissions         map[uint]uint
+	err                 error
+	validateErr         error
+	validatedRoleID     uint
+	validatedInstanceID uint
+	upserted            *dbbiz.DatabaseInstancePermission
 }
 
 func (r *fakeDatabasePermissionRepo) HasAnyRules(context.Context) (bool, error) {
@@ -43,8 +47,15 @@ func (r *fakeDatabasePermissionRepo) List(context.Context, *dbbiz.DatabaseInstan
 	return nil, 0, errors.New("not implemented")
 }
 
-func (r *fakeDatabasePermissionRepo) Upsert(context.Context, *dbbiz.DatabaseInstancePermission) error {
-	return errors.New("not implemented")
+func (r *fakeDatabasePermissionRepo) ValidateTarget(_ context.Context, roleID, instanceID uint) error {
+	r.validatedRoleID = roleID
+	r.validatedInstanceID = instanceID
+	return r.validateErr
+}
+
+func (r *fakeDatabasePermissionRepo) Upsert(_ context.Context, item *dbbiz.DatabaseInstancePermission) error {
+	r.upserted = item
+	return r.err
 }
 
 func (r *fakeDatabasePermissionRepo) Delete(context.Context, uint) error {
@@ -104,5 +115,42 @@ func TestPermissionScopeRestrictsListRequests(t *testing.T) {
 	}
 	if len(req.AllowedInstanceIDs) != 2 || req.AllowedInstanceIDs[0] != 2 || req.AllowedInstanceIDs[1] != 4 {
 		t.Fatalf("unexpected allowed ids: %#v", req.AllowedInstanceIDs)
+	}
+}
+
+func TestUpsertInstancePermissionValidatesTargetBeforeSaving(t *testing.T) {
+	c, recorder := newPermissionTestContext()
+	c.Request = httptest.NewRequest("POST", "/test", strings.NewReader(`{"roleId":3,"instanceId":42,"permissions":3}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	repo := &fakeDatabasePermissionRepo{}
+	service := NewService(nil, repo)
+
+	service.UpsertInstancePermission(c)
+
+	if repo.validatedRoleID != 3 || repo.validatedInstanceID != 42 {
+		t.Fatalf("expected target validation for role 3 and instance 42, got role=%d instance=%d", repo.validatedRoleID, repo.validatedInstanceID)
+	}
+	if repo.upserted == nil {
+		t.Fatalf("expected permission to be saved, response=%s", recorder.Body.String())
+	}
+	if repo.upserted.Permissions != 3 {
+		t.Fatalf("unexpected saved permission mask: %d", repo.upserted.Permissions)
+	}
+}
+
+func TestUpsertInstancePermissionRejectsInvalidTarget(t *testing.T) {
+	c, recorder := newPermissionTestContext()
+	c.Request = httptest.NewRequest("POST", "/test", strings.NewReader(`{"roleId":3,"instanceId":42,"permissions":3}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	repo := &fakeDatabasePermissionRepo{validateErr: errors.New("角色不存在或已禁用")}
+	service := NewService(nil, repo)
+
+	service.UpsertInstancePermission(c)
+
+	if repo.upserted != nil {
+		t.Fatal("expected invalid target to stop before saving")
+	}
+	if !strings.Contains(recorder.Body.String(), "角色不存在或已禁用") {
+		t.Fatalf("expected target validation error response, got %s", recorder.Body.String())
 	}
 }

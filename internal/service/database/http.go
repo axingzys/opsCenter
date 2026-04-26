@@ -243,6 +243,10 @@ func (s *Service) UpsertInstancePermission(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "请选择数据库实例权限")
 		return
 	}
+	if err := s.permissionRepo.ValidateTarget(c.Request.Context(), req.RoleID, req.InstanceID); err != nil {
+		writeDatabaseError(c, "保存失败: ", err)
+		return
+	}
 	if err := s.permissionRepo.Upsert(c.Request.Context(), &dbbiz.DatabaseInstancePermission{
 		RoleID:      req.RoleID,
 		InstanceID:  req.InstanceID,

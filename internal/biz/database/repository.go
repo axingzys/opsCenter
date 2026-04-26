@@ -20,6 +20,7 @@ type DatabasePermissionRepo interface {
 	GetUserInstancePermissions(ctx context.Context, userID, instanceID uint) (uint, error)
 	GetUserAccessibleInstanceIDs(ctx context.Context, userID uint, required uint) ([]uint, error)
 	List(ctx context.Context, req *DatabaseInstancePermissionListRequest) ([]*DatabaseInstancePermissionVO, int64, error)
+	ValidateTarget(ctx context.Context, roleID, instanceID uint) error
 	Upsert(ctx context.Context, item *DatabaseInstancePermission) error
 	Delete(ctx context.Context, id uint) error
 }
