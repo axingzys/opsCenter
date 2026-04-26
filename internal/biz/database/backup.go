@@ -3,7 +3,6 @@ package database
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
@@ -158,7 +157,7 @@ func (uc *UseCase) reconcileStaleBackupRecords(ctx context.Context, items []*Dat
 	}
 	now := time.Now()
 	for _, item := range items {
-		if item == nil || strings.TrimSpace(item.Status) != DatabaseBackupStatusRunning || item.StartedAt == nil {
+		if item == nil || !isActiveBackupStatus(item.Status) || item.StartedAt == nil {
 			continue
 		}
 		if item.StartedAt.After(uc.startedAt) && now.Sub(*item.StartedAt) <= backupStaleTimeout {
@@ -178,7 +177,7 @@ func (uc *UseCase) markBackupTaskStale(ctx context.Context, taskID uint, finishe
 		return
 	}
 	task, err := uc.backupTaskRepo.GetByID(ctx, taskID)
-	if err != nil || task == nil || strings.TrimSpace(task.LastStatus) != DatabaseBackupStatusRunning {
+	if err != nil || task == nil || !isActiveBackupStatus(task.LastStatus) {
 		return
 	}
 	task.LastStatus = DatabaseBackupStatusFailed
@@ -218,14 +217,7 @@ func (uc *UseCase) DownloadBackupRecord(ctx context.Context, id uint, operator Q
 		return nil, err
 	}
 
-	info, err := os.Stat(filePath)
-	if err != nil {
-		err = fmt.Errorf("备份文件不存在")
-		uc.recordBackupDownloadAudit(ctx, instance, record, operator, DatabaseQueryStatusFailed, err.Error())
-		return nil, err
-	}
-	if info.IsDir() {
-		err = fmt.Errorf("备份文件不存在")
+	if _, err := uc.verifyBackupRecordFile(ctx, record, filePath); err != nil {
 		uc.recordBackupDownloadAudit(ctx, instance, record, operator, DatabaseQueryStatusFailed, err.Error())
 		return nil, err
 	}
@@ -361,7 +353,16 @@ func (uc *UseCase) finishBackupRecord(ctx context.Context, record *DatabaseBacku
 	_ = uc.backupRecordRepo.Update(ctx, record)
 }
 
-func (uc *UseCase) finishBackupRecordSuccess(ctx context.Context, record *DatabaseBackupRecord, startedAt, finishedAt time.Time, durationMs, fileSize int64, message string) {
+func (uc *UseCase) markBackupRecordStatus(ctx context.Context, record *DatabaseBackupRecord, status, message string) {
+	if uc.backupRecordRepo == nil || record == nil || record.ID == 0 {
+		return
+	}
+	record.Status = status
+	record.ErrorMessage = trimText(message, 500)
+	_ = uc.backupRecordRepo.Update(ctx, record)
+}
+
+func (uc *UseCase) finishBackupRecordSuccess(ctx context.Context, record *DatabaseBackupRecord, startedAt, finishedAt time.Time, durationMs, fileSize int64, checksum, message string) {
 	if uc.backupRecordRepo == nil || record == nil || record.ID == 0 {
 		return
 	}
@@ -370,6 +371,7 @@ func (uc *UseCase) finishBackupRecordSuccess(ctx context.Context, record *Databa
 	record.FinishedAt = &finishedAt
 	record.DurationMs = durationMs
 	record.FileSize = fileSize
+	record.ChecksumSHA256 = strings.TrimSpace(checksum)
 	record.ErrorMessage = trimText(message, 500)
 	_ = uc.backupRecordRepo.Update(ctx, record)
 }
@@ -379,6 +381,15 @@ func (uc *UseCase) finishBackupTask(ctx context.Context, task *DatabaseBackupTas
 		return
 	}
 	task.LastRunAt = &finishedAt
+	task.LastStatus = status
+	task.LastMessage = trimText(message, 500)
+	_ = uc.backupTaskRepo.Update(ctx, task)
+}
+
+func (uc *UseCase) markBackupTaskStatus(ctx context.Context, task *DatabaseBackupTask, status, message string) {
+	if uc.backupTaskRepo == nil || task == nil || task.ID == 0 {
+		return
+	}
 	task.LastStatus = status
 	task.LastMessage = trimText(message, 500)
 	_ = uc.backupTaskRepo.Update(ctx, task)
@@ -495,6 +506,7 @@ func (uc *UseCase) toBackupRecordVO(item *DatabaseBackupRecord, taskName, instan
 		StatusText:      BackupStatusText(item.Status),
 		FileName:        item.FileName,
 		FileSize:        item.FileSize,
+		ChecksumSHA256:  item.ChecksumSHA256,
 		StartedAt:       formatTime(item.StartedAt),
 		FinishedAt:      formatTime(item.FinishedAt),
 		DurationMs:      item.DurationMs,
@@ -592,4 +604,13 @@ func backupTaskLastStatusText(status string) string {
 		return "-"
 	}
 	return BackupStatusText(status)
+}
+
+func isActiveBackupStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case DatabaseBackupStatusQueued, DatabaseBackupStatusRunning, DatabaseBackupStatusCleaning:
+		return true
+	default:
+		return false
+	}
 }

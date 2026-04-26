@@ -488,6 +488,7 @@ type DatabaseBackupRecordVO struct {
 	StatusText      string `json:"statusText"`
 	FileName        string `json:"fileName"`
 	FileSize        int64  `json:"fileSize"`
+	ChecksumSHA256  string `json:"checksumSha256"`
 	StartedAt       string `json:"startedAt"`
 	FinishedAt      string `json:"finishedAt"`
 	DurationMs      int64  `json:"durationMs"`
@@ -497,18 +498,19 @@ type DatabaseBackupRecordVO struct {
 }
 
 type DatabaseBackupRunVO struct {
-	TaskID       uint   `json:"taskId"`
-	TaskName     string `json:"taskName"`
-	RecordID     uint   `json:"recordId"`
-	InstanceID   uint   `json:"instanceId"`
-	InstanceName string `json:"instanceName"`
-	Status       string `json:"status"`
-	StatusText   string `json:"statusText"`
-	FileName     string `json:"fileName"`
-	FileSize     int64  `json:"fileSize"`
-	DurationMs   int64  `json:"durationMs"`
-	Message      string `json:"message"`
-	TriggeredAt  string `json:"triggeredAt"`
+	TaskID         uint   `json:"taskId"`
+	TaskName       string `json:"taskName"`
+	RecordID       uint   `json:"recordId"`
+	InstanceID     uint   `json:"instanceId"`
+	InstanceName   string `json:"instanceName"`
+	Status         string `json:"status"`
+	StatusText     string `json:"statusText"`
+	FileName       string `json:"fileName"`
+	FileSize       int64  `json:"fileSize"`
+	ChecksumSHA256 string `json:"checksumSha256"`
+	DurationMs     int64  `json:"durationMs"`
+	Message        string `json:"message"`
+	TriggeredAt    string `json:"triggeredAt"`
 }
 
 type DatabaseBackupDownloadVO struct {
@@ -1896,8 +1898,12 @@ func BackupStatusText(status string) string {
 	switch strings.TrimSpace(status) {
 	case DatabaseBackupStatusPending:
 		return "待执行"
+	case DatabaseBackupStatusQueued:
+		return "队列中"
 	case DatabaseBackupStatusRunning:
 		return "执行中"
+	case DatabaseBackupStatusCleaning:
+		return "清理中"
 	case DatabaseBackupStatusSuccess:
 		return "成功"
 	case DatabaseBackupStatusFailed:

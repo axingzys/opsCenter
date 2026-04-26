@@ -1347,6 +1347,14 @@
               <el-table-column label="文件大小" width="120" align="right">
                 <template #default="{ row }">{{ row.fileSize ? formatBytes(row.fileSize) : '-' }}</template>
               </el-table-column>
+              <el-table-column label="校验" width="120" align="center">
+                <template #default="{ row }">
+                  <el-tooltip v-if="row.checksumSha256" :content="row.checksumSha256" placement="top">
+                    <el-tag size="small" type="success">{{ row.checksumSha256.slice(0, 8) }}</el-tag>
+                  </el-tooltip>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
               <el-table-column label="耗时" width="100" align="right">
                 <template #default="{ row }">{{ row.durationMs ? `${row.durationMs} ms` : '-' }}</template>
               </el-table-column>
@@ -4554,6 +4562,10 @@ const backupStatusTag = (status: string) => {
     case 'failed':
       return 'danger'
     case 'running':
+      return 'warning'
+    case 'queued':
+      return 'info'
+    case 'cleaning':
       return 'warning'
     case 'pending':
       return 'info'

@@ -159,6 +159,7 @@ export interface DatabaseBackupRecordResult {
   statusText: string
   fileName: string
   fileSize: number
+  checksumSha256?: string
   startedAt: string
   finishedAt: string
   durationMs: number
@@ -177,6 +178,7 @@ export interface DatabaseBackupRunResult {
   statusText: string
   fileName: string
   fileSize: number
+  checksumSha256?: string
   durationMs: number
   message: string
   triggeredAt: string

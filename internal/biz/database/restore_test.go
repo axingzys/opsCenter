@@ -113,7 +113,7 @@ func TestValidateRestoreStrategy(t *testing.T) {
 func TestRestoreRunLock(t *testing.T) {
 	uc := &UseCase{}
 	key := buildRestoreRunKey(10, "AppDB")
-	if key != "10:appdb" {
+	if key != "10" {
 		t.Fatalf("unexpected restore lock key: %q", key)
 	}
 	if err := uc.acquireRestoreRun(key); err != nil {

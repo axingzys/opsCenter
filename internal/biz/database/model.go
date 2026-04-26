@@ -61,7 +61,9 @@ const (
 	DatabaseBackupTypeLogicalCustom  = "logical_custom"
 	DatabaseBackupStorageLocal       = "local"
 	DatabaseBackupStatusPending      = "pending"
+	DatabaseBackupStatusQueued       = "queued"
 	DatabaseBackupStatusRunning      = "running"
+	DatabaseBackupStatusCleaning     = "cleaning"
 	DatabaseBackupStatusSuccess      = "success"
 	DatabaseBackupStatusFailed       = "failed"
 	DatabaseBackupTriggerManual      = "manual"
@@ -323,19 +325,20 @@ func (DatabaseBackupTask) TableName() string {
 // DatabaseBackupRecord 备份执行记录
 type DatabaseBackupRecord struct {
 	gorm.Model
-	TaskID       uint       `gorm:"column:task_id;index;comment:任务ID" json:"taskId"`
-	InstanceID   uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
-	TriggerType  string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发方式" json:"triggerType"`
-	BackupType   string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
-	StorageType  string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
-	Status       string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
-	FilePath     string     `gorm:"column:file_path;type:varchar(500);comment:文件路径" json:"filePath"`
-	FileName     string     `gorm:"column:file_name;type:varchar(255);comment:文件名" json:"fileName"`
-	FileSize     int64      `gorm:"column:file_size;type:bigint;default:0;comment:文件大小" json:"fileSize"`
-	StartedAt    *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
-	FinishedAt   *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
-	DurationMs   int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
-	ErrorMessage string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
+	TaskID         uint       `gorm:"column:task_id;index;comment:任务ID" json:"taskId"`
+	InstanceID     uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	TriggerType    string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发方式" json:"triggerType"`
+	BackupType     string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
+	StorageType    string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
+	Status         string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
+	FilePath       string     `gorm:"column:file_path;type:varchar(500);comment:文件路径" json:"filePath"`
+	FileName       string     `gorm:"column:file_name;type:varchar(255);comment:文件名" json:"fileName"`
+	FileSize       int64      `gorm:"column:file_size;type:bigint;default:0;comment:文件大小" json:"fileSize"`
+	ChecksumSHA256 string     `gorm:"column:checksum_sha256;type:varchar(64);comment:文件SHA256校验和" json:"checksumSha256"`
+	StartedAt      *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	FinishedAt     *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
+	DurationMs     int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	ErrorMessage   string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
 }
 
 func (DatabaseBackupRecord) TableName() string {

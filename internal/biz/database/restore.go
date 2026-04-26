@@ -3,7 +3,6 @@ package database
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
@@ -63,6 +62,13 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 	}
 
 	if err := validateRestoreDryRunRecord(record); err != nil {
+		return nil, err
+	}
+	restoreFilePath, err := uc.secureBackupFilePath(ctx, record.FilePath)
+	if err != nil {
+		return nil, fmt.Errorf("备份文件路径无效: %w", err)
+	}
+	if _, err := uc.verifyBackupRecordFile(ctx, record, restoreFilePath); err != nil {
 		return nil, err
 	}
 	if err := validateRestoreDryRunTarget(source, target); err != nil {
@@ -128,18 +134,18 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 	}
 
 	vo := uc.toRestoreJobVO(job, source.Name, target.Name, target.Environment)
-	go uc.executeRestoreDryRunJob(job, audit, target, record, spec, databaseName, startedAt, restoreLockKey)
+	go uc.executeRestoreDryRunJob(job, audit, target, record, spec, databaseName, restoreFilePath, startedAt, restoreLockKey)
 	releaseRestoreLock = false
 	return vo, nil
 }
 
-func (uc *UseCase) executeRestoreDryRunJob(job *DatabaseRestoreJob, audit *DatabaseQueryAudit, target *DatabaseInstance, record *DatabaseBackupRecord, spec *restoreCommandSpec, databaseName string, startedAt time.Time, restoreLockKey string) {
+func (uc *UseCase) executeRestoreDryRunJob(job *DatabaseRestoreJob, audit *DatabaseQueryAudit, target *DatabaseInstance, record *DatabaseBackupRecord, spec *restoreCommandSpec, databaseName, restoreFilePath string, startedAt time.Time, restoreLockKey string) {
 	defer uc.releaseRestoreRun(restoreLockKey)
 
 	runCtx, cancel := context.WithTimeout(context.Background(), restoreCommandTimeout)
 	defer cancel()
 
-	runErr := runRestoreCommand(runCtx, spec, record.FilePath)
+	runErr := runRestoreCommand(runCtx, spec, restoreFilePath)
 	finishedAt := time.Now()
 	status := DatabaseBackupStatusSuccess
 	message := buildRestoreSuccessMessage(record.FileName, target.Name, databaseName)
@@ -174,7 +180,7 @@ func (uc *UseCase) reconcileStaleRestoreJobs(ctx context.Context, items []*Datab
 }
 
 func buildRestoreRunKey(targetInstanceID uint, databaseName string) string {
-	return fmt.Sprintf("%d:%s", targetInstanceID, strings.ToLower(strings.TrimSpace(databaseName)))
+	return fmt.Sprintf("%d", targetInstanceID)
 }
 
 func (uc *UseCase) acquireRestoreRun(key string) error {
@@ -218,10 +224,6 @@ func validateRestoreDryRunRecord(record *DatabaseBackupRecord) error {
 		return fmt.Errorf("当前仅支持 local 本地备份恢复演练")
 	}
 	if strings.TrimSpace(record.FilePath) == "" || strings.TrimSpace(record.FileName) == "" {
-		return fmt.Errorf("备份文件不存在")
-	}
-	info, err := os.Stat(record.FilePath)
-	if err != nil || info == nil || info.IsDir() {
 		return fmt.Errorf("备份文件不存在")
 	}
 	return nil

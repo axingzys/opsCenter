@@ -95,11 +95,11 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 		TriggerType:  normalizeBackupTriggerType(triggerType),
 		BackupType:   task.BackupType,
 		StorageType:  task.StorageType,
-		Status:       DatabaseBackupStatusRunning,
+		Status:       DatabaseBackupStatusQueued,
 		FilePath:     outputPath,
 		FileName:     fileName,
 		StartedAt:    &startedAt,
-		ErrorMessage: trimText(backupRunningMessage, 500),
+		ErrorMessage: trimText("备份任务已进入执行队列", 500),
 	}
 	if err := uc.backupRecordRepo.Create(ctx, record); err != nil {
 		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, 0, "创建备份记录失败: "+err.Error())
@@ -107,26 +107,39 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 	}
 
 	task.LastRunAt = &startedAt
-	task.LastStatus = DatabaseBackupStatusRunning
-	task.LastMessage = trimText(backupRunningMessage, 500)
+	task.LastStatus = DatabaseBackupStatusQueued
+	task.LastMessage = trimText("备份任务已进入执行队列", 500)
 	if err := uc.backupTaskRepo.Update(ctx, task); err != nil {
 		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, time.Now(), "更新备份任务状态失败: "+err.Error())
 		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, 0, "更新备份任务状态失败: "+err.Error())
 		return nil, err
 	}
 
+	uc.markBackupRecordStatus(ctx, record, DatabaseBackupStatusRunning, backupRunningMessage)
+	uc.markBackupTaskStatus(ctx, task, DatabaseBackupStatusRunning, backupRunningMessage)
 	fileSize, err := runBackupCommand(ctx, spec, outputPath)
 	finishedAt := time.Now()
 	durationMs := finishedAt.Sub(startedAt).Milliseconds()
 	if err != nil {
-		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, finishedAt, err.Error())
-		uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusFailed, err.Error())
-		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, durationMs, err.Error())
-		return nil, err
+		failureMessage := classifyBackupFailureMessage(err.Error())
+		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, finishedAt, failureMessage)
+		uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusFailed, failureMessage)
+		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, durationMs, failureMessage)
+		return nil, fmt.Errorf("%s", failureMessage)
+	}
+	checksum, err := calculateFileSHA256(outputPath)
+	if err != nil {
+		failureMessage := classifyBackupFailureMessage(err.Error())
+		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, finishedAt, failureMessage)
+		uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusFailed, failureMessage)
+		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, durationMs, failureMessage)
+		return nil, fmt.Errorf("%s", failureMessage)
 	}
 
 	recordMessage := buildBackupSuccessMessage(fileName, fileSize)
 	taskMessage := recordMessage
+	uc.markBackupRecordStatus(ctx, record, DatabaseBackupStatusCleaning, "备份文件已生成，保留策略清理中")
+	uc.markBackupTaskStatus(ctx, task, DatabaseBackupStatusCleaning, "备份文件已生成，保留策略清理中")
 	cleanedCount, cleanupErr := uc.cleanupExpiredBackupFilesByTask(ctx, task)
 	if cleanedCount > 0 {
 		taskMessage = recordMessage + "，" + buildBackupCleanupMessage(cleanedCount)
@@ -136,23 +149,24 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 	}
 	taskMessage = trimText(taskMessage, 500)
 
-	uc.finishBackupRecordSuccess(ctx, record, startedAt, finishedAt, durationMs, fileSize, recordMessage)
+	uc.finishBackupRecordSuccess(ctx, record, startedAt, finishedAt, durationMs, fileSize, checksum, recordMessage)
 	uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusSuccess, taskMessage)
 	uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusSuccess, durationMs, "")
 
 	return &DatabaseBackupRunVO{
-		TaskID:       task.ID,
-		TaskName:     task.Name,
-		RecordID:     record.ID,
-		InstanceID:   task.InstanceID,
-		InstanceName: instance.Name,
-		Status:       DatabaseBackupStatusSuccess,
-		StatusText:   BackupStatusText(DatabaseBackupStatusSuccess),
-		FileName:     fileName,
-		FileSize:     fileSize,
-		DurationMs:   durationMs,
-		Message:      taskMessage,
-		TriggeredAt:  startedAt.Format("2006-01-02 15:04:05"),
+		TaskID:         task.ID,
+		TaskName:       task.Name,
+		RecordID:       record.ID,
+		InstanceID:     task.InstanceID,
+		InstanceName:   instance.Name,
+		Status:         DatabaseBackupStatusSuccess,
+		StatusText:     BackupStatusText(DatabaseBackupStatusSuccess),
+		FileName:       fileName,
+		FileSize:       fileSize,
+		ChecksumSHA256: checksum,
+		DurationMs:     durationMs,
+		Message:        taskMessage,
+		TriggeredAt:    startedAt.Format("2006-01-02 15:04:05"),
 	}, nil
 }
 

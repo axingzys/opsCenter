@@ -291,6 +291,38 @@ func TestSecureBackupPathUnderRootRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestCalculateFileSHA256(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backup.sql")
+	if err := os.WriteFile(path, []byte("backup"), 0o644); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+	got, err := calculateFileSHA256(path)
+	if err != nil {
+		t.Fatalf("calculateFileSHA256() error = %v", err)
+	}
+	want := "54d00d867758cef816bc4685f58e327b949712b07ebd17c3485f3ffc9e9f5133"
+	if got != want {
+		t.Fatalf("calculateFileSHA256() = %q, want %q", got, want)
+	}
+}
+
+func TestVerifyBackupRecordFileRejectsChecksumMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backup.sql")
+	if err := os.WriteFile(path, []byte("backup"), 0o644); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+	record := &DatabaseBackupRecord{
+		FilePath:       path,
+		FileName:       "backup.sql",
+		FileSize:       int64(len("backup")),
+		ChecksumSHA256: strings.Repeat("0", 64),
+	}
+	_, err := (&UseCase{}).verifyBackupRecordFile(context.Background(), record, path)
+	if err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("expected checksum mismatch, got %v", err)
+	}
+}
+
 func TestBuildBackupRecordMessage(t *testing.T) {
 	success := buildBackupRecordMessage(&DatabaseBackupRecord{
 		Status:   DatabaseBackupStatusSuccess,
