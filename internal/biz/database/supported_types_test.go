@@ -29,3 +29,21 @@ func TestCompatibleReadOnlyCapabilities(t *testing.T) {
 		}
 	}
 }
+
+func TestSupportedTypeCapabilityMatrix(t *testing.T) {
+	uc := &UseCase{}
+	byType := make(map[string]*SupportedTypeVO)
+	for _, item := range uc.SupportedTypes() {
+		byType[item.Type] = item
+	}
+
+	if mongodb := byType[DBTypeMongoDB]; mongodb == nil || !mongodb.TopologyEnabled || mongodb.TestEnabled || mongodb.MetadataEnabled || mongodb.QueryEnabled {
+		t.Fatalf("mongodb capabilities should be topology-only, got %#v", mongodb)
+	}
+	if dameng := byType[DBTypeDameng]; dameng == nil || dameng.TestEnabled || dameng.MetadataEnabled || dameng.QueryEnabled || dameng.TopologyEnabled {
+		t.Fatalf("dameng capabilities should be disabled until dedicated driver support, got %#v", dameng)
+	}
+	if redis := byType[DBTypeRedis]; redis == nil || !redis.TestEnabled || !redis.MetadataEnabled || !redis.QueryEnabled || !redis.TopologyEnabled {
+		t.Fatalf("redis capabilities should be fully enabled, got %#v", redis)
+	}
+}

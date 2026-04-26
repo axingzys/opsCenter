@@ -527,15 +527,15 @@ func (uc *UseCase) SupportedTypes() []*SupportedTypeVO {
 		{Type: DBTypeSQLServer, Name: "SQL Server", DefaultPort: 1433, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase2"},
 		{Type: DBTypeClickHouse, Name: "ClickHouse", DefaultPort: 9000, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase2"},
 		{Type: DBTypeOracle, Name: "Oracle", DefaultPort: 1521, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase2-research"},
-		{Type: DBTypeRedis, Name: "Redis", DefaultPort: 6379, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, TopologyEnabled: true, Phase: "phase6-redis"},
-		{Type: DBTypeMongoDB, Name: "MongoDB", DefaultPort: 27017, TopologyEnabled: true, Phase: "phase4-topology"},
+		{Type: DBTypeRedis, Name: "Redis", DefaultPort: 6379, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, TopologyEnabled: true, Phase: "phase1-redis"},
+		{Type: DBTypeMongoDB, Name: "MongoDB", DefaultPort: 27017, TopologyEnabled: true, Phase: "phase4-topology-only"},
 		{Type: DBTypeElasticsearch, Name: "Elasticsearch", DefaultPort: 9200, TestEnabled: true, TopologyEnabled: true, Phase: "phase4-topology"},
 		{Type: DBTypeOpenSearch, Name: "OpenSearch", DefaultPort: 9200, TestEnabled: true, TopologyEnabled: true, Phase: "phase4-topology"},
 		{Type: DBTypeTiDB, Name: "TiDB", DefaultPort: 4000, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase4-compatible"},
 		{Type: DBTypeOceanBase, Name: "OceanBase MySQL", DefaultPort: 2881, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase4-compatible"},
 		{Type: DBTypeOpenGauss, Name: "openGauss", DefaultPort: 5432, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase4-compatible"},
 		{Type: DBTypeKingbase, Name: "人大金仓 Kingbase", DefaultPort: 54321, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase4-compatible"},
-		{Type: DBTypeDameng, Name: "达梦 Dameng", DefaultPort: 5236, Phase: "phase4-research"},
+		{Type: DBTypeDameng, Name: "达梦 Dameng", DefaultPort: 5236, Phase: "phase4-research-only"},
 	}
 }
 

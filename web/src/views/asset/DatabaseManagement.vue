@@ -132,13 +132,13 @@
             </el-table-column>
             <el-table-column label="操作" width="260" align="center" fixed="right">
               <template #default="{ row }">
-                <el-tooltip content="连接测试" placement="top">
-                  <el-button link type="primary" :loading="testingId === row.id" @click="handleTest(row)">
+                <el-tooltip :content="hasInstanceCapability(row, 'testEnabled') ? '连接测试' : '该类型暂未接入连接测试'" placement="top">
+                  <el-button link type="primary" :loading="testingId === row.id" :disabled="!hasInstanceCapability(row, 'testEnabled')" @click="handleTest(row)">
                     <el-icon><Connection /></el-icon>
                   </el-button>
                 </el-tooltip>
-                <el-tooltip content="同步结构" placement="top">
-                  <el-button link type="success" :loading="syncingId === row.id" @click="handleSync(row)">
+                <el-tooltip :content="hasInstanceCapability(row, 'metadataEnabled') ? '同步结构' : '该类型暂未接入元数据同步'" placement="top">
+                  <el-button link type="success" :loading="syncingId === row.id" :disabled="!hasInstanceCapability(row, 'metadataEnabled')" @click="handleSync(row)">
                     <el-icon><Refresh /></el-icon>
                   </el-button>
                 </el-tooltip>
@@ -188,7 +188,7 @@
                 @change="handleMetadataInstanceChange"
               >
                 <el-option
-                  v-for="item in instances"
+                  v-for="item in metadataInstances"
                   :key="item.id"
                   :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
                   :value="item.id"
@@ -201,7 +201,7 @@
             </div>
             <el-button
               type="primary"
-              :disabled="!metadataInstanceId"
+              :disabled="!metadataInstanceId || !hasInstanceCapability(currentMetadataInstance, 'metadataEnabled')"
               :loading="syncingId === metadataInstanceId"
               @click="handleSync()"
             >
@@ -415,7 +415,7 @@
               @change="handleQueryInstanceChange"
             >
               <el-option
-                v-for="item in instances"
+                v-for="item in queryInstances"
                 :key="item.id"
                 :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
                 :value="item.id"
@@ -430,22 +430,22 @@
             <el-input-number v-model="queryTimeoutSeconds" :min="1" :max="30" class="query-number" />
             <span class="query-option-label">导出上限</span>
             <el-input-number v-model="queryExportLimit" :min="1" :max="5000" :step="100" class="query-number" />
-            <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId" @click="executeQuery">
+            <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="executeQuery">
               {{ isRedisQueryInstance ? '执行命令' : '执行查询' }}
             </el-button>
-            <el-button :loading="queryFormatting" :disabled="!queryInstanceId" @click="handleFormatQuery">
+            <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="handleFormatQuery">
               {{ isRedisQueryInstance ? '格式化命令' : '格式化 SQL' }}
             </el-button>
-            <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId" @click="handleExplainQuery">
+            <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="handleExplainQuery">
               执行计划
             </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryWriteChecking" :disabled="!queryInstanceId" @click="handleValidateWriteQuery">
+            <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryWriteChecking" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handleValidateWriteQuery">
               写前检查
             </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="danger" plain :loading="queryWritePreparing" :disabled="!queryInstanceId" @click="handlePrepareWriteExecute">
+            <el-button v-if="!isRedisQueryInstance" type="danger" plain :loading="queryWritePreparing" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handlePrepareWriteExecute">
               受控写入
             </el-button>
-            <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId" @click="handleExportQuery">
+            <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId || !hasInstanceCapability(currentQueryInstance, 'queryEnabled')" @click="handleExportQuery">
               <el-icon style="margin-right: 4px;"><Download /></el-icon>
               导出结果
             </el-button>
@@ -2322,6 +2322,23 @@ const instances = ref<any[]>([])
 const supportedTypes = ref<DatabaseSupportedType[]>([])
 const credentials = ref<any[]>([])
 const total = ref(0)
+
+type DatabaseCapabilityKey = 'metadataEnabled' | 'queryEnabled' | 'testEnabled' | 'topologyEnabled'
+
+const supportedTypeMap = computed(() => {
+  const result = new Map<string, DatabaseSupportedType>()
+  supportedTypes.value.forEach(item => result.set(item.type, item))
+  return result
+})
+
+const hasDatabaseCapability = (dbType: string | undefined, capability: DatabaseCapabilityKey) => {
+  if (!dbType) return false
+  return !!supportedTypeMap.value.get(dbType)?.[capability]
+}
+
+const hasInstanceCapability = (item: any, capability: DatabaseCapabilityKey) =>
+  hasDatabaseCapability(item?.dbType, capability)
+
 const formRef = ref<FormInstance>()
 const metadataInstanceId = ref<number>()
 const schemasLoading = ref(false)
@@ -2554,8 +2571,16 @@ const currentMetadataInstance = computed(() =>
   instances.value.find(item => item.id === metadataInstanceId.value)
 )
 
+const metadataInstances = computed(() =>
+  instances.value.filter(item => hasInstanceCapability(item, 'metadataEnabled'))
+)
+
 const currentQueryInstance = computed(() =>
   instances.value.find(item => item.id === queryInstanceId.value)
+)
+
+const queryInstances = computed(() =>
+  instances.value.filter(item => hasInstanceCapability(item, 'queryEnabled'))
 )
 
 const isRedisMetadataInstance = computed(() =>
@@ -2564,6 +2589,10 @@ const isRedisMetadataInstance = computed(() =>
 
 const isRedisQueryInstance = computed(() =>
   currentQueryInstance.value?.dbType === 'redis'
+)
+
+const canWriteCurrentQueryInstance = computed(() =>
+  ['mysql', 'mariadb', 'postgresql'].includes(currentQueryInstance.value?.dbType || '')
 )
 
 const queryConsoleAlert = computed(() =>
@@ -2603,10 +2632,7 @@ let diagnosisRequestSeq = 0
 let capacityTrendRequestSeq = 0
 
 const topologyInstances = computed(() =>
-  instances.value.filter(item => {
-    const supported = supportedTypes.value.find(type => type.type === item.dbType)
-    return !!supported?.topologyEnabled || ['redis', 'mongodb', 'elasticsearch', 'opensearch'].includes(item.dbType)
-  })
+  instances.value.filter(item => hasInstanceCapability(item, 'topologyEnabled'))
 )
 
 const supportedBackupInstances = computed(() =>
@@ -3369,6 +3395,10 @@ const toggleInstanceStatus = async (row: any) => {
 }
 
 const handleTest = async (row: any) => {
+  if (!hasInstanceCapability(row, 'testEnabled')) {
+    ElMessage.warning('该数据库类型暂未接入连接测试')
+    return
+  }
   testingId.value = row.id
   try {
     const res: any = await testDatabaseInstance(row.id)
@@ -3385,10 +3415,14 @@ const handleSync = async (row?: any) => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
+  const instance = row || instances.value.find(item => item.id === id)
+  if (!hasInstanceCapability(instance, 'metadataEnabled')) {
+    ElMessage.warning('该数据库类型暂未接入元数据同步')
+    return
+  }
   syncingId.value = id
   try {
     const res: any = await syncDatabaseMetadata(id)
-    const instance = instances.value.find(item => item.id === id)
     if (instance?.dbType === 'redis') {
       ElMessage.success(
         `${res.message || '同步成功'}：${res.schemasCount || 0} 个逻辑 DB，${res.tablesCount || 0} 个 Key 样本`
@@ -3503,6 +3537,10 @@ const executeQuery = async () => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
+  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
+    ElMessage.warning('该数据库类型暂未接入查询控制台')
+    return
+  }
   if (!querySQL.value.trim()) {
     ElMessage.warning(isRedisQueryInstance.value ? '请输入 Redis 命令' : '请输入 SQL')
     return
@@ -3526,6 +3564,10 @@ const handleFormatQuery = async () => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
+  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
+    ElMessage.warning('该数据库类型暂未接入查询控制台')
+    return
+  }
   if (!querySQL.value.trim()) {
     ElMessage.warning('请输入 SQL')
     return
@@ -3543,6 +3585,10 @@ const handleFormatQuery = async () => {
 const handleExplainQuery = async () => {
   if (!queryInstanceId.value) {
     ElMessage.warning('请先选择数据库实例')
+    return
+  }
+  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
+    ElMessage.warning('该数据库类型暂未接入执行计划')
     return
   }
   if (!querySQL.value.trim()) {
@@ -3564,6 +3610,10 @@ const handleExportQuery = async () => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
+  if (!hasInstanceCapability(currentQueryInstance.value, 'queryEnabled')) {
+    ElMessage.warning('该数据库类型暂未接入查询导出')
+    return
+  }
   if (!querySQL.value.trim()) {
     ElMessage.warning('请输入 SQL')
     return
@@ -3582,6 +3632,10 @@ const handleExportQuery = async () => {
 const handleValidateWriteQuery = async () => {
   if (!queryInstanceId.value) {
     ElMessage.warning('请先选择数据库实例')
+    return
+  }
+  if (!canWriteCurrentQueryInstance.value) {
+    ElMessage.warning('该数据库类型暂未接入受控写操作')
     return
   }
   if (!querySQL.value.trim()) {
@@ -3606,6 +3660,10 @@ const handleValidateWriteQuery = async () => {
 const handlePrepareWriteExecute = async () => {
   if (!queryInstanceId.value) {
     ElMessage.warning('请先选择数据库实例')
+    return
+  }
+  if (!canWriteCurrentQueryInstance.value) {
+    ElMessage.warning('该数据库类型暂未接入受控写操作')
     return
   }
   if (!querySQL.value.trim()) {
@@ -3633,6 +3691,10 @@ const handlePrepareWriteExecute = async () => {
 const handleExecuteWrite = async () => {
   if (!queryInstanceId.value) {
     ElMessage.warning('请先选择数据库实例')
+    return
+  }
+  if (!canWriteCurrentQueryInstance.value) {
+    ElMessage.warning('该数据库类型暂未接入受控写操作')
     return
   }
   if (!writeCheckResult.value?.allowed) {
