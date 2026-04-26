@@ -22,7 +22,8 @@
       <div class="toolbar-actions">
         <div class="live-sync">
           <span class="live-dot" />
-          后台自动同步
+          <span>后台自动同步</span>
+          <span class="freshness-text">{{ dataFreshnessText }}</span>
         </div>
         <el-radio-group :model-value="trendRange" size="small" @update:model-value="handleRangeChange">
           <el-radio-button label="24h">小时</el-radio-button>
@@ -43,9 +44,12 @@
           <div class="tree-header">
             <div class="tree-title-row">
               <span class="tree-title">资源树</span>
-              <el-tag size="small" effect="plain">{{ topologyStats.guestCount }} VM</el-tag>
+              <el-tag size="small" effect="plain">{{ treeBadgeText }}</el-tag>
             </div>
-            <div class="tree-subtitle">Datacenter / Node / VM</div>
+            <div class="tree-subtitle">
+              Datacenter / Node / VM
+              <template v-if="treeKeyword.trim()"> · 已过滤</template>
+            </div>
           </div>
 
           <div class="tree-scroll">
@@ -117,10 +121,16 @@
                 <div>
                   <h3>{{ objectTitle }}</h3>
                   <p>{{ objectSubtitle }}</p>
+                  <div class="object-path">
+                    <span v-for="(segment, index) in objectPathSegments" :key="`${segment}-${index}`">{{ segment }}</span>
+                  </div>
                 </div>
               </div>
             </div>
             <div class="object-actions">
+              <el-tag v-for="item in objectMetaItems" :key="item.label" size="small" effect="plain">
+                {{ item.label }}：{{ item.value }}
+              </el-tag>
               <el-tag :type="objectStatusType" effect="plain">{{ objectStatusText }}</el-tag>
               <el-button class="reset-btn" @click="openGuestsFromTopology">
                 查看虚机
@@ -132,13 +142,19 @@
           </section>
 
           <nav class="object-tabs">
-            <button class="tab-button active" type="button">概要</button>
-            <button class="tab-button" type="button">监控</button>
-            <button class="tab-button" type="button">资源</button>
-            <button class="tab-button" type="button">任务</button>
+            <button
+              v-for="tab in topologyTabs"
+              :key="tab.value"
+              class="tab-button"
+              :class="{ active: activeObjectTab === tab.value }"
+              type="button"
+              @click="setActiveObjectTab(tab.value)"
+            >
+              {{ tab.label }}
+            </button>
           </nav>
 
-          <div class="summary-grid">
+          <div v-if="activeObjectTab === 'overview'" class="summary-grid">
             <section class="pve-card object-summary">
               <header class="card-header">
                 <div>
@@ -238,10 +254,141 @@
             </section>
           </div>
 
-          <section class="chart-grid" v-loading="trendLoading">
+          <template v-else-if="activeObjectTab === 'monitor'">
+            <section class="monitor-summary-grid">
+              <div v-for="item in monitorSummaryRows" :key="item.label" class="monitor-summary-card">
+                <span>{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+                <small>{{ item.help }}</small>
+              </div>
+            </section>
+            <section class="chart-grid" v-loading="trendLoading">
+              <article v-for="panel in chartPanels" :key="panel.key" class="pve-card chart-card">
+                <header class="chart-header">
+                  <div>
+                    <a>{{ panel.title }}</a>
+                    <strong class="chart-current">{{ panel.currentValue }}</strong>
+                  </div>
+                  <div class="chart-legend">
+                    <span v-for="series in panel.series" :key="series.name">
+                      <i :style="{ background: series.color }" />
+                      {{ series.name }}
+                    </span>
+                  </div>
+                </header>
+                <div v-if="hasTrendData" :ref="setChartRef(panel.key)" class="metric-chart" />
+                <div v-else class="chart-empty">
+                  <el-empty description="暂无趋势数据，等待同步快照生成" :image-size="58" />
+                </div>
+              </article>
+            </section>
+          </template>
+
+          <section v-else-if="activeObjectTab === 'resources'" class="pve-card resource-list resource-list-wide">
+            <header class="card-header">
+              <div>
+                <h4>{{ resourceListTitle }}</h4>
+                <span>{{ resourceListSubtitle }}</span>
+              </div>
+              <el-tag size="small" effect="plain">{{ contextStats.hostCount }} Host / {{ contextStats.guestCount }} VM</el-tag>
+            </header>
+
+            <div v-if="currentGuestRows.length > 0" class="compact-table">
+              <div class="compact-table-head guest-grid">
+                <span>VMID</span>
+                <span>名称</span>
+                <span>状态</span>
+                <span>CPU / 内存</span>
+                <span>IP</span>
+                <span>纳管</span>
+              </div>
+              <button
+                v-for="guest in currentGuestRows"
+                :key="guest.id"
+                type="button"
+                class="compact-table-row guest-grid"
+                :class="{ active: selectedTopologyGuest?.id === guest.id }"
+                @click="selectGuestFromContext(guest)"
+              >
+                <span>{{ guestResourceId(guest.externalId) }}</span>
+                <strong>{{ guest.name }}</strong>
+                <el-tag size="small" :type="powerStateType(guest.powerState)">
+                  {{ powerStateText(guest.powerState) }}
+                </el-tag>
+                <span>{{ guest.cpuCount || 0 }} vCPU / {{ formatMb(guest.memoryMb) }}</span>
+                <span>{{ guest.primaryIp || '-' }}</span>
+                <el-tag size="small" :type="bindingStatusType(guest.bindingStatus)">
+                  {{ bindingStatusText(guest.bindingStatus) }}
+                </el-tag>
+              </button>
+            </div>
+
+            <div v-else class="compact-table">
+              <div class="compact-table-head host-grid">
+                <span>节点</span>
+                <span>状态</span>
+                <span>CPU</span>
+                <span>内存</span>
+                <span>虚机</span>
+              </div>
+              <button
+                v-for="host in currentHostRows"
+                :key="host.id"
+                type="button"
+                class="compact-table-row host-grid"
+                :class="{ active: selectedTopologyHost?.id === host.id }"
+                @click="selectHostFromContext(host)"
+              >
+                <strong>{{ host.name }}</strong>
+                <el-tag size="small" :type="hostStatusType(host.status)">
+                  {{ hostStatusText(host.status) }}
+                </el-tag>
+                <span>{{ host.cpuCores || 0 }} Core</span>
+                <span>{{ formatMemoryPair(host.memoryUsedMb, host.memoryTotalMb) }}</span>
+                <span>{{ hostGuestCount(host) }}</span>
+              </button>
+            </div>
+          </section>
+
+          <section v-else class="task-panel task-panel-main">
+            <header class="task-header">
+              <div>
+                <h4>任务</h4>
+                <span>{{ taskPanelSubtitle }}</span>
+              </div>
+              <el-button class="reset-btn" size="small" :loading="syncJobsLoading" @click="emit('load-sync-jobs', selectedTopologyPlatform?.id)">
+                <el-icon style="margin-right: 4px;"><Refresh /></el-icon>
+                刷新任务
+              </el-button>
+            </header>
+            <div class="task-table" v-loading="syncJobsLoading">
+              <el-empty v-if="taskRows.length === 0" description="暂无同步任务记录" :image-size="64" />
+              <div v-else class="task-table-head task-grid">
+                <span>开始时间</span>
+                <span>触发</span>
+                <span>状态</span>
+                <span>条目</span>
+                <span>完成时间 / 错误</span>
+              </div>
+              <div v-for="job in taskRows" :key="job.id" class="task-row task-grid">
+                <span>{{ job.startedAt || job.createTime || '-' }}</span>
+                <span>{{ syncTriggerText(job.triggerType) }}</span>
+                <el-tag size="small" :type="syncStatusType(job.status)">
+                  {{ syncStatusText(job.status) }}
+                </el-tag>
+                <span>{{ job.itemsTotal || 0 }} / +{{ job.itemsCreated || 0 }} / ~{{ job.itemsUpdated || 0 }}</span>
+                <span :class="{ error: !!job.failureReason }">{{ job.failureReason || job.finishedAt || '-' }}</span>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="activeObjectTab === 'overview'" class="chart-grid chart-grid-docked" v-loading="trendLoading">
             <article v-for="panel in chartPanels" :key="panel.key" class="pve-card chart-card">
               <header class="chart-header">
-                <a>{{ panel.title }}</a>
+                <div>
+                  <a>{{ panel.title }}</a>
+                  <strong class="chart-current">{{ panel.currentValue }}</strong>
+                </div>
                 <div class="chart-legend">
                   <span v-for="series in panel.series" :key="series.name">
                     <i :style="{ background: series.color }" />
@@ -250,23 +397,34 @@
                 </div>
               </header>
               <div v-if="hasTrendData" :ref="setChartRef(panel.key)" class="metric-chart" />
-              <el-empty v-else description="暂无趋势数据" :image-size="58" />
+              <div v-else class="chart-empty">
+                <el-empty description="暂无趋势数据" :image-size="58" />
+              </div>
             </article>
           </section>
 
-          <section class="task-panel">
+          <section
+            v-if="activeObjectTab !== 'tasks'"
+            class="task-panel task-panel-docked"
+            :class="{ collapsed: taskDockCollapsed }"
+          >
             <header class="task-header">
               <div>
                 <h4>任务</h4>
-                <span>{{ selectedTopologyPlatform?.name || '当前平台' }} 最近同步记录</span>
+                <span>{{ taskPanelSubtitle }}</span>
               </div>
-              <el-button class="reset-btn" size="small" :loading="syncJobsLoading" @click="emit('load-sync-jobs', selectedTopologyPlatform?.id)">
-                <el-icon style="margin-right: 4px;"><Refresh /></el-icon>
-                刷新任务
-              </el-button>
+              <div class="task-actions">
+                <el-button class="reset-btn" size="small" :loading="syncJobsLoading" @click="emit('load-sync-jobs', selectedTopologyPlatform?.id)">
+                  <el-icon style="margin-right: 4px;"><Refresh /></el-icon>
+                  刷新任务
+                </el-button>
+                <el-button class="reset-btn" size="small" @click="taskDockCollapsed = !taskDockCollapsed">
+                  {{ taskDockCollapsed ? '展开' : '收起' }}
+                </el-button>
+              </div>
             </header>
-            <div class="task-table" v-loading="syncJobsLoading">
-              <el-empty v-if="syncJobs.length === 0" description="暂无同步任务记录" :image-size="64" />
+            <div v-show="!taskDockCollapsed" class="task-table" v-loading="syncJobsLoading">
+              <el-empty v-if="taskRows.length === 0" description="暂无同步任务记录" :image-size="64" />
               <div v-else class="task-table-head task-grid">
                 <span>开始时间</span>
                 <span>触发</span>
@@ -274,7 +432,7 @@
                 <span>条目</span>
                 <span>完成时间 / 错误</span>
               </div>
-              <div v-for="job in syncJobs.slice(0, 8)" :key="job.id" class="task-row task-grid">
+              <div v-for="job in taskRows" :key="job.id" class="task-row task-grid">
                 <span>{{ job.startedAt || job.createTime || '-' }}</span>
                 <span>{{ syncTriggerText(job.triggerType) }}</span>
                 <el-tag size="small" :type="syncStatusType(job.status)">
@@ -299,6 +457,7 @@ import { Cpu, FolderOpened, Grid, Monitor, Refresh, Search } from '@element-plus
 type TopologyNodeType = 'platform' | 'cluster' | 'host' | 'guest'
 type TrendRange = '24h' | '7d' | '15d'
 type TrendScopeType = 'platform' | 'cluster'
+type TopologyTab = 'overview' | 'monitor' | 'resources' | 'tasks'
 type TrendMetricKey =
   | 'guestTotal'
   | 'poweredOnGuests'
@@ -395,6 +554,7 @@ interface ChartPanel {
   key: string
   title: string
   unit: string
+  currentValue: string
   series: ChartSeries[]
 }
 
@@ -430,9 +590,18 @@ const emit = defineEmits<{
 
 const viewMode = ref('server')
 const treeKeyword = ref('')
+const activeObjectTab = ref<TopologyTab>('overview')
+const taskDockCollapsed = ref(false)
 const selectedTopologyNode = ref<TopologySelection | null>(null)
 const chartRefs = new Map<string, HTMLElement>()
 const charts = new Map<string, echarts.ECharts>()
+
+const topologyTabs: Array<{ label: string; value: TopologyTab }> = [
+  { label: '概要', value: 'overview' },
+  { label: '监控', value: 'monitor' },
+  { label: '资源', value: 'resources' },
+  { label: '任务', value: 'tasks' }
+]
 
 const selectedPlatformId = computed({
   get: () => props.platformId,
@@ -468,6 +637,33 @@ const topologyStats = computed(() => {
     hostCount,
     guestCount
   }
+})
+
+const filteredTreeStats = computed(() => {
+  let clusterCount = 0
+  let hostCount = 0
+  let guestCount = 0
+  filteredPlatforms.value.forEach((platform) => {
+    const clusters = platform.clusters || []
+    clusterCount += clusters.length
+    clusters.forEach((cluster) => {
+      const hosts = cluster.hosts || []
+      hostCount += hosts.length
+      guestCount += hosts.reduce((total, host) => total + hostGuestCount(host), 0)
+    })
+  })
+  return {
+    platformCount: filteredPlatforms.value.length,
+    clusterCount,
+    hostCount,
+    guestCount
+  }
+})
+
+const treeBadgeText = computed(() => {
+  const keyword = normalizeKeyword(treeKeyword.value)
+  if (!keyword) return `${topologyStats.value.guestCount} VM`
+  return `${filteredTreeStats.value.guestCount} / ${topologyStats.value.guestCount} VM`
 })
 
 const filteredPlatforms = computed(() => {
@@ -585,6 +781,12 @@ const contextStats = computed(() => {
   }
 })
 
+const dataFreshnessText = computed(() => {
+  if (selectedTopologyHost.value?.lastCollectedAt) return `采集 ${selectedTopologyHost.value.lastCollectedAt}`
+  if (selectedTopologyPlatform.value?.lastSyncAt) return `同步 ${selectedTopologyPlatform.value.lastSyncAt}`
+  return '等待同步'
+})
+
 const objectTitle = computed(() => {
   if (selectedTopologyGuest.value) return `${guestResourceId(selectedTopologyGuest.value.externalId)} (${selectedTopologyGuest.value.name})`
   if (selectedTopologyHost.value) return `节点 '${selectedTopologyHost.value.name}'`
@@ -616,6 +818,37 @@ const objectStatusType = computed(() => {
   if (selectedTopologyGuest.value) return powerStateType(selectedTopologyGuest.value.powerState)
   if (selectedTopologyHost.value) return hostStatusType(selectedTopologyHost.value.status)
   return selectedTopologyPlatform.value?.status === 'enabled' ? 'success' : 'info'
+})
+
+const objectPathSegments = computed(() => {
+  const segments: string[] = []
+  const platform = selectedTopologyPlatform.value
+  const cluster = selectedTopologyCluster.value
+  const host = selectedTopologyHost.value
+  const guest = selectedTopologyGuest.value
+  if (platform) segments.push(platform.provider === 'pve' ? 'Datacenter' : 'vCenter', platform.name)
+  if (cluster) segments.push(cluster.name)
+  if (host) segments.push(host.name)
+  if (guest) segments.push(`${guestTypeLabel(guest.externalId)} ${guestResourceId(guest.externalId)}`)
+  return segments
+})
+
+const objectMetaItems = computed(() => {
+  const stats = contextStats.value
+  const scope = selectedTopologyGuest.value
+    ? '虚机'
+    : selectedTopologyHost.value
+      ? '节点'
+      : selectedTopologyCluster.value
+        ? '集群'
+        : '平台'
+  const trendWindow = props.trendRange === '24h' ? '小时' : props.trendRange === '7d' ? '7 天' : '15 天'
+  return [
+    { label: '范围', value: scope },
+    { label: 'Host', value: `${stats.hostCount}` },
+    { label: 'VM', value: `${stats.guestCount}` },
+    { label: '趋势', value: trendWindow }
+  ]
 })
 
 const summaryTitle = computed(() => {
@@ -732,13 +965,51 @@ const resourceListSubtitle = computed(() => {
 const trendPoints = computed<TrendPoint[]>(() => props.trend?.points || [])
 const hasTrendData = computed(() => trendPoints.value.length > 0)
 const chartLabels = computed(() => trendPoints.value.map(formatTrendPointLabel))
+const latestTrendPoint = computed(() => trendPoints.value[trendPoints.value.length - 1] || null)
+
+const monitorSummaryRows = computed(() => {
+  const stats = contextStats.value
+  const latest = latestTrendPoint.value
+  return [
+    {
+      label: 'VM 总数',
+      value: `${latest?.guestTotal ?? stats.guestCount}`,
+      help: hasTrendData.value ? '最近趋势快照' : '当前拓扑汇总'
+    },
+    {
+      label: '开机',
+      value: `${latest?.poweredOnGuests ?? stats.poweredOn}`,
+      help: `关机 ${latest?.poweredOffGuests ?? stats.poweredOff}`
+    },
+    {
+      label: '已纳管',
+      value: `${latest?.boundGuests ?? stats.bound}`,
+      help: `未纳管 ${Math.max(0, (latest?.guestTotal ?? stats.guestCount) - (latest?.boundGuests ?? stats.bound))}`
+    },
+    {
+      label: '在线',
+      value: `${latest?.onlineGuests ?? stats.online}`,
+      help: `离线 ${latest?.offlineGuests ?? Math.max(0, stats.guestCount - stats.online)}`
+    }
+  ]
+})
+
 const chartPanels = computed<ChartPanel[]>(() => {
   const points = trendPoints.value
+  const stats = contextStats.value
+  const latest = latestTrendPoint.value
+  const total = latest?.guestTotal ?? stats.guestCount
+  const poweredOn = latest?.poweredOnGuests ?? stats.poweredOn
+  const poweredOff = latest?.poweredOffGuests ?? stats.poweredOff
+  const bound = latest?.boundGuests ?? stats.bound
+  const online = latest?.onlineGuests ?? stats.online
+  const offline = latest?.offlineGuests ?? Math.max(0, stats.guestCount - stats.online)
   return [
     {
       key: 'guest-total',
       title: '虚机总量',
       unit: '台',
+      currentValue: `${total} 台`,
       series: [
         { name: '总数', color: '#89a61f', data: points.map((item) => item.guestTotal), area: true }
       ]
@@ -747,6 +1018,7 @@ const chartPanels = computed<ChartPanel[]>(() => {
       key: 'power-state',
       title: '电源状态',
       unit: '台',
+      currentValue: `开机 ${poweredOn} / 关机 ${poweredOff}`,
       series: [
         { name: '开机', color: '#89a61f', data: points.map((item) => item.poweredOnGuests), area: true },
         { name: '关机', color: '#5b8cc0', data: points.map((item) => item.poweredOffGuests) },
@@ -757,6 +1029,7 @@ const chartPanels = computed<ChartPanel[]>(() => {
       key: 'onboard-state',
       title: '纳管状态',
       unit: '台',
+      currentValue: `已纳管 ${bound} / 未纳管 ${Math.max(0, total - bound)}`,
       series: [
         { name: '已纳管', color: '#20a162', data: points.map((item) => item.boundGuests), area: true },
         { name: '未纳管', color: '#9aa0a6', data: points.map((item) => Math.max(0, item.guestTotal - item.boundGuests)) }
@@ -766,6 +1039,7 @@ const chartPanels = computed<ChartPanel[]>(() => {
       key: 'runtime-state',
       title: '运行连通状态',
       unit: '台',
+      currentValue: `在线 ${online} / 离线 ${offline}`,
       series: [
         { name: '在线', color: '#2e8b57', data: points.map((item) => item.onlineGuests), area: true },
         { name: '离线', color: '#c2410c', data: points.map((item) => item.offlineGuests) },
@@ -773,6 +1047,14 @@ const chartPanels = computed<ChartPanel[]>(() => {
       ]
     }
   ]
+})
+
+const taskRows = computed(() => (props.syncJobs || []).slice(0, 8))
+
+const taskPanelSubtitle = computed(() => {
+  const platform = selectedTopologyPlatform.value
+  if (!platform) return '当前平台最近同步记录'
+  return `${platform.name} 最近同步记录`
 })
 
 const normalizeKeyword = (value?: string) => (value || '').trim().toLowerCase()
@@ -948,6 +1230,13 @@ const showCurrentTrend = () => {
     return
   }
   localTrendScopeType.value = 'platform'
+}
+
+const setActiveObjectTab = (tab: TopologyTab) => {
+  activeObjectTab.value = tab
+  if (tab === 'overview' || tab === 'monitor') {
+    showCurrentTrend()
+  }
 }
 
 const handleRangeChange = (value: string | number | boolean) => {
@@ -1173,6 +1462,7 @@ watch(() => selectedTopologyPlatform.value?.id, (id) => {
 watch(() => props.trend, renderCharts, { deep: true, flush: 'post' })
 watch(() => props.trendRange, renderCharts, { flush: 'post' })
 watch(hasTrendData, renderCharts, { flush: 'post' })
+watch(activeObjectTab, renderCharts, { flush: 'post' })
 
 onMounted(() => {
   window.addEventListener('resize', resizeCharts)
@@ -1241,6 +1531,13 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: #7aa80f;
   box-shadow: 0 0 0 3px rgba(122, 168, 15, 0.18);
+}
+
+.freshness-text {
+  max-width: 180px;
+  overflow: hidden;
+  color: #6b7280;
+  text-overflow: ellipsis;
 }
 
 .black-button {
@@ -1457,6 +1754,28 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.object-path {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.object-path span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.object-path span + span::before {
+  color: #9aa0a6;
+  content: '/';
+}
+
 .object-actions {
   display: flex;
   align-items: center;
@@ -1642,6 +1961,41 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(140px, 1fr) 90px 90px minmax(140px, 1fr) 70px;
 }
 
+.resource-list-wide {
+  min-height: 410px;
+}
+
+.monitor-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.monitor-summary-card {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #cfcfcf;
+  background: #fff;
+}
+
+.monitor-summary-card span,
+.monitor-summary-card small {
+  display: block;
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-summary-card strong {
+  display: block;
+  margin: 6px 0 3px;
+  color: #111827;
+  font-size: 22px;
+  line-height: 1.1;
+}
+
 .chart-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1657,6 +2011,14 @@ onBeforeUnmount(() => {
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
+}
+
+.chart-current {
+  display: block;
+  margin-top: 3px;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .chart-legend {
@@ -1686,9 +2048,39 @@ onBeforeUnmount(() => {
   height: 198px;
 }
 
+.chart-empty {
+  height: 198px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chart-grid-docked .chart-card {
+  min-height: 224px;
+}
+
+.chart-grid-docked .metric-chart,
+.chart-grid-docked .chart-empty {
+  height: 178px;
+}
+
 .task-panel {
   border: 1px solid #cfcfcf;
   background: #fff;
+}
+
+.task-panel-main {
+  min-height: 410px;
+}
+
+.task-panel-docked.collapsed .task-header {
+  border-bottom: 0;
+}
+
+.task-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .task-table {
@@ -1768,8 +2160,24 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .monitor-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .detail-table {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .monitor-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
   }
 }
 </style>
