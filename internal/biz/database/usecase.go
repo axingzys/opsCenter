@@ -33,27 +33,29 @@ type DatabaseBackupPolicy struct {
 }
 
 type UseCase struct {
-	instanceRepo         InstanceRepo
-	schemaRepo           SchemaRepo
-	tableRepo            TableRepo
-	columnRepo           ColumnRepo
-	indexRepo            IndexRepo
-	metadataRepo         MetadataRepo
-	redisMetadataRepo    RedisMetadataRepo
-	syncJobRepo          SyncJobRepo
-	auditRepo            QueryAuditRepo
-	backupTaskRepo       BackupTaskRepo
-	backupRecordRepo     BackupRecordRepo
-	restoreJobRepo       RestoreJobRepo
-	capacitySnapshotRepo CapacitySnapshotRepo
-	inspectionReportRepo InspectionReportRepo
-	credentialIDExists   func(ctx context.Context, id uint) error
-	credentialResolver   func(ctx context.Context, id uint) (*ConnectionCredential, error)
-	writePolicyResolver  func(ctx context.Context) (*DatabaseWritePolicy, error)
-	backupPolicyResolver func(ctx context.Context) (*DatabaseBackupPolicy, error)
-	backupRunMu          sync.Mutex
-	backupRunningTasks   map[uint]struct{}
-	startedAt            time.Time
+	instanceRepo          InstanceRepo
+	schemaRepo            SchemaRepo
+	tableRepo             TableRepo
+	columnRepo            ColumnRepo
+	indexRepo             IndexRepo
+	metadataRepo          MetadataRepo
+	redisMetadataRepo     RedisMetadataRepo
+	syncJobRepo           SyncJobRepo
+	auditRepo             QueryAuditRepo
+	backupTaskRepo        BackupTaskRepo
+	backupRecordRepo      BackupRecordRepo
+	restoreJobRepo        RestoreJobRepo
+	capacitySnapshotRepo  CapacitySnapshotRepo
+	inspectionReportRepo  InspectionReportRepo
+	credentialIDExists    func(ctx context.Context, id uint) error
+	credentialResolver    func(ctx context.Context, id uint) (*ConnectionCredential, error)
+	writePolicyResolver   func(ctx context.Context) (*DatabaseWritePolicy, error)
+	backupPolicyResolver  func(ctx context.Context) (*DatabaseBackupPolicy, error)
+	backupRunMu           sync.Mutex
+	backupRunningTasks    map[uint]struct{}
+	restoreRunMu          sync.Mutex
+	restoreRunningTargets map[string]struct{}
+	startedAt             time.Time
 }
 
 func NewUseCase(
@@ -77,26 +79,27 @@ func NewUseCase(
 	backupPolicyResolver func(ctx context.Context) (*DatabaseBackupPolicy, error),
 ) *UseCase {
 	return &UseCase{
-		instanceRepo:         instanceRepo,
-		schemaRepo:           schemaRepo,
-		tableRepo:            tableRepo,
-		columnRepo:           columnRepo,
-		indexRepo:            indexRepo,
-		metadataRepo:         metadataRepo,
-		redisMetadataRepo:    redisMetadataRepo,
-		syncJobRepo:          syncJobRepo,
-		auditRepo:            auditRepo,
-		backupTaskRepo:       backupTaskRepo,
-		backupRecordRepo:     backupRecordRepo,
-		restoreJobRepo:       restoreJobRepo,
-		capacitySnapshotRepo: capacitySnapshotRepo,
-		inspectionReportRepo: inspectionReportRepo,
-		credentialIDExists:   credentialIDExists,
-		credentialResolver:   credentialResolver,
-		writePolicyResolver:  writePolicyResolver,
-		backupPolicyResolver: backupPolicyResolver,
-		backupRunningTasks:   make(map[uint]struct{}),
-		startedAt:            time.Now(),
+		instanceRepo:          instanceRepo,
+		schemaRepo:            schemaRepo,
+		tableRepo:             tableRepo,
+		columnRepo:            columnRepo,
+		indexRepo:             indexRepo,
+		metadataRepo:          metadataRepo,
+		redisMetadataRepo:     redisMetadataRepo,
+		syncJobRepo:           syncJobRepo,
+		auditRepo:             auditRepo,
+		backupTaskRepo:        backupTaskRepo,
+		backupRecordRepo:      backupRecordRepo,
+		restoreJobRepo:        restoreJobRepo,
+		capacitySnapshotRepo:  capacitySnapshotRepo,
+		inspectionReportRepo:  inspectionReportRepo,
+		credentialIDExists:    credentialIDExists,
+		credentialResolver:    credentialResolver,
+		writePolicyResolver:   writePolicyResolver,
+		backupPolicyResolver:  backupPolicyResolver,
+		backupRunningTasks:    make(map[uint]struct{}),
+		restoreRunningTargets: make(map[string]struct{}),
+		startedAt:             time.Now(),
 	}
 }
 

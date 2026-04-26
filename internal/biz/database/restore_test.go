@@ -109,3 +109,22 @@ func TestValidateRestoreStrategy(t *testing.T) {
 		t.Fatalf("expected redis database clean strategy to be rejected")
 	}
 }
+
+func TestRestoreRunLock(t *testing.T) {
+	uc := &UseCase{}
+	key := buildRestoreRunKey(10, "AppDB")
+	if key != "10:appdb" {
+		t.Fatalf("unexpected restore lock key: %q", key)
+	}
+	if err := uc.acquireRestoreRun(key); err != nil {
+		t.Fatalf("acquireRestoreRun() error = %v", err)
+	}
+	if err := uc.acquireRestoreRun(key); err == nil {
+		t.Fatalf("expected duplicate restore run to be rejected")
+	}
+	uc.releaseRestoreRun(key)
+	if err := uc.acquireRestoreRun(key); err != nil {
+		t.Fatalf("expected restore lock to be reusable after release, got %v", err)
+	}
+	uc.releaseRestoreRun(key)
+}

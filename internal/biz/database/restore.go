@@ -86,6 +86,16 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 	if err != nil {
 		return nil, err
 	}
+	restoreLockKey := buildRestoreRunKey(target.ID, databaseName)
+	if err := uc.acquireRestoreRun(restoreLockKey); err != nil {
+		return nil, err
+	}
+	releaseRestoreLock := true
+	defer func() {
+		if releaseRestoreLock {
+			uc.releaseRestoreRun(restoreLockKey)
+		}
+	}()
 
 	startedAt := time.Now()
 	mode := normalizeRestoreMode(req.RestoreMode)
@@ -118,11 +128,14 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 	}
 
 	vo := uc.toRestoreJobVO(job, source.Name, target.Name, target.Environment)
-	go uc.executeRestoreDryRunJob(job, audit, target, record, spec, databaseName, startedAt)
+	go uc.executeRestoreDryRunJob(job, audit, target, record, spec, databaseName, startedAt, restoreLockKey)
+	releaseRestoreLock = false
 	return vo, nil
 }
 
-func (uc *UseCase) executeRestoreDryRunJob(job *DatabaseRestoreJob, audit *DatabaseQueryAudit, target *DatabaseInstance, record *DatabaseBackupRecord, spec *restoreCommandSpec, databaseName string, startedAt time.Time) {
+func (uc *UseCase) executeRestoreDryRunJob(job *DatabaseRestoreJob, audit *DatabaseQueryAudit, target *DatabaseInstance, record *DatabaseBackupRecord, spec *restoreCommandSpec, databaseName string, startedAt time.Time, restoreLockKey string) {
+	defer uc.releaseRestoreRun(restoreLockKey)
+
 	runCtx, cancel := context.WithTimeout(context.Background(), restoreCommandTimeout)
 	defer cancel()
 
@@ -158,6 +171,37 @@ func (uc *UseCase) reconcileStaleRestoreJobs(ctx context.Context, items []*Datab
 		item.ErrorMessage = trimText("恢复演练进程已中断、服务已重启或超过 2 小时未完成，已自动标记失败", 500)
 		_ = uc.restoreJobRepo.Update(ctx, item)
 	}
+}
+
+func buildRestoreRunKey(targetInstanceID uint, databaseName string) string {
+	return fmt.Sprintf("%d:%s", targetInstanceID, strings.ToLower(strings.TrimSpace(databaseName)))
+}
+
+func (uc *UseCase) acquireRestoreRun(key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("恢复演练目标不存在")
+	}
+	uc.restoreRunMu.Lock()
+	defer uc.restoreRunMu.Unlock()
+	if uc.restoreRunningTargets == nil {
+		uc.restoreRunningTargets = make(map[string]struct{})
+	}
+	if _, exists := uc.restoreRunningTargets[key]; exists {
+		return fmt.Errorf("目标实例恢复演练正在执行中，请稍后重试")
+	}
+	uc.restoreRunningTargets[key] = struct{}{}
+	return nil
+}
+
+func (uc *UseCase) releaseRestoreRun(key string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	uc.restoreRunMu.Lock()
+	defer uc.restoreRunMu.Unlock()
+	delete(uc.restoreRunningTargets, key)
 }
 
 func validateRestoreDryRunRecord(record *DatabaseBackupRecord) error {
