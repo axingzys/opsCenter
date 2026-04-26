@@ -94,10 +94,60 @@ func (uc *ConfigUseCase) GetAllConfig(ctx context.Context) (*AllConfig, error) {
 			MFAType:         getStringValue(configMap, ConfigKeyMFAType, "totp"),
 			MFASkipDuration: getIntValue(configMap, ConfigKeyMFASkipDuration, 2592000),
 		},
+		Monitoring: MonitoringConfig{
+			PrometheusRetentionDays: getIntValue(configMap, ConfigKeyPrometheusRetentionDays, 15),
+		},
+		Database: DatabaseConfig{
+			WriteEnabled:               getBoolValue(configMap, ConfigKeyDatabaseWriteEnabled, false),
+			HighRiskRequiresConfirm:    getBoolValue(configMap, ConfigKeyDatabaseHighRiskRequiresConfirm, true),
+			OperationReasonRequired:    getBoolValue(configMap, ConfigKeyDatabaseOperationReasonRequired, true),
+			MaxAffectedRows:            getIntValue(configMap, ConfigKeyDatabaseMaxAffectedRows, 1000),
+			DefaultBackupRetentionDays: getIntValue(configMap, ConfigKeyDatabaseDefaultBackupRetentionDays, 7),
+			BackupStoragePath:          getStringValue(configMap, ConfigKeyDatabaseBackupStoragePath, "./data/database-backups"),
+		},
 		LDAP: ldapConfig,
 	}
 
 	return result, nil
+}
+
+// GetMonitoringConfig 获取监控配置
+func (uc *ConfigUseCase) GetMonitoringConfig(ctx context.Context) (*MonitoringConfig, error) {
+	configs, err := uc.configRepo.GetByGroup(ctx, ConfigGroupMonitoring)
+	if err != nil {
+		return nil, err
+	}
+
+	configMap := make(map[string]string)
+	for _, c := range configs {
+		configMap[c.Key] = c.Value
+	}
+
+	return &MonitoringConfig{
+		PrometheusRetentionDays: getIntValue(configMap, ConfigKeyPrometheusRetentionDays, 15),
+	}, nil
+}
+
+// GetDatabaseConfig 获取数据库配置
+func (uc *ConfigUseCase) GetDatabaseConfig(ctx context.Context) (*DatabaseConfig, error) {
+	configs, err := uc.configRepo.GetByGroup(ctx, ConfigGroupDatabase)
+	if err != nil {
+		return nil, err
+	}
+
+	configMap := make(map[string]string)
+	for _, c := range configs {
+		configMap[c.Key] = c.Value
+	}
+
+	return &DatabaseConfig{
+		WriteEnabled:               getBoolValue(configMap, ConfigKeyDatabaseWriteEnabled, false),
+		HighRiskRequiresConfirm:    getBoolValue(configMap, ConfigKeyDatabaseHighRiskRequiresConfirm, true),
+		OperationReasonRequired:    getBoolValue(configMap, ConfigKeyDatabaseOperationReasonRequired, true),
+		MaxAffectedRows:            getIntValue(configMap, ConfigKeyDatabaseMaxAffectedRows, 1000),
+		DefaultBackupRetentionDays: getIntValue(configMap, ConfigKeyDatabaseDefaultBackupRetentionDays, 7),
+		BackupStoragePath:          getStringValue(configMap, ConfigKeyDatabaseBackupStoragePath, "./data/database-backups"),
+	}, nil
 }
 
 // GetBasicConfig 获取基础配置
@@ -172,6 +222,27 @@ func (uc *ConfigUseCase) SaveSecurityConfig(ctx context.Context, config *Securit
 	return uc.configRepo.BatchSaveOrUpdate(ctx, configs)
 }
 
+// SaveMonitoringConfig 保存监控配置
+func (uc *ConfigUseCase) SaveMonitoringConfig(ctx context.Context, config *MonitoringConfig) error {
+	configs := map[string]string{
+		ConfigKeyPrometheusRetentionDays: strconv.Itoa(config.PrometheusRetentionDays),
+	}
+	return uc.configRepo.BatchSaveOrUpdate(ctx, configs)
+}
+
+// SaveDatabaseConfig 保存数据库配置
+func (uc *ConfigUseCase) SaveDatabaseConfig(ctx context.Context, config *DatabaseConfig) error {
+	configs := map[string]string{
+		ConfigKeyDatabaseWriteEnabled:               strconv.FormatBool(config.WriteEnabled),
+		ConfigKeyDatabaseHighRiskRequiresConfirm:    strconv.FormatBool(config.HighRiskRequiresConfirm),
+		ConfigKeyDatabaseOperationReasonRequired:    strconv.FormatBool(config.OperationReasonRequired),
+		ConfigKeyDatabaseMaxAffectedRows:            strconv.Itoa(config.MaxAffectedRows),
+		ConfigKeyDatabaseDefaultBackupRetentionDays: strconv.Itoa(config.DefaultBackupRetentionDays),
+		ConfigKeyDatabaseBackupStoragePath:          config.BackupStoragePath,
+	}
+	return uc.configRepo.BatchSaveOrUpdate(ctx, configs)
+}
+
 // GetConfigByKey 根据Key获取配置值
 func (uc *ConfigUseCase) GetConfigByKey(ctx context.Context, key string) (string, error) {
 	config, err := uc.configRepo.GetByKey(ctx, key)
@@ -203,6 +274,15 @@ func (uc *ConfigUseCase) IsCaptchaEnabled(ctx context.Context) bool {
 	value, err := uc.GetConfigByKey(ctx, ConfigKeyEnableCaptcha)
 	if err != nil {
 		return true
+	}
+	return value == "true"
+}
+
+// IsDatabaseWriteEnabled 检查数据库写操作是否开启
+func (uc *ConfigUseCase) IsDatabaseWriteEnabled(ctx context.Context) bool {
+	value, err := uc.GetConfigByKey(ctx, ConfigKeyDatabaseWriteEnabled)
+	if err != nil {
+		return false
 	}
 	return value == "true"
 }

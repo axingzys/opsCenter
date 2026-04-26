@@ -46,7 +46,4 @@ installPlugins().then(() => {
   })
 
   app.mount('#app')
-
-  // 全局字体大小调整
-  document.documentElement.style.fontSize = '20px'
 })

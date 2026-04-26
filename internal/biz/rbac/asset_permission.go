@@ -29,13 +29,14 @@ import (
 
 // Permission constants - using bitmask
 const (
-	PermissionView     = 1 << 0  // 1 (查看)
-	PermissionEdit     = 1 << 1  // 2 (编辑)
-	PermissionDelete   = 1 << 2  // 4 (删除)
-	PermissionTerminal = 1 << 3  // 8 (终端)
-	PermissionFile     = 1 << 4  // 16 (文件管理)
-	PermissionCollect  = 1 << 5  // 32 (采集信息)
-	PermissionAll      = 0x3F    // 63 (所有权限)
+	PermissionView     = 1 << 0 // 1 (查看)
+	PermissionEdit     = 1 << 1 // 2 (编辑)
+	PermissionDelete   = 1 << 2 // 4 (删除)
+	PermissionTerminal = 1 << 3 // 8 (终端)
+	PermissionFile     = 1 << 4 // 16 (文件管理)
+	PermissionCollect  = 1 << 5 // 32 (采集信息)
+	PermissionDesktop  = 1 << 6 // 64 (桌面连接)
+	PermissionAll      = 0x7F   // 127 (所有权限)
 )
 
 // UintArray 用于处理JSON格式的uint数组
@@ -48,11 +49,25 @@ func (ua UintArray) Value() (driver.Value, error) {
 
 // Scan 实现 sql.Scanner 接口，用于从数据库读取
 func (ua *UintArray) Scan(value interface{}) error {
-	bytes, ok := value.([]byte)
-	if !ok {
+	if value == nil {
+		*ua = UintArray{}
 		return nil
 	}
-	return json.Unmarshal(bytes, &ua)
+
+	var bytes []byte
+	switch v := value.(type) {
+	case []byte:
+		bytes = v
+	case string:
+		bytes = []byte(v)
+	default:
+		return nil
+	}
+	if len(bytes) == 0 {
+		*ua = UintArray{}
+		return nil
+	}
+	return json.Unmarshal(bytes, ua)
 }
 
 // SysRoleAssetPermission 角色资产权限模型
@@ -62,10 +77,10 @@ type SysRoleAssetPermission struct {
 	CreatedAt    time.Time      `json:"createdAt"`
 	UpdatedAt    time.Time      `json:"updatedAt"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
-	RoleID       uint           `gorm:"not null;index:idx_role_asset" json:"roleId"`        // 角色ID
+	RoleID       uint           `gorm:"not null;index:idx_role_asset" json:"roleId"`       // 角色ID
 	AssetGroupID uint           `gorm:"not null;index:idx_role_asset" json:"assetGroupId"` // 资产分组ID
 	HostIDs      UintArray      `gorm:"type:json" json:"hostIds"`                          // 主机ID列表（为空表示整个分组）
-	Permissions  uint           `gorm:"type:int unsigned;default:1;comment:操作权限位掩码：1=查看,2=编辑,4=删除,8=终端,16=文件,32=采集;index" json:"permissions"`
+	Permissions  uint           `gorm:"type:int unsigned;default:1;comment:操作权限位掩码：1=查看,2=编辑,4=删除,8=终端,16=文件,32=采集,64=桌面;index" json:"permissions"`
 }
 
 // TableName 指定表名
@@ -81,9 +96,9 @@ type AssetPermissionInfo struct {
 	RoleCode       string    `json:"roleCode"`
 	AssetGroupID   uint      `json:"assetGroupId"`
 	AssetGroupName string    `json:"assetGroupName"`
-	HostIDs        []uint    `json:"hostIds"`        // 主机ID列表（为空表示整个分组）
-	HostNames      []string  `json:"hostNames,omitempty"` // 主机名称列表
-	IsAllHosts     bool      `json:"isAllHosts"`    // 是否授权所有主机
+	HostIDs        UintArray `gorm:"column:host_ids;type:json" json:"hostIds"` // 主机ID列表（为空表示整个分组）
+	HostNames      []string  `gorm:"-" json:"hostNames,omitempty"`             // 主机名称列表
+	IsAllHosts     bool      `gorm:"-" json:"isAllHosts"`                      // 是否授权所有主机
 	Permissions    uint      `json:"permissions"`
 	CreatedAt      time.Time `json:"createdAt"`
 }
@@ -103,22 +118,22 @@ type AssetPermissionUpdateReq struct {
 
 // AssetPermissionCreateReqWithPermissions 创建资产权限请求（支持操作权限）
 type AssetPermissionCreateReqWithPermissions struct {
-	RoleID      uint   `json:"roleId" binding:"required"`
+	RoleID       uint   `json:"roleId" binding:"required"`
 	AssetGroupID uint   `json:"assetGroupId" binding:"required"`
-	HostIDs     []uint `json:"hostIds"` // 空数组表示整个分组，非空表示指定主机
-	Permissions uint   `json:"permissions"`
+	HostIDs      []uint `json:"hostIds"` // 空数组表示整个分组，非空表示指定主机
+	Permissions  uint   `json:"permissions"`
 }
 
 // AssetPermissionDetailVO 资产权限详情（用于编辑）
 type AssetPermissionDetailVO struct {
-	ID            uint      `json:"id"`
-	RoleID        uint      `json:"roleId"`
-	RoleName      string    `json:"roleName"`
-	AssetGroupID  uint      `json:"assetGroupId"`
-	AssetGroupName string   `json:"assetGroupName"`
-	HostIDs       []uint    `json:"hostIds"`       // 指定的主机ID列表（为空表示全部）
-	Permissions   uint      `json:"permissions"`
-	CreatedAt     time.Time `json:"createdAt"`
+	ID             uint      `json:"id"`
+	RoleID         uint      `json:"roleId"`
+	RoleName       string    `json:"roleName"`
+	AssetGroupID   uint      `json:"assetGroupId"`
+	AssetGroupName string    `json:"assetGroupName"`
+	HostIDs        []uint    `json:"hostIds"` // 指定的主机ID列表（为空表示全部）
+	Permissions    uint      `json:"permissions"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 // HasPermission 检查是否具有指定权限
@@ -151,6 +166,8 @@ func GetPermissionName(perm uint) string {
 		return "文件管理"
 	case PermissionCollect:
 		return "采集信息"
+	case PermissionDesktop:
+		return "桌面连接"
 	default:
 		return "未知"
 	}
@@ -177,6 +194,8 @@ func GetAllPermissionNames(permissions uint) []string {
 	if (permissions & PermissionCollect) > 0 {
 		names = append(names, "采集信息")
 	}
+	if (permissions & PermissionDesktop) > 0 {
+		names = append(names, "桌面连接")
+	}
 	return names
 }
-

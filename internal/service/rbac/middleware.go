@@ -56,8 +56,9 @@ func GetUsername(c *gin.Context) string {
 
 // AuthMiddleware JWT认证中间件
 type AuthMiddleware struct {
-	authService        *AuthService
+	authService         *AuthService
 	assetPermissionRepo rbac.AssetPermissionRepo
+	menuUseCase         *rbac.MenuUseCase
 }
 
 func NewAuthMiddleware(authService *AuthService) *AuthMiddleware {
@@ -69,6 +70,11 @@ func NewAuthMiddleware(authService *AuthService) *AuthMiddleware {
 // SetAssetPermissionRepo 设置资产权限仓储
 func (m *AuthMiddleware) SetAssetPermissionRepo(repo rbac.AssetPermissionRepo) {
 	m.assetPermissionRepo = repo
+}
+
+// SetMenuUseCase 设置菜单权限用例
+func (m *AuthMiddleware) SetMenuUseCase(menuUseCase *rbac.MenuUseCase) {
+	m.menuUseCase = menuUseCase
 }
 
 // AuthRequired JWT认证
@@ -187,6 +193,55 @@ func (m *AuthMiddleware) RequireAdmin() gin.HandlerFunc {
 
 		if !hasAdminRole {
 			response.ErrorCode(c, http.StatusForbidden, "权限不足：此操作仅限管理员执行")
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// RequireMenuPermission 检查菜单或按钮权限编码，admin 角色自动放行
+func (m *AuthMiddleware) RequireMenuPermission(code string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := GetUserID(c)
+		if userID == 0 {
+			response.ErrorCode(c, http.StatusUnauthorized, "未登录")
+			c.Abort()
+			return
+		}
+		if strings.TrimSpace(code) == "" {
+			response.ErrorCode(c, http.StatusInternalServerError, "权限编码未配置")
+			c.Abort()
+			return
+		}
+
+		roles, err := m.authService.roleUseCase.GetByUserID(c.Request.Context(), userID)
+		if err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "获取用户角色失败")
+			c.Abort()
+			return
+		}
+		for _, role := range roles {
+			if role.Code == "admin" {
+				c.Next()
+				return
+			}
+		}
+
+		if m.menuUseCase == nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "权限检查未初始化")
+			c.Abort()
+			return
+		}
+		ok, err := m.menuUseCase.HasUserMenuCode(c.Request.Context(), userID, strings.TrimSpace(code))
+		if err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "权限检查失败")
+			c.Abort()
+			return
+		}
+		if !ok {
+			response.ErrorCode(c, http.StatusForbidden, "权限不足")
 			c.Abort()
 			return
 		}

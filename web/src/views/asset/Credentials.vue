@@ -8,7 +8,7 @@
         </div>
         <div>
           <h2 class="page-title">凭证管理</h2>
-          <p class="page-subtitle">管理SSH认证凭证，支持密码和密钥两种认证方式</p>
+          <p class="page-subtitle">管理远程连接凭证，支持 SSH、WinRM 与 RDP 三类协议</p>
         </div>
       </div>
       <div class="header-actions">
@@ -83,6 +83,14 @@
           <template #default="{ row }">
             <el-tag :type="row.type === 'password' ? 'warning' : 'success'" size="small">
               {{ row.typeText }}
+            </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="协议" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag :type="row.protocol === 'rdp' ? 'danger' : row.protocol === 'winrm' ? 'warning' : 'info'" size="small">
+              {{ (row.protocol || 'ssh').toUpperCase() }}
             </el-tag>
           </template>
         </el-table-column>
@@ -162,20 +170,44 @@
           <el-input v-model="form.name" placeholder="请输入凭证名称，如：生产环境root凭证" />
         </el-form-item>
 
-        <el-form-item label="认证方式" prop="type">
-          <el-radio-group v-model="form.type" @change="handleAuthTypeChange">
-            <el-radio label="password">密码认证</el-radio>
-            <el-radio label="key">密钥认证</el-radio>
-          </el-radio-group>
-        </el-form-item>
+          <el-form-item label="协议类型" prop="protocol">
+            <el-radio-group v-model="form.protocol" @change="handleProtocolChange">
+              <el-radio label="ssh">SSH</el-radio>
+              <el-radio label="winrm">WinRM</el-radio>
+              <el-radio label="rdp">RDP</el-radio>
+            </el-radio-group>
+          </el-form-item>
 
-        <el-form-item v-if="form.type === 'password'" label="用户名">
-          <el-input v-model="form.username" placeholder="如：root" />
-        </el-form-item>
+	          <el-form-item label="认证方式" prop="type">
+	            <el-radio-group v-model="form.type" @change="handleAuthTypeChange">
+	              <el-radio label="password">密码认证</el-radio>
+	              <el-radio label="key" :disabled="form.protocol !== 'ssh'">密钥认证</el-radio>
+	            </el-radio-group>
+	          </el-form-item>
 
-        <el-form-item v-if="form.type === 'password'" label="密码" prop="password">
-          <el-input v-model="form.password" type="password" :placeholder="isEdit ? '如需修改密码请在此填写，留空则保持不变' : '请输入密码'" show-password />
-        </el-form-item>
+	        <el-form-item v-if="form.protocol === 'ssh' && form.type === 'password'" label="无认证">
+	          <div class="credential-mode-row">
+	            <el-switch v-model="form.anonymous" @change="handleAnonymousChange" />
+	            <span class="credential-mode-text">无认证 / 匿名连接</span>
+	          </div>
+	          <div class="credential-tip">用于 Redis、MongoDB、Elasticsearch、OpenSearch 等无账号密码场景。</div>
+	        </el-form-item>
+
+	        <el-form-item v-if="form.type === 'password' && !form.anonymous" label="用户名">
+	          <el-input v-model="form.username" :placeholder="form.protocol === 'ssh' ? '如：root' : '如：Administrator'" />
+	        </el-form-item>
+
+	        <el-form-item v-if="(form.protocol === 'rdp' || form.protocol === 'winrm') && form.type === 'password' && !form.anonymous" label="域">
+	          <el-input v-model="form.domain" placeholder="如：CORP（可选）" />
+	        </el-form-item>
+
+	        <el-form-item v-if="form.type === 'password' && !form.anonymous" label="密码" prop="password">
+	          <el-input v-model="form.password" type="password" :placeholder="isEdit ? '如需修改密码请在此填写，留空则保持不变' : '请输入密码'" show-password />
+	        </el-form-item>
+
+	        <el-form-item v-if="form.type === 'password' && form.anonymous" label="连接说明">
+	          <div class="credential-tip">当前凭据将以空用户名、空密码保存。</div>
+	        </el-form-item>
 
         <el-form-item v-if="form.type === 'key'" label="用户名">
           <el-input v-model="form.username" placeholder="如：root（可选）" />
@@ -210,7 +242,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { ElMessage, ElMessageBox, FormInstance, FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
 import {
   Plus,
   Edit,
@@ -254,26 +287,69 @@ const pagination = reactive({
 })
 
 // 凭证列表
-const credentialList = ref([])
+const credentialList = ref<any[]>([])
 
 // 表单
 const form = reactive({
   id: 0,
   name: '',
+  protocol: 'ssh',
   type: 'password',
+  anonymous: false,
   username: '',
+  domain: '',
   password: '',
   privateKey: '',
   passphrase: '',
   description: ''
 })
 
+const originalSecretState = reactive({
+  type: 'password',
+  anonymous: false,
+  hasPassword: false,
+  hasPrivateKey: false
+})
+
+const validatePassword = (_rule: any, value: string, callback: (error?: Error) => void) => {
+  if (form.type !== 'password') {
+    callback()
+    return
+  }
+  if (form.anonymous || value) {
+    callback()
+    return
+  }
+  if (isEdit.value && originalSecretState.type === 'password' && !originalSecretState.anonymous && originalSecretState.hasPassword) {
+    callback()
+    return
+  }
+  callback(new Error('请输入密码'))
+}
+
+const validatePrivateKey = (_rule: any, value: string, callback: (error?: Error) => void) => {
+  if (form.type !== 'key') {
+    callback()
+    return
+  }
+  if (value) {
+    callback()
+    return
+  }
+  if (isEdit.value && originalSecretState.type === 'key' && originalSecretState.hasPrivateKey) {
+    callback()
+    return
+  }
+  callback(new Error('请输入私钥'))
+}
+
 // 表单验证规则
 const rules: FormRules = {
   name: [{ required: true, message: '请输入凭证名称', trigger: 'blur' }],
+  protocol: [{ required: true, message: '请选择协议类型', trigger: 'change' }],
   type: [{ required: true, message: '请选择认证方式', trigger: 'change' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-  privateKey: [{ required: true, message: '请输入私钥', trigger: 'blur' }]
+  password: [{ validator: validatePassword, trigger: 'blur' }],
+  privateKey: [{ validator: validatePrivateKey, trigger: 'blur' }]
 }
 
 // 加载凭证列表
@@ -317,12 +393,21 @@ const handleAdd = () => {
   Object.assign(form, {
     id: 0,
     name: '',
+    protocol: 'ssh',
     type: 'password',
+    anonymous: false,
     username: '',
+    domain: '',
     password: '',
     privateKey: '',
     passphrase: '',
     description: ''
+  })
+  Object.assign(originalSecretState, {
+    type: 'password',
+    anonymous: false,
+    hasPassword: false,
+    hasPrivateKey: false
   })
   isEdit.value = false
   dialogVisible.value = true
@@ -338,12 +423,21 @@ const handleEdit = async (row: any) => {
     Object.assign(form, {
       id: credential.id,
       name: credential.name,
+      protocol: credential.protocol || 'ssh',
       type: credential.type,
+      anonymous: (credential.protocol || 'ssh') === 'ssh' && credential.type === 'password' && !credential.username && !credential.password,
       username: credential.username || '',
+      domain: credential.domain || '',
       password: credential.password || '',
       privateKey: credential.privateKey || '',
       passphrase: credential.passphrase || '',
       description: credential.description || ''
+    })
+    Object.assign(originalSecretState, {
+      type: credential.type || 'password',
+      anonymous: (credential.protocol || 'ssh') === 'ssh' && credential.type === 'password' && !credential.username && !credential.password,
+      hasPassword: !!credential.password,
+      hasPrivateKey: !!credential.privateKey
     })
   } catch (error) {
     ElMessage.error('获取凭证详情失败')
@@ -383,12 +477,42 @@ const handleAuthTypeChange = (type: string) => {
     form.privateKey = ''
     form.passphrase = ''
   } else {
+    form.anonymous = false
     form.password = ''
   }
+  formRef.value?.clearValidate(['password', 'privateKey'])
+}
+
+const handleProtocolChange = (protocol: string) => {
+  form.protocol = protocol
+  form.domain = ''
+  if (protocol !== 'ssh') {
+    form.type = 'password'
+    form.anonymous = false
+    form.privateKey = ''
+    form.passphrase = ''
+  }
+  formRef.value?.clearValidate(['password', 'privateKey'])
+}
+
+const handleAnonymousChange = (anonymous: boolean) => {
+  if (anonymous) {
+    form.username = ''
+    form.domain = ''
+    form.password = ''
+  }
+  formRef.value?.clearValidate('password')
 }
 
 // 对话框关闭
 const handleDialogClose = () => {
+  Object.assign(originalSecretState, {
+    type: 'password',
+    anonymous: false,
+    hasPassword: false,
+    hasPrivateKey: false
+  })
+  form.anonymous = false
   formRef.value?.resetFields()
 }
 
@@ -398,33 +522,50 @@ const handleSubmit = async () => {
   await formRef.value.validate(async (valid) => {
     if (!valid) return
 
-    submitting.value = true
-    try {
-      if (isEdit.value) {
-        // 编辑凭证时，如果不修改密码或私钥，需要从请求对象中删除这些字段
-        const updateData: any = {
-          id: form.id,
-          name: form.name,
-          type: form.type,
-          username: form.username,
-          description: form.description
-        }
-        // 只有当用户填写了密码或私钥时，才包含这些字段
-        if (form.password) {
-          updateData.password = form.password
-        }
-        if (form.privateKey) {
-          updateData.privateKey = form.privateKey
-        }
-        if (form.passphrase) {
-          updateData.passphrase = form.passphrase
-        }
-        await updateCredential(form.id, updateData)
-        ElMessage.success('更新成功')
-      } else {
-        await createCredential(form)
-        ElMessage.success('创建成功')
-      }
+	    submitting.value = true
+	    try {
+	      const baseData: any = {
+	        name: form.name,
+	        protocol: form.protocol,
+	        type: form.type,
+	        username: form.anonymous ? '' : form.username,
+	        domain: form.anonymous ? '' : form.domain,
+	        description: form.description
+	      }
+	      if (isEdit.value) {
+	        // 编辑凭证时，如果不修改密码或私钥，需要从请求对象中删除这些字段
+	        const updateData: any = {
+	          id: form.id,
+	          ...baseData
+	        }
+	        if (form.type === 'password') {
+	          updateData.clearPrivateKey = true
+	          updateData.clearPassphrase = true
+	          if (form.anonymous) {
+	            updateData.clearPassword = true
+	          } else if (form.password) {
+	            updateData.password = form.password
+	          }
+	        } else {
+	          updateData.clearPassword = true
+	          if (form.privateKey) {
+	            updateData.privateKey = form.privateKey
+	          }
+	          if (form.passphrase) {
+	            updateData.passphrase = form.passphrase
+	          }
+	        }
+	        await updateCredential(form.id, updateData)
+	        ElMessage.success('更新成功')
+	      } else {
+	        await createCredential({
+	          ...baseData,
+	          password: form.anonymous ? '' : form.password,
+	          privateKey: form.privateKey,
+	          passphrase: form.passphrase
+	        })
+	        ElMessage.success('创建成功')
+	      }
       dialogVisible.value = false
       loadCredentialList()
     } catch (error: any) {
@@ -691,6 +832,24 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+
+.credential-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.credential-mode-text {
+  color: #303133;
+  font-size: 14px;
+}
+
+.credential-tip {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 :deep(.credential-dialog) {

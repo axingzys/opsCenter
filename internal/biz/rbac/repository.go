@@ -62,6 +62,7 @@ type MenuRepo interface {
 	GetTree(ctx context.Context) ([]*SysMenu, error)
 	GetByUserID(ctx context.Context, userID uint) ([]*SysMenu, error)
 	GetByRoleID(ctx context.Context, roleID uint) ([]*SysMenu, error)
+	HasUserMenuCode(ctx context.Context, userID uint, code string) (bool, error)
 }
 
 type PositionRepo interface {

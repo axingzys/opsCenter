@@ -240,7 +240,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, nextTick, watch } from 'vue'
-import { ElMessage, ElMessageBox, FormInstance, FormRules, ElTable } from 'element-plus'
+import { ElMessage, ElMessageBox, ElTable } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
 import {
   Plus,
   Search,

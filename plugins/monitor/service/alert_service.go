@@ -41,33 +41,42 @@ func NewAlertService() *AlertService {
 
 // AlertMessage 告警消息
 type AlertMessage struct {
-	AlertType   string `json:"alertType"`   // 告警类型
-	Domain      string `json:"domain"`      // 域名
-	Status      string `json:"status"`      // 状态
-	Message     string `json:"message"`     // 消息内容
-	ResponseTime int    `json:"responseTime"` // 响应时间
-	SSLExpiry   string `json:"sslExpiry"`   // SSL过期时间
-	Timestamp   string `json:"timestamp"`   // 时间戳
+	AlertType      string   `json:"alertType"` // 告警类型
+	ResourceType   string   `json:"resourceType"`
+	ResourceID     uint     `json:"resourceId"`
+	ResourceName   string   `json:"resourceName"`
+	ResourceTarget string   `json:"resourceTarget"`
+	Metric         string   `json:"metric"`
+	Severity       string   `json:"severity"`
+	CurrentValue   *float64 `json:"currentValue"`
+	ThresholdValue *float64 `json:"thresholdValue"`
+	AlertRuleID    *uint    `json:"alertRuleId"`
+	Domain         string   `json:"domain"`  // 域名
+	Status         string   `json:"status"`  // 状态
+	Message        string   `json:"message"` // 消息内容
+	ResponseTime   int      `json:"responseTime"`
+	SSLExpiry      string   `json:"sslExpiry"`
+	Timestamp      string   `json:"timestamp"`
 }
 
 // ReceiverInfo 接收人信息（用于告警发送）
 type ReceiverInfo struct {
-	ID        uint   `json:"id"`
-	Name      string `json:"name"`
-	Email     string `json:"email"`
-	Phone     string `json:"phone"`
-	FeishuID  string `json:"feishuId"`
+	ID         uint   `json:"id"`
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	Phone      string `json:"phone"`
+	FeishuID   string `json:"feishuId"`
 	DingTalkID string `json:"dingtalkId"`
-	WeChatID  string `json:"wechatId"`
+	WeChatID   string `json:"wechatId"`
 }
 
 // ReceiverChannelRelation 接收人与通道的关联信息
 type ReceiverChannelRelation struct {
-	ReceiverID    uint          `json:"receiverId"`
-	ChannelID     uint          `json:"channelId"`
-	ChannelType   string        `json:"channelType"`
-	Receiver      ReceiverInfo  `json:"receiver"`
-	ChannelConfig string        `json:"channelConfig"` // 关联时的特定配置（如@信息）
+	ReceiverID    uint         `json:"receiverId"`
+	ChannelID     uint         `json:"channelId"`
+	ChannelType   string       `json:"channelType"`
+	Receiver      ReceiverInfo `json:"receiver"`
+	ChannelConfig string       `json:"channelConfig"` // 关联时的特定配置（如@信息）
 }
 
 // AlertChannelConfig 告警通道配置
@@ -242,7 +251,7 @@ func (s *AlertService) sendEmail(message AlertMessage, config AlertChannelConfig
 	}
 
 	// 构建邮件内容
-	subject := fmt.Sprintf("[域名监控告警] %s - %s", message.Domain, message.getAlertTitle())
+	subject := fmt.Sprintf("[%s] %s - %s", message.getCategoryTitle(), message.displayResourceName(), message.getAlertTitle())
 	body := s.buildEmailBody(message)
 
 	// 设置SMTP认证
@@ -294,11 +303,12 @@ func (s *AlertService) buildEmailBody(message AlertMessage) string {
 <body>
     <div class="container">
         <div class="header">
-            <h2>域名监控告警</h2>
+            <h2>%s</h2>
         </div>
         <div class="content">
             <h3>%s</h3>
-            <div class="info-item"><strong>域名:</strong> %s</div>
+            <div class="info-item"><strong>%s:</strong> %s</div>
+            <div class="info-item"><strong>目标:</strong> %s</div>
             <div class="info-item"><strong>状态:</strong> %s</div>
             <div class="info-item"><strong>消息:</strong> %s</div>
             <div class="info-item"><strong>时间:</strong> %s</div>
@@ -310,7 +320,7 @@ func (s *AlertService) buildEmailBody(message AlertMessage) string {
     </div>
 </body>
 </html>
-`, message.getAlertTitle(), message.Domain, message.getStatusText(), message.Message, message.Timestamp, s.getDetailInfo(message))
+`, message.getCategoryTitle(), message.getAlertTitle(), message.getResourceLabel(), message.displayResourceName(), message.displayResourceTarget(), message.getStatusText(), message.Message, message.Timestamp, s.getDetailInfo(message))
 }
 
 // sendWeChat 发送企业微信通知
@@ -319,8 +329,8 @@ func (s *AlertService) sendWeChat(message AlertMessage, config AlertChannelConfi
 		return fmt.Errorf("企业微信Webhook未配置")
 	}
 
-	content := fmt.Sprintf("**域名监控告警**\n\n**域名**: %s\n**状态**: %s\n**消息**: %s\n**时间**: %s",
-		message.Domain, message.getStatusText(), message.Message, message.Timestamp)
+	content := fmt.Sprintf("**%s**\n\n**%s**: %s\n**目标**: %s\n**状态**: %s\n**消息**: %s\n**时间**: %s",
+		message.getCategoryTitle(), message.getResourceLabel(), message.displayResourceName(), message.displayResourceTarget(), message.getStatusText(), message.Message, message.Timestamp)
 
 	// 如果提供了接收人，添加@提醒
 	if receivers != nil && len(*receivers) > 0 {
@@ -349,8 +359,8 @@ func (s *AlertService) sendDingTalk(message AlertMessage, config AlertChannelCon
 		return fmt.Errorf("钉钉Webhook未配置")
 	}
 
-	content := fmt.Sprintf("## 域名监控告警\n\n**域名**: %s\n**状态**: %s\n**消息**: %s\n**时间**: %s",
-		message.Domain, message.getStatusText(), message.Message, message.Timestamp)
+	content := fmt.Sprintf("## %s\n\n**%s**: %s\n**目标**: %s\n**状态**: %s\n**消息**: %s\n**时间**: %s",
+		message.getCategoryTitle(), message.getResourceLabel(), message.displayResourceName(), message.displayResourceTarget(), message.getStatusText(), message.Message, message.Timestamp)
 
 	// 如果提供了接收人，添加@提醒
 	var atMobiles []string
@@ -394,7 +404,8 @@ func (s *AlertService) sendFeishu(message AlertMessage, config AlertChannelConfi
 
 	// 构建富文本内容
 	textElements := []map[string]interface{}{
-		{"tag": "text", "text": fmt.Sprintf("域名: %s\n", message.Domain)},
+		{"tag": "text", "text": fmt.Sprintf("%s: %s\n", message.getResourceLabel(), message.displayResourceName())},
+		{"tag": "text", "text": fmt.Sprintf("目标: %s\n", message.displayResourceTarget())},
 		{"tag": "text", "text": fmt.Sprintf("状态: %s\n", message.getStatusText())},
 		{"tag": "text", "text": fmt.Sprintf("消息: %s\n", message.Message)},
 		{"tag": "text", "text": fmt.Sprintf("时间: %s", message.Timestamp)},
@@ -422,11 +433,11 @@ func (s *AlertService) sendFeishu(message AlertMessage, config AlertChannelConfi
 		for _, receiver := range *receivers {
 			if receiver.FeishuID != "" {
 				textElements = append(textElements, map[string]interface{}{
-					"tag": "at",
+					"tag":     "at",
 					"user_id": receiver.FeishuID,
 				})
 				textElements = append(textElements, map[string]interface{}{
-					"tag": "text",
+					"tag":  "text",
 					"text": " ",
 				})
 			}
@@ -459,13 +470,21 @@ func (s *AlertService) sendWebhook(message AlertMessage, config AlertChannelConf
 	}
 
 	webhookData := map[string]interface{}{
-		"alertType":    message.AlertType,
-		"domain":       message.Domain,
-		"status":       message.Status,
-		"message":      message.Message,
-		"responseTime": message.ResponseTime,
-		"sslExpiry":    message.SSLExpiry,
-		"timestamp":    message.Timestamp,
+		"alertType":      message.AlertType,
+		"resourceType":   message.ResourceType,
+		"resourceId":     message.ResourceID,
+		"resourceName":   message.displayResourceName(),
+		"resourceTarget": message.displayResourceTarget(),
+		"metric":         message.Metric,
+		"severity":       message.Severity,
+		"currentValue":   message.CurrentValue,
+		"thresholdValue": message.ThresholdValue,
+		"domain":         message.Domain,
+		"status":         message.Status,
+		"message":        message.Message,
+		"responseTime":   message.ResponseTime,
+		"sslExpiry":      message.SSLExpiry,
+		"timestamp":      message.Timestamp,
 	}
 
 	return s.sendWebhookRequest(config.WebhookURL, webhookData)
@@ -534,8 +553,19 @@ func (m AlertMessage) getAlertTitle() string {
 		return "SSL证书已过期"
 	case "ssl_invalid":
 		return "SSL证书无效"
+	case "high_cpu_usage":
+		return "CPU使用率过高"
+	case "high_memory_usage":
+		return "内存使用率过高"
+	case "high_disk_usage":
+		return "磁盘使用率过高"
+	case "agent_offline":
+		return "Agent离线"
 	default:
-		return "域名监控告警"
+		if m.ResourceType == "host" {
+			return "主机监控告警"
+		}
+		return "监控告警"
 	}
 }
 
@@ -545,13 +575,31 @@ func (m AlertMessage) getStatusText() string {
 		return "正常"
 	case "abnormal":
 		return "异常"
+	case "warning":
+		return "告警"
+	case "critical":
+		return "严重"
+	case "offline":
+		return "离线"
 	default:
+		if m.Status != "" {
+			return m.Status
+		}
 		return "未知"
 	}
 }
 
 func (s *AlertService) getDetailInfo(message AlertMessage) string {
 	var detail string
+	if message.CurrentValue != nil {
+		detail += fmt.Sprintf(`<div class="info-item"><strong>当前值:</strong> %s</div>`, message.getValueText(*message.CurrentValue))
+	}
+	if message.ThresholdValue != nil {
+		detail += fmt.Sprintf(`<div class="info-item"><strong>阈值:</strong> %s</div>`, message.getValueText(*message.ThresholdValue))
+	}
+	if message.Metric != "" {
+		detail += fmt.Sprintf(`<div class="info-item"><strong>指标:</strong> %s</div>`, message.getMetricLabel())
+	}
 	if message.ResponseTime > 0 {
 		detail += fmt.Sprintf(`<div class="info-item"><strong>响应时间:</strong> %d ms</div>`, message.ResponseTime)
 	}
@@ -559,4 +607,63 @@ func (s *AlertService) getDetailInfo(message AlertMessage) string {
 		detail += fmt.Sprintf(`<div class="info-item"><strong>SSL过期时间:</strong> %s</div>`, message.SSLExpiry)
 	}
 	return detail
+}
+
+func (m AlertMessage) getCategoryTitle() string {
+	if m.ResourceType == "host" {
+		return "主机监控告警"
+	}
+	return "域名监控告警"
+}
+
+func (m AlertMessage) getResourceLabel() string {
+	if m.ResourceType == "host" {
+		return "主机"
+	}
+	return "域名"
+}
+
+func (m AlertMessage) displayResourceName() string {
+	if m.ResourceName != "" {
+		return m.ResourceName
+	}
+	if m.Domain != "" {
+		return m.Domain
+	}
+	return "-"
+}
+
+func (m AlertMessage) displayResourceTarget() string {
+	if m.ResourceTarget != "" {
+		return m.ResourceTarget
+	}
+	if m.Domain != "" {
+		return m.Domain
+	}
+	return "-"
+}
+
+func (m AlertMessage) getMetricLabel() string {
+	switch m.Metric {
+	case "cpu_usage":
+		return "CPU使用率"
+	case "memory_usage":
+		return "内存使用率"
+	case "disk_usage":
+		return "磁盘使用率"
+	case "agent_offline":
+		return "Agent上报时延"
+	default:
+		if m.Metric != "" {
+			return m.Metric
+		}
+		return "-"
+	}
+}
+
+func (m AlertMessage) getValueText(value float64) string {
+	if m.Metric == "agent_offline" {
+		return fmt.Sprintf("%.0f 秒", value)
+	}
+	return fmt.Sprintf("%.2f%%", value)
 }

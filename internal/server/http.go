@@ -35,6 +35,7 @@ import (
 	"github.com/ydcloud-dy/opshub/internal/plugin"
 	assetserver "github.com/ydcloud-dy/opshub/internal/server/asset"
 	auditserver "github.com/ydcloud-dy/opshub/internal/server/audit"
+	databaseserver "github.com/ydcloud-dy/opshub/internal/server/database"
 	identityserver "github.com/ydcloud-dy/opshub/internal/server/identity"
 	mfaserver "github.com/ydcloud-dy/opshub/internal/server/mfa"
 	"github.com/ydcloud-dy/opshub/internal/server/rbac"
@@ -61,6 +62,7 @@ type HTTPServer struct {
 	db        *gorm.DB
 	pluginMgr *plugin.Manager
 	uploadSrv *UploadServer
+	database  *databaseserver.HTTPServer
 }
 
 // NewHTTPServer 创建HTTP服务器
@@ -179,19 +181,20 @@ func (s *HTTPServer) registerRoutes(router *gin.Engine, jwtSecret string) {
 	operationLogService, loginLogService, dataLogService := auditserver.NewAuditServices(s.db)
 
 	// 创建 Asset 服务
-	assetGroupService, hostService, terminalManager := assetserver.NewAssetServices(s.db)
+	assetGroupService, hostService, agentService, desktopService, virtualizationService, terminalManager := assetserver.NewAssetServices(s.db, s.conf)
 
 	// 设置authMiddleware的assetPermissionRepo
 	assetPermissionRepo := rbacdata.NewAssetPermissionRepo(s.db)
 	authMiddleware.SetAssetPermissionRepo(assetPermissionRepo)
 
 	// Asset 路由
-	assetServer := assetserver.NewHTTPServer(assetGroupService, hostService, terminalManager, s.db, authMiddleware)
+	assetServer := assetserver.NewHTTPServer(assetGroupService, hostService, agentService, desktopService, virtualizationService, terminalManager, s.conf.Terminal, s.db, authMiddleware)
 
 	// API v1 - 公开接口(不需要认证)
 	public := router.Group("/api/v1/public")
 	{
 		public.GET("/example", s.svc.Example)
+		assetServer.RegisterPublicRoutes(public)
 	}
 
 	// 身份认证模块暂不开放，如需启用请取消下方注释
@@ -215,6 +218,11 @@ func (s *HTTPServer) registerRoutes(router *gin.Engine, jwtSecret string) {
 
 		// 注册 Asset 路由
 		assetServer.RegisterRoutes(v1)
+
+		// 注册数据库管理路由
+		databaseServer := databaseserver.NewHTTPServer(s.db, authMiddleware)
+		databaseServer.RegisterRoutes(v1)
+		s.database = databaseServer
 
 		// 身份认证模块暂不开放，如需启用请取消下方注释
 		// if identityServer != nil {
@@ -445,6 +453,10 @@ func (s *HTTPServer) disablePlugin(c *gin.Context) {
 
 // Start 启动服务器
 func (s *HTTPServer) Start() error {
+	if s.database != nil {
+		s.database.StartBackground(context.Background())
+	}
+
 	appLogger.Info("HTTP服务器启动",
 		zap.String("addr", s.server.Addr),
 		zap.String("mode", s.conf.Server.Mode),
@@ -460,6 +472,11 @@ func (s *HTTPServer) Start() error {
 // Stop 停止服务器
 func (s *HTTPServer) Stop(ctx context.Context) error {
 	appLogger.Info("HTTP服务器停止中...")
+	if s.database != nil {
+		if err := s.database.StopBackground(ctx); err != nil {
+			return fmt.Errorf("数据库备份调度器停止失败: %w", err)
+		}
+	}
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("HTTP服务器停止失败: %w", err)
 	}

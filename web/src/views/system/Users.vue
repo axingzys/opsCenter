@@ -335,7 +335,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, watch } from 'vue'
-import { ElMessage, ElMessageBox, FormInstance } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import type { FormInstance } from 'element-plus'
 import {
   User, Postcard, Message, Phone, Lock,
   OfficeBuilding, Key, Document, Check, Edit, Delete, Unlock

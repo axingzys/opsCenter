@@ -5,7 +5,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, onBeforeUnmount } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { create } from 'asciinema-player'
+import 'asciinema-player/dist/bundle/asciinema-player.css'
 
 interface Props {
   src: string
@@ -28,61 +30,31 @@ const props = withDefaults(defineProps<Props>(), {
   loop: false
 })
 
-const emit = defineEmits(['ready', 'play', 'pause', 'finish', 'progress'])
+const emit = defineEmits(['ready', 'play', 'pause', 'finish', 'error'])
 
 const playerRef = ref<HTMLDivElement>()
 let player: any = null
 
-// 动态加载 AsciinemaPlayer
-const loadAsciinemaPlayer = async () => {
-  return new Promise<void>((resolve, reject) => {
-    const win = window as any
-    // 检查是否已加载
-    if (win.AsciinemaPlayer || win.AsciiinemaPlayer) {
-      resolve()
-      return
-    }
-
-    // 加载 CSS
-    const css = document.createElement('link')
-    css.rel = 'stylesheet'
-    css.href = 'https://cdn.jsdelivr.net/npm/asciinema-player@3.6.3/dist/bundle/asciinema-player.css'
-    document.head.appendChild(css)
-
-    // 加载 JS
-    const script = document.createElement('script')
-    script.src = 'https://cdn.jsdelivr.net/npm/asciinema-player@3.6.3/dist/bundle/asciinema-player.min.js'
-    script.onload = () => {
-      resolve()
-    }
-    script.onerror = () => reject(new Error('Failed to load AsciinemaPlayer'))
-    document.head.appendChild(script)
-  })
+const destroyPlayer = () => {
+  if (player?.dispose) {
+    player.dispose()
+  }
+  if (playerRef.value) {
+    playerRef.value.innerHTML = ''
+  }
+  player = null
 }
 
-// 创建播放器
 const createPlayer = async () => {
-  if (!playerRef.value || !props.src) return
+  if (!playerRef.value || !props.src) {
+    return
+  }
 
   try {
-    await loadAsciinemaPlayer()
+    await nextTick()
+    destroyPlayer()
 
-    // 清除旧播放器
-    if (player) {
-      playerRef.value.innerHTML = ''
-    }
-
-    const win = window as any
-    // 尝试两种可能的全局变量名
-    const AsciinemaPlayerLibrary = win.AsciinemaPlayer || win.AsciiinemaPlayer
-
-    if (!AsciinemaPlayerLibrary) {
-      throw new Error('AsciinemaPlayer library not loaded')
-    }
-
-    // 使用 create 函数创建播放器（asciinema-player v3+）
-    player = AsciinemaPlayerLibrary.create(props.src, playerRef.value, {
-      // 不设置 cols 和 rows，让播放器从录制文件中自动读取
+    player = create(props.src, playerRef.value, {
       autoplay: props.autoplay,
       preload: props.preload ? 'auto' : 'none',
       startTime: props.startTime,
@@ -90,26 +62,21 @@ const createPlayer = async () => {
       loop: props.loop,
       theme: 'tango',
       poster: 'npt:0:01',
-      // 确保控制栏显示
       controls: true,
     })
 
-    // 监听事件
-    if (player.addEventListener) {
+    if (player?.addEventListener) {
       player.addEventListener('ready', () => emit('ready'))
       player.addEventListener('play', () => emit('play'))
       player.addEventListener('pause', () => emit('pause'))
       player.addEventListener('ended', () => emit('finish'))
-      player.addEventListener('progress', (e: any) => emit('progress', e))
     }
-
-    emit('ready')
-  } catch (error) {
-    // Error handling without console output
+  } catch (error: any) {
+    destroyPlayer()
+    emit('error', error?.message || '终端播放器初始化失败')
   }
 }
 
-// 监听 src 变化
 watch(() => props.src, () => {
   createPlayer()
 })
@@ -119,19 +86,15 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (player && playerRef.value) {
-    playerRef.value.innerHTML = ''
-    player = null
-  }
+  destroyPlayer()
 })
 
-// 暴露方法
 defineExpose({
   play: () => player?.play(),
   pause: () => player?.pause(),
   seek: (time: number) => player?.seek(time),
-  getDuration: () => player?.duration,
-  getCurrentTime: () => player?.currentTime,
+  getDuration: () => player?.getDuration?.(),
+  getCurrentTime: () => player?.getCurrentTime?.(),
 })
 </script>
 
@@ -152,7 +115,6 @@ defineExpose({
   overflow: auto;
 }
 
-/* 深度样式覆盖 - 修改 AsciinemaPlayer 的颜色 */
 .asciinema-player-wrapper :deep(.asciinema-player) {
   background-color: #000 !important;
 }

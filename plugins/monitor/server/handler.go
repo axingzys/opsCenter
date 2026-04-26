@@ -24,7 +24,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -44,17 +43,15 @@ import (
 
 // Handler 域名监控处理器
 type Handler struct {
-	db           *gorm.DB
-	repo         *repository.DomainMonitorRepository
-	alertService *service.AlertService
+	db   *gorm.DB
+	repo *repository.DomainMonitorRepository
 }
 
 // NewHandler 创建处理器
 func NewHandler(db *gorm.DB) *Handler {
 	return &Handler{
-		db:           db,
-		repo:         repository.NewDomainMonitorRepository(db),
-		alertService: service.NewAlertService(),
+		db:   db,
+		repo: repository.NewDomainMonitorRepository(db),
 	}
 }
 
@@ -592,163 +589,24 @@ func (h *Handler) checkAlertConditions(monitor *model.DomainMonitor, result *Che
 
 // sendAlert 发送告警
 func (h *Handler) sendAlert(monitor *model.DomainMonitor, alert service.AlertMessage) {
-	// 1. 获取启用的告警通道
-	var channels []model.AlertChannel
-	if err := h.db.Where("enabled = ?", true).Find(&channels).Error; err != nil {
-		h.logAlert(monitor.ID, alert, "failed", "", fmt.Sprintf("获取告警通道失败: %v", err))
-		return
-	}
-
-	// 2. 获取启用的告警接收人
-	var receivers []model.AlertReceiver
-	if err := h.db.Find(&receivers).Error; err != nil {
-		h.logAlert(monitor.ID, alert, "failed", "", fmt.Sprintf("获取告警接收人失败: %v", err))
-		return
-	}
-
-	// 如果没有配置通道或接收人，记录失败日志
-	if len(channels) == 0 {
-		h.logAlert(monitor.ID, alert, "failed", "", "未配置启用的告警通道")
-		return
-	}
-	if len(receivers) == 0 {
-		h.logAlert(monitor.ID, alert, "failed", "", "未配置告警接收人")
-		return
-	}
-
-	// 3. 构建告警通道配置
-	var channelConfig service.AlertChannelConfig
-	var emailReceivers []string
-
-	for _, channel := range channels {
-		var config map[string]interface{}
-		if err := json.Unmarshal([]byte(channel.Config), &config); err != nil {
-			continue
-		}
-
-		switch channel.ChannelType {
-		case "email":
-			if smtpHost, ok := config["smtpHost"].(string); ok {
-				channelConfig.SMTPHost = smtpHost
-			}
-			if smtpPort, ok := config["smtpPort"].(float64); ok {
-				channelConfig.SMTPPort = int(smtpPort)
-			}
-			if smtpUser, ok := config["smtpUser"].(string); ok {
-				channelConfig.SMTPUser = smtpUser
-			}
-			if smtpPassword, ok := config["smtpPassword"].(string); ok {
-				channelConfig.SMTPPassword = smtpPassword
-			}
-			if fromEmail, ok := config["fromEmail"].(string); ok {
-				channelConfig.FromEmail = fromEmail
-			}
-			if fromName, ok := config["fromName"].(string); ok {
-				channelConfig.FromName = fromName
-			}
-		case "webhook":
-			if webhookURL, ok := config["webhookUrl"].(string); ok {
-				channelConfig.WebhookURL = webhookURL
-			}
-		case "wechat":
-			if wechatWebhook, ok := config["wechatWebhook"].(string); ok {
-				channelConfig.WeChatWebhook = wechatWebhook
-			}
-		case "dingtalk":
-			if dingtalkWebhook, ok := config["dingtalkWebhook"].(string); ok {
-				channelConfig.DingTalkWebhook = dingtalkWebhook
-			}
-			if dingtalkSecret, ok := config["dingtalkSecret"].(string); ok {
-				channelConfig.DingTalkSecret = dingtalkSecret
-			}
-		case "feishu":
-			if feishuWebhook, ok := config["feishuWebhook"].(string); ok {
-				channelConfig.FeishuWebhook = feishuWebhook
-			}
-		}
-	}
-
-	// 4. 获取接收人-通道关联关系（用于@提醒）
-	var receiverChannels []model.AlertReceiverChannel
-	if err := h.db.Find(&receiverChannels).Error; err != nil {
-		// 如果查询关联失败，继续使用旧的方式发送（向后兼容）
-		receiverChannels = []model.AlertReceiverChannel{}
-	}
-
-	// 5. 构建接收人-通道关联信息
-	receiverMap := make(map[uint]*model.AlertReceiver)
-	for i := range receivers {
-		receiverMap[receivers[i].ID] = &receivers[i]
-	}
-
-	channelMap := make(map[uint]*model.AlertChannel)
-	for i := range channels {
-		channelMap[channels[i].ID] = &channels[i]
-	}
-
-	// 构建有关联关系的接收人-通道列表
-	var relations []service.ReceiverChannelRelation
-	for _, rc := range receiverChannels {
-		receiver, receiverExists := receiverMap[rc.ReceiverID]
-		channel, channelExists := channelMap[rc.ChannelID]
-
-		if !receiverExists || !channelExists {
-			continue
-		}
-
-		// 只添加有效的关联（接收人启用对应通道）
-		shouldAdd := false
-		switch channel.ChannelType {
-		case "email":
-			shouldAdd = receiver.EnableEmail && receiver.Email != ""
-		case "feishu":
-			shouldAdd = receiver.EnableFeishu && receiver.FeishuID != ""
-		case "dingtalk":
-			shouldAdd = receiver.EnableDingTalk && (receiver.DingTalkID != "" || receiver.Phone != "")
-		case "wechat":
-			shouldAdd = receiver.EnableWeChat && receiver.WeChatID != ""
-		}
-
-		if shouldAdd {
-			relations = append(relations, service.ReceiverChannelRelation{
-				ReceiverID:  rc.ReceiverID,
-				ChannelID:   rc.ChannelID,
-				ChannelType: channel.ChannelType,
-				Receiver: service.ReceiverInfo{
-					ID:         receiver.ID,
-					Name:       receiver.Name,
-					Email:      receiver.Email,
-					Phone:      receiver.Phone,
-					FeishuID:   receiver.FeishuID,
-					DingTalkID: receiver.DingTalkID,
-					WeChatID:   receiver.WeChatID,
-				},
-				ChannelConfig: rc.Config,
-			})
-		}
-	}
-
-	// 6. 发送告警
-	var err error
-	if len(relations) > 0 {
-		// 如果有关联关系，使用新的方式发送（支持@提醒）
-		err = h.alertService.SendAlert(alert, channelConfig, emailReceivers, relations)
-	} else {
-		// 否则使用旧的方式发送（向后兼容）
-		err = h.alertService.SendAlert(alert, channelConfig, emailReceivers)
-	}
-
-	// 7. 记录发送结果
+	dispatcher := service.NewAlertDispatcher(h.db)
+	channelSummary, err := dispatcher.Dispatch(alert)
 	if err != nil {
-		h.logAlert(monitor.ID, alert, "failed", channels[0].ChannelType, err.Error())
-	} else {
-		h.logAlert(monitor.ID, alert, "success", channels[0].ChannelType, "")
+		h.logAlert(monitor.ID, alert, "failed", channelSummary, err.Error())
+		return
 	}
+	h.logAlert(monitor.ID, alert, "success", channelSummary, "")
 }
 
 // logAlert 记录告警日志
 func (h *Handler) logAlert(domainMonitorID uint, alert service.AlertMessage, status, channel, errorMsg string) {
 	alertLog := &model.AlertLog{
+		ResourceType:    "domain",
+		ResourceID:      domainMonitorID,
+		ResourceName:    alert.Domain,
+		ResourceTarget:  alert.Domain,
+		Metric:          mapDomainAlertMetric(alert.AlertType),
+		Severity:        "warning",
 		DomainMonitorID: domainMonitorID,
 		Domain:          alert.Domain,
 		AlertType:       alert.AlertType,
@@ -760,6 +618,17 @@ func (h *Handler) logAlert(domainMonitorID uint, alert service.AlertMessage, sta
 	}
 
 	h.db.Create(alertLog)
+}
+
+func mapDomainAlertMetric(alertType string) string {
+	switch alertType {
+	case "high_response_time":
+		return "response_time"
+	case "ssl_expiring", "ssl_expired", "ssl_invalid":
+		return "ssl"
+	default:
+		return "availability"
+	}
 }
 
 // shouldSuppressAlert 检查是否应该抑制告警（告警频率控制）

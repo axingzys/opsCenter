@@ -79,10 +79,10 @@
 
         <el-table-column label="主机" min-width="200">
           <template #default="{ row }">
-            <el-tag v-if="!row.hostId" type="info">全部主机</el-tag>
+            <el-tag v-if="!row.hostIds || row.hostIds.length === 0" type="info">全部主机</el-tag>
             <div v-else>
-              <div>{{ row.hostName }}</div>
-              <div class="host-ip">{{ row.hostIp }}</div>
+              <div>{{ formatHostLabel(row) }}</div>
+              <div class="host-ip">{{ formatHostDetail(row) }}</div>
             </div>
           </template>
         </el-table-column>
@@ -96,6 +96,7 @@
               <el-tag v-if="(row.permissions & 8) > 0" size="small" type="warning">终端</el-tag>
               <el-tag v-if="(row.permissions & 16) > 0" size="small" type="info">文件</el-tag>
               <el-tag v-if="(row.permissions & 32) > 0" size="small">采集</el-tag>
+              <el-tag v-if="(row.permissions & 64) > 0" size="small" type="danger">桌面</el-tag>
             </div>
           </template>
         </el-table-column>
@@ -222,6 +223,7 @@
             <el-checkbox :value="8">终端 - SSH连接主机</el-checkbox>
             <el-checkbox :value="16">文件 - 文件上传、下载、删除</el-checkbox>
             <el-checkbox :value="32">采集 - 采集主机系统信息</el-checkbox>
+            <el-checkbox :value="64">桌面 - RDP 图形桌面连接</el-checkbox>
           </el-checkbox-group>
           <div class="permission-tip">默认仅授予查看权限，请根据需要勾选其他操作权限</div>
         </el-form-item>
@@ -312,6 +314,7 @@
             <el-checkbox :value="8">终端 - SSH连接主机</el-checkbox>
             <el-checkbox :value="16">文件 - 文件上传、下载、删除</el-checkbox>
             <el-checkbox :value="32">采集 - 采集主机系统信息</el-checkbox>
+            <el-checkbox :value="64">桌面 - RDP 图形桌面连接</el-checkbox>
           </el-checkbox-group>
         </el-form-item>
       </el-form>
@@ -415,6 +418,28 @@ const formRules: FormRules = {
   assetGroupId: [{ required: true, message: '请选择资产分组', trigger: 'change' }]
 }
 
+const normalizeHostIds = (hostIds: unknown): number[] => {
+  if (!Array.isArray(hostIds)) {
+    return []
+  }
+  return hostIds
+    .map(item => Number(item))
+    .filter(item => Number.isInteger(item) && item > 0)
+}
+
+const formatHostLabel = (row: any) => {
+  const hostIds = normalizeHostIds(row.hostIds)
+  if (Array.isArray(row.hostNames) && row.hostNames.length > 0) {
+    return row.hostNames.join('、')
+  }
+  return `已选 ${hostIds.length} 台主机`
+}
+
+const formatHostDetail = (row: any) => {
+  const hostIds = normalizeHostIds(row.hostIds)
+  return hostIds.length > 0 ? `ID: ${hostIds.join(', ')}` : ''
+}
+
 // 加载权限列表
 const loadPermissions = async () => {
   loading.value = true
@@ -423,7 +448,10 @@ const loadPermissions = async () => {
       page: page.value,
       pageSize: pageSize.value
     })
-    permissions.value = response.list || []
+    permissions.value = (response.list || []).map((item: any) => ({
+      ...item,
+      hostIds: normalizeHostIds(item.hostIds)
+    }))
     total.value = response.total || 0
   } catch (error: any) {
     ElMessage.error('加载权限列表失败: ' + (error.message || '未知错误'))

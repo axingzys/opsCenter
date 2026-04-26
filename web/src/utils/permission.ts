@@ -1,12 +1,13 @@
 // 权限常量定义 - 位掩码
 export const PERMISSION = {
-  VIEW: 1 << 0,     // 1 - 查看
-  EDIT: 1 << 1,     // 2 - 编辑
-  DELETE: 1 << 2,   // 4 - 删除
-  TERMINAL: 1 << 3, // 8 - 终端
-  FILE: 1 << 4,     // 16 - 文件管理
-  COLLECT: 1 << 5,  // 32 - 采集信息
-  ALL: 0x3F,        // 63 - 所有权限
+  VIEW: 1 << 0,      // 1 - 查看
+  EDIT: 1 << 1,      // 2 - 编辑
+  DELETE: 1 << 2,    // 4 - 删除
+  TERMINAL: 1 << 3,  // 8 - 终端
+  FILE: 1 << 4,      // 16 - 文件管理
+  COLLECT: 1 << 5,   // 32 - 采集信息
+  DESKTOP: 1 << 6,   // 64 - 桌面连接
+  ALL: 0x7F,         // 127 - 所有权限
 } as const
 
 /**
@@ -38,6 +39,8 @@ export function getPermissionName(permission: number): string {
       return '文件管理'
     case PERMISSION.COLLECT:
       return '采集信息'
+    case PERMISSION.DESKTOP:
+      return '桌面连接'
     default:
       return '未知'
   }
@@ -56,6 +59,7 @@ export function getPermissionNames(permissions: number): string[] {
   if ((permissions & PERMISSION.TERMINAL) > 0) names.push('终端')
   if ((permissions & PERMISSION.FILE) > 0) names.push('文件管理')
   if ((permissions & PERMISSION.COLLECT) > 0) names.push('采集信息')
+  if ((permissions & PERMISSION.DESKTOP) > 0) names.push('桌面连接')
   return names
 }
 
@@ -85,6 +89,9 @@ export function permissionNamesToMask(permissionNames: string[]): number {
         break
       case '采集信息':
         mask |= PERMISSION.COLLECT
+        break
+      case '桌面连接':
+        mask |= PERMISSION.DESKTOP
         break
     }
   }
@@ -121,4 +128,5 @@ export const PERMISSION_OPTIONS = [
   { label: '连接终端', value: PERMISSION.TERMINAL, description: 'SSH连接到主机' },
   { label: '文件管理', value: PERMISSION.FILE, description: '文件上传、下载、删除' },
   { label: '采集信息', value: PERMISSION.COLLECT, description: '采集主机系统信息' },
+  { label: '桌面连接', value: PERMISSION.DESKTOP, description: '通过RDP连接Windows桌面' },
 ]

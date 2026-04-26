@@ -31,10 +31,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"golang.org/x/crypto/ssh"
 	assetbiz "github.com/ydcloud-dy/opshub/internal/biz/asset"
 	appLogger "github.com/ydcloud-dy/opshub/pkg/logger"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/ssh"
 	"gorm.io/gorm"
 )
 
@@ -66,35 +66,40 @@ type CredentialInfo struct {
 
 // TerminalSession 终端会话
 type TerminalSession struct {
-	ID          string
-	HostID      uint
-	HostName    string
-	HostIP      string
-	UserID      uint
-	Username    string
-	SSHClient   *ssh.Client
-	SSHSession  *ssh.Session
-	StdinPipe   io.WriteCloser
-	StdoutPipe  io.Reader
-	StderrPipe  io.Reader
-	Recorder    *AsciinemaRecorder // 录制器
-	CreatedAt   time.Time
+	ID             string
+	HostID         uint
+	HostName       string
+	HostIP         string
+	UserID         uint
+	Username       string
+	AuditRecordID  uint
+	SSHClient      *ssh.Client
+	SSHSession     *ssh.Session
+	StdinPipe      io.WriteCloser
+	StdoutPipe     io.Reader
+	StderrPipe     io.Reader
+	Recorder       *AsciinemaRecorder // 录制器
+	CommandTracker *terminalCommandTracker
+	RiskEvents     []*assetbiz.TerminalCommandEvent
+	CreatedAt      time.Time
 }
 
 // TerminalManager 终端管理器
 type TerminalManager struct {
-	sessions    map[string]*TerminalSession
-	mu          sync.RWMutex
-	hostUseCase *assetbiz.HostUseCase
-	db          *gorm.DB
+	sessions       map[string]*TerminalSession
+	mu             sync.RWMutex
+	hostUseCase    *assetbiz.HostUseCase
+	db             *gorm.DB
+	recordingStore *terminalRecordingStore
 }
 
 // NewTerminalManager 创建终端管理器
-func NewTerminalManager(hostUseCase *assetbiz.HostUseCase, db *gorm.DB) *TerminalManager {
+func NewTerminalManager(hostUseCase *assetbiz.HostUseCase, db *gorm.DB, recordingStore *terminalRecordingStore) *TerminalManager {
 	return &TerminalManager{
-		sessions:    make(map[string]*TerminalSession),
-		hostUseCase: hostUseCase,
-		db:          db,
+		sessions:       make(map[string]*TerminalSession),
+		hostUseCase:    hostUseCase,
+		db:             db,
+		recordingStore: recordingStore,
 	}
 }
 
@@ -162,7 +167,7 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 
 	// 设置终端模式
 	modes := ssh.TerminalModes{
-		ssh.ECHO:   1, // 启用回显
+		ssh.ECHO:          1,     // 启用回显
 		ssh.TTY_OP_ISPEED: 14400, // 输入速度
 		ssh.TTY_OP_OSPEED: 14400, // 输出速度
 	}
@@ -203,28 +208,49 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 	}
 
 	// 创建录制器
-	recordingDir := "./data/terminal-recordings"
-	recorder, err := NewAsciinemaRecorder(recordingDir, int(cols), int(rows))
+	recorder, err := tm.recordingStore.CreateRecorder(int(cols), int(rows))
 	if err != nil {
 		// 录制失败不影响终端连接，继续
 		recorder = nil
 	}
 
+	auditRecord := &assetbiz.TerminalSession{
+		HostID:   hostID,
+		HostName: hostVO.Name,
+		HostIP:   hostVO.IP,
+		UserID:   userID,
+		Username: username,
+		Status:   "recording",
+	}
+	if recorder != nil {
+		auditRecord.RecordingPath = tm.recordingStore.NormalizeForSave(recorder.GetRecordingPath())
+	}
+	if err := tm.db.Create(auditRecord).Error; err != nil {
+		appLogger.Error("创建终端审计记录失败", zap.Error(err))
+		auditRecord = nil
+	}
+
 	// 创建会话对象
 	terminalSession := &TerminalSession{
-		ID:         fmt.Sprintf("%d-%d", hostID, time.Now().Unix()),
-		HostID:     hostID,
-		HostName:   hostVO.Name,
-		HostIP:     hostVO.IP,
-		UserID:     userID,
-		Username:   username,
-		SSHClient:  client,
-		SSHSession: session,
-		StdinPipe:  stdinPipe,
-		StdoutPipe: stdoutPipe,
-		StderrPipe: stderrPipe,
-		Recorder:   recorder,
-		CreatedAt:  time.Now(),
+		ID:             fmt.Sprintf("%d-%d", hostID, time.Now().Unix()),
+		HostID:         hostID,
+		HostName:       hostVO.Name,
+		HostIP:         hostVO.IP,
+		UserID:         userID,
+		Username:       username,
+		AuditRecordID:  0,
+		SSHClient:      client,
+		SSHSession:     session,
+		StdinPipe:      stdinPipe,
+		StdoutPipe:     stdoutPipe,
+		StderrPipe:     stderrPipe,
+		Recorder:       recorder,
+		CommandTracker: newTerminalCommandTracker(),
+		RiskEvents:     make([]*assetbiz.TerminalCommandEvent, 0, 4),
+		CreatedAt:      time.Now(),
+	}
+	if auditRecord != nil {
+		terminalSession.AuditRecordID = auditRecord.ID
 	}
 
 	// 保存会话
@@ -261,6 +287,11 @@ func (tm *TerminalManager) CloseSession(sessionID string) error {
 		zap.Uint("userID", session.UserID),
 		zap.String("username", session.Username))
 
+	status := "failed"
+	duration := 0
+	fileSize := int64(0)
+	recordingPath := ""
+
 	// 关闭录制器并保存会话信息
 	if session.Recorder != nil {
 		// 关闭录制器
@@ -269,49 +300,43 @@ func (tm *TerminalManager) CloseSession(sessionID string) error {
 		}
 
 		// 获取录制信息
-		duration := session.Recorder.GetDuration()
-		fileSize := session.Recorder.GetFileSize()
-		recordingPath := session.Recorder.GetRecordingPath()
+		duration = session.Recorder.GetDuration()
+		fileSize = session.Recorder.GetFileSize()
+		recordingPath = tm.recordingStore.NormalizeForSave(session.Recorder.GetRecordingPath())
+		status = "completed"
 
 		appLogger.Info("录制信息",
 			zap.String("recordingPath", recordingPath),
 			zap.Int("duration", duration),
 			zap.Int64("fileSize", fileSize))
 
-		// 保存会话记录到数据库
-		terminalSession := &assetbiz.TerminalSession{
-			HostID:        session.HostID,
-			HostName:      session.HostName,
-			HostIP:        session.HostIP,
-			UserID:        session.UserID,
-			Username:      session.Username,
-			RecordingPath: recordingPath,
-			Duration:      duration,
-			FileSize:      fileSize,
-			Status:        "completed",
-		}
-
-		appLogger.Info("准备保存终端会话记录到数据库",
-			zap.Uint("hostID", terminalSession.HostID),
-			zap.String("hostName", terminalSession.HostName),
-			zap.Uint("userID", terminalSession.UserID),
-			zap.String("username", terminalSession.Username))
-
-		if err := tm.db.Create(terminalSession).Error; err != nil {
-			appLogger.Error("保存终端会话记录失败",
-				zap.Error(err),
-				zap.Uint("hostID", session.HostID),
-				zap.Uint("userID", session.UserID),
-				zap.String("recordingPath", recordingPath))
-		} else {
-			appLogger.Info("终端会话记录已成功保存到数据库",
-				zap.Uint("sessionID", terminalSession.ID),
-				zap.String("username", terminalSession.Username),
-				zap.String("hostName", terminalSession.HostName),
-				zap.Int("duration", duration))
-		}
 	} else {
 		appLogger.Warn("会话没有录制器", zap.String("sessionID", sessionID))
+	}
+
+	if session.AuditRecordID > 0 {
+		updates := map[string]interface{}{
+			"recording_path": recordingPath,
+			"duration":       duration,
+			"file_size":      fileSize,
+			"status":         status,
+		}
+		if err := tm.db.Model(&assetbiz.TerminalSession{}).Where("id = ?", session.AuditRecordID).Updates(updates).Error; err != nil {
+			appLogger.Error("更新终端会话记录失败",
+				zap.Error(err),
+				zap.Uint("sessionID", session.AuditRecordID),
+				zap.String("recordingPath", recordingPath))
+		}
+		if len(session.RiskEvents) > 0 {
+			for _, event := range session.RiskEvents {
+				event.SessionID = session.AuditRecordID
+			}
+			if err := tm.db.Create(&session.RiskEvents).Error; err != nil {
+				appLogger.Error("保存终端高危命令事件失败",
+					zap.Error(err),
+					zap.Uint("sessionID", session.AuditRecordID))
+			}
+		}
 	}
 
 	// 关闭SSH连接
@@ -498,11 +523,21 @@ func (s *HTTPServer) HandleSSHConnection(c *gin.Context) {
 			if session.Recorder != nil {
 				session.Recorder.RecordInput(data)
 			}
+			for _, command := range session.CommandTracker.Feed(data) {
+				if event := buildTerminalRiskEvent(session, command, time.Now()); event != nil {
+					session.RiskEvents = append(session.RiskEvents, event)
+				}
+			}
 			session.StdinPipe.Write(data)
 		} else if messageType == websocket.BinaryMessage {
 			// 录制输入
 			if session.Recorder != nil {
 				session.Recorder.RecordInput(data)
+			}
+			for _, command := range session.CommandTracker.Feed(data) {
+				if event := buildTerminalRiskEvent(session, command, time.Now()); event != nil {
+					session.RiskEvents = append(session.RiskEvents, event)
+				}
 			}
 			session.StdinPipe.Write(data)
 		}

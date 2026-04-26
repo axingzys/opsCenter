@@ -29,6 +29,7 @@ import (
 func RegisterRoutes(router *gin.RouterGroup, db *gorm.DB) {
 	handler := NewHandler(db)
 	alertHandler := NewAlertHandler(db)
+	hostHandler := NewHostHandler(db)
 
 	// 监控插件路由组 - 使用 /monitor 前缀
 	monitorGroup := router.Group("/monitor")
@@ -95,6 +96,26 @@ func RegisterRoutes(router *gin.RouterGroup, db *gorm.DB) {
 			// 告警统计
 			alerts.GET("/stats", alertHandler.GetAlertStats) // 获取告警统计信息
 		}
+
+		hosts := monitorGroup.Group("/hosts")
+		{
+			hosts.GET("", hostHandler.ListHosts)
+			hosts.GET("/assignable", hostHandler.ListAssignableHosts)
+			hosts.GET("/:id/overview", hostHandler.GetHostOverview)
+			hosts.GET("/:id/history", hostHandler.GetHostHistory)
+			hosts.GET("/:id/processes", hostHandler.ListHostProcesses)
+			hosts.GET("/:id/ports", hostHandler.ListHostPorts)
+		}
+
+		hostAlertRules := monitorGroup.Group("/host-alert-rules")
+		{
+			hostAlertRules.GET("", hostHandler.ListHostAlertRules)
+			hostAlertRules.GET("/stats", hostHandler.GetHostAlertRuleStats)
+			hostAlertRules.GET("/:id", hostHandler.GetHostAlertRule)
+			hostAlertRules.POST("", hostHandler.CreateHostAlertRule)
+			hostAlertRules.PUT("/:id", hostHandler.UpdateHostAlertRule)
+			hostAlertRules.DELETE("/:id", hostHandler.DeleteHostAlertRule)
+		}
 	}
 }
 
@@ -108,5 +129,6 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.AlertReceiver{},
 		&model.AlertReceiverChannel{},
 		&model.AlertLog{},
+		&model.HostAlertRule{},
 	)
 }

@@ -21,36 +21,47 @@ package asset
 
 import (
 	"github.com/gin-gonic/gin"
-	assetService "github.com/ydcloud-dy/opshub/internal/service/asset"
-	assetdata "github.com/ydcloud-dy/opshub/internal/data/asset"
 	assetbiz "github.com/ydcloud-dy/opshub/internal/biz/asset"
-	rbacService "github.com/ydcloud-dy/opshub/internal/service/rbac"
-	rbacdata "github.com/ydcloud-dy/opshub/internal/data/rbac"
 	rbacbiz "github.com/ydcloud-dy/opshub/internal/biz/rbac"
+	"github.com/ydcloud-dy/opshub/internal/conf"
+	assetdata "github.com/ydcloud-dy/opshub/internal/data/asset"
+	rbacdata "github.com/ydcloud-dy/opshub/internal/data/rbac"
+	assetService "github.com/ydcloud-dy/opshub/internal/service/asset"
+	rbacService "github.com/ydcloud-dy/opshub/internal/service/rbac"
 	"gorm.io/gorm"
 )
 
 type HTTPServer struct {
-	assetGroupService    *assetService.AssetGroupService
-	hostService          *assetService.HostService
-	terminalManager      *TerminalManager
-	terminalAuditHandler *TerminalAuditHandler
-	authMiddleware       *rbacService.AuthMiddleware
+	assetGroupService     *assetService.AssetGroupService
+	hostService           *assetService.HostService
+	agentService          *assetService.AgentService
+	desktopService        *assetService.DesktopService
+	virtualizationService *assetService.VirtualizationService
+	terminalManager       *TerminalManager
+	terminalAuditHandler  *TerminalAuditHandler
+	authMiddleware        *rbacService.AuthMiddleware
 }
 
 func NewHTTPServer(
 	assetGroupService *assetService.AssetGroupService,
 	hostService *assetService.HostService,
+	agentService *assetService.AgentService,
+	desktopService *assetService.DesktopService,
+	virtualizationService *assetService.VirtualizationService,
 	terminalManager *TerminalManager,
+	terminalCfg conf.TerminalConfig,
 	db *gorm.DB,
 	authMiddleware *rbacService.AuthMiddleware,
 ) *HTTPServer {
 	return &HTTPServer{
-		assetGroupService:    assetGroupService,
-		hostService:          hostService,
-		terminalManager:      terminalManager,
-		terminalAuditHandler: NewTerminalAuditHandler(db),
-		authMiddleware:       authMiddleware,
+		assetGroupService:     assetGroupService,
+		hostService:           hostService,
+		agentService:          agentService,
+		desktopService:        desktopService,
+		virtualizationService: virtualizationService,
+		terminalManager:       terminalManager,
+		terminalAuditHandler:  NewTerminalAuditHandler(db, terminalCfg),
+		authMiddleware:        authMiddleware,
 	}
 }
 
@@ -74,6 +85,9 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		hosts.POST("/import", s.hostService.ImportFromExcel)
 		hosts.POST("/batch-collect", s.hostService.BatchCollectHostInfo)
 		hosts.POST("/batch-delete", s.hostService.BatchDeleteHosts)
+		hosts.GET("/:id/trends",
+			s.authMiddleware.RequireHostPermission(rbacbiz.PermissionView),
+			s.hostService.GetMetricTrend)
 
 		// 查看权限 - 查看主机详情
 		hosts.GET("/:id",
@@ -98,6 +112,12 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			s.authMiddleware.RequireHostPermission(rbacbiz.PermissionCollect),
 			s.hostService.CollectHostInfo)
 		hosts.POST("/:id/test", s.hostService.TestHostConnection)
+		hosts.GET("/:id/agent/bootstrap",
+			s.authMiddleware.RequireHostPermission(rbacbiz.PermissionEdit),
+			s.agentService.GetHostBootstrap)
+		hosts.POST("/:id/desktop/sessions",
+			s.authMiddleware.RequireHostPermission(rbacbiz.PermissionDesktop),
+			s.desktopService.CreateDesktopSession)
 
 		// 文件管理权限 - 文件上传、下载、删除
 		hosts.GET("/:id/files",
@@ -112,6 +132,17 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		hosts.DELETE("/:id/files",
 			s.authMiddleware.RequireHostPermission(rbacbiz.PermissionFile),
 			s.hostService.DeleteHostFile)
+	}
+
+	agents := r.Group("/agents")
+	{
+		agents.GET("", s.agentService.List)
+		agents.POST("/deploy", s.agentService.Deploy)
+		agents.POST("/uninstall", s.agentService.Uninstall)
+		agents.GET("/jobs/:id", s.agentService.GetJob)
+		agents.GET("/:id/inventory",
+			s.authMiddleware.RequireHostPermission(rbacbiz.PermissionView),
+			s.agentService.GetInventory)
 	}
 
 	// 凭证管理
@@ -139,6 +170,51 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		cloudAccounts.POST("/import", s.hostService.ImportFromCloud)
 	}
 
+	// 虚拟化平台管理（一期：平台/拓扑/纳管基础能力）
+	virtualization := r.Group("/virtualization")
+	virtualization.Use(s.authMiddleware.RequireAdmin())
+	{
+		virtualization.GET("/settings", s.virtualizationService.GetSettings)
+		virtualization.PUT("/settings", s.virtualizationService.UpdateSettings)
+		virtualization.GET("/action-logs", s.virtualizationService.ListActionLogs)
+
+		platforms := virtualization.Group("/platforms")
+		{
+			platforms.GET("", s.virtualizationService.ListPlatforms)
+			platforms.POST("", s.virtualizationService.CreatePlatform)
+			platforms.GET("/:id", s.virtualizationService.GetPlatform)
+			platforms.PUT("/:id", s.virtualizationService.UpdatePlatform)
+			platforms.DELETE("/:id", s.virtualizationService.DeletePlatform)
+			platforms.GET("/:id/trend", s.virtualizationService.GetPlatformTrend)
+			platforms.POST("/:id/test", s.virtualizationService.TestPlatform)
+			platforms.POST("/:id/sync", s.virtualizationService.SyncPlatform)
+			platforms.GET("/:id/sync-jobs", s.virtualizationService.ListSyncJobs)
+		}
+
+		clusters := virtualization.Group("/clusters")
+		{
+			clusters.GET("/:id/trend", s.virtualizationService.GetClusterTrend)
+		}
+
+		virtualization.GET("/topology", s.virtualizationService.GetTopology)
+
+		guests := virtualization.Group("/guests")
+		{
+			guests.GET("", s.virtualizationService.ListGuests)
+			guests.GET("/:id", s.virtualizationService.GetGuest)
+			guests.GET("/:id/precheck", s.virtualizationService.PrecheckGuestOnboard)
+			guests.POST("/:id/console-link", s.virtualizationService.CreateGuestConsoleLink)
+			guests.POST("/:id/power", s.virtualizationService.PowerGuest)
+			guests.GET("/:id/snapshots", s.virtualizationService.ListGuestSnapshots)
+			guests.POST("/:id/snapshots", s.virtualizationService.CreateGuestSnapshot)
+			guests.POST("/:id/snapshots/rollback", s.virtualizationService.RollbackGuestSnapshot)
+			guests.POST("/:id/snapshots/delete", s.virtualizationService.DeleteGuestSnapshot)
+			guests.POST("/:id/onboard", s.virtualizationService.BindGuest)
+			guests.POST("/:id/bind", s.virtualizationService.BindGuest)
+			guests.POST("/:id/unbind", s.virtualizationService.UnbindGuest)
+		}
+	}
+
 	// SSH终端 - 终端权限
 	terminal := r.Group("/asset/terminal")
 	{
@@ -151,16 +227,62 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 	// 终端审计
 	terminalSessions := r.Group("/terminal-sessions")
 	{
-		terminalSessions.GET("", s.terminalAuditHandler.ListTerminalSessions)
-		terminalSessions.GET("/:id/play", s.terminalAuditHandler.PlayTerminalSession)
-		terminalSessions.DELETE("/:id", s.terminalAuditHandler.DeleteTerminalSession)
+		terminalSessions.GET("",
+			s.authMiddleware.RequireAdmin(),
+			s.terminalAuditHandler.ListTerminalSessions)
+		terminalSessions.GET("/:id/play",
+			s.authMiddleware.RequireAdmin(),
+			s.terminalAuditHandler.PlayTerminalSession)
+		terminalSessions.GET("/:id/download",
+			s.authMiddleware.RequireAdmin(),
+			s.terminalAuditHandler.DownloadTerminalSession)
+		terminalSessions.GET("/:id/events",
+			s.authMiddleware.RequireAdmin(),
+			s.terminalAuditHandler.ListTerminalSessionEvents)
+		terminalSessions.DELETE("/:id",
+			s.authMiddleware.RequireAdmin(),
+			s.terminalAuditHandler.DeleteTerminalSession)
+	}
+
+	desktopSessions := r.Group("/desktop-sessions")
+	{
+		desktopSessions.GET("",
+			s.authMiddleware.RequireAdmin(),
+			s.desktopService.ListDesktopSessions)
+		desktopSessions.GET("/:id/recording",
+			s.authMiddleware.RequireAdmin(),
+			s.desktopService.DownloadDesktopSessionRecording)
+		desktopSessions.GET("/:id/recording/play",
+			s.authMiddleware.RequireAdmin(),
+			s.desktopService.PlayDesktopSessionRecording)
+		desktopSessions.DELETE("/:id",
+			s.authMiddleware.RequireAdmin(),
+			s.desktopService.DeleteDesktopSession)
+		desktopSessions.GET("/:id", s.desktopService.GetDesktopSession)
+		desktopSessions.POST("/:id/files/upload", s.desktopService.UploadDesktopSessionFile)
+		desktopSessions.POST("/:id/close", s.desktopService.CloseDesktopSession)
+	}
+}
+
+func (s *HTTPServer) RegisterPublicRoutes(r *gin.RouterGroup) {
+	agents := r.Group("/agents")
+	{
+		agents.GET("/install.ps1", s.agentService.InstallPowerShellScript)
+		agents.GET("/install.sh", s.agentService.InstallShellScript)
+		agents.GET("/download/:os/:arch", s.agentService.DownloadBinary)
+		agents.GET("/echo-ip", s.agentService.EchoIP)
+		agents.POST("/register", s.agentService.Register)
+		agents.POST("/report", s.agentService.Report)
 	}
 }
 
 // NewAssetServices 创建asset相关的服务
-func NewAssetServices(db *gorm.DB) (
+func NewAssetServices(db *gorm.DB, cfg *conf.Config) (
 	*assetService.AssetGroupService,
 	*assetService.HostService,
+	*assetService.AgentService,
+	*assetService.DesktopService,
+	*assetService.VirtualizationService,
 	*TerminalManager,
 ) {
 	// 初始化Repository
@@ -168,21 +290,55 @@ func NewAssetServices(db *gorm.DB) (
 	hostRepo := assetdata.NewHostRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
 	cloudAccountRepo := assetdata.NewCloudAccountRepo(db)
+	agentRepo := assetdata.NewAssetAgentRepo(db)
+	hostInventoryRepo := assetdata.NewAssetHostInventoryRepo(db)
+	publicIPHistoryRepo := assetdata.NewAssetHostPublicIPHistoryRepo(db)
+	agentJobRepo := assetdata.NewAssetAgentJobRepo(db)
+	desktopSessionRepo := assetdata.NewDesktopSessionRepo(db)
+	virtualizationPlatformRepo := assetdata.NewVirtualizationPlatformRepo(db)
+	virtualizationClusterRepo := assetdata.NewVirtualizationClusterRepo(db)
+	virtualizationHostRepo := assetdata.NewVirtualizationHostRepo(db)
+	virtualizationGuestRepo := assetdata.NewVirtualizationGuestRepo(db)
+	virtualizationGuestBindingRepo := assetdata.NewVirtualizationGuestBindingRepo(db)
+	virtualizationSyncJobRepo := assetdata.NewVirtualizationSyncJobRepo(db)
+	virtualizationMetricRepo := assetdata.NewVirtualizationPlatformMetricRepo(db)
+	virtualizationClusterMetricRepo := assetdata.NewVirtualizationClusterMetricRepo(db)
+	virtualizationActionLogRepo := assetdata.NewVirtualizationActionLogRepo(db)
+	virtualizationPolicyRepo := assetdata.NewVirtualizationPolicyRepo(db)
 	assetPermissionRepo := rbacdata.NewAssetPermissionRepo(db)
 
 	// 初始化UseCase
 	assetGroupUseCase := assetbiz.NewAssetGroupUseCase(assetGroupRepo)
 	credentialUseCase := assetbiz.NewCredentialUseCase(credentialRepo, hostRepo)
 	cloudAccountUseCase := assetbiz.NewCloudAccountUseCase(cloudAccountRepo)
-	hostUseCase := assetbiz.NewHostUseCase(hostRepo, credentialRepo, assetGroupRepo, cloudAccountRepo)
+	hostUseCase := assetbiz.NewHostUseCase(hostRepo, credentialRepo, assetGroupRepo, cloudAccountRepo, agentRepo, hostInventoryRepo, cfg.Monitoring.Prometheus, []byte(cfg.Server.JWTSecret))
+	agentUseCase := assetbiz.NewAgentUseCase(hostRepo, credentialRepo, agentRepo, hostInventoryRepo, publicIPHistoryRepo, agentJobRepo, cfg.Server.JWTSecret, cfg.Agent, cfg.Monitoring.Prometheus)
+	desktopSessionUseCase := assetbiz.NewDesktopSessionUseCase(hostRepo, credentialRepo, desktopSessionRepo, cfg.Desktop)
+	virtualizationUseCase := assetbiz.NewVirtualizationUseCase(
+		virtualizationPlatformRepo,
+		virtualizationClusterRepo,
+		virtualizationHostRepo,
+		virtualizationGuestRepo,
+		virtualizationGuestBindingRepo,
+		virtualizationSyncJobRepo,
+		virtualizationMetricRepo,
+		virtualizationClusterMetricRepo,
+		virtualizationActionLogRepo,
+		virtualizationPolicyRepo,
+		hostRepo,
+	)
 	assetPermissionUseCase := rbacbiz.NewAssetPermissionUseCase(assetPermissionRepo)
 
 	// 初始化Service
 	assetGroupService := assetService.NewAssetGroupService(assetGroupUseCase)
 	hostService := assetService.NewHostService(hostUseCase, credentialUseCase, cloudAccountUseCase, assetPermissionUseCase)
+	agentService := assetService.NewAgentService(agentUseCase, assetPermissionUseCase, cfg)
+	desktopService := assetService.NewDesktopService(desktopSessionUseCase)
+	virtualizationService := assetService.NewVirtualizationService(virtualizationUseCase)
 
 	// 初始化TerminalManager
-	terminalManager := NewTerminalManager(hostUseCase, db)
+	recordingStore := newTerminalRecordingStore(cfg.Terminal)
+	terminalManager := NewTerminalManager(hostUseCase, db, recordingStore)
 
-	return assetGroupService, hostService, terminalManager
+	return assetGroupService, hostService, agentService, desktopService, virtualizationService, terminalManager
 }

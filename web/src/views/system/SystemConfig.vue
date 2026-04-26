@@ -162,8 +162,92 @@
           </el-form>
         </div>
 
-        <!-- LDAP 配置 -->
+        <!-- 监控配置 -->
         <div v-show="activeNav === 2" class="config-section">
+          <div class="section-header">
+            <el-icon class="section-icon"><Monitor /></el-icon>
+            <span>监控配置</span>
+          </div>
+          <el-form :model="monitoringConfig" label-width="180px" class="config-form">
+            <el-form-item label="Prometheus 地址">
+              <el-input :model-value="monitoringConfig.prometheusBaseUrl || '-'" disabled />
+              <span class="form-tip">当前后端使用的 Prometheus 查询地址</span>
+            </el-form-item>
+            <el-form-item label="当前生效保留期">
+              <el-input :model-value="monitoringConfig.currentPrometheusRetention || '-'" disabled />
+              <span class="form-tip">从 Prometheus 运行时状态读取的当前 retention 值</span>
+            </el-form-item>
+            <el-form-item label="监控数据保留天数">
+              <el-input-number v-model="monitoringConfig.prometheusRetentionDays" :min="1" :max="3650" />
+              <span class="form-tip">目标值，单位：天</span>
+            </el-form-item>
+            <el-form-item>
+              <el-alert
+                title="该配置属于 Prometheus 存储保留策略。当前系统会保存目标值并展示当前生效值，但 Prometheus 侧仍需同步应用并重启后才会真正生效。"
+                type="warning"
+                :closable="false"
+                show-icon
+              />
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <!-- 数据库配置 -->
+        <div v-show="activeNav === 3" class="config-section">
+          <div class="section-header">
+            <el-icon class="section-icon"><DataLine /></el-icon>
+            <span>数据库配置</span>
+          </div>
+          <el-form :model="databaseConfig" label-width="180px" class="config-form">
+            <el-form-item label="写操作总开关">
+              <el-switch
+                v-model="databaseConfig.writeEnabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">关闭时所有数据库写操作都会被统一拦截。</span>
+            </el-form-item>
+            <el-form-item label="高风险二次确认">
+              <el-switch
+                v-model="databaseConfig.highRiskRequiresConfirm"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">高风险 SQL 在执行前要求前端明确确认。</span>
+            </el-form-item>
+            <el-form-item label="操作原因必填">
+              <el-switch
+                v-model="databaseConfig.operationReasonRequired"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">开启后写操作必须填写原因，并随审计一起留痕。</span>
+            </el-form-item>
+            <el-form-item label="最大影响行数阈值">
+              <el-input-number v-model="databaseConfig.maxAffectedRows" :min="1" :max="1000000" :step="100" />
+              <span class="form-tip">执行结果超过阈值时会在结果页和审计中高亮提示。</span>
+            </el-form-item>
+            <el-form-item label="默认备份保留天数">
+              <el-input-number v-model="databaseConfig.defaultBackupRetentionDays" :min="1" :max="3650" />
+              <span class="form-tip">后续备份任务默认继承该保留天数。</span>
+            </el-form-item>
+            <el-form-item label="本地备份目录">
+              <el-input v-model="databaseConfig.backupStoragePath" placeholder="/data/opshub/database-backups" />
+              <span class="form-tip">建议使用独立磁盘路径，并预留可观测的磁盘容量。</span>
+            </el-form-item>
+            <el-form-item>
+              <el-alert
+                title="数据库三期默认坚持安全优先：建议先保持写开关关闭，只在明确的变更窗口内按需开启，并配合高风险确认与原因留痕。"
+                type="warning"
+                :closable="false"
+                show-icon
+              />
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <!-- LDAP 配置 -->
+        <div v-show="activeNav === 4" class="config-section">
           <div class="section-header">
             <el-icon class="section-icon"><Connection /></el-icon>
             <span>LDAP 配置</span>
@@ -289,19 +373,25 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Setting, Check, HomeFilled, Lock,
-  Edit, Plus, Delete, Connection,
-  CircleCheckFilled, CircleCloseFilled, Key
+  Edit, Plus, Delete, Connection, Monitor,
+  CircleCheckFilled, CircleCloseFilled, Key, DataLine
 } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 import {
   getAllConfig,
+  getDatabaseConfig,
+  getMonitoringConfig,
   saveBasicConfig,
+  saveDatabaseConfig,
+  saveMonitoringConfig,
   saveSecurityConfig,
   uploadLogo,
   getLDAPConfig,
   saveLDAPConfig,
   testLDAPConnection,
-  type LDAPConfig
+  type DatabaseConfig,
+  type LDAPConfig,
+  type MonitoringConfig
 } from '@/api/system'
 import { useSystemStore } from '@/stores/system'
 
@@ -312,6 +402,8 @@ const activeNav = ref(0)
 const navItems = [
   { label: '基础配置', icon: 'HomeFilled' },
   { label: '安全配置', icon: 'Lock' },
+  { label: '监控配置', icon: 'Monitor' },
+  { label: '数据库配置', icon: 'DataLine' },
   { label: 'LDAP 配置', icon: 'Connection' }
 ]
 
@@ -333,6 +425,21 @@ const config = reactive({
   mfaEnforced: false,
   mfaType: 'totp',
   mfaSkipDuration: 2592000
+})
+
+const monitoringConfig = reactive<MonitoringConfig>({
+  prometheusRetentionDays: 15,
+  prometheusBaseUrl: '',
+  currentPrometheusRetention: ''
+})
+
+const databaseConfig = reactive<DatabaseConfig>({
+  writeEnabled: false,
+  highRiskRequiresConfirm: true,
+  operationReasonRequired: true,
+  maxAffectedRows: 1000,
+  defaultBackupRetentionDays: 7,
+  backupStoragePath: ''
 })
 
 // LDAP 配置
@@ -425,6 +532,35 @@ const loadLDAPConfig = async () => {
   }
 }
 
+const loadMonitoringConfig = async () => {
+  try {
+    const res: any = await getMonitoringConfig()
+    if (res) {
+      monitoringConfig.prometheusRetentionDays = res.prometheusRetentionDays || 15
+      monitoringConfig.prometheusBaseUrl = res.prometheusBaseUrl || ''
+      monitoringConfig.currentPrometheusRetention = res.currentPrometheusRetention || ''
+    }
+  } catch (error) {
+    console.error('加载监控配置失败', error)
+  }
+}
+
+const loadDatabaseConfig = async () => {
+  try {
+    const res: any = await getDatabaseConfig()
+    if (res) {
+      databaseConfig.writeEnabled = !!res.writeEnabled
+      databaseConfig.highRiskRequiresConfirm = res.highRiskRequiresConfirm !== false
+      databaseConfig.operationReasonRequired = res.operationReasonRequired !== false
+      databaseConfig.maxAffectedRows = res.maxAffectedRows || 1000
+      databaseConfig.defaultBackupRetentionDays = res.defaultBackupRetentionDays || 7
+      databaseConfig.backupStoragePath = res.backupStoragePath || ''
+    }
+  } catch (error) {
+    console.error('加载数据库配置失败', error)
+  }
+}
+
 // 测试LDAP连接
 const handleTestLDAP = async () => {
   if (!ldapConfig.host || !ldapConfig.bindDn || !ldapConfig.baseDn) {
@@ -488,6 +624,17 @@ const loadConfig = async () => {
         config.mfaType = res.security.mfaType || 'totp'
         config.mfaSkipDuration = res.security.mfaSkipDuration || 2592000
       }
+      if (res.monitoring) {
+        monitoringConfig.prometheusRetentionDays = res.monitoring.prometheusRetentionDays || 15
+      }
+      if (res.database) {
+        databaseConfig.writeEnabled = !!res.database.writeEnabled
+        databaseConfig.highRiskRequiresConfirm = res.database.highRiskRequiresConfirm !== false
+        databaseConfig.operationReasonRequired = res.database.operationReasonRequired !== false
+        databaseConfig.maxAffectedRows = res.database.maxAffectedRows || 1000
+        databaseConfig.defaultBackupRetentionDays = res.database.defaultBackupRetentionDays || 7
+        databaseConfig.backupStoragePath = res.database.backupStoragePath || ''
+      }
     }
   } catch (error) {
     console.error('加载配置失败', error)
@@ -525,6 +672,14 @@ const handleSave = async () => {
         mfaSkipDuration: config.mfaSkipDuration
       })
     } else if (activeNav.value === 2) {
+      await saveMonitoringConfig({
+        prometheusRetentionDays: monitoringConfig.prometheusRetentionDays
+      })
+      await loadMonitoringConfig()
+    } else if (activeNav.value === 3) {
+      await saveDatabaseConfig({ ...databaseConfig })
+      await loadDatabaseConfig()
+    } else if (activeNav.value === 4) {
       // 保存LDAP配置
       await saveLDAPConfig({ ...ldapConfig })
     }
@@ -571,6 +726,8 @@ const removeLogo = () => {
 
 onMounted(() => {
   loadConfig()
+  loadMonitoringConfig()
+  loadDatabaseConfig()
   loadLDAPConfig()
   loadRolesAndDepts()
 })

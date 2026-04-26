@@ -667,6 +667,10 @@ func (h *AlertHandler) UpdateReceiverChannelConfig(c *gin.Context) {
 // @Param page query int false "页码"
 // @Param pageSize query int false "每页数量"
 // @Param domainMonitorId query int false "域名监控ID"
+// @Param resourceType query string false "资源类型"
+// @Param resourceId query int false "资源ID"
+// @Param keyword query string false "资源关键字"
+// @Param status query string false "发送状态"
 // @Param alertType query string false "告警类型"
 // @Success 200 {array} model.AlertLog
 // @Router /monitor/alerts/logs [get]
@@ -688,8 +692,21 @@ func (h *AlertHandler) ListAlertLogs(c *gin.Context) {
 	if domainMonitorID := c.Query("domainMonitorId"); domainMonitorID != "" {
 		query = query.Where("domain_monitor_id = ?", domainMonitorID)
 	}
+	if resourceType := c.Query("resourceType"); resourceType != "" {
+		query = query.Where("resource_type = ?", resourceType)
+	}
+	if resourceID := c.Query("resourceId"); resourceID != "" {
+		query = query.Where("resource_id = ?", resourceID)
+	}
+	if keyword := c.Query("keyword"); keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where("resource_name LIKE ? OR resource_target LIKE ? OR domain LIKE ? OR message LIKE ?", like, like, like, like)
+	}
 	if alertType := c.Query("alertType"); alertType != "" {
 		query = query.Where("alert_type = ?", alertType)
+	}
+	if status := c.Query("status"); status != "" {
+		query = query.Where("status = ?", status)
 	}
 
 	// 获取总数

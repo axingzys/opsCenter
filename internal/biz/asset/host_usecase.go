@@ -26,18 +26,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/requests"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/ecs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awscfg "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm/v20170312"
 	"github.com/xuri/excelize/v2"
-	"github.com/ydcloud-dy/opshub/pkg/collector"
+	"github.com/ydcloud-dy/opshub/internal/conf"
 	sshclient "github.com/ydcloud-dy/opshub/pkg/ssh"
 	"github.com/ydcloud-dy/opshub/pkg/utils"
 )
@@ -47,20 +51,32 @@ type HostUseCase struct {
 	credentialRepo CredentialRepo
 	groupRepo      AssetGroupRepo
 	cloudRepo      CloudAccountRepo
+	agentRepo      AssetAgentRepo
+	inventoryRepo  AssetHostInventoryRepo
+	promCfg        conf.PrometheusConfig
+	agentSecretKey []byte
 }
 
-func NewHostUseCase(hostRepo HostRepo, credentialRepo CredentialRepo, groupRepo AssetGroupRepo, cloudRepo CloudAccountRepo) *HostUseCase {
+func NewHostUseCase(hostRepo HostRepo, credentialRepo CredentialRepo, groupRepo AssetGroupRepo, cloudRepo CloudAccountRepo, agentRepo AssetAgentRepo, inventoryRepo AssetHostInventoryRepo, promCfg conf.PrometheusConfig, agentSecretKey []byte) *HostUseCase {
 	return &HostUseCase{
 		hostRepo:       hostRepo,
 		credentialRepo: credentialRepo,
 		groupRepo:      groupRepo,
 		cloudRepo:      cloudRepo,
+		agentRepo:      agentRepo,
+		inventoryRepo:  inventoryRepo,
+		promCfg:        promCfg,
+		agentSecretKey: agentSecretKey,
 	}
 }
 
 // Create 创建主机
 func (uc *HostUseCase) Create(ctx context.Context, req *HostRequest) (*Host, error) {
 	host := req.ToModel()
+	uc.applyManagementConfig(host, req)
+	if err := uc.validateCredentialBindings(ctx, host); err != nil {
+		return nil, err
+	}
 
 	if err := uc.hostRepo.CreateOrUpdate(ctx, host); err != nil {
 		return nil, err
@@ -88,18 +104,136 @@ func (uc *HostUseCase) Update(ctx context.Context, req *HostRequest) error {
 	host.CloudProvider = req.CloudProvider
 	host.CloudInstanceID = req.CloudInstanceID
 	host.CloudAccountID = req.CloudAccountID
-	host.SSHUser = req.SSHUser
+	if req.OSType != "" {
+		host.OSType = req.OSType
+	}
 	host.IP = req.IP
-	host.Port = req.Port
-	host.CredentialID = req.CredentialID
+	uc.applyManagementConfig(host, req)
+	host.DesktopEnabled = req.DesktopEnabled
+	if req.DesktopProtocol != "" {
+		host.DesktopProtocol = req.DesktopProtocol
+	}
+	if req.DesktopPort > 0 {
+		host.DesktopPort = req.DesktopPort
+	}
+	host.DesktopCredentialID = req.DesktopCredentialID
+	if req.DesktopSecurity != "" {
+		host.DesktopSecurity = req.DesktopSecurity
+	}
+	host.DesktopIgnoreCert = req.DesktopIgnoreCert
 	host.Tags = req.Tags
 	host.Description = req.Description
+
+	if err := uc.validateCredentialBindings(ctx, host); err != nil {
+		return err
+	}
 
 	return uc.hostRepo.Update(ctx, host)
 }
 
+func (uc *HostUseCase) applyManagementConfig(host *Host, req *HostRequest) {
+	previousMode := uc.effectiveManagementMode(host)
+	existingSSHUser := strings.TrimSpace(host.SSHUser)
+	existingCredentialID := host.CredentialID
+	existingManagementCredentialID := host.ManagementCredentialID
+	osType := host.OSType
+	if osType == "" {
+		osType = OSTypeLinux
+	}
+
+	requestedSSHPort := req.Port
+	if requestedSSHPort == 0 {
+		requestedSSHPort = host.Port
+	}
+	if requestedSSHPort == 0 {
+		requestedSSHPort = 22
+	}
+
+	mode := NormalizeManagementMode(osType, req.ManagementMode, req.CredentialID, req.ManagementCredentialID)
+	managementPort := NormalizeManagementPort(mode, req.ManagementPort, requestedSSHPort)
+	managementCredentialID := NormalizeManagementCredentialID(mode, req.ManagementCredentialID, req.CredentialID)
+	if mode == ManagementModeAgent && managementCredentialID == 0 {
+		managementCredentialID = NormalizeManagementCredentialID(ManagementModeAgent, existingManagementCredentialID, existingCredentialID)
+	}
+
+	host.ManagementMode = mode
+	host.ManagementPort = managementPort
+	host.ManagementCredentialID = managementCredentialID
+
+	if osType == OSTypeLinux || mode == ManagementModeSSH {
+		sshUser := strings.TrimSpace(req.SSHUser)
+		if sshUser == "" {
+			sshUser = existingSSHUser
+		}
+		host.SSHUser = sshUser
+		host.Port = requestedSSHPort
+		host.CredentialID = managementCredentialID
+	} else {
+		host.SSHUser = ""
+		host.Port = 22
+		host.CredentialID = 0
+	}
+
+	if host.CollectStatus == "" || previousMode != mode {
+		host.CollectStatus = DefaultCollectStatus(mode)
+		host.CollectError = ""
+		if mode == ManagementModeNone {
+			host.Status = -1
+		}
+	}
+}
+
+func normalizeCredentialProtocol(protocol string) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		return ManagementModeSSH
+	}
+	return protocol
+}
+
+func (uc *HostUseCase) validateCredentialBindings(ctx context.Context, host *Host) error {
+	mode := uc.effectiveManagementMode(host)
+	managementCredentialID := uc.effectiveManagementCredentialID(host)
+	if mode == ManagementModeWinRM && managementCredentialID == 0 {
+		return fmt.Errorf("WinRM 管理方式需要选择 WinRM 凭证")
+	}
+	if managementCredentialID > 0 {
+		credential, err := uc.credentialRepo.GetByID(ctx, managementCredentialID)
+		if err != nil {
+			return fmt.Errorf("管理凭证不存在")
+		}
+
+		expectedProtocol := ""
+		switch mode {
+		case ManagementModeSSH:
+			expectedProtocol = ManagementModeSSH
+		case ManagementModeWinRM:
+			expectedProtocol = ManagementModeWinRM
+		}
+
+		if expectedProtocol != "" && normalizeCredentialProtocol(credential.Protocol) != expectedProtocol {
+			return fmt.Errorf("%s 管理方式需要 %s 凭证", strings.ToUpper(mode), strings.ToUpper(expectedProtocol))
+		}
+	}
+
+	if host.DesktopCredentialID > 0 {
+		credential, err := uc.credentialRepo.GetByID(ctx, host.DesktopCredentialID)
+		if err != nil {
+			return fmt.Errorf("桌面凭证不存在")
+		}
+		if normalizeCredentialProtocol(credential.Protocol) != "rdp" {
+			return fmt.Errorf("桌面访问需要 RDP 凭证")
+		}
+	}
+
+	return nil
+}
+
 // Delete 删除主机
 func (uc *HostUseCase) Delete(ctx context.Context, id uint) error {
+	if err := uc.cleanupHostAgentArtifacts(ctx, id); err != nil {
+		return err
+	}
 	return uc.hostRepo.Delete(ctx, id)
 }
 
@@ -125,6 +259,18 @@ func (uc *HostUseCase) GetByID(ctx context.Context, id uint) (*HostInfoVO, error
 		credential, err := uc.credentialRepo.GetByID(ctx, host.CredentialID)
 		if err == nil && credential != nil {
 			vo.Credential = uc.toCredentialVO(credential)
+		}
+	}
+	if host.ManagementCredentialID > 0 {
+		credential, err := uc.credentialRepo.GetByID(ctx, host.ManagementCredentialID)
+		if err == nil && credential != nil {
+			vo.ManagementCredential = uc.toCredentialVO(credential)
+		}
+	}
+	if host.DesktopCredentialID > 0 {
+		credential, err := uc.credentialRepo.GetByID(ctx, host.DesktopCredentialID)
+		if err == nil && credential != nil {
+			vo.DesktopCredential = uc.toCredentialVO(credential)
 		}
 	}
 
@@ -168,6 +314,18 @@ func (uc *HostUseCase) List(ctx context.Context, page, pageSize int, keyword str
 				vo.Credential = uc.toCredentialVO(credential)
 			}
 		}
+		if host.ManagementCredentialID > 0 {
+			credential, err := uc.credentialRepo.GetByID(ctx, host.ManagementCredentialID)
+			if err == nil && credential != nil {
+				vo.ManagementCredential = uc.toCredentialVO(credential)
+			}
+		}
+		if host.DesktopCredentialID > 0 {
+			credential, err := uc.credentialRepo.GetByID(ctx, host.DesktopCredentialID)
+			if err == nil && credential != nil {
+				vo.DesktopCredential = uc.toCredentialVO(credential)
+			}
+		}
 
 		vos = append(vos, vo)
 	}
@@ -177,10 +335,21 @@ func (uc *HostUseCase) List(ctx context.Context, page, pageSize int, keyword str
 
 // toInfoVO 转换为InfoVO
 func (uc *HostUseCase) toInfoVO(host *Host) *HostInfoVO {
+	status := host.Status
+	managementMode := uc.effectiveManagementMode(host)
+	collectStatus := host.CollectStatus
+	collectError := host.CollectError
+	if collectStatus == "" {
+		collectStatus = DefaultCollectStatus(managementMode)
+	}
+	if managementMode == ManagementModeAgent {
+		status, collectStatus, collectError = AgentRuntimeState(host)
+	}
+
 	statusText := "未知"
-	if host.Status == 1 {
+	if status == 1 {
 		statusText = "在线"
-	} else if host.Status == 0 {
+	} else if status == 0 {
 		statusText = "离线"
 	}
 
@@ -214,30 +383,65 @@ func (uc *HostUseCase) toInfoVO(host *Host) *HostInfoVO {
 	if host.LastSeen != nil {
 		lastSeen = host.LastSeen.Format("2006-01-02 15:04:05")
 	}
+	var lastCollectAt string
+	if host.LastCollectAt != nil {
+		lastCollectAt = host.LastCollectAt.Format("2006-01-02 15:04:05")
+	}
+	var agentLastHeartbeatAt string
+	if host.AgentLastHeartbeatAt != nil {
+		agentLastHeartbeatAt = host.AgentLastHeartbeatAt.Format("2006-01-02 15:04:05")
+	}
+	var agentLastReportAt string
+	if host.AgentLastReportAt != nil {
+		agentLastReportAt = host.AgentLastReportAt.Format("2006-01-02 15:04:05")
+	}
 
 	return &HostInfoVO{
-		ID:                host.ID,
-		Name:              host.Name,
-		GroupID:           host.GroupID,
-		Type:              host.Type,
-		TypeText:          typeText,
-		CloudProvider:     host.CloudProvider,
-		CloudProviderText: cloudProviderText,
-		CloudInstanceID:   host.CloudInstanceID,
-		SSHUser:           host.SSHUser,
-		IP:                host.IP,
-		Port:              host.Port,
-		CredentialID:      host.CredentialID,
-		Tags:              tags,
-		Description:       host.Description,
-		Status:            host.Status,
-		StatusText:        statusText,
-		LastSeen:          lastSeen,
-		OS:                host.OS,
-		Kernel:            host.Kernel,
-		Arch:              host.Arch,
-		CreateTime:        host.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdateTime:        host.UpdatedAt.Format("2006-01-02 15:04:05"),
+		ID:                     host.ID,
+		Name:                   host.Name,
+		GroupID:                host.GroupID,
+		Type:                   host.Type,
+		TypeText:               typeText,
+		CloudProvider:          host.CloudProvider,
+		CloudProviderText:      cloudProviderText,
+		CloudInstanceID:        host.CloudInstanceID,
+		OSType:                 host.OSType,
+		SSHUser:                host.SSHUser,
+		IP:                     host.IP,
+		Port:                   host.Port,
+		CredentialID:           host.CredentialID,
+		ManagementMode:         managementMode,
+		ManagementModeText:     ManagementModeText(managementMode),
+		ManagementPort:         uc.effectiveManagementPort(host),
+		ManagementCredentialID: uc.effectiveManagementCredentialID(host),
+		DesktopEnabled:         host.DesktopEnabled,
+		DesktopProtocol:        host.DesktopProtocol,
+		DesktopPort:            host.DesktopPort,
+		DesktopCredentialID:    host.DesktopCredentialID,
+		DesktopSecurity:        host.DesktopSecurity,
+		DesktopIgnoreCert:      host.DesktopIgnoreCert,
+		Tags:                   tags,
+		Description:            host.Description,
+		Status:                 status,
+		StatusText:             statusText,
+		LastSeen:               lastSeen,
+		CollectStatus:          collectStatus,
+		CollectStatusText:      CollectStatusText(collectStatus),
+		CollectError:           collectError,
+		LastCollectAt:          lastCollectAt,
+		PrimaryPrivateIP:       host.PrimaryPrivateIP,
+		PrimaryPublicIP:        host.PrimaryPublicIP,
+		AgentID:                host.AgentID,
+		AgentVersion:           host.AgentVersion,
+		AgentLastHeartbeatAt:   agentLastHeartbeatAt,
+		AgentPort:              host.AgentPort,
+		AgentLastReportAt:      agentLastReportAt,
+		AgentLastError:         host.AgentLastError,
+		OS:                     host.OS,
+		Kernel:                 host.Kernel,
+		Arch:                   host.Arch,
+		CreateTime:             host.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdateTime:             host.UpdatedAt.Format("2006-01-02 15:04:05"),
 		// 扩展信息
 		CPUCores:    host.CPUCores,
 		CPUUsage:    host.CPUUsage,
@@ -259,38 +463,21 @@ func (uc *HostUseCase) CollectHostInfo(ctx context.Context, hostID uint) error {
 		return fmt.Errorf("获取主机信息失败: %w", err)
 	}
 
-	// 如果没有配置凭证，无法连接
-	if host.CredentialID == 0 {
-		return fmt.Errorf("主机未配置凭证")
+	mode := uc.effectiveManagementMode(host)
+	if mode == ManagementModeNone {
+		uc.persistCollectFailure(ctx, host, CollectStatusNotConfigured, fmt.Errorf("主机未配置采集通道"), -1)
+		return fmt.Errorf("主机未配置采集通道")
 	}
 
-	// 获取凭证（解密后的）
-	credential, err := uc.credentialRepo.GetByIDDecrypted(ctx, host.CredentialID)
+	hostCollector := uc.selectCollector(host)
+	info, err := hostCollector.Collect(ctx, host)
 	if err != nil {
-		return fmt.Errorf("获取凭证失败: %w", err)
-	}
-
-	// 创建SSH客户端
-	sshClient, err := uc.createSSHClient(host, credential)
-	if err != nil {
-		// 连接失败，更新主机状态为离线
-		host.Status = 0
-		uc.hostRepo.Update(ctx, host)
-		return fmt.Errorf("创建SSH连接失败: %w", err)
-	}
-	defer sshClient.Close()
-
-	// 创建采集器
-	c := collector.NewCollector(sshClient)
-
-	// 采集所有信息
-	info, err := c.CollectAll()
-	if err != nil {
+		collectStatus, runtimeStatus := uc.inferCollectFailure(host, err)
+		uc.persistCollectFailure(ctx, host, collectStatus, err, runtimeStatus)
 		return fmt.Errorf("采集主机信息失败: %w", err)
 	}
 
 	// 更新主机信息
-	now := time.Now()
 	host.OS = info.OS
 	host.Kernel = info.Kernel
 	host.Arch = info.Arch
@@ -302,8 +489,6 @@ func (uc *HostUseCase) CollectHostInfo(ctx context.Context, hostID uint) error {
 	host.MemoryUsage = info.Memory.Usage
 	host.Uptime = info.Uptime
 	host.Hostname = info.Hostname
-	host.Status = 1 // 在线
-	host.LastSeen = &now
 
 	// 计算磁盘总容量和使用量
 	var diskTotal, diskUsed uint64
@@ -323,6 +508,13 @@ func (uc *HostUseCase) CollectHostInfo(ctx context.Context, hostID uint) error {
 	if cpuJSON, err := info.CPU.ToJSON(); err == nil {
 		host.CPUInfo = cpuJSON
 	}
+
+	now := time.Now()
+	host.Status = 1
+	host.LastSeen = &now
+	host.LastCollectAt = &now
+	host.CollectStatus = CollectStatusOnline
+	host.CollectError = ""
 
 	return uc.hostRepo.Update(ctx, host)
 }
@@ -363,6 +555,49 @@ func (uc *HostUseCase) createSSHClient(host *Host, credential *Credential) (*ssh
 	return client, nil
 }
 
+func (uc *HostUseCase) inferCollectFailure(host *Host, err error) (string, int) {
+	mode := uc.effectiveManagementMode(host)
+	errMsg := err.Error()
+
+	switch mode {
+	case ManagementModeNone:
+		return CollectStatusNotConfigured, -1
+	case ManagementModeWinRM:
+		if uc.effectiveManagementCredentialID(host) == 0 || strings.Contains(errMsg, "未配置 WinRM 凭证") || strings.Contains(errMsg, "WinRM 凭证未配置") || strings.Contains(errMsg, "当前管理方式需要 WinRM 凭证") {
+			return CollectStatusNotConfigured, -1
+		}
+		if strings.Contains(errMsg, "创建WinRM连接失败") || strings.Contains(errMsg, "WinRM连接测试失败") || strings.Contains(errMsg, "WinRM执行失败") {
+			return CollectStatusOffline, 0
+		}
+		return CollectStatusUnknown, -1
+	case ManagementModeAgent:
+		if strings.Contains(errMsg, "Agent 未注册") || strings.Contains(errMsg, "尚未上报") {
+			return CollectStatusNotConfigured, -1
+		}
+		if strings.Contains(errMsg, "Agent 心跳超时") {
+			return CollectStatusOffline, 0
+		}
+		return CollectStatusUnknown, -1
+	default:
+		if strings.Contains(errMsg, "未配置 SSH 凭证") || strings.Contains(errMsg, "未配置 SSH 用户名") {
+			return CollectStatusNotConfigured, -1
+		}
+		if strings.Contains(errMsg, "创建SSH连接失败") || strings.Contains(errMsg, "连接测试失败") {
+			return CollectStatusOffline, 0
+		}
+		return CollectStatusUnknown, -1
+	}
+}
+
+func (uc *HostUseCase) persistCollectFailure(ctx context.Context, host *Host, collectStatus string, err error, runtimeStatus int) {
+	now := time.Now()
+	host.CollectStatus = collectStatus
+	host.CollectError = err.Error()
+	host.LastCollectAt = &now
+	host.Status = runtimeStatus
+	_ = uc.hostRepo.Update(ctx, host)
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -384,30 +619,12 @@ func (uc *HostUseCase) TestConnection(ctx context.Context, hostID uint) error {
 		return fmt.Errorf("获取主机信息失败: %w", err)
 	}
 
-	// 如果没有配置凭证，无法连接
-	if host.CredentialID == 0 {
-		return fmt.Errorf("主机未配置凭证")
+	mode := uc.effectiveManagementMode(host)
+	if mode == ManagementModeNone {
+		return fmt.Errorf("主机未配置采集通道")
 	}
 
-	// 获取凭证（解密后的）
-	credential, err := uc.credentialRepo.GetByIDDecrypted(ctx, host.CredentialID)
-	if err != nil {
-		return fmt.Errorf("获取凭证失败: %w", err)
-	}
-
-	// 创建SSH客户端
-	sshClient, err := uc.createSSHClient(host, credential)
-	if err != nil {
-		return fmt.Errorf("创建SSH连接失败: %w", err)
-	}
-	defer sshClient.Close()
-
-	// 测试连接
-	if err := sshClient.TestConnection(); err != nil {
-		return fmt.Errorf("连接测试失败: %w", err)
-	}
-
-	return nil
+	return uc.selectCollector(host).Test(ctx, host)
 }
 
 // BatchCollectHostInfo 批量采集主机信息
@@ -422,9 +639,29 @@ func (uc *HostUseCase) BatchCollectHostInfo(ctx context.Context, hostIDs []uint)
 // BatchDelete 批量删除主机
 func (uc *HostUseCase) BatchDelete(ctx context.Context, hostIDs []uint) error {
 	for _, hostID := range hostIDs {
-		if err := uc.hostRepo.Delete(ctx, hostID); err != nil {
+		if err := uc.Delete(ctx, hostID); err != nil {
 			return fmt.Errorf("删除主机 %d 失败: %w", hostID, err)
 		}
+	}
+	return nil
+}
+
+func (uc *HostUseCase) cleanupHostAgentArtifacts(ctx context.Context, hostID uint) error {
+	if hostID == 0 {
+		return nil
+	}
+	if uc.agentRepo != nil {
+		if err := uc.agentRepo.DeleteByHostID(ctx, hostID); err != nil {
+			return fmt.Errorf("清理 Agent 记录失败: %w", err)
+		}
+	}
+	if uc.inventoryRepo != nil {
+		if err := uc.inventoryRepo.DeleteByHostID(ctx, hostID); err != nil {
+			return fmt.Errorf("清理 Agent 库存失败: %w", err)
+		}
+	}
+	if err := removePrometheusTargetFile(uc.promCfg, hostID); err != nil {
+		return fmt.Errorf("清理 Prometheus 目标失败: %w", err)
 	}
 	return nil
 }
@@ -439,9 +676,11 @@ func (uc *HostUseCase) toCredentialVO(credential *Credential) *CredentialVO {
 	return &CredentialVO{
 		ID:          credential.ID,
 		Name:        credential.Name,
+		Protocol:    credential.Protocol,
 		Type:        credential.Type,
 		TypeText:    typeText,
 		Username:    credential.Username,
+		Domain:      credential.Domain,
 		Description: credential.Description,
 		CreateTime:  credential.CreatedAt.Format("2006-01-02 15:04:05"),
 	}
@@ -477,6 +716,13 @@ func NewCredentialUseCase(repo CredentialRepo, hostRepo HostRepo) *CredentialUse
 
 // Create 创建凭证
 func (uc *CredentialUseCase) Create(ctx context.Context, req *CredentialRequest) (*Credential, error) {
+	if req.Protocol == "" {
+		req.Protocol = "ssh"
+	}
+	if (req.Protocol == "rdp" || req.Protocol == "winrm") && req.Type != "password" {
+		return nil, fmt.Errorf("%s 凭证仅支持密码认证", strings.ToUpper(req.Protocol))
+	}
+
 	credential := req.ToModel()
 
 	if err := uc.repo.Create(ctx, credential); err != nil {
@@ -494,19 +740,33 @@ func (uc *CredentialUseCase) Update(ctx context.Context, req *CredentialRequest)
 	}
 
 	credential.Name = req.Name
+	if req.Protocol != "" {
+		credential.Protocol = req.Protocol
+	}
 	credential.Type = req.Type
 	credential.Username = req.Username
+	credential.Domain = req.Domain
 	credential.Description = req.Description
+
+	if (credential.Protocol == "rdp" || credential.Protocol == "winrm") && credential.Type != "password" {
+		return fmt.Errorf("%s 凭证仅支持密码认证", strings.ToUpper(credential.Protocol))
+	}
 
 	// 如果提供了新的密码或私钥，更新它们
 	if req.Password != "" {
 		credential.Password = req.Password
+	} else if req.ClearPassword {
+		credential.Password = ""
 	}
 	if req.PrivateKey != "" {
 		credential.PrivateKey = req.PrivateKey
+	} else if req.ClearPrivateKey {
+		credential.PrivateKey = ""
 	}
 	if req.Passphrase != "" {
 		credential.Passphrase = req.Passphrase
+	} else if req.ClearPassphrase {
+		credential.Passphrase = ""
 	}
 
 	return uc.repo.Update(ctx, credential)
@@ -542,9 +802,11 @@ func (uc *CredentialUseCase) List(ctx context.Context, page, pageSize int, keywo
 		vo := &CredentialVO{
 			ID:          cred.ID,
 			Name:        cred.Name,
+			Protocol:    cred.Protocol,
 			Type:        cred.Type,
 			TypeText:    typeText,
 			Username:    cred.Username,
+			Domain:      cred.Domain,
 			Description: cred.Description,
 			CreateTime:  cred.CreatedAt.Format("2006-01-02 15:04:05"),
 			HostCount:   usedCount,
@@ -575,9 +837,11 @@ func (uc *CredentialUseCase) GetAll(ctx context.Context) ([]*CredentialVO, error
 		vo := &CredentialVO{
 			ID:          cred.ID,
 			Name:        cred.Name,
+			Protocol:    cred.Protocol,
 			Type:        cred.Type,
 			TypeText:    typeText,
 			Username:    cred.Username,
+			Domain:      cred.Domain,
 			Description: cred.Description,
 			CreateTime:  cred.CreatedAt.Format("2006-01-02 15:04:05"),
 			HostCount:   usedCount,
@@ -696,6 +960,8 @@ func (uc *CloudAccountUseCase) GetRegions(ctx context.Context, accountID uint) (
 		regions, err = uc.listAliyunRegions(account)
 	case "tencent":
 		regions, err = uc.listTencentRegions(account)
+	case "aws":
+		regions, err = uc.listAWSRegions(account)
 	case "jdcloud":
 		regions, err = uc.listJDCloudRegions(account)
 	default:
@@ -733,6 +999,8 @@ func (uc *CloudAccountUseCase) GetInstances(ctx context.Context, accountID uint,
 		instances, err = uc.listAliyunInstances(account, region)
 	case "tencent":
 		instances, err = uc.listTencentInstances(account, region)
+	case "aws":
+		instances, err = uc.listAWSInstances(account, region)
 	default:
 		return nil, fmt.Errorf("暂不支持该云平台")
 	}
@@ -759,14 +1027,18 @@ func (uc *CloudAccountUseCase) GetInstances(ctx context.Context, accountID uint,
 
 // toVO 转换为VO
 func (uc *CloudAccountUseCase) toVO(account *CloudAccount) *CloudAccountVO {
-	providerText := "阿里云"
+	providerText := account.Provider
 	switch account.Provider {
+	case "aliyun":
+		providerText = "阿里云"
 	case "tencent":
 		providerText = "腾讯云"
 	case "aws":
 		providerText = "AWS"
 	case "huawei":
 		providerText = "华为云"
+	case "jdcloud":
+		providerText = "京东云"
 	}
 
 	return &CloudAccountVO{
@@ -789,7 +1061,6 @@ func (uc *CloudAccountUseCase) ImportFromCloud(ctx context.Context, req *CloudIm
 	}
 
 	// 根据不同的云厂商调用不同的SDK获取实例列表
-	// 这里先实现阿里云的导入
 	var instances []CloudInstance
 
 	switch account.Provider {
@@ -797,6 +1068,8 @@ func (uc *CloudAccountUseCase) ImportFromCloud(ctx context.Context, req *CloudIm
 		instances, err = uc.listAliyunInstances(account, req.Region)
 	case "tencent":
 		instances, err = uc.listTencentInstances(account, req.Region)
+	case "aws":
+		instances, err = uc.listAWSInstances(account, req.Region)
 	default:
 		return fmt.Errorf("暂不支持该云平台")
 	}
@@ -910,6 +1183,38 @@ type CloudRegion struct {
 	Label string
 }
 
+var awsRegionLabels = map[string]string{
+	"us-east-1":      "美国东部 (弗吉尼亚北部)",
+	"us-east-2":      "美国东部 (俄亥俄)",
+	"us-west-1":      "美国西部 (加利福尼亚北部)",
+	"us-west-2":      "美国西部 (俄勒冈)",
+	"ca-central-1":   "加拿大 (中部)",
+	"sa-east-1":      "南美洲 (圣保罗)",
+	"eu-west-1":      "欧洲 (爱尔兰)",
+	"eu-west-2":      "欧洲 (伦敦)",
+	"eu-west-3":      "欧洲 (巴黎)",
+	"eu-central-1":   "欧洲 (法兰克福)",
+	"eu-central-2":   "欧洲 (苏黎世)",
+	"eu-north-1":     "欧洲 (斯德哥尔摩)",
+	"eu-south-1":     "欧洲 (米兰)",
+	"eu-south-2":     "欧洲 (西班牙)",
+	"ap-east-1":      "亚太地区 (香港)",
+	"ap-south-1":     "亚太地区 (孟买)",
+	"ap-south-2":     "亚太地区 (海得拉巴)",
+	"ap-southeast-1": "亚太地区 (新加坡)",
+	"ap-southeast-2": "亚太地区 (悉尼)",
+	"ap-southeast-3": "亚太地区 (雅加达)",
+	"ap-southeast-4": "亚太地区 (墨尔本)",
+	"ap-northeast-1": "亚太地区 (东京)",
+	"ap-northeast-2": "亚太地区 (首尔)",
+	"ap-northeast-3": "亚太地区 (大阪)",
+	"ap-east-2":      "亚太地区 (台北)",
+	"me-south-1":     "中东 (巴林)",
+	"me-central-1":   "中东 (阿联酋)",
+	"af-south-1":     "非洲 (开普敦)",
+	"il-central-1":   "以色列 (特拉维夫)",
+}
+
 // listAliyunRegions 获取阿里云区域列表
 func (uc *CloudAccountUseCase) listAliyunRegions(account *CloudAccount) ([]CloudRegion, error) {
 	// 使用杭州区域创建客户端（DescribeRegions API 可以使用任意区域）
@@ -1003,6 +1308,49 @@ func (uc *CloudAccountUseCase) listJDCloudRegions(account *CloudAccount) ([]Clou
 		{Value: "cn-southwest-1", Label: "西南-成都"},
 		{Value: "ap-southeast-1", Label: "中国香港"},
 	}, nil
+}
+
+func (uc *CloudAccountUseCase) listAWSRegions(account *CloudAccount) ([]CloudRegion, error) {
+	client, err := uc.newAWSEC2Client(account, defaultAWSRegion(account.Region))
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := client.DescribeRegions(context.Background(), &ec2.DescribeRegionsInput{
+		AllRegions: aws.Bool(true),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("获取AWS区域列表失败: %w", err)
+	}
+
+	regions := make([]CloudRegion, 0, len(response.Regions))
+	for _, region := range response.Regions {
+		regionID := aws.ToString(region.RegionName)
+		if regionID == "" {
+			continue
+		}
+
+		optInStatus := aws.ToString(region.OptInStatus)
+		if optInStatus == "not-opted-in" {
+			continue
+		}
+
+		label := regionID
+		if localName, ok := awsRegionLabels[regionID]; ok {
+			label = fmt.Sprintf("%s (%s)", localName, regionID)
+		}
+
+		regions = append(regions, CloudRegion{
+			Value: regionID,
+			Label: label,
+		})
+	}
+
+	sort.Slice(regions, func(i, j int) bool {
+		return regions[i].Value < regions[j].Value
+	})
+
+	return regions, nil
 }
 
 // listAliyunInstances 获取阿里云实例列表
@@ -1208,6 +1556,96 @@ func (uc *CloudAccountUseCase) listJDCloudInstances(account *CloudAccount, regio
 	}
 
 	return instances, nil
+}
+
+func (uc *CloudAccountUseCase) listAWSInstances(account *CloudAccount, region string) ([]CloudInstance, error) {
+	awsRegion := strings.TrimSpace(region)
+	if awsRegion == "" {
+		awsRegion = account.Region
+	}
+
+	client, err := uc.newAWSEC2Client(account, defaultAWSRegion(awsRegion))
+	if err != nil {
+		return nil, err
+	}
+
+	paginator := ec2.NewDescribeInstancesPaginator(client, &ec2.DescribeInstancesInput{
+		MaxResults: aws.Int32(100),
+	})
+
+	allInstances := make([]CloudInstance, 0, 100)
+	pageCount := 0
+	for paginator.HasMorePages() {
+		response, err := paginator.NextPage(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("获取AWS实例失败: %w", err)
+		}
+
+		for _, reservation := range response.Reservations {
+			for _, instance := range reservation.Instances {
+				instanceID := aws.ToString(instance.InstanceId)
+				if instanceID == "" {
+					continue
+				}
+
+				name := instanceID
+				for _, tag := range instance.Tags {
+					if aws.ToString(tag.Key) == "Name" && aws.ToString(tag.Value) != "" {
+						name = aws.ToString(tag.Value)
+						break
+					}
+				}
+
+				osName := aws.ToString(instance.PlatformDetails)
+				if osName == "" {
+					if strings.EqualFold(string(instance.Platform), "windows") {
+						osName = "Windows"
+					} else {
+						osName = "Linux/UNIX"
+					}
+				}
+
+				allInstances = append(allInstances, CloudInstance{
+					InstanceID: instanceID,
+					Name:       name,
+					PublicIP:   aws.ToString(instance.PublicIpAddress),
+					PrivateIP:  aws.ToString(instance.PrivateIpAddress),
+					OS:         osName,
+					Status:     strings.ToLower(string(instance.State.Name)),
+				})
+			}
+		}
+
+		pageCount++
+		if pageCount >= 20 {
+			break
+		}
+	}
+
+	return allInstances, nil
+}
+
+func (uc *CloudAccountUseCase) newAWSEC2Client(account *CloudAccount, region string) (*ec2.Client, error) {
+	awsCfg, err := awscfg.LoadDefaultConfig(context.Background(),
+		awscfg.WithRegion(defaultAWSRegion(region)),
+		awscfg.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			account.AccessKey,
+			account.SecretKey,
+			"",
+		)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("创建AWS客户端失败: %w", err)
+	}
+
+	return ec2.NewFromConfig(awsCfg), nil
+}
+
+func defaultAWSRegion(region string) string {
+	if strings.TrimSpace(region) != "" {
+		return region
+	}
+	return "us-east-1"
 }
 
 // ExcelImportResult Excel导入结果
@@ -1493,54 +1931,21 @@ func (uc *HostUseCase) ImportFromExcelWithType(ctx context.Context, excelData []
 }
 
 // ListFiles 列出主机目录下的文件
-func (uc *HostUseCase) ListFiles(ctx context.Context, hostID uint, remotePath string) ([]*sshclient.FileInfo, error) {
-
+func (uc *HostUseCase) ListFiles(ctx context.Context, hostID uint, remotePath string) ([]*HostFileEntry, error) {
 	host, err := uc.hostRepo.GetByID(ctx, hostID)
 	if err != nil {
 		return nil, fmt.Errorf("获取主机信息失败: %w", err)
 	}
 
-	if host.CredentialID == 0 {
-		return nil, fmt.Errorf("主机未配置凭证")
+	if host.OSType == OSTypeWindows && !uc.shouldUseAgentFileProxy(host) {
+		return nil, fmt.Errorf("Windows 文件管理仅支持已部署并在线的 Agent")
 	}
 
-	credential, err := uc.credentialRepo.GetByIDDecrypted(ctx, host.CredentialID)
-	if err != nil {
-		return nil, fmt.Errorf("获取凭证失败: %w", err)
+	if uc.shouldUseAgentFileProxy(host) {
+		return uc.listFilesViaAgent(ctx, host, remotePath)
 	}
 
-	sshClient, err := uc.createSSHClient(host, credential)
-	if err != nil {
-		return nil, fmt.Errorf("创建SSH连接失败: %w", err)
-	}
-	defer sshClient.Close()
-
-	// 如果路径以 ~ 开头，替换为用户主目录
-	if strings.HasPrefix(remotePath, "~") {
-		homeDir, err := sshClient.Execute("echo $HOME")
-		if err != nil {
-			return nil, fmt.Errorf("获取用户主目录失败: %w", err)
-		}
-		homeDir = strings.TrimSpace(homeDir)
-		remotePath = strings.Replace(remotePath, "~", homeDir, 1)
-	}
-
-	// 检查路径是否存在
-	statInfo, err := sshClient.StatFile(remotePath)
-	if err != nil {
-		return nil, fmt.Errorf("路径不存在或无权限访问: %s, 错误: %w", remotePath, err)
-	}
-
-	if !statInfo.IsDir {
-		return nil, fmt.Errorf("路径不是目录: %s", remotePath)
-	}
-
-	files, err := sshClient.ListDir(remotePath)
-	if err != nil {
-		return nil, fmt.Errorf("列出目录失败: %w", err)
-	}
-
-	return files, nil
+	return uc.listFilesViaSSH(ctx, host, remotePath)
 }
 
 // UploadFile 上传文件到主机
@@ -1550,40 +1955,15 @@ func (uc *HostUseCase) UploadFile(ctx context.Context, hostID uint, reader io.Re
 		return fmt.Errorf("获取主机信息失败: %w", err)
 	}
 
-	if host.CredentialID == 0 {
-		return fmt.Errorf("主机未配置凭证")
+	if host.OSType == OSTypeWindows && !uc.shouldUseAgentFileProxy(host) {
+		return fmt.Errorf("Windows 文件管理仅支持已部署并在线的 Agent")
 	}
 
-	credential, err := uc.credentialRepo.GetByIDDecrypted(ctx, host.CredentialID)
-	if err != nil {
-		return fmt.Errorf("获取凭证失败: %w", err)
+	if uc.shouldUseAgentFileProxy(host) {
+		return uc.uploadFileViaAgent(ctx, host, reader, remotePath, filename)
 	}
 
-	sshClient, err := uc.createSSHClient(host, credential)
-	if err != nil {
-		return fmt.Errorf("创建SSH连接失败: %w", err)
-	}
-	defer sshClient.Close()
-
-	// 如果路径以 ~ 开头，替换为用户主目录
-	if strings.HasPrefix(remotePath, "~") {
-		homeDir, err := sshClient.Execute("echo $HOME")
-		if err != nil {
-			return fmt.Errorf("获取用户主目录失败: %w", err)
-		}
-		homeDir = strings.TrimSpace(homeDir)
-		remotePath = strings.Replace(remotePath, "~", homeDir, 1)
-	}
-
-	// 构造完整的远程文件路径
-	fullPath := filepath.Join(remotePath, filename)
-
-	// 上传文件
-	if err := sshClient.UploadFromReader(reader, fullPath); err != nil {
-		return fmt.Errorf("上传文件失败: %w", err)
-	}
-
-	return nil
+	return uc.uploadFileViaSSH(ctx, host, reader, remotePath, filename)
 }
 
 // DownloadFile 从主机下载文件
@@ -1593,37 +1973,15 @@ func (uc *HostUseCase) DownloadFile(ctx context.Context, hostID uint, remotePath
 		return fmt.Errorf("获取主机信息失败: %w", err)
 	}
 
-	if host.CredentialID == 0 {
-		return fmt.Errorf("主机未配置凭证")
+	if host.OSType == OSTypeWindows && !uc.shouldUseAgentFileProxy(host) {
+		return fmt.Errorf("Windows 文件管理仅支持已部署并在线的 Agent")
 	}
 
-	credential, err := uc.credentialRepo.GetByIDDecrypted(ctx, host.CredentialID)
-	if err != nil {
-		return fmt.Errorf("获取凭证失败: %w", err)
+	if uc.shouldUseAgentFileProxy(host) {
+		return uc.downloadFileViaAgent(ctx, host, remotePath, writer)
 	}
 
-	sshClient, err := uc.createSSHClient(host, credential)
-	if err != nil {
-		return fmt.Errorf("创建SSH连接失败: %w", err)
-	}
-	defer sshClient.Close()
-
-	// 如果路径以 ~ 开头，替换为用户主目录
-	if strings.HasPrefix(remotePath, "~") {
-		homeDir, err := sshClient.Execute("echo $HOME")
-		if err != nil {
-			return fmt.Errorf("获取用户主目录失败: %w", err)
-		}
-		homeDir = strings.TrimSpace(homeDir)
-		remotePath = strings.Replace(remotePath, "~", homeDir, 1)
-	}
-
-	// 下载文件
-	if err := sshClient.DownloadToWriter(remotePath, writer); err != nil {
-		return fmt.Errorf("下载文件失败: %w", err)
-	}
-
-	return nil
+	return uc.downloadFileViaSSH(ctx, host, remotePath, writer)
 }
 
 // DeleteFile 删除主机上的文件
@@ -1633,35 +1991,13 @@ func (uc *HostUseCase) DeleteFile(ctx context.Context, hostID uint, remotePath s
 		return fmt.Errorf("获取主机信息失败: %w", err)
 	}
 
-	if host.CredentialID == 0 {
-		return fmt.Errorf("主机未配置凭证")
+	if host.OSType == OSTypeWindows && !uc.shouldUseAgentFileProxy(host) {
+		return fmt.Errorf("Windows 文件管理仅支持已部署并在线的 Agent")
 	}
 
-	credential, err := uc.credentialRepo.GetByIDDecrypted(ctx, host.CredentialID)
-	if err != nil {
-		return fmt.Errorf("获取凭证失败: %w", err)
+	if uc.shouldUseAgentFileProxy(host) {
+		return uc.deleteFileViaAgent(ctx, host, remotePath)
 	}
 
-	sshClient, err := uc.createSSHClient(host, credential)
-	if err != nil {
-		return fmt.Errorf("创建SSH连接失败: %w", err)
-	}
-	defer sshClient.Close()
-
-	// 如果路径以 ~ 开头，替换为用户主目录
-	if strings.HasPrefix(remotePath, "~") {
-		homeDir, err := sshClient.Execute("echo $HOME")
-		if err != nil {
-			return fmt.Errorf("获取用户主目录失败: %w", err)
-		}
-		homeDir = strings.TrimSpace(homeDir)
-		remotePath = strings.Replace(remotePath, "~", homeDir, 1)
-	}
-
-	// 删除文件
-	if err := sshClient.RemoveFile(remotePath); err != nil {
-		return fmt.Errorf("删除文件失败: %w", err)
-	}
-
-	return nil
+	return uc.deleteFileViaSSH(ctx, host, remotePath)
 }

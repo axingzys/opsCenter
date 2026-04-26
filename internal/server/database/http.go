@@ -1,0 +1,230 @@
+package database
+
+import (
+	"context"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	dbbiz "github.com/ydcloud-dy/opshub/internal/biz/database"
+	systembiz "github.com/ydcloud-dy/opshub/internal/biz/system"
+	assetdata "github.com/ydcloud-dy/opshub/internal/data/asset"
+	dbdata "github.com/ydcloud-dy/opshub/internal/data/database"
+	systemdata "github.com/ydcloud-dy/opshub/internal/data/system"
+	dbservice "github.com/ydcloud-dy/opshub/internal/service/database"
+	rbacservice "github.com/ydcloud-dy/opshub/internal/service/rbac"
+	"gorm.io/gorm"
+)
+
+const (
+	permDatabaseInstanceView    = "database:instance:view"
+	permDatabaseInstanceCreate  = "database:instance:create"
+	permDatabaseInstanceUpdate  = "database:instance:update"
+	permDatabaseInstanceDelete  = "database:instance:delete"
+	permDatabaseInstanceStatus  = "database:instance:status"
+	permDatabaseConnectionTest  = "database:connection:test"
+	permDatabaseMetadataView    = "database:metadata:view"
+	permDatabaseMetadataSync    = "database:metadata:sync"
+	permDatabaseMetadataExport  = "database:metadata:export"
+	permDatabaseQueryExecute    = "database:query:execute"
+	permDatabaseQueryWrite      = "database:query:write"
+	permDatabaseQueryExplain    = "database:query:explain"
+	permDatabaseQueryExport     = "database:query:export"
+	permDatabaseQueryHistory    = "database:query:history:view"
+	permDatabaseDiagnosisView   = "database:diagnosis:view"
+	permDatabaseTopologyView    = "database:topology:view"
+	permDatabaseAuditView       = "database:audit:view"
+	permDatabaseAuditExport     = "database:audit:export"
+	permDatabaseBackupView      = "database:backup:view"
+	permDatabaseBackupCreate    = "database:backup:create"
+	permDatabaseBackupUpdate    = "database:backup:update"
+	permDatabaseBackupDelete    = "database:backup:delete"
+	permDatabaseBackupRun       = "database:backup:run"
+	permDatabaseBackupDownload  = "database:backup:download"
+	permDatabaseRestoreView     = "database:restore:view"
+	permDatabaseRestoreRun      = "database:restore:run"
+	permDatabaseCapacityView    = "database:capacity:view"
+	permDatabaseCapacityCollect = "database:capacity:collect"
+	permDatabaseInspectionView  = "database:inspection:view"
+	permDatabaseInspectionRun   = "database:inspection:run"
+)
+
+type HTTPServer struct {
+	service           *dbservice.Service
+	backupScheduler   *dbbiz.BackupScheduler
+	capacityScheduler *dbbiz.CapacityScheduler
+	authMiddleware    *rbacservice.AuthMiddleware
+}
+
+func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTTPServer {
+	instanceRepo := dbdata.NewInstanceRepo(db)
+	schemaRepo := dbdata.NewSchemaRepo(db)
+	tableRepo := dbdata.NewTableRepo(db)
+	columnRepo := dbdata.NewColumnRepo(db)
+	indexRepo := dbdata.NewIndexRepo(db)
+	metadataRepo := dbdata.NewMetadataRepo(db)
+	redisMetadataRepo := dbdata.NewRedisMetadataRepo(db)
+	syncJobRepo := dbdata.NewSyncJobRepo(db)
+	auditRepo := dbdata.NewQueryAuditRepo(db)
+	backupTaskRepo := dbdata.NewBackupTaskRepo(db)
+	backupRecordRepo := dbdata.NewBackupRecordRepo(db)
+	restoreJobRepo := dbdata.NewRestoreJobRepo(db)
+	capacitySnapshotRepo := dbdata.NewCapacitySnapshotRepo(db)
+	inspectionReportRepo := dbdata.NewInspectionReportRepo(db)
+	credentialRepo := assetdata.NewCredentialRepo(db)
+	configRepo := systemdata.NewConfigRepo(db)
+	loginAttemptRepo := systemdata.NewLoginAttemptRepo(db)
+	configUseCase := systembiz.NewConfigUseCase(configRepo, loginAttemptRepo)
+
+	useCase := dbbiz.NewUseCase(
+		instanceRepo,
+		schemaRepo,
+		tableRepo,
+		columnRepo,
+		indexRepo,
+		metadataRepo,
+		redisMetadataRepo,
+		syncJobRepo,
+		auditRepo,
+		backupTaskRepo,
+		backupRecordRepo,
+		restoreJobRepo,
+		capacitySnapshotRepo,
+		inspectionReportRepo,
+		func(ctx context.Context, id uint) error {
+			_, err := credentialRepo.GetByID(ctx, id)
+			return err
+		},
+		func(ctx context.Context, id uint) (*dbbiz.ConnectionCredential, error) {
+			credential, err := credentialRepo.GetByIDDecrypted(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			return &dbbiz.ConnectionCredential{
+				Username: credential.Username,
+				Password: credential.Password,
+			}, nil
+		},
+		func(ctx context.Context) (*dbbiz.DatabaseWritePolicy, error) {
+			cfg, err := configUseCase.GetDatabaseConfig(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return &dbbiz.DatabaseWritePolicy{
+				WriteEnabled:            cfg.WriteEnabled,
+				HighRiskRequiresConfirm: cfg.HighRiskRequiresConfirm,
+				OperationReasonRequired: cfg.OperationReasonRequired,
+				MaxAffectedRows:         int64(cfg.MaxAffectedRows),
+			}, nil
+		},
+		func(ctx context.Context) (*dbbiz.DatabaseBackupPolicy, error) {
+			cfg, err := configUseCase.GetDatabaseConfig(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return &dbbiz.DatabaseBackupPolicy{
+				DefaultRetentionDays: cfg.DefaultBackupRetentionDays,
+				StoragePath:          cfg.BackupStoragePath,
+			}, nil
+		},
+	)
+
+	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
+		Interval:        time.Minute,
+		CleanupInterval: 6 * time.Hour,
+		NotifyFailure: func(ctx context.Context, notice *dbbiz.BackupSchedulerNotice) error {
+			return dispatchBackupSchedulerAlert(ctx, db, notice)
+		},
+	})
+	capacityScheduler := dbbiz.NewCapacityScheduler(useCase, dbbiz.CapacitySchedulerOptions{
+		Interval: 6 * time.Hour,
+	})
+
+	return &HTTPServer{
+		service:           dbservice.NewService(useCase),
+		backupScheduler:   backupScheduler,
+		capacityScheduler: capacityScheduler,
+		authMiddleware:    authMiddleware,
+	}
+}
+
+func (s *HTTPServer) StartBackground(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	if s.backupScheduler != nil {
+		s.backupScheduler.Start(ctx)
+	}
+	if s.capacityScheduler != nil {
+		s.capacityScheduler.Start(ctx)
+	}
+}
+
+func (s *HTTPServer) StopBackground(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	if s.backupScheduler != nil {
+		if err := s.backupScheduler.Stop(ctx); err != nil {
+			return err
+		}
+	}
+	if s.capacityScheduler != nil {
+		if err := s.capacityScheduler.Stop(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
+	databases := r.Group("/databases")
+	{
+		databases.GET("/supported-types", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.service.GetSupportedTypes)
+		databases.GET("/query-history", s.authMiddleware.RequireMenuPermission(permDatabaseQueryHistory), s.service.ListQueryHistory)
+		databases.GET("/query-audits", s.authMiddleware.RequireMenuPermission(permDatabaseAuditView), s.service.ListQueryAudits)
+		databases.GET("/query-audits/export", s.authMiddleware.RequireMenuPermission(permDatabaseAuditExport), s.service.ExportQueryAudits)
+		databases.GET("/backup-tasks", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupTasks)
+		databases.POST("/backup-tasks", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateBackupTask)
+		databases.PUT("/backup-tasks/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateBackupTask)
+		databases.DELETE("/backup-tasks/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBackupTask)
+		databases.POST("/backup-tasks/:id/run", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupTask)
+		databases.GET("/backup-records", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupRecords)
+		databases.GET("/backup-records/:id/download", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDownload), s.service.DownloadBackupRecord)
+		databases.POST("/backup-records/:id/restore-dry-run", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreRun), s.service.RunRestoreDryRun)
+		databases.GET("/restore-jobs", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreView), s.service.ListRestoreJobs)
+		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
+		databases.POST("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionRun), s.service.GenerateInspectionReport)
+		databases.GET("/inspection-reports/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.GetInspectionReport)
+
+		instances := databases.Group("/instances")
+		{
+			instances.GET("", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.service.ListInstances)
+			instances.POST("", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceCreate), s.service.CreateInstance)
+			instances.GET("/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.service.GetInstance)
+			instances.PUT("/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceUpdate), s.service.UpdateInstance)
+			instances.DELETE("/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceDelete), s.service.DeleteInstance)
+			instances.POST("/:id/enable", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceStatus), s.service.EnableInstance)
+			instances.POST("/:id/disable", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceStatus), s.service.DisableInstance)
+			instances.POST("/:id/test", s.authMiddleware.RequireMenuPermission(permDatabaseConnectionTest), s.service.TestInstance)
+			instances.POST("/:id/sync-metadata", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataSync), s.service.SyncMetadata)
+			instances.GET("/:id/schemas", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListSchemas)
+			instances.GET("/:id/tables", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListTables)
+			instances.GET("/:id/columns", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListColumns)
+			instances.GET("/:id/indexes", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListIndexes)
+			instances.GET("/:id/ddl", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.GetTableDDL)
+			instances.GET("/:id/dictionary/export", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataExport), s.service.ExportTableDictionary)
+			instances.GET("/:id/metrics", s.authMiddleware.RequireMenuPermission(permDatabaseDiagnosisView), s.service.GetDiagnosisMetrics)
+			instances.GET("/:id/sessions", s.authMiddleware.RequireMenuPermission(permDatabaseDiagnosisView), s.service.ListDiagnosisSessions)
+			instances.GET("/:id/slow-queries", s.authMiddleware.RequireMenuPermission(permDatabaseDiagnosisView), s.service.ListSlowQueries)
+			instances.GET("/:id/topology", s.authMiddleware.RequireMenuPermission(permDatabaseTopologyView), s.service.GetTopology)
+			instances.GET("/:id/capacity-trend", s.authMiddleware.RequireMenuPermission(permDatabaseCapacityView), s.service.GetCapacityTrend)
+			instances.POST("/:id/capacity-snapshots", s.authMiddleware.RequireMenuPermission(permDatabaseCapacityCollect), s.service.CollectCapacitySnapshot)
+			instances.POST("/:id/query/format", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExecute), s.service.FormatQuerySQL)
+			instances.POST("/:id/query/write/validate", s.authMiddleware.RequireMenuPermission(permDatabaseQueryWrite), s.service.ValidateWriteQuery)
+			instances.POST("/:id/query/write", s.authMiddleware.RequireMenuPermission(permDatabaseQueryWrite), s.service.ExecuteWriteQuery)
+			instances.POST("/:id/query", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExecute), s.service.ExecuteQuery)
+			instances.POST("/:id/query/explain", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExplain), s.service.ExplainQuery)
+			instances.POST("/:id/query/export", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExport), s.service.ExportQueryResult)
+		}
+	}
+}

@@ -79,13 +79,26 @@ const (
 
 	// LDAP 配置
 	ConfigKeyLDAPConfig = "ldap_config" // JSON格式存储完整LDAP配置
+
+	// 监控配置
+	ConfigKeyPrometheusRetentionDays = "prometheus_retention_days"
+
+	// 数据库配置
+	ConfigKeyDatabaseWriteEnabled               = "database_write_enabled"
+	ConfigKeyDatabaseHighRiskRequiresConfirm    = "database_high_risk_requires_confirm"
+	ConfigKeyDatabaseOperationReasonRequired    = "database_operation_reason_required"
+	ConfigKeyDatabaseMaxAffectedRows            = "database_max_affected_rows"
+	ConfigKeyDatabaseDefaultBackupRetentionDays = "database_default_backup_retention_days"
+	ConfigKeyDatabaseBackupStoragePath          = "database_backup_storage_path"
 )
 
 // ConfigGroup 配置分组常量
 const (
-	ConfigGroupBasic    = "basic"
-	ConfigGroupSecurity = "security"
-	ConfigGroupLDAP     = "ldap"
+	ConfigGroupBasic      = "basic"
+	ConfigGroupSecurity   = "security"
+	ConfigGroupLDAP       = "ldap"
+	ConfigGroupMonitoring = "monitoring"
+	ConfigGroupDatabase   = "database"
 )
 
 // DefaultConfigs 默认配置
@@ -181,6 +194,55 @@ var DefaultConfigs = map[string]SysConfig{
 		Group:  ConfigGroupLDAP,
 		Remark: "LDAP配置(JSON)",
 	},
+	ConfigKeyPrometheusRetentionDays: {
+		Key:    ConfigKeyPrometheusRetentionDays,
+		Value:  "15",
+		Type:   "int",
+		Group:  ConfigGroupMonitoring,
+		Remark: "Prometheus监控数据目标保留天数",
+	},
+	ConfigKeyDatabaseWriteEnabled: {
+		Key:    ConfigKeyDatabaseWriteEnabled,
+		Value:  "false",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库写操作总开关",
+	},
+	ConfigKeyDatabaseHighRiskRequiresConfirm: {
+		Key:    ConfigKeyDatabaseHighRiskRequiresConfirm,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库高风险操作是否要求二次确认",
+	},
+	ConfigKeyDatabaseOperationReasonRequired: {
+		Key:    ConfigKeyDatabaseOperationReasonRequired,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库操作是否要求填写原因",
+	},
+	ConfigKeyDatabaseMaxAffectedRows: {
+		Key:    ConfigKeyDatabaseMaxAffectedRows,
+		Value:  "1000",
+		Type:   "int",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库写操作最大影响行数",
+	},
+	ConfigKeyDatabaseDefaultBackupRetentionDays: {
+		Key:    ConfigKeyDatabaseDefaultBackupRetentionDays,
+		Value:  "7",
+		Type:   "int",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库备份默认保留天数",
+	},
+	ConfigKeyDatabaseBackupStoragePath: {
+		Key:    ConfigKeyDatabaseBackupStoragePath,
+		Value:  "./data/database-backups",
+		Type:   "string",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库备份默认本地存储目录",
+	},
 }
 
 // BasicConfig 基础配置响应结构
@@ -202,6 +264,23 @@ type SecurityConfig struct {
 	MFAEnforced     bool   `json:"mfaEnforced"`
 	MFAType         string `json:"mfaType"`
 	MFASkipDuration int    `json:"mfaSkipDuration"`
+}
+
+// MonitoringConfig 监控配置响应结构
+type MonitoringConfig struct {
+	PrometheusRetentionDays    int    `json:"prometheusRetentionDays"`
+	PrometheusBaseURL          string `json:"prometheusBaseUrl,omitempty"`
+	CurrentPrometheusRetention string `json:"currentPrometheusRetention,omitempty"`
+}
+
+// DatabaseConfig 数据库配置响应结构
+type DatabaseConfig struct {
+	WriteEnabled               bool   `json:"writeEnabled"`
+	HighRiskRequiresConfirm    bool   `json:"highRiskRequiresConfirm"`
+	OperationReasonRequired    bool   `json:"operationReasonRequired"`
+	MaxAffectedRows            int    `json:"maxAffectedRows"`
+	DefaultBackupRetentionDays int    `json:"defaultBackupRetentionDays"`
+	BackupStoragePath          string `json:"backupStoragePath"`
 }
 
 // LDAPConfig LDAP配置结构
@@ -241,7 +320,9 @@ func GetDefaultLDAPConfig() *LDAPConfig {
 
 // AllConfig 所有配置响应结构
 type AllConfig struct {
-	Basic    BasicConfig    `json:"basic"`
-	Security SecurityConfig `json:"security"`
-	LDAP     *LDAPConfig    `json:"ldap,omitempty"`
+	Basic      BasicConfig      `json:"basic"`
+	Security   SecurityConfig   `json:"security"`
+	Monitoring MonitoringConfig `json:"monitoring"`
+	Database   DatabaseConfig   `json:"database"`
+	LDAP       *LDAPConfig      `json:"ldap,omitempty"`
 }

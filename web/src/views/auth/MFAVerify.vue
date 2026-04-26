@@ -54,7 +54,8 @@
 <script setup lang="ts">
 import { reactive, ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage, FormInstance } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import type { FormInstance } from 'element-plus'
 import { Key, Lock } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { mfaLogin } from '@/api/mfa'

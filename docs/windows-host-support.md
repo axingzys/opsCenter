@@ -1,603 +1,673 @@
-# OpsHub Windows 主机接入与远程终端技术方案
+# OpsHub Windows 主机接入与状态采集技术方案
 
-## 1. 结论
+## 1. 背景
 
-当前项目不能算正式支持 Windows 主机。
+当前项目对 Windows 已经具备一条可用的图形桌面链路：
 
-原因不是“没有 Windows 页面”，而是资产模块的核心链路都默认了 Linux + SSH：
+- 浏览器 -> OpsHub -> Guacamole -> guacd -> RDP -> Windows
 
-- 主机模型使用 `SSHUser`、`Port`，前端表单也固定写成“SSH 用户名”“SSH 端口”。
-- Web 终端通过 SSH 建立伪终端。
-- 文件管理通过 SFTP 实现，默认路径使用 `~` 和 `echo $HOME`。
-- 主机信息采集器执行的是 `uname`、`free -b`、`top`、`lscpu`、`/etc/os-release` 这类 Linux 命令。
+但主机资源采集仍然是 Linux/SSH 模型，Windows 主机即使已经能通过 RDP 打开桌面，也无法像 Linux 主机一样稳定显示：
 
-但是，从架构上看，项目可以扩展为支持 Windows 主机远程接入。
+- CPU
+- 内存
+- 磁盘
+- 主机名
+- 在线状态
+- 运行时长
 
-推荐路线分两步：
+这不是前端展示问题，而是后端采集链路的能力边界。
 
-1. 第一阶段先支持 `Windows + OpenSSH Server`。
-   这条路线最接近当前实现，能够较快获得“像 Linux 一样的 Web 终端”体验。
-2. 第二阶段再补 `Windows + WinRM/PowerShell Remoting`。
-   这条路线更贴近企业 Windows 环境，但实现复杂度明显更高，尤其是交互式终端能力不如 SSH 自然。
+## 2. 当前现状与根因
 
-如果你的“远程 Win 主机”指的是图形桌面，那个属于 `RDP 代理/桌面网关` 范畴，不属于当前 SSH Web 终端的直接延伸，建议单独作为后续特性评估。
+### 2.1 后端采集链路仍然是 SSH
 
-## 2. 当前实现现状
+当前 `CollectHostInfo()` 固定执行这条流程：
 
-以下模块都已经与 SSH/Linux 耦合：
+1. 读取主机 `credentialId`
+2. 解密凭据
+3. 创建 SSH 客户端
+4. 调用采集器执行系统命令
+5. 把结果写回 `hosts`
 
-### 2.1 主机与凭证模型
+代码位置：
 
-当前主机模型定义在 `internal/biz/asset/host.go`，关键字段如下：
+- `internal/biz/asset/host_usecase.go`
+- `pkg/ssh`
+- `pkg/collector/collector.go`
 
-- `SSHUser`
-- `Port`
-- `CredentialID`
-- `OS`
+### 2.2 采集器执行的是 Linux 命令
 
-问题：
-
-- 没有 `osType` 字段区分 `linux/windows`。
-- 没有 `connectionProtocol` 字段区分 `ssh/winrm`。
-- `SSHUser` 这个命名本身已经把协议写死。
-
-当前凭证模型也只支持：
-
-- `password`
-- `key`
-
-这可以覆盖 Linux SSH，但不够表达 Windows 原生远程接入所需的信息，例如：
-
-- WinRM 认证方式
-- 域账号
-- 是否启用 HTTPS
-- 证书校验策略
-
-### 2.2 Web 终端
-
-当前终端服务位于 `internal/server/asset/terminal.go`，终端能力完全基于 SSH：
-
-- 使用 `golang.org/x/crypto/ssh`
-- `ssh.Dial`
-- `RequestPty`
-- `session.Shell()`
-
-这意味着：
-
-- Linux 主机终端是原生支持的。
-- Windows 如果安装并启用了 OpenSSH Server，理论上可以复用这条链路。
-- 如果走 WinRM，则需要重新实现终端会话适配层。
-
-### 2.3 文件管理
-
-当前文件管理位于 `internal/biz/asset/host_usecase.go` 与 `pkg/ssh/client.go`：
-
-- 依赖 SFTP
-- 依赖 `echo $HOME`
-- 路径默认使用 `~`
-
-这会导致 Windows 即使通过 SSH 连上，文件管理也不完整：
-
-- `~` 的语义未必和 Linux 一致
-- `echo $HOME` 对 PowerShell/CMD 并不可靠
-- 路径分隔符、盘符、根目录展示都需要单独处理
-
-### 2.4 主机信息采集
-
-当前采集器位于 `pkg/collector/collector.go`，依赖的命令是 Linux 命令集：
+当前采集器直接执行这些命令：
 
 - `uname -r`
 - `uname -m`
-- `free -b`
-- `top -bn1`
+- `hostname`
 - `lscpu`
-- `cat /proc/cpuinfo`
-- `. /etc/os-release`
+- `top -bn1`
+- `free -b`
+- `df -B1 /`
 
-因此当前采集器对 Windows 不可用。
+这意味着它天然假设目标机满足两个条件：
 
-### 2.5 前端页面与接口
+- 能走 SSH
+- 能执行 Linux 命令
 
-当前资产前端位于：
+Windows 主机即使配置了 RDP，只要没有 OpenSSH 或 SSH 凭据，就不可能沿用这条链路。
+
+### 2.3 前端也已经默认承认 Windows 不走自动采集
+
+当前主机编辑页对 Windows 的 SSH 字段已经降成“可选”：
+
+- `SSH端口(可选)`
+- `SSH用户名(可选)`
+- `SSH凭据(可选)`
+
+并且创建/更新主机后，前端只会对 `osType !== 'windows'` 的主机自动触发采集。
+
+代码位置：
 
 - `web/src/views/asset/Hosts.vue`
-- `web/src/views/asset/Credentials.vue`
-- `web/src/api/host.ts`
 
-现状问题：
+这说明当前实现事实上已经把 Windows 视为“有桌面，但没有资源采集”的状态。
 
-- 主机表单固定为“SSH 端口”“SSH 用户名”。
-- 终端欢迎语明确写成“SSH Web 终端”。
-- 文件接口默认路径是 `~` / `~/`。
-- 凭证页面文案明确写成“管理 SSH 认证凭证”。
+## 3. 需求澄清
 
-所以当前前端也没有“Windows 主机”的建模空间。
+这次需求不是“让 Windows 也支持 SSH”。
 
-## 3. 目标与非目标
+真正的需求是：
 
-### 3.1 目标
+1. Windows 主机不依赖 SSH，也能显示 CPU/内存/磁盘等资源信息。
+2. Windows 主机的桌面接入和资源采集要解耦。
+3. 资源采集要支持手动触发和周期刷新。
+4. 方案要适配“大多数 Windows 主机默认没有 SSH”的现实。
 
-本方案的目标是支持以下能力：
+结论先行：
 
-- 可新增 Windows 主机资产
-- 可测试连通性
-- 可通过浏览器打开 Windows 远程终端
-- 可审计终端会话
-- 可进行文件浏览、上传、下载、删除
-- 可采集基础主机信息
-- 不影响现有 Linux 主机能力
+- 不应继续沿用 Linux 主机的 SSH 采集方案。
+- 也不应试图从 RDP 桌面链路里“顺手拿指标”。
+- 应该为 Windows 单独建设“管理/采集通道”。
 
-### 3.2 非目标
+## 4. 方案对比
 
-本方案首期不包含：
+| 方案 | 是否依赖目标机改造 | 网络要求 | 复杂度 | 适配度 | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| 继续复用 SSH | 需要安装并启用 OpenSSH | 入站 22 | 低 | 低 | 不推荐 |
+| 从 RDP 链路取指标 | 无 | 入站 3389 | 高 | 极低 | 不可行 |
+| WMI/DCOM 直连 | 不装 Agent | RPC/DCOM 动态端口 | 高 | 中低 | 不推荐 |
+| WinRM 直连 | 启用 WinRM/PowerShell Remoting | 入站 5985/5986 | 中 | 中高 | 可做第一版 |
+| Windows Agent | 安装轻量服务 | 仅需出站 443 | 中高 | 高 | 推荐长期标准方案 |
 
-- 图形化远程桌面（RDP 画面转发）
-- 剪贴板、文件拖拽、打印机映射等桌面特性
-- 域控、Kerberos、CredSSP 的完整企业级集成
-- Windows 运维自动化编排体系重构
+### 4.1 为什么不推荐继续复用 SSH
 
-## 4. 技术路线比较
+因为这条路线只解决“少量安装了 OpenSSH 的 Windows 主机”，无法覆盖大多数目标机。
 
-| 方案 | 终端体验 | 文件管理 | 改造成本 | 风险 | 推荐度 |
-|:-----|:---------|:---------|:---------|:-----|:-------|
-| Windows over SSH（OpenSSH Server） | 最接近现有 Linux Web 终端 | 可继续复用 SFTP | 低到中 | 主要是命令/路径兼容 | 高 |
-| Windows over WinRM | 更贴近 Windows 企业环境 | 需单独实现文件传输 | 中到高 | 交互式终端能力较弱、协议适配复杂 | 中 |
-| Windows over RDP | 图形桌面 | 与终端无关 | 高 | 需要桌面代理与网关体系 | 低 |
+如果把 Windows 支持建立在 SSH 上，最终会出现两个问题：
 
-### 4.1 推荐结论
+- 用户误以为“Windows 已支持”，实际大多数机器不可用
+- 后续所有字段、测试连接、错误信息都会继续被 Linux 语义污染
 
-推荐先做：
+### 4.2 为什么不推荐 WMI/DCOM
 
-- `Windows + SSH(OpenSSH Server)` 作为 MVP
+WMI/DCOM 理论上能获取指标，但它的运维代价很差：
 
-然后再做：
+- 依赖 RPC/DCOM
+- 端口范围复杂
+- 防火墙策略麻烦
+- 跨网段、跨域、零信任环境下体验很差
 
-- `Windows + WinRM` 作为增强版
+它适合内网老系统，不适合作为新标准方案。
 
-不建议首版直接做：
+### 4.3 WinRM 的定位
 
-- `RDP 图形桌面`
+WinRM 是 Windows 原生远程管理方案，适合作为“无 Agent 第一版”。
 
-原因很直接：
+优点：
 
-- 用户要求是“像 Linux 终端那样”，本质是文本终端，不是图形桌面。
-- 当前系统的 WebSocket + xterm + SSH 链路已经成熟，复用价值最高。
-- WinRM 更适合远程命令和自动化，不适合作为第一版交互终端的唯一基础。
+- 不依赖 SSH
+- 可以直接执行 PowerShell
+- 可以获取系统、CPU、内存、磁盘、服务等信息
+- 与当前“凭据 + 主机直连”的资产模型比较接近
 
-## 5. 推荐方案设计
+缺点：
 
-### 5.1 总体设计
+- 目标机要启用 WinRM
+- 需要处理认证模式、TLS、域环境/工作组环境差异
+- 对跨网段、跨环境的适配不如 Agent
 
-将当前“SSH 主机”抽象为“远程主机”，新增两个核心维度：
+### 4.4 Agent 的定位
 
-- `osType`: `linux` / `windows`
-- `connectionProtocol`: `ssh` / `winrm`
+Agent 不是“技术炫技”，而是最适合 Windows 的长期方案。
 
-同时把当前 SSH 专用字段逐步泛化：
+优点：
 
-- `SSHUser` -> `loginUser`
-- `Port` 保留，但其默认值由协议决定
-- 终端、文件管理、采集逻辑都改为“按协议 + 按操作系统分发”
+- 不需要 SSH
+- 不需要开放 WinRM 入站端口
+- 只要 Windows 主机能主动访问 OpsHub，就能上报
+- 心跳、在线状态、实时刷新都更稳定
+- 后续可扩展服务、进程、补丁、事件日志、软件清单
 
-### 5.1.1 推荐抽象层
+缺点：
 
-建议新增以下接口：
+- 需要安装一个轻量 Windows 服务
+- 首版开发量大于 WinRM
+
+## 5. 推荐结论
+
+推荐采用“双通道”架构：
+
+- 桌面通道：继续使用 `RDP + Guacamole`
+- 采集通道：新增 Windows 管理链路，不再依赖 SSH
+
+平台能力上，建议保留多种采集能力共存：
+
+1. 后端同时保留 `AgentCollector` 和 `WinRMCollector`
+2. 数据模型新增 `managementMode`
+3. Windows 前端管理方式提供：
+   - `Agent（推荐）`
+   - `WinRM`
+   - `SSH（兼容）`
+   - `仅桌面`
+
+产品默认上，建议明确站到 Agent 一侧：
+
+1. 新增 Windows 主机时，默认选择 `Agent`
+2. UI 上将 `Agent` 标记为“推荐”
+3. 后续安装文档、运维手册、部署说明都以 `Agent` 为主路径
+
+迁移阶段上，WinRM 继续保留：
+
+1. 对暂时无法安装 Agent 的机器，用 `WinRM` 顶上
+2. 对受管内网、能批量启用 WinRM 的环境，`WinRM` 很适合作为第一版交付路径
+3. `SSH` 仅作为兼容模式保留，不再作为 Windows 默认采集通道
+
+运行策略上，建议采用单主模式，而不是双活：
+
+1. 一台 Windows 主机正式运行时，只保留一个主采集模式
+2. 迁移期间可以临时切换测试 `Agent / WinRM / SSH`
+3. 但不建议长期并行双写同一台主机的状态字段
+
+原因：
+
+- `lastSeen`
+- 在线状态
+- 采集错误
+- 最后采集时间
+
+这些字段如果由两个采集器同时写入，很容易互相覆盖，最终让状态失真
+
+也就是说：
+
+- Windows 桌面连不连，和资源采集不应绑定
+- Windows 资源采集不应建立在 SSH 是否存在之上
+- 平台能力可以共存，但产品默认应收敛到 `Agent`
+- Windows 主机的采集模式应当是“单主模式”，不是“双活模式”
+
+## 6. 推荐架构
+
+### 6.1 总体架构
+
+```text
+                +--------------------+
+                |   OpsHub Frontend  |
+                +--------------------+
+                         |
+                         v
+                +--------------------+
+                |   OpsHub Backend   |
+                +--------------------+
+                  |               |
+                  |               |
+       RDP Desktop Path     Metrics / Management Path
+                  |               |
+                  v               v
+        Guacamole / guacd   WinRM Collector or Agent Gateway
+                  |               |
+                  v               v
+             Windows Host    Windows Host
+```
+
+### 6.2 原则
+
+1. RDP 只负责桌面，不负责资源采集。
+2. 资源采集通道必须独立于 RDP。
+3. Windows 与 Linux 要共用资产模型，但不强行共用同一采集协议。
+4. Windows 采集能力允许多通道共存，但单台主机只允许一个主采集模式长期生效。
+
+## 7. Windows 采集方案设计
+
+## 7.1 路线 A：WinRM 直连采集
+
+这是最快能落地的第一版。
+
+### 7.1.1 采集流程
+
+1. 用户点击“采集信息”
+2. 后端读取主机的 Windows 管理方式
+3. 如果是 `winrm`，就用 WinRM 连接 Windows
+4. 执行 PowerShell 采集脚本
+5. 脚本输出统一 JSON
+6. 后端解析 JSON，写回 `hosts`
+
+### 7.1.2 采集内容
+
+建议通过 PowerShell + CIM / Counter 采集以下信息：
+
+- OS：`Win32_OperatingSystem.Caption`
+- Kernel/Build：`Version` / `BuildNumber`
+- Hostname：`CSName`
+- Arch：`OSArchitecture`
+- Uptime：`LastBootUpTime`
+- CPU 核数：`Win32_Processor.NumberOfLogicalProcessors`
+- CPU 使用率：`Get-Counter '\\Processor(_Total)\\% Processor Time'`
+- Memory：`Win32_OperatingSystem.TotalVisibleMemorySize / FreePhysicalMemory`
+- Disk：`Win32_LogicalDisk`，仅统计 `DriveType = 3` 的固定磁盘
+
+### 7.1.3 适用场景
+
+- 机器由统一运维控制
+- 可批量启用 WinRM
+- 网络上允许 5985/5986
+- 希望尽快做出第一版
+
+### 7.1.4 风险
+
+- 工作组环境下认证策略较繁琐
+- 没开 WinRM 的机器仍然采不到
+- 在线状态本质上仍是“连得上 WinRM”
+
+## 7.2 路线 B：Windows Agent
+
+这是推荐的长期标准方案。
+
+### 7.2.1 采集流程
+
+1. 在 Windows 主机安装 `OpsHub Agent`
+2. Agent 以 Windows Service 方式运行
+3. Agent 定时采集本机指标
+4. Agent 主动通过 HTTPS 上报到 OpsHub
+5. OpsHub 更新 `hosts` 资源字段和最后心跳时间
+
+### 7.2.2 Agent 采集内容
+
+与 WinRM 版保持同一份逻辑和输出结构：
+
+- 系统名称、版本、Build、架构
+- 主机名、开机时间、运行时长
+- CPU 核数、CPU 使用率
+- 内存总量、已用、使用率
+- 固定磁盘总量、已用、使用率
+
+建议 Agent 输出结构与现有 `SystemInfo` 对齐，这样后端落库逻辑可以复用。
+
+### 7.2.3 Agent 的优势
+
+- 目标机只需要访问 OpsHub，不需要暴露管理端口
+- 可以做心跳，在线状态更准确
+- 更适合跨网段、NAT、办公网、零信任场景
+- 后续扩展能力最好
+
+### 7.2.4 Agent 的职责边界
+
+Agent 只做这些事：
+
+- 本机指标采集
+- 心跳上报
+- 可选的即时刷新
+
+首版不建议把它做成“远控代理”或“大而全的运维客户端”。
+
+## 8. 最终建议：平台能力共存，产品默认 Agent，迁移保留 WinRM
+
+建议拆成三个层面理解：
+
+### 8.1 平台能力
+
+- 后端同时支持 `AgentCollector` 与 `WinRMCollector`
+- Windows 主机通过 `managementMode` 选择主采集通道
+- `SSH` 继续保留，但只作为兼容模式
+
+### 8.2 产品默认
+
+- 新增 Windows 主机时默认 `managementMode = agent`
+- UI 明确标注 `Agent（推荐）`
+- 未来的文档、安装引导、运维手册均以 Agent 为主
+
+### 8.3 迁移阶段
+
+- 工程交付可以先落 `WinRM`
+- 但产品路线不应停在 `WinRM`
+- 一旦 Agent 可用，应作为 Windows 主机默认与推荐方案
+
+原因：
+
+- WinRM 能更快验证业务闭环
+- Agent 才能真正覆盖“大多数没有 SSH 的 Windows 主机”
+- 两者共存能兼顾短期交付和长期标准化
+
+## 9. 数据模型改造建议
+
+当前 `Host` 模型里的 `credentialId/sshUser/port` 对 Windows 来说语义已经不准确。
+
+建议新增“管理通道”字段，而不是继续把 Windows 塞进 SSH 字段。
+
+### 9.1 Host 建议新增字段
+
+- `managementMode`
+  - `ssh`
+  - `winrm`
+  - `agent`
+  - `none`
+- `managementPort`
+- `managementCredentialId`
+- `collectStatus`
+  - `online`
+  - `offline`
+  - `unknown`
+  - `not_configured`
+- `collectError`
+- `lastCollectAt`
+- `agentId`
+- `agentVersion`
+- `agentLastHeartbeatAt`
+
+补充约束：
+
+- `managementMode` 是单值字段，不是多选集合
+- 一台主机在正式运行时只应存在一个主采集模式
+- 如果需要迁移，可在运维操作中切换 `managementMode`
+- 不建议让 Agent 与 WinRM 长期同时写入同一台主机状态
+
+### 9.2 对现有字段的处理建议
+
+- Linux 主机：
+  - `managementMode = ssh`
+  - 现有 `credentialId/port/sshUser` 可平滑映射到管理通道字段
+- Windows 主机：
+  - 不再把 `SSHUser/Port/CredentialID` 当成默认采集字段
+  - RDP 字段继续保留用于桌面访问
+
+### 9.3 Credential 模型建议
+
+现有凭据模型已经支持：
+
+- `protocol`
+- `type`
+- `username`
+- `domain`
+- `password`
+
+建议扩展：
+
+- `protocol = winrm`
+- `authMode`
+  - `ntlm`
+  - `kerberos`
+  - `basic`
+  - `certificate`
+
+这样 RDP 凭据和 WinRM 凭据可以分离。
+
+## 10. 后端设计建议
+
+## 10.1 抽象采集接口
+
+不要再让 `CollectHostInfo()` 直接写死 SSH。
+
+建议抽象出统一接口：
 
 ```go
-type RemoteClient interface {
-    Connect(ctx context.Context) error
-    Close() error
-    TestConnection(ctx context.Context) error
-    Execute(ctx context.Context, command string) (string, error)
-}
-
-type RemoteTerminal interface {
-    Start(ctx context.Context, cols, rows uint16) error
-    Resize(cols, rows uint16) error
-    Stdin() io.WriteCloser
-    Stdout() io.Reader
-    Stderr() io.Reader
-    Close() error
-}
-
-type RemoteFileClient interface {
-    ListDir(ctx context.Context, path string) ([]FileInfo, error)
-    Upload(ctx context.Context, path string, reader io.Reader) error
-    Download(ctx context.Context, path string, writer io.Writer) error
-    Remove(ctx context.Context, path string) error
-    ResolveHome(ctx context.Context) (string, error)
-}
-
 type HostCollector interface {
-    CollectAll(ctx context.Context) (*SystemInfo, error)
+    Test(ctx context.Context, host *Host, cred *Credential) error
+    Collect(ctx context.Context, host *Host, cred *Credential) (*collector.SystemInfo, error)
 }
 ```
 
-实现层按协议/系统拆分：
+实现：
 
-- `SSHClient`
-- `SSHRemoteTerminal`
-- `SFTPFileClient`
-- `LinuxCollector`
-- `WindowsSSHCollector`
-- `WinRMClient`
-- `WinRMFileClient`
-- `WindowsWinRMCollector`
+- `SSHCollector`
+- `WinRMCollector`
+- `AgentCollector`
 
-### 5.2 数据模型改造
+调度逻辑：
 
-### 5.2.1 Host 表
+- Linux 默认走 `SSHCollector`
+- Windows 根据 `managementMode` 选择 `WinRMCollector` 或 `AgentCollector`
+- 同一时刻只允许一个 Collector 作为该主机的主采集器执行落库
 
-建议在主机表新增字段：
+## 10.2 采集结果统一落库
 
-| 字段 | 类型 | 说明 |
-|:-----|:-----|:-----|
-| `os_type` | varchar(20) | `linux` / `windows` |
-| `connection_protocol` | varchar(20) | `ssh` / `winrm` |
-| `login_user` | varchar(100) | 通用登录用户 |
-| `shell_type` | varchar(20) | `bash` / `sh` / `powershell` / `cmd` |
-| `default_directory` | varchar(255) | 默认目录 |
+无论是 SSH、WinRM 还是 Agent，最终都统一写回当前 `hosts` 表中的这些字段：
 
-兼容策略：
+- `cpuCores`
+- `cpuUsage`
+- `memoryTotal`
+- `memoryUsed`
+- `memoryUsage`
+- `diskTotal`
+- `diskUsed`
+- `diskUsage`
+- `os`
+- `kernel`
+- `arch`
+- `hostname`
+- `uptime`
+- `lastSeen`
 
-- 现有 Linux 主机数据回填：
-  - `os_type = linux`
-  - `connection_protocol = ssh`
-  - `login_user = ssh_user`
-  - `shell_type = bash`
-- 老字段 `ssh_user` 第一阶段保留，代码内部逐步切换到 `login_user`
+这样前端资源卡片无需重写。
 
-### 5.2.2 Credential 表
+## 10.3 状态定义调整
 
-建议扩展凭证模型：
+当前 `status` 更像 SSH 在线状态。
 
-| 字段 | 类型 | 说明 |
-|:-----|:-----|:-----|
-| `protocol` | varchar(20) | `ssh` / `winrm` |
-| `auth_type` | varchar(20) | `password` / `key` |
-| `username` | varchar(100) | 用户名 |
-| `domain` | varchar(100) | Windows 域名，可选 |
-| `use_https` | tinyint | WinRM 是否走 HTTPS |
-| `verify_server_cert` | tinyint | 是否校验证书 |
+建议拆开理解：
 
-兼容策略：
+- `desktopStatus`：RDP 是否可用
+- `collectStatus`：采集链路是否可用
+- `status`：主列表聚合状态
 
-- 现有凭证默认回填 `protocol = ssh`
-- `key` 仅在 SSH 下可选
-- `winrm` 首版只支持 `password`
+聚合逻辑建议：
 
-### 5.2.3 终端审计表
+- 有采集心跳/最近采集成功：显示在线
+- 仅桌面可达但无采集链路：显示“桌面可用 / 未配置采集”
+- 两者都不可达：离线
 
-当前表名为 `ssh_terminal_sessions`，对 Windows over SSH 没问题，但对 WinRM 语义不准确。
+## 11. 前端设计建议
 
-建议分阶段处理：
+## 11.1 Windows 编辑页不应继续以 SSH 为中心
 
-- 阶段一：
-  - 保留现有表
-  - 增加 `protocol`、`os_type`、`shell_type` 字段
-- 阶段二：
-  - 如确实需要支持 WinRM 终端审计，再评估是否迁移为通用表 `terminal_sessions`
+当前 Windows 编辑页虽然把 SSH 字段改成“可选”，但这还不够。
 
-这样能降低一次性改造风险。
+建议改成：
 
-### 5.3 后端改造方案
+### Linux
 
-### 5.3.1 主机创建与更新
+- 管理方式：固定 `SSH`
+- 展示 SSH 用户、SSH 端口、SSH 凭据
 
-需要调整以下对象：
+### Windows
 
-- `internal/biz/asset/host.go`
-- `internal/service/asset/host.go`
-- `internal/biz/asset/host_usecase.go`
+- 管理方式：
+  - `Agent（推荐）`
+  - `WinRM`
+  - `SSH（兼容）`
+  - `仅桌面`
+- 桌面方式：RDP
+- 桌面凭据：独立选择
 
-改造点：
+默认策略：
 
-- `HostRequest` 增加 `osType`、`connectionProtocol`、`loginUser`、`shellType`
-- 保留对旧参数 `sshUser` 的兼容读取
-- 根据协议设置默认端口：
-  - SSH: `22`
-  - WinRM HTTP: `5985`
-  - WinRM HTTPS: `5986`
+- 新增 Windows 主机时默认选中 `Agent（推荐）`
+- 如果用户主动切换到 `WinRM` 或 `SSH（兼容）`，再展示对应字段
+- `仅桌面` 只解决远程桌面，不提供资源采集
 
-### 5.3.2 终端接入
+### Windows 选择不同管理方式时显示不同字段
 
-保留当前路由：
+如果是 `WinRM`：
 
-- `GET /api/v1/asset/terminal/:id`
+- WinRM 端口
+- HTTP/HTTPS
+- 认证方式
+- WinRM 凭据
 
-但内部改为按主机协议分发：
+如果是 `Agent`：
 
-1. 读取主机信息
-2. 根据 `connectionProtocol` 选择终端驱动
-3. 建立远程终端
-4. 复用现有 WebSocket / xterm 前端协议
+- Agent 安装命令
+- 注册令牌
+- Agent 状态
+- 最后心跳
 
-推荐行为：
+如果是 `仅桌面`：
 
-- `linux + ssh`：走现有实现
-- `windows + ssh`：复用现有 SSH 终端，但默认 shell 为 PowerShell
-- `windows + winrm`：第二阶段再接入
+- 只显示 RDP 相关字段
+- 资源区显示“未配置采集通道”
 
-### 5.3.3 文件管理
+## 11.2 主机列表建议
 
-保留现有接口：
+建议新增或补充这些展示：
 
-- `GET /api/v1/hosts/:id/files`
-- `POST /api/v1/hosts/:id/files/upload`
-- `GET /api/v1/hosts/:id/files/download`
-- `DELETE /api/v1/hosts/:id/files`
+- 采集方式
+- 桌面方式
+- 采集状态
+- 最后采集时间
 
-但内部逻辑改为：
+Windows 主机如果没有采集通道，不应只是显示 `-`，应明确提示：
 
-- 由 `RemoteFileClient` 负责路径解释
-- 前端不再默认写死 `~`
-- 后端返回标准化路径信息，例如：
-  - Linux: `/var/log`
-  - Windows: `C:\\Users\\Administrator`
+- `未配置采集`
+- `WinRM 未连通`
+- `Agent 未在线`
 
-Windows 首版建议：
+## 11.3 按钮语义建议
 
-- `windows + ssh` 继续使用 SFTP
-- 默认目录改为远程用户目录
-- 路径展示按 Windows 风格输出
+现在“测试连接”和“采集信息”对 Windows 容易造成歧义。
 
-### 5.3.4 主机信息采集
+建议拆分：
 
-采集器必须拆分为两套命令体系：
+- `测试桌面`
+- `测试采集`
+- `采集信息`
 
-- Linux 采集器：保留现状
-- Windows 采集器：使用 PowerShell 命令收集
+## 12. Agent 方案的最小实现范围
 
-Windows 采集建议字段：
+如果选择 Agent，不建议一上来做太大。
 
-- OS 版本
-- 主机名
-- CPU 核数
-- 内存总量/已用量
-- 磁盘容量
-- 开机时长
+### 12.1 首版只做这些能力
 
-建议命令来源：
+- 安装为 Windows Service
+- 启动注册
+- 定时心跳
+- 周期采集 CPU/内存/磁盘/系统信息
+- HTTPS 上报
 
-- `Get-CimInstance Win32_OperatingSystem`
-- `Get-CimInstance Win32_ComputerSystem`
-- `Get-CimInstance Win32_Processor`
-- `Get-PSDrive -PSProvider FileSystem`
+### 12.2 首版不做这些能力
 
-### 5.3.5 测试连接
+- 远程命令执行
+- 文件分发
+- 进程管理
+- 补丁管理
+- 事件日志拉取
 
-当前 `TestConnection` 只会走 SSH。
+这些可以放到后续阶段。
 
-改造后逻辑应为：
+## 13. 安全要求
 
-- `ssh`：执行轻量命令检测
-- `winrm`：执行远程空命令或基础 PowerShell 命令检测
+## 13.1 WinRM 模式
 
-返回结果统一为：
+- 优先 `HTTPS`
+- 域环境优先 `Kerberos`
+- 不建议把 `Basic over HTTP` 作为默认方案
+- 凭据继续沿用现有加密存储机制
 
-- 是否成功
-- 延迟
-- 失败原因
+## 13.2 Agent 模式
 
-### 5.4 前端改造方案
+- Agent 与 OpsHub 通过 TLS 通信
+- 使用一次性注册令牌或短期注册码
+- 服务端为 Agent 分配唯一 `agentId`
+- 心跳接口必须鉴权
+- 支持服务端吊销 Agent
 
-### 5.4.1 主机表单
+## 13.3 审计
 
-修改 `web/src/views/asset/Hosts.vue`：
+新增审计事件建议包括：
 
-- 新增“操作系统”：
-  - Linux
-  - Windows
-- 新增“连接协议”：
-  - SSH
-  - WinRM
-- 根据协议动态显示字段：
-  - SSH: 用户名、端口、SSH 凭证
-  - WinRM: 用户名、端口、WinRM 凭证、HTTP/HTTPS
+- 测试采集通道
+- 手动触发采集
+- Agent 注册
+- Agent 心跳异常
+- WinRM 认证失败
 
-动态默认值建议：
+## 14. 分阶段实施建议
 
-- Linux + SSH:
-  - 端口 `22`
-  - shell `bash`
-- Windows + SSH:
-  - 端口 `22`
-  - shell `powershell`
-- Windows + WinRM:
-  - 端口 `5985/5986`
-  - shell `powershell`
-
-### 5.4.2 凭证表单
-
-修改 `web/src/views/asset/Credentials.vue`：
-
-- 页面文案从“SSH 凭证”改为“远程连接凭证”
-- 增加协议类型选择：
-  - SSH
-  - WinRM
-- 认证方式按协议受限：
-  - SSH: `password` / `key`
-  - WinRM: 首版仅 `password`
-
-### 5.4.3 Web 终端
-
-修改 `web/src/views/asset/Hosts.vue`：
-
-- 欢迎语从“SSH Web 终端”改为“远程 Web 终端”
-- 终端顶部展示：
-  - 主机名
-  - IP
-  - 协议
-  - 操作系统
-  - shell 类型
-
-### 5.4.4 文件管理
-
-修改 `web/src/api/host.ts` 与对应文件管理页面：
-
-- 去掉前端默认 `~`
-- 首次进入时从后端获取默认目录
-- Windows 主机展示盘符入口，如：
-  - `C:\\`
-  - `D:\\`
-
-## 6. 推荐实施阶段
-
-### 6.1 Phase 1: Windows over SSH MVP
+## Phase 1：采集架构解耦
 
 目标：
 
-- 能新增 Windows 主机
-- 能测试连接
-- 能打开 PowerShell 终端
-- 能做文件管理
-- 能保留终端审计
-- 能采集基础主机信息
+- 把当前 `SSH = 采集` 的硬编码拆开
+- 主机模型支持 `managementMode`
+- 前端表单区分 Linux 与 Windows 的采集方式
 
-实施内容：
+产出：
 
-- 新增 `osType` / `connectionProtocol`
-- 抽象 Remote 接口
-- 保留现有终端路由
-- 增加 Windows SSH 采集器
-- 前端增加 Windows/协议选择
+- 数据模型调整
+- 后端 Collector 抽象
+- 前端表单改版
+- 明确 `managementMode` 单主模式约束
 
-上线前提：
+## Phase 2：WinRM 第一版（迁移方案）
 
-- Windows 主机已安装并启用 OpenSSH Server
-- Windows 主机允许 SFTP
-- 终端默认 shell 配置为 PowerShell
+目标：
 
-这一步完成后，用户体验会最接近“像 Linux 那样打开一个终端”。
+- Windows 不依赖 SSH，也能手动采集
+- 支持 CPU/内存/磁盘/系统信息
 
-### 6.2 Phase 2: Windows over WinRM
+产出：
 
-适用场景：
+- `WinRMCollector`
+- WinRM 凭据与测试连接
+- Windows 主机资源卡片可用
+- 作为无法安装 Agent 场景下的过渡方案
 
-- 企业环境不允许开 SSH
-- 需要贴近 AD/Windows 运维规范
-- 需要更标准的 PowerShell Remoting
+## Phase 3：Agent 标准方案（产品默认）
 
-实施内容：
+目标：
 
-- 新增 WinRM 客户端适配层
-- 增加 WinRM 凭证模型
-- 实现 WinRM 文件传输
-- 新增 WinRM 连通性检测
-- 对终端体验做单独 PoC 验证
+- 支持大多数没有 SSH、也不方便开 WinRM 的 Windows 主机
+- 实现心跳和持续上报
 
-关键风险：
+产出：
 
-- WinRM 更适合命令执行，不一定适合作为完整交互式 PTY
-- 编码、换行、命令回显与 xterm 交互需要额外处理
-- HTTPS、自签证书、域认证策略会提高接入复杂度
+- Windows Agent
+- 注册与心跳接口
+- Agent 状态展示
+- 新增 Windows 主机默认 `Agent（推荐）`
 
-因此第二阶段应先做技术验证，再进入正式开发。
+## Phase 4：高级资产能力
 
-### 6.3 Phase 3: 图形化远程桌面（可选）
+可选扩展：
 
-如果后续需求变成“像堡垒机那样打开 Windows 桌面”，则属于新模块：
+- 每盘符明细
+- 网卡与 IP 明细
+- 服务列表
+- 进程列表
+- 补丁信息
+- 事件日志
 
-- RDP 协议接入
-- Web 画面转发
-- 鼠标键盘映射
-- 剪贴板与会话控制
+## 15. 最终建议
 
-这不建议与本次“Windows 主机终端化接入”一起做。
+一句话总结：
 
-## 7. 风险与难点
+- Windows 主机的“桌面接入”与“资源采集”必须分开设计。
+- RDP 继续保留为桌面通道。
+- 资源采集不应继续依赖 SSH。
+- 平台层面保留 Agent 与 WinRM 共存。
+- 产品层面默认收敛到 Agent。
+- 单台主机正式运行时只保留一个主采集模式。
 
-### 7.1 终端体验差异
+如果只问“这项目现在怎么改最合理”，我的结论是：
 
-即使接入 Windows，终端体验也不可能与 Linux 完全相同：
-
-- PowerShell 输出风格不同
-- 路径不同
-- 命令不同
-- 默认编码与换行不同
-
-### 7.2 文件路径兼容
-
-当前代码大量假设：
-
-- `~`
-- `/`
-- `$HOME`
-
-Windows 需要统一路径抽象，否则文件管理会持续出兼容问题。
-
-### 7.3 采集命令差异
-
-当前采集器完全是 Linux 命令集，不能复用到 Windows。
-
-### 7.4 审计字段命名债务
-
-当前 `ssh_terminal_sessions` 这个表名会限制未来扩展，需要在 Phase 2 前决定是否泛化。
-
-## 8. 兼容性策略
-
-### 8.1 对现有 Linux 主机的兼容
-
-必须保证以下行为不变：
-
-- 现有 Linux 主机无需重建
-- 现有 SSH 凭证继续可用
-- 现有终端权限模型不变
-- 现有文件管理接口不变
-
-### 8.2 数据迁移策略
-
-建议采用“新增字段 + 数据回填”方式：
-
-1. 给主机表新增 `os_type`、`connection_protocol`、`login_user`、`shell_type`
-2. 给凭证表新增 `protocol` 等字段
-3. 将旧数据批量回填为 Linux + SSH
-4. 代码切换到新字段
-5. 最后再评估是否移除 `ssh_user`
-
-## 9. 建议排期
-
-按可控范围估算：
-
-| 阶段 | 内容 | 预估 |
-|:-----|:-----|:-----|
-| Phase 1 | Windows over SSH MVP | 5 到 8 个工作日 |
-| Phase 2 | WinRM 支持与 PoC | 5 到 10 个工作日 |
-| Phase 3 | RDP 远程桌面 | 单独评估 |
-
-说明：
-
-- 这里是技术估算，不含联调环境准备时间。
-- 如果需要支持域账号、HTTPS 证书校验、企业代理策略，Phase 2 会继续增长。
-
-## 10. 最终建议
-
-如果你的目标是：
-
-- “能把 Windows 主机纳入资产”
-- “能远程打开命令行”
-- “体验尽量像现在的 Linux 终端”
-
-那么最合理的方案是：
-
-- 第一版只做 `Windows + OpenSSH Server`
-
-如果你的目标是：
-
-- “必须遵守 Windows 企业远程管理规范”
-- “不能开 SSH，只能 WinRM”
-
-那么应该：
-
-- 先做 `WinRM 技术验证`
-- 再决定是否把 WinRM 作为正式接入协议
-
-如果你的目标是：
-
-- “打开 Windows 图形桌面”
-
-那应该单独立项做：
-
-- `RDP 网关/桌面代理`
-
-不建议把它混进本次终端方案。
+1. 不再把 Windows 主机当成“可选 SSH 的 Linux 变体”
+2. 先抽象 `managementMode`
+3. 后端同时保留 `AgentCollector` 和 `WinRMCollector`
+4. 前端 Windows 管理方式提供 `Agent（推荐） / WinRM / SSH（兼容） / 仅桌面`
+5. 新增 Windows 主机默认 `Agent`
+6. 迁移阶段保留 `WinRM`
+7. 单机正式运行时禁止双活采集

@@ -23,6 +23,22 @@ export const playTerminalSession = (id: number) => {
 }
 
 /**
+ * 下载终端会话录制
+ */
+export const downloadTerminalSession = (id: number) => {
+  return request.get(`/api/v1/terminal-sessions/${id}/download`, {
+    responseType: 'blob'
+  })
+}
+
+/**
+ * 获取终端会话高危命令记录
+ */
+export const getTerminalSessionEvents = (id: number) => {
+  return request.get(`/api/v1/terminal-sessions/${id}/events`)
+}
+
+/**
  * 删除终端会话
  */
 export const deleteTerminalSession = (id: number) => {

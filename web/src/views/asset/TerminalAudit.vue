@@ -1,130 +1,180 @@
 <template>
   <div class="terminal-audit-container">
-    <!-- 页面标题和操作按钮 -->
     <div class="page-header">
       <div class="page-title-group">
         <div class="page-title-icon">
           <el-icon><Monitor /></el-icon>
         </div>
         <div>
-          <h2 class="page-title">终端审计</h2>
-          <p class="page-subtitle">查看和管理SSH终端会话录制</p>
+          <h2 class="page-title">会话审计</h2>
+          <p class="page-subtitle">查看和管理 SSH 终端与 Windows 桌面会话录制</p>
         </div>
       </div>
     </div>
 
-    <!-- 搜索栏 -->
-    <div class="search-bar">
-      <div class="search-inputs">
-        <el-input
-          v-model="searchKeyword"
-          placeholder="搜索主机名、IP或用户名..."
-          clearable
-          class="search-input"
-          @keyup.enter="loadSessions"
-          @clear="loadSessions"
-        >
-          <template #prefix>
-            <el-icon class="search-icon"><Search /></el-icon>
-          </template>
-        </el-input>
-      </div>
+    <div class="audit-tabs-card">
+      <el-tabs v-model="activeTab" class="audit-tabs">
+        <el-tab-pane label="SSH终端" name="terminal">
+          <div class="search-bar">
+            <div class="search-inputs">
+              <el-input
+                v-model="searchKeyword"
+                placeholder="搜索主机名、IP或用户名..."
+                clearable
+                class="search-input"
+                @keyup.enter="loadSessions"
+                @clear="loadSessions"
+              >
+                <template #prefix>
+                  <el-icon class="search-icon"><Search /></el-icon>
+                </template>
+              </el-input>
+            </div>
 
-      <div class="search-actions">
-        <el-button class="reset-btn" @click="handleRefresh">
-          <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
-          重置
-        </el-button>
-      </div>
+            <div class="search-actions">
+              <el-button class="reset-btn" @click="handleRefresh">
+                <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
+                重置
+              </el-button>
+            </div>
+          </div>
+
+          <div class="table-wrapper">
+            <el-table
+              :data="filteredSessions"
+              v-loading="loading"
+              class="modern-table"
+              :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
+            >
+              <el-table-column prop="id" label="ID" width="80" align="center" />
+
+              <el-table-column label="主机信息" min-width="220">
+                <template #default="{ row }">
+                  <div class="host-info">
+                    <div class="host-name">
+                      <el-icon><Monitor /></el-icon>
+                      <span>{{ row.hostName }}</span>
+                    </div>
+                    <div class="host-ip">{{ row.hostIp }}</div>
+                  </div>
+                </template>
+              </el-table-column>
+
+              <el-table-column prop="username" label="操作用户" min-width="150" align="center">
+                <template #default="{ row }">
+                  <el-tooltip :content="row.username" placement="top">
+                    <el-tag type="info" class="username-tag">
+                      <el-icon><User /></el-icon>
+                      <span class="username-text">{{ row.username }}</span>
+                    </el-tag>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+
+              <el-table-column prop="durationText" label="时长" min-width="100" align="center" />
+
+              <el-table-column prop="fileSizeText" label="文件大小" min-width="110" align="center" />
+
+              <el-table-column label="录屏状态" min-width="160" align="center">
+                <template #default="{ row }">
+                  <el-tooltip :content="row.recordingAvailable ? '录屏文件可播放' : row.recordingIssue || '录屏不可用'" placement="top">
+                    <el-tag :type="row.recordingAvailable ? 'success' : 'danger'">
+                      {{ row.recordingAvailable ? '可播放' : '不可用' }}
+                    </el-tag>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="风险记录" min-width="170" align="center">
+                <template #default="{ row }">
+                  <div style="display: flex; gap: 6px; justify-content: center; flex-wrap: wrap;">
+                    <el-tag v-if="row.highRiskCount > 0" type="danger">高危 {{ row.highRiskCount }}</el-tag>
+                    <el-tag v-if="row.mediumRiskCount > 0" type="warning">中危 {{ row.mediumRiskCount }}</el-tag>
+                    <span v-if="row.highRiskCount === 0 && row.mediumRiskCount === 0" style="color: #909399;">无</span>
+                  </div>
+                </template>
+              </el-table-column>
+
+              <el-table-column prop="statusText" label="状态" min-width="100" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="getStatusType(row.status)">{{ row.statusText }}</el-tag>
+                </template>
+              </el-table-column>
+
+              <el-table-column prop="startedAtText" label="开始时间" min-width="180" align="center" />
+
+              <el-table-column prop="endedAtText" label="结束时间" min-width="180" align="center" />
+
+              <el-table-column label="操作" width="240" align="center" fixed="right">
+                <template #default="{ row }">
+                  <div class="action-buttons">
+                    <el-tooltip :content="row.recordingAvailable ? '播放' : (row.recordingIssue || '录屏不可用')" placement="top">
+                      <el-button
+                        link
+                        class="action-btn action-play"
+                        @click="handlePlay(row)"
+                        :loading="playingSession === row.id"
+                        :disabled="!row.recordingAvailable"
+                      >
+                        <el-icon><VideoPlay /></el-icon>
+                      </el-button>
+                    </el-tooltip>
+                    <el-tooltip :content="row.recordingAvailable ? '下载' : (row.recordingIssue || '录屏不可用')" placement="top">
+                      <el-button
+                        link
+                        class="action-btn action-download"
+                        @click="handleDownload(row)"
+                        :loading="downloadingSession === row.id"
+                        :disabled="!row.recordingAvailable"
+                      >
+                        <el-icon><Download /></el-icon>
+                      </el-button>
+                    </el-tooltip>
+                    <el-tooltip content="查看风险记录" placement="top">
+                      <el-button
+                        link
+                        class="action-btn action-risk"
+                        @click="handleOpenRiskRecords(row)"
+                        :loading="loadingRiskSession === row.id"
+                      >
+                        <el-icon><Warning /></el-icon>
+                      </el-button>
+                    </el-tooltip>
+                    <el-tooltip content="删除" placement="top">
+                      <el-button
+                        link
+                        class="action-btn action-delete"
+                        @click="handleDeleteClick(row)"
+                        :loading="deletingSession === row.id"
+                      >
+                        <el-icon><Delete /></el-icon>
+                      </el-button>
+                    </el-tooltip>
+                  </div>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <div class="pagination-container">
+              <el-pagination
+                v-model:current-page="page"
+                v-model:page-size="pageSize"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="total"
+                layout="total, sizes, prev, pager, next, jumper"
+                @size-change="handleSizeChange"
+                @current-change="handlePageChange"
+              />
+            </div>
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane label="Windows桌面" name="desktop" lazy>
+          <DesktopSessionAuditTab />
+        </el-tab-pane>
+      </el-tabs>
     </div>
 
-    <!-- 表格和分页容器 -->
-    <div class="table-wrapper">
-      <el-table
-        :data="filteredSessions"
-        v-loading="loading"
-        class="modern-table"
-        :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
-      >
-        <el-table-column prop="id" label="ID" width="80" align="center" />
-
-        <el-table-column label="主机信息" min-width="220">
-          <template #default="{ row }">
-            <div class="host-info">
-              <div class="host-name">
-                <el-icon><Monitor /></el-icon>
-                <span>{{ row.hostName }}</span>
-              </div>
-              <div class="host-ip">{{ row.hostIp }}</div>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="username" label="操作用户" min-width="150" align="center">
-          <template #default="{ row }">
-            <el-tooltip :content="row.username" placement="top">
-              <el-tag type="info" class="username-tag">
-                <el-icon><User /></el-icon>
-                <span class="username-text">{{ row.username }}</span>
-              </el-tag>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="durationText" label="时长" min-width="100" align="center" />
-
-        <el-table-column prop="fileSizeText" label="文件大小" min-width="110" align="center" />
-
-        <el-table-column prop="statusText" label="状态" min-width="100" align="center">
-          <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)">{{ row.statusText }}</el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="createdAtText" label="创建时间" min-width="180" align="center" />
-
-        <el-table-column label="操作" width="160" align="center" fixed="right">
-          <template #default="{ row }">
-            <div class="action-buttons">
-              <el-tooltip content="播放" placement="top">
-                <el-button
-                  link
-                  class="action-btn action-play"
-                  @click="handlePlay(row)"
-                  :loading="playingSession === row.id"
-                >
-                  <el-icon><VideoPlay /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-tooltip content="删除" placement="top">
-                <el-button
-                  link
-                  class="action-btn action-delete"
-                  @click="handleDeleteClick(row)"
-                >
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </el-tooltip>
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <!-- 分页 -->
-      <div class="pagination-container">
-        <el-pagination
-          v-model:current-page="page"
-          v-model:page-size="pageSize"
-          :page-sizes="[10, 20, 50, 100]"
-          :total="total"
-          layout="total, sizes, prev, pager, next, jumper"
-          @size-change="handleSizeChange"
-          @current-change="handlePageChange"
-        />
-      </div>
-    </div>
-
-    <!-- 播放对话框 -->
     <el-dialog
       v-model="playerVisible"
       :title="`终端回放 - ${currentSession?.hostName}`"
@@ -138,24 +188,61 @@
         v-if="recordingUrl && playerVisible"
         :src="recordingUrl"
         :autoplay="true"
+        @error="handlePlayerError"
       />
+    </el-dialog>
+
+    <el-dialog
+      v-model="riskDialogVisible"
+      :title="`风险记录 - ${riskSession?.hostName || ''}`"
+      width="860px"
+      top="8vh"
+      :close-on-click-modal="false"
+    >
+      <div v-if="riskSession" style="margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
+        <el-tag type="danger">高危 {{ riskSummary.highRiskCount }}</el-tag>
+        <el-tag type="warning">中危 {{ riskSummary.mediumRiskCount }}</el-tag>
+        <el-tag type="info">主机 {{ riskSession.hostIp }}</el-tag>
+        <el-tag type="info">用户 {{ riskSession.username }}</el-tag>
+      </div>
+
+      <el-table :data="riskEvents" v-loading="riskLoading" empty-text="暂无高危或中危命令记录">
+        <el-table-column prop="executedAtText" label="执行时间" min-width="170" align="center" />
+        <el-table-column label="等级" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag :type="getRiskTagType(row.riskLevel)">{{ row.riskLevelText }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="commandText" label="命令" min-width="280" show-overflow-tooltip />
+        <el-table-column prop="ruleName" label="命中规则" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="ruleDescription" label="说明" min-width="220" show-overflow-tooltip />
+      </el-table>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Search,
+  Delete,
+  Download,
   Monitor,
+  RefreshLeft,
+  Search,
   User,
   VideoPlay,
-  Delete,
-  RefreshLeft
+  Warning,
 } from '@element-plus/icons-vue'
-import { getTerminalSessions, playTerminalSession, deleteTerminalSession } from '@/api/terminal'
+import {
+  deleteTerminalSession,
+  downloadTerminalSession,
+  getTerminalSessionEvents,
+  getTerminalSessions,
+  playTerminalSession,
+} from '@/api/terminal'
 import AsciinemaPlayer from '@/components/AsciinemaPlayer.vue'
+import DesktopSessionAuditTab from '@/views/asset/components/DesktopSessionAuditTab.vue'
 
 interface TerminalSession {
   id: number
@@ -170,27 +257,59 @@ interface TerminalSession {
   fileSizeText: string
   status: string
   statusText: string
+  recordingAvailable: boolean
+  recordingIssue: string
+  highRiskCount: number
+  mediumRiskCount: number
+  topRiskLevel: string
+  topRiskLevelText: string
   createdAt: string
   createdAtText: string
+  startedAt: string
+  startedAtText: string
+  endedAt: string
+  endedAtText: string
+}
+
+interface TerminalCommandEvent {
+  id: number
+  sessionId: number
+  commandText: string
+  normalizedCommand: string
+  riskLevel: string
+  riskLevelText: string
+  ruleCode: string
+  ruleName: string
+  ruleDescription: string
+  source: string
+  confidence: string
+  executedAt: string
+  executedAtText: string
 }
 
 const loading = ref(false)
 const sessions = ref<TerminalSession[]>([])
 const searchKeyword = ref('')
+const activeTab = ref('terminal')
 const page = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
 
-// 播放相关
 const playerVisible = ref(false)
 const recordingUrl = ref('')
 const currentSession = ref<TerminalSession | null>(null)
 const playingSession = ref(0)
+const downloadingSession = ref(0)
 
-// 删除相关
+const riskDialogVisible = ref(false)
+const riskLoading = ref(false)
+const loadingRiskSession = ref(0)
+const riskSession = ref<TerminalSession | null>(null)
+const riskEvents = ref<TerminalCommandEvent[]>([])
+const riskSummary = ref({ highRiskCount: 0, mediumRiskCount: 0 })
+
 const deletingSession = ref(0)
 
-// 过滤后的会话列表
 const filteredSessions = computed(() => {
   if (!searchKeyword.value) {
     return sessions.value
@@ -204,7 +323,34 @@ const filteredSessions = computed(() => {
   )
 })
 
-// 加载会话列表
+const extractErrorMessage = (error: any, fallback: string) => {
+  const responseData = error?.response?.data
+  if (typeof responseData === 'object' && responseData?.message) {
+    return responseData.message
+  }
+  if (typeof responseData === 'string' && responseData.trim()) {
+    try {
+      const parsed = JSON.parse(responseData)
+      if (parsed?.message) {
+        return parsed.message
+      }
+    } catch {
+      return responseData
+    }
+  }
+  if (error?.message) {
+    return error.message
+  }
+  return fallback
+}
+
+const cleanupRecordingUrl = () => {
+  if (recordingUrl.value) {
+    URL.revokeObjectURL(recordingUrl.value)
+    recordingUrl.value = ''
+  }
+}
+
 const loadSessions = async () => {
   loading.value = true
   try {
@@ -216,33 +362,85 @@ const loadSessions = async () => {
     sessions.value = response.list || []
     total.value = response.total || 0
   } catch (error: any) {
-    ElMessage.error('加载会话列表失败: ' + (error.message || '未知错误'))
+    ElMessage.error('加载会话列表失败: ' + extractErrorMessage(error, '未知错误'))
   } finally {
     loading.value = false
   }
 }
 
-// 播放会话
 const handlePlay = async (session: TerminalSession) => {
+  if (!session.recordingAvailable) {
+    ElMessage.warning(session.recordingIssue || '录屏文件不可用')
+    return
+  }
+
   playingSession.value = session.id
   try {
+    cleanupRecordingUrl()
     const response = await playTerminalSession(session.id)
-
-    // 创建Blob URL
-    const blob = new Blob([response], { type: 'application/json' })
+    const blob = new Blob([response], { type: 'text/plain;charset=utf-8' })
     recordingUrl.value = URL.createObjectURL(blob)
     currentSession.value = session
     playerVisible.value = true
   } catch (error: any) {
-    ElMessage.error('加载录制文件失败: ' + (error.message || '未知错误'))
+    ElMessage.error('加载录制文件失败: ' + extractErrorMessage(error, '未知错误'))
   } finally {
     playingSession.value = 0
   }
 }
 
-// 删除会话
+const handleDownload = async (session: TerminalSession) => {
+  if (!session.recordingAvailable) {
+    ElMessage.warning(session.recordingIssue || '录屏文件不可用')
+    return
+  }
+
+  downloadingSession.value = session.id
+  try {
+    const response = await downloadTerminalSession(session.id)
+    const blobUrl = URL.createObjectURL(response)
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = buildDownloadName(session)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(blobUrl)
+    ElMessage.success('录制文件已开始下载')
+  } catch (error: any) {
+    ElMessage.error('下载录制文件失败: ' + extractErrorMessage(error, '未知错误'))
+  } finally {
+    downloadingSession.value = 0
+  }
+}
+
+const handleOpenRiskRecords = async (session: TerminalSession) => {
+  loadingRiskSession.value = session.id
+  riskLoading.value = true
+  riskSession.value = session
+  riskEvents.value = []
+  riskSummary.value = {
+    highRiskCount: session.highRiskCount || 0,
+    mediumRiskCount: session.mediumRiskCount || 0,
+  }
+  try {
+    const response = await getTerminalSessionEvents(session.id)
+    riskEvents.value = response.list || []
+    riskSummary.value = {
+      highRiskCount: response.highRiskCount || 0,
+      mediumRiskCount: response.mediumRiskCount || 0,
+    }
+    riskDialogVisible.value = true
+  } catch (error: any) {
+    ElMessage.error('加载风险记录失败: ' + extractErrorMessage(error, '未知错误'))
+  } finally {
+    riskLoading.value = false
+    loadingRiskSession.value = 0
+  }
+}
+
 const handleDeleteClick = (row: TerminalSession) => {
-  ElMessageBox.confirm('确定删除此会话录制吗？', '提示', {
+  ElMessageBox.confirm('确定删除此会话录制吗？相关高危命令记录也会一并删除。', '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
@@ -256,22 +454,27 @@ const handleDelete = async (id: number) => {
   try {
     await deleteTerminalSession(id)
     ElMessage.success('删除成功')
-    loadSessions()
+    await loadSessions()
   } catch (error: any) {
-    ElMessage.error('删除失败: ' + (error.message || '未知错误'))
+    ElMessage.error('删除失败: ' + extractErrorMessage(error, '未知错误'))
   } finally {
     deletingSession.value = 0
   }
 }
 
-// 刷新
+const buildDownloadName = (session: TerminalSession) => {
+  const host = sanitizeFileName(session.hostName || session.hostIp || `terminal-session-${session.id}`)
+  return `${host}-${session.id}.cast`
+}
+
+const sanitizeFileName = (value: string) => value.replace(/[\\/:*?"<>|\s]+/g, '_')
+
 const handleRefresh = () => {
   searchKeyword.value = ''
   page.value = 1
   loadSessions()
 }
 
-// 分页变化
 const handleSizeChange = () => {
   page.value = 1
   loadSessions()
@@ -281,16 +484,15 @@ const handlePageChange = () => {
   loadSessions()
 }
 
-// 关闭播放器
 const handlePlayerClose = () => {
-  if (recordingUrl.value) {
-    URL.revokeObjectURL(recordingUrl.value)
-    recordingUrl.value = ''
-  }
+  cleanupRecordingUrl()
   currentSession.value = null
 }
 
-// 获取状态类型
+const handlePlayerError = (message: string) => {
+  ElMessage.error(message || '终端播放器初始化失败')
+}
+
 const getStatusType = (status: string): 'success' | 'info' | 'warning' | 'danger' => {
   const typeMap: Record<string, 'success' | 'info' | 'warning' | 'danger'> = {
     completed: 'success',
@@ -300,11 +502,24 @@ const getStatusType = (status: string): 'success' | 'info' | 'warning' | 'danger
   return typeMap[status] || 'info'
 }
 
+const getRiskTagType = (riskLevel: string): 'danger' | 'warning' | 'info' => {
+  if (riskLevel === 'high') {
+    return 'danger'
+  }
+  if (riskLevel === 'medium') {
+    return 'warning'
+  }
+  return 'info'
+}
+
 onMounted(() => {
   loadSessions()
 })
-</script>
 
+onBeforeUnmount(() => {
+  cleanupRecordingUrl()
+})
+</script>
 <style scoped>
 .terminal-audit-container {
   padding: 0;
@@ -358,7 +573,30 @@ onMounted(() => {
   line-height: 1.4;
 }
 
-/* 搜索栏 */
+.audit-tabs-card {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  padding: 0 16px 16px;
+}
+
+.audit-tabs-card :deep(.el-tabs__header) {
+  margin-bottom: 12px;
+}
+
+.audit-tabs-card :deep(.el-tabs__nav-wrap::after) {
+  background-color: #ebeef5;
+}
+
+.audit-tabs-card :deep(.el-tabs__item.is-active) {
+  color: #303133;
+  font-weight: 600;
+}
+
+.audit-tabs-card :deep(.el-tabs__active-bar) {
+  background-color: #d4af37;
+}
+
 .search-bar {
   margin-bottom: 12px;
   padding: 12px 16px;
@@ -506,6 +744,7 @@ onMounted(() => {
   display: flex;
   gap: 8px;
   align-items: center;
+  justify-content: center;
 }
 
 .action-btn {
@@ -529,6 +768,16 @@ onMounted(() => {
 .action-play:hover {
   background-color: #e8f4ff;
   color: #409eff;
+}
+
+.action-download:hover {
+  background-color: #ecf5ff;
+  color: #409eff;
+}
+
+.action-risk:hover {
+  background-color: #fff7e6;
+  color: #e6a23c;
 }
 
 .action-delete:hover {

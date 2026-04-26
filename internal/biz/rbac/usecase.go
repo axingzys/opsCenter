@@ -281,6 +281,10 @@ func (uc *MenuUseCase) GetByRoleID(ctx context.Context, roleID uint) ([]*SysMenu
 	return uc.menuRepo.GetByRoleID(ctx, roleID)
 }
 
+func (uc *MenuUseCase) HasUserMenuCode(ctx context.Context, userID uint, code string) (bool, error) {
+	return uc.menuRepo.HasUserMenuCode(ctx, userID, code)
+}
+
 type PositionUseCase struct {
 	positionRepo PositionRepo
 }

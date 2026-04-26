@@ -1,5 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { useUserStore } from '@/stores/user'
 import { pluginManager } from '@/plugins/manager'
 
 const router = createRouter({
@@ -108,10 +107,22 @@ const router = createRouter({
           meta: { title: '云账号管理' }
         },
         {
+          path: 'asset/virtualization',
+          name: 'AssetVirtualization',
+          component: () => import('@/views/asset/VirtualizationPlatforms.vue'),
+          meta: { title: '虚拟化平台' }
+        },
+        {
+          path: 'asset/databases',
+          name: 'AssetDatabases',
+          component: () => import('@/views/asset/DatabaseManagement.vue'),
+          meta: { title: '数据库管理' }
+        },
+        {
           path: 'asset/terminal-audit',
           name: 'AssetTerminalAudit',
           component: () => import('@/views/asset/TerminalAudit.vue'),
-          meta: { title: '终端审计' }
+          meta: { title: '会话审计' }
         },
         {
           path: 'asset/groups',
@@ -138,6 +149,12 @@ const router = createRouter({
           meta: { title: 'Web终端', hideSidebar: true }
         },
         {
+          path: 'desktop',
+          name: 'Desktop',
+          component: () => import('@/views/asset/Desktop.vue'),
+          meta: { title: '远程桌面', hideSidebar: true }
+        },
+        {
           path: 'plugin/list',
           name: 'PluginList',
           component: () => import('@/views/plugin/PluginList.vue'),
@@ -148,6 +165,18 @@ const router = createRouter({
           name: 'PluginInstall',
           component: () => import('@/views/plugin/PluginInstall.vue'),
           meta: { title: '插件安装' }
+        },
+        {
+          path: 'plugin/agents',
+          name: 'PluginAgents',
+          component: () => import('@/views/asset/Agents.vue'),
+          meta: { title: 'Agent管理' }
+        },
+        {
+          path: 'asset/agents',
+          name: 'AssetAgents',
+          redirect: '/plugin/agents',
+          meta: { title: 'Agent管理', activeMenu: '/plugin/agents' }
         },
         // 身份认证模块（暂不开放，如需启用请取消注释）
         // {
@@ -234,7 +263,7 @@ export function clearMFAFlag() {
 }
 
 // 路由守卫
-router.beforeEach(async (to, from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const token = localStorage.getItem('token')
 
   // 公开路由（登录页、OAuth回调等）
@@ -309,4 +338,3 @@ router.beforeEach(async (to, from, next) => {
 })
 
 export default router
-

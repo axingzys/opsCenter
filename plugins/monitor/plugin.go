@@ -28,6 +28,7 @@ import (
 	"github.com/ydcloud-dy/opshub/internal/plugin"
 	"github.com/ydcloud-dy/opshub/plugins/monitor/model"
 	"github.com/ydcloud-dy/opshub/plugins/monitor/server"
+	"github.com/ydcloud-dy/opshub/plugins/monitor/service"
 )
 
 // Plugin 监控中心插件实现
@@ -78,6 +79,7 @@ func (p *Plugin) Enable(db *gorm.DB) error {
 		&model.AlertReceiver{},
 		&model.AlertReceiverChannel{},
 		&model.AlertLog{},
+		&model.HostAlertRule{},
 	}
 
 	// 自动迁移所有插件相关的表
@@ -110,6 +112,7 @@ func (p *Plugin) startMonitorScheduler() {
 	defer ticker.Stop()
 
 	handler := server.NewHandler(p.db)
+	hostAlertService := service.NewHostAlertService(p.db)
 
 	for {
 		select {
@@ -117,6 +120,7 @@ func (p *Plugin) startMonitorScheduler() {
 			return
 		case <-ticker.C:
 			p.checkDueDomains(handler)
+			hostAlertService.CheckRules(p.ctx)
 		}
 	}
 }
@@ -159,24 +163,38 @@ func (p *Plugin) GetMenus() []plugin.MenuConfig {
 			ParentPath: "/monitor",
 		},
 		{
+			Name:       "主机监控",
+			Path:       "/monitor/hosts",
+			Icon:       "Monitor",
+			Sort:       2,
+			ParentPath: "/monitor",
+		},
+		{
 			Name:       "告警通道",
 			Path:       "/monitor/alert-channels",
 			Icon:       "Bell",
-			Sort:       2,
+			Sort:       3,
 			ParentPath: "/monitor",
 		},
 		{
 			Name:       "告警接收人",
 			Path:       "/monitor/alert-receivers",
 			Icon:       "User",
-			Sort:       3,
+			Sort:       4,
+			ParentPath: "/monitor",
+		},
+		{
+			Name:       "主机告警",
+			Path:       "/monitor/host-alert-rules",
+			Icon:       "Bell",
+			Sort:       5,
 			ParentPath: "/monitor",
 		},
 		{
 			Name:       "告警日志",
 			Path:       "/monitor/alert-logs",
 			Icon:       "Document",
-			Sort:       4,
+			Sort:       6,
 			ParentPath: "/monitor",
 		},
 	}

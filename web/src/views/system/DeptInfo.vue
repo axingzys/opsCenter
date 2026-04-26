@@ -191,7 +191,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
-import { ElMessage, ElMessageBox, FormInstance, FormRules, ElTable } from 'element-plus'
+import { ElMessage, ElMessageBox, ElTable } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
 import {
   Plus,
   Edit,

@@ -163,6 +163,34 @@ func (s *HostService) GetHost(c *gin.Context) {
 	response.Success(c, host)
 }
 
+// GetMetricTrend 获取主机资源趋势
+// @Summary 获取主机资源趋势
+// @Description 获取主机 CPU、内存、磁盘的 1 小时或 24 小时趋势
+// @Tags 资产管理-主机
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "主机ID"
+// @Param range query string false "时间范围(1h/24h)" default(1h)
+// @Success 200 {object} response.Response{} "获取成功"
+// @Router /api/v1/hosts/{id}/trends [get]
+func (s *HostService) GetMetricTrend(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的主机ID")
+		return
+	}
+
+	trend, err := s.hostUseCase.GetMetricTrend(c.Request.Context(), uint(id), c.DefaultQuery("range", "1h"))
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "获取主机趋势失败: "+err.Error())
+		return
+	}
+
+	response.Success(c, trend)
+}
+
 // ListHosts 主机列表
 // @Summary 获取主机列表
 // @Description 分页获取主机列表，支持搜索和按分组筛选
@@ -926,7 +954,7 @@ func (s *HostService) ListHostFiles(c *gin.Context) {
 	}
 
 	// 获取目录路径参数，默认为用户主目录
-	remotePath := c.DefaultQuery("path", "~")
+	remotePath := c.Query("path")
 
 	files, err := s.hostUseCase.ListFiles(c.Request.Context(), uint(id), remotePath)
 	if err != nil {
@@ -967,9 +995,6 @@ func (s *HostService) UploadHostFile(c *gin.Context) {
 
 	// 获取远程路径参数
 	remotePath := c.PostForm("path")
-	if remotePath == "" {
-		remotePath = "~/"
-	}
 
 	// 打开文件
 	src, err := file.Open()
@@ -1016,10 +1041,7 @@ func (s *HostService) DownloadHostFile(c *gin.Context) {
 	}
 
 	// 获取文件名
-	fileName := remotePath
-	if idx := strings.LastIndex(remotePath, "/"); idx >= 0 {
-		fileName = remotePath[idx+1:]
-	}
+	fileName := extractRemoteFileName(remotePath)
 
 	// 设置响应头
 	c.Header("Content-Type", "application/octet-stream")
@@ -1031,6 +1053,17 @@ func (s *HostService) DownloadHostFile(c *gin.Context) {
 		response.ErrorCode(c, http.StatusInternalServerError, "下载文件失败: "+err.Error())
 		return
 	}
+}
+
+func extractRemoteFileName(remotePath string) string {
+	normalized := strings.TrimSpace(strings.ReplaceAll(remotePath, "\\", "/"))
+	if normalized == "" {
+		return "download"
+	}
+	if idx := strings.LastIndex(normalized, "/"); idx >= 0 {
+		return normalized[idx+1:]
+	}
+	return normalized
 }
 
 // DeleteHostFile 删除主机文件

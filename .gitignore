@@ -49,7 +49,7 @@ web/public/uploads/*
 
 # SQLite database
 data/*.db.env
-data/
+/data/
 logs/
 web/node_modules/
 node_modules/

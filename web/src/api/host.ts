@@ -1,4 +1,5 @@
 import request from '@/utils/request'
+import type { AxiosProgressEvent } from 'axios'
 
 // 主机管理
 export const getHostList = (params: any) => {
@@ -7,6 +8,10 @@ export const getHostList = (params: any) => {
 
 export const getHost = (id: number) => {
   return request.get(`/api/v1/hosts/${id}`)
+}
+
+export const getHostMetricTrend = (id: number, params?: { range?: '1h' | '24h' | '7d' | '15d' }) => {
+  return request.get(`/api/v1/hosts/${id}/trends`, { params })
 }
 
 export const createHost = (data: any) => {
@@ -119,6 +124,65 @@ export const batchDeleteHosts = (hostIds: number[]) => {
   return request.post('/api/v1/hosts/batch-delete', { hostIds })
 }
 
+export const getHostAgentBootstrap = (hostId: number) => {
+  return request.get(`/api/v1/hosts/${hostId}/agent/bootstrap`, {
+    headers: {
+      'X-OpsHub-Base-URL': window.location.origin
+    }
+  })
+}
+
+// 桌面会话
+export const createDesktopSession = (hostId: number, data: {
+  width?: number
+  height?: number
+  dpi?: number
+  fullscreen?: boolean
+}) => {
+  return request.post(`/api/v1/hosts/${hostId}/desktop/sessions`, data)
+}
+
+export const getDesktopSessions = (params: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  status?: string
+  scope?: 'self' | 'all'
+}) => {
+  return request.get('/api/v1/desktop-sessions', { params })
+}
+
+export const getDesktopSession = (id: number) => {
+  return request.get(`/api/v1/desktop-sessions/${id}`)
+}
+
+export const downloadDesktopSessionRecording = (id: number) => {
+  return request.get(`/api/v1/desktop-sessions/${id}/recording`, {
+    responseType: 'blob'
+  })
+}
+
+export const deleteDesktopSession = (id: number) => {
+  return request.delete(`/api/v1/desktop-sessions/${id}`)
+}
+
+export const closeDesktopSession = (id: number) => {
+  return request.post(`/api/v1/desktop-sessions/${id}/close`)
+}
+
+export const uploadDesktopSessionFile = (
+  id: number,
+  file: File,
+  onUploadProgress?: (event: AxiosProgressEvent) => void
+) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request.post(`/api/v1/desktop-sessions/${id}/files/upload`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress
+  })
+}
+
 // 文件管理
 export const listHostFiles = (hostId: number, path: string = '~') => {
   return request.get(`/api/v1/hosts/${hostId}/files`, { params: { path } })
@@ -136,7 +200,8 @@ export const uploadHostFile = (hostId: number, file: File, path: string = '~/') 
 export const downloadHostFile = (hostId: number, path: string) => {
   return request.get(`/api/v1/hosts/${hostId}/files/download`, {
     params: { path },
-    responseType: 'blob'
+    responseType: 'blob',
+    timeout: 30 * 60 * 1000
   })
 }
 

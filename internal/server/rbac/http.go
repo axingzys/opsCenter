@@ -212,6 +212,7 @@ func NewRBACServices(db *gorm.DB, jwtSecret string) (
 	captchaService := rbacService.NewCaptchaService()
 	assetPermissionService := rbacService.NewAssetPermissionService(assetPermissionUseCase)
 	authMiddleware := rbacService.NewAuthMiddleware(authService)
+	authMiddleware.SetMenuUseCase(menuUseCase)
 
 	// 设置验证码服务到用户服务
 	userService.SetCaptchaService(captchaService)

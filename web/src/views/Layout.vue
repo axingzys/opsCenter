@@ -146,7 +146,8 @@ import {
   Key,
   Upload,
   Bell,
-  VideoPlay
+  VideoPlay,
+  DataBoard
 } from '@element-plus/icons-vue'
 import { getUserMenu } from '@/api/menu'
 
@@ -260,7 +261,8 @@ const iconMap: Record<string, any> = {
   'Key': Key,
   'Upload': Upload,
   'Bell': Bell,
-  'VideoPlay': VideoPlay
+  'VideoPlay': VideoPlay,
+  'DataBoard': DataBoard
 }
 
 // 获取图标组件

@@ -22,6 +22,12 @@ vendor/
 logs/
 *.log
 
+# Build artifacts / runtime data
+dist/
+.docker-build/
+data/
+agent-bundles/
+
 # Git
 .git/
 .gitignore

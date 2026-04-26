@@ -1,8 +1,10 @@
 import type { Plugin, PluginMenuConfig, PluginRouteConfig } from '../types'
 import { pluginManager } from '../manager'
 import DomainMonitor from './components/DomainMonitor.vue'
+import HostMonitor from './components/HostMonitor.vue'
 import AlertChannels from './components/AlertChannels.vue'
 import AlertReceivers from './components/AlertReceivers.vue'
+import HostAlertRules from './components/HostAlertRules.vue'
 import AlertLogs from './components/AlertLogs.vue'
 
 /**
@@ -46,10 +48,18 @@ class MonitorPlugin implements Plugin {
         parentPath: '',
       },
       {
+        name: '主机监控',
+        path: '/monitor/hosts',
+        icon: 'Monitor',
+        sort: 1,
+        hidden: false,
+        parentPath: parentPath,
+      },
+      {
         name: '域名监控',
         path: '/monitor/domain',
         icon: 'Monitor',
-        sort: 1,
+        sort: 2,
         hidden: false,
         parentPath: parentPath,
       },
@@ -57,7 +67,7 @@ class MonitorPlugin implements Plugin {
         name: '告警通道',
         path: '/monitor/alert-channels',
         icon: 'Bell',
-        sort: 2,
+        sort: 3,
         hidden: false,
         parentPath: parentPath,
       },
@@ -65,7 +75,15 @@ class MonitorPlugin implements Plugin {
         name: '告警接收人',
         path: '/monitor/alert-receivers',
         icon: 'User',
-        sort: 3,
+        sort: 4,
+        hidden: false,
+        parentPath: parentPath,
+      },
+      {
+        name: '主机告警',
+        path: '/monitor/host-alert-rules',
+        icon: 'Bell',
+        sort: 5,
         hidden: false,
         parentPath: parentPath,
       },
@@ -73,7 +91,7 @@ class MonitorPlugin implements Plugin {
         name: '告警日志',
         path: '/monitor/alert-logs',
         icon: 'Document',
-        sort: 4,
+        sort: 6,
         hidden: false,
         parentPath: parentPath,
       },
@@ -88,9 +106,15 @@ class MonitorPlugin implements Plugin {
       {
         path: '/monitor',
         name: 'Monitor',
-        component: () => import('./components/DomainMonitor.vue'),
-        redirect: '/monitor/domain',
+        component: () => import('./components/HostMonitor.vue'),
+        redirect: '/monitor/hosts',
         meta: { title: '监控中心' },
+      },
+      {
+        path: '/monitor/hosts',
+        name: 'HostMonitor',
+        component: () => import('./components/HostMonitor.vue'),
+        meta: { title: '主机监控' },
       },
       {
         path: '/monitor/domain',
@@ -109,6 +133,12 @@ class MonitorPlugin implements Plugin {
         name: 'AlertReceivers',
         component: () => import('./components/AlertReceivers.vue'),
         meta: { title: '告警接收人' },
+      },
+      {
+        path: '/monitor/host-alert-rules',
+        name: 'HostAlertRules',
+        component: () => import('./components/HostAlertRules.vue'),
+        meta: { title: '主机告警' },
       },
       {
         path: '/monitor/alert-logs',

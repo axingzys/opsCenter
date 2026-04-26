@@ -33,6 +33,7 @@ import (
 	"github.com/ydcloud-dy/opshub/internal/biz"
 	assetmodel "github.com/ydcloud-dy/opshub/internal/biz/asset"
 	auditmodel "github.com/ydcloud-dy/opshub/internal/biz/audit"
+	databasemodel "github.com/ydcloud-dy/opshub/internal/biz/database"
 	mfamodel "github.com/ydcloud-dy/opshub/internal/biz/mfa"
 	rbacmodel "github.com/ydcloud-dy/opshub/internal/biz/rbac"
 	systemmodel "github.com/ydcloud-dy/opshub/internal/biz/system"
@@ -192,10 +193,40 @@ func autoMigrate(db *gorm.DB) error {
 		&systemmodel.SysUserLoginAttempt{},
 		// 资产管理相关表
 		&assetmodel.Host{},
+		&assetmodel.AssetAgent{},
+		&assetmodel.AssetAgentJob{},
+		&assetmodel.AssetHostInventory{},
+		&assetmodel.AssetHostPublicIPHistory{},
 		&assetmodel.Credential{},
 		&assetmodel.AssetGroup{},
 		&assetmodel.CloudAccount{},
 		&assetmodel.TerminalSession{},
+		&assetmodel.TerminalCommandEvent{},
+		&assetmodel.DesktopSession{},
+		&assetmodel.VirtualizationPlatform{},
+		&assetmodel.VirtualizationCluster{},
+		&assetmodel.VirtualizationHost{},
+		&assetmodel.VirtualizationGuest{},
+		&assetmodel.VirtualizationGuestBinding{},
+		&assetmodel.VirtualizationSyncJob{},
+		&assetmodel.VirtualizationPlatformMetric{},
+		&assetmodel.VirtualizationClusterMetric{},
+		&assetmodel.VirtualizationActionLog{},
+		// 数据库管理相关表
+		&databasemodel.DatabaseInstance{},
+		&databasemodel.DatabaseSchema{},
+		&databasemodel.DatabaseTable{},
+		&databasemodel.DatabaseColumn{},
+		&databasemodel.DatabaseIndex{},
+		&databasemodel.DatabaseRedisKeyspace{},
+		&databasemodel.DatabaseRedisKeySample{},
+		&databasemodel.DatabaseSyncJob{},
+		&databasemodel.DatabaseQueryAudit{},
+		&databasemodel.DatabaseBackupTask{},
+		&databasemodel.DatabaseBackupRecord{},
+		&databasemodel.DatabaseRestoreJob{},
+		&databasemodel.DatabaseCapacitySnapshot{},
+		&databasemodel.DatabaseInspectionReport{},
 		// Kubernetes 集群相关表
 		&models.Cluster{},
 		&k8smodel.UserKubeConfig{},
@@ -252,6 +283,9 @@ func initDefaultData(db *gorm.DB) error {
 	var count int64
 	db.Model(&rbacmodel.SysUser{}).Where("username = ?", "admin").Count(&count)
 	if count > 0 {
+		if err := ensureDatabaseManagementMenu(db); err != nil {
+			appLogger.Warn("确保数据库管理菜单失败", zap.Error(err))
+		}
 		return nil // 已存在管理员，无需初始化
 	}
 
@@ -328,16 +362,22 @@ func initDefaultData(db *gorm.DB) error {
 
 	assetSubMenus := []*rbacmodel.SysMenu{
 		{Name: "主机管理", Code: "host-management", Type: 2, ParentID: assetMenu.ID, Path: "/asset/hosts", Component: "asset/Hosts", Icon: "Monitor", Sort: 1, Visible: 1, Status: 1},
-		{Name: "凭据管理", Code: "asset:credentials", Type: 3, ParentID: assetMenu.ID, Path: "/asset/credentials", Component: "asset/Credentials", Icon: "Lock", Sort: 2, Visible: 1, Status: 1},
-		{Name: "业务分组", Code: "business-group", Type: 2, ParentID: assetMenu.ID, Path: "/asset/groups", Component: "asset/Groups", Icon: "Collection", Sort: 3, Visible: 1, Status: 1},
-		{Name: "云账号管理", Code: "cloud-accounts", Type: 2, ParentID: assetMenu.ID, Path: "/asset/cloud-accounts", Component: "asset/CloudAccounts", Icon: "Cloudy", Sort: 4, Visible: 1, Status: 1},
-		{Name: "终端审计", Code: "asset_terminal_audit", Type: 2, ParentID: assetMenu.ID, Path: "/asset/terminal-audit", Icon: "View", Sort: 5, Visible: 1, Status: 1},
-		{Name: "权限配置", Code: "asset_permission", Type: 2, ParentID: assetMenu.ID, Path: "/asset/permissions", Component: "views/asset/AssetPermission.vue", Icon: "Lock", Sort: 6, Visible: 1, Status: 1},
+		{Name: "Agent管理", Code: "asset-agents", Type: 2, ParentID: assetMenu.ID, Path: "/asset/agents", Component: "asset/Agents", Icon: "Connection", Sort: 2, Visible: 1, Status: 1},
+		{Name: "凭据管理", Code: "asset:credentials", Type: 3, ParentID: assetMenu.ID, Path: "/asset/credentials", Component: "asset/Credentials", Icon: "Lock", Sort: 3, Visible: 1, Status: 1},
+		{Name: "业务分组", Code: "business-group", Type: 2, ParentID: assetMenu.ID, Path: "/asset/groups", Component: "asset/Groups", Icon: "Collection", Sort: 4, Visible: 1, Status: 1},
+		{Name: "云账号管理", Code: "cloud-accounts", Type: 2, ParentID: assetMenu.ID, Path: "/asset/cloud-accounts", Component: "asset/CloudAccounts", Icon: "Cloudy", Sort: 5, Visible: 1, Status: 1},
+		{Name: "虚拟化平台", Code: "asset_virtualization", Type: 2, ParentID: assetMenu.ID, Path: "/asset/virtualization", Component: "asset/VirtualizationPlatforms", Icon: "DataBoard", Sort: 6, Visible: 1, Status: 1},
+		{Name: "数据库管理", Code: "asset_databases", Type: 2, ParentID: assetMenu.ID, Path: "/asset/databases", Component: "asset/DatabaseManagement", Icon: "DataLine", Sort: 7, Visible: 1, Status: 1},
+		{Name: "会话审计", Code: "asset_terminal_audit", Type: 2, ParentID: assetMenu.ID, Path: "/asset/terminal-audit", Icon: "View", Sort: 8, Visible: 1, Status: 1},
+		{Name: "权限配置", Code: "asset_permission", Type: 2, ParentID: assetMenu.ID, Path: "/asset/permissions", Component: "views/asset/AssetPermission.vue", Icon: "Lock", Sort: 9, Visible: 1, Status: 1},
 	}
 	for _, menu := range assetSubMenus {
 		if err := createMenuWithPermission(menu); err != nil {
 			return fmt.Errorf("创建资产管理子菜单失败: %w", err)
 		}
+	}
+	if err := ensureDatabaseManagementMenu(db); err != nil {
+		return fmt.Errorf("初始化数据库管理权限失败: %w", err)
 	}
 
 	// ========== 3. 身份认证（暂不开放，如需启用请取消注释） ==========
@@ -423,6 +463,108 @@ func initDefaultData(db *gorm.DB) error {
 		appLogger.Info("系统默认配置初始化完成")
 	}
 
+	return nil
+}
+
+func ensureDatabaseManagementMenu(db *gorm.DB) error {
+	var assetMenu rbacmodel.SysMenu
+	if err := db.Where("code = ?", "asset-management").First(&assetMenu).Error; err != nil {
+		return nil
+	}
+
+	var menu rbacmodel.SysMenu
+	err := db.Where("code = ?", "asset_databases").First(&menu).Error
+	if err != nil {
+		if err != gorm.ErrRecordNotFound {
+			return err
+		}
+		menu = rbacmodel.SysMenu{
+			Name:      "数据库管理",
+			Code:      "asset_databases",
+			Type:      2,
+			ParentID:  assetMenu.ID,
+			Path:      "/asset/databases",
+			Component: "asset/DatabaseManagement",
+			Icon:      "DataLine",
+			Sort:      7,
+			Visible:   1,
+			Status:    1,
+		}
+		if err := db.Create(&menu).Error; err != nil {
+			return err
+		}
+	}
+
+	var adminRole rbacmodel.SysRole
+	if err := db.Where("code = ?", "admin").First(&adminRole).Error; err != nil {
+		return nil
+	}
+	if err := db.Exec("INSERT INTO sys_role_menu (role_id, menu_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE role_id = role_id", adminRole.ID, menu.ID).Error; err != nil {
+		return err
+	}
+
+	buttons := []rbacmodel.SysMenu{
+		{Name: "查看实例", Code: "database:instance:view", Type: 3, ParentID: menu.ID, Sort: 101, Visible: 0, Status: 1},
+		{Name: "新增实例", Code: "database:instance:create", Type: 3, ParentID: menu.ID, Sort: 102, Visible: 0, Status: 1},
+		{Name: "编辑实例", Code: "database:instance:update", Type: 3, ParentID: menu.ID, Sort: 103, Visible: 0, Status: 1},
+		{Name: "删除实例", Code: "database:instance:delete", Type: 3, ParentID: menu.ID, Sort: 104, Visible: 0, Status: 1},
+		{Name: "启停实例", Code: "database:instance:status", Type: 3, ParentID: menu.ID, Sort: 105, Visible: 0, Status: 1},
+		{Name: "连接测试", Code: "database:connection:test", Type: 3, ParentID: menu.ID, Sort: 106, Visible: 0, Status: 1},
+		{Name: "查看元数据", Code: "database:metadata:view", Type: 3, ParentID: menu.ID, Sort: 107, Visible: 0, Status: 1},
+		{Name: "同步元数据", Code: "database:metadata:sync", Type: 3, ParentID: menu.ID, Sort: 108, Visible: 0, Status: 1},
+		{Name: "导出元数据", Code: "database:metadata:export", Type: 3, ParentID: menu.ID, Sort: 109, Visible: 0, Status: 1},
+		{Name: "执行只读查询", Code: "database:query:execute", Type: 3, ParentID: menu.ID, Sort: 110, Visible: 0, Status: 1},
+		{Name: "查看 SQL 历史", Code: "database:query:history:view", Type: 3, ParentID: menu.ID, Sort: 111, Visible: 0, Status: 1},
+		{Name: "查看执行计划", Code: "database:query:explain", Type: 3, ParentID: menu.ID, Sort: 112, Visible: 0, Status: 1},
+		{Name: "导出查询结果", Code: "database:query:export", Type: 3, ParentID: menu.ID, Sort: 113, Visible: 0, Status: 1},
+		{Name: "写操作预检查", Code: "database:query:write", Type: 3, ParentID: menu.ID, Sort: 114, Visible: 0, Status: 1},
+		{Name: "查看数据库诊断", Code: "database:diagnosis:view", Type: 3, ParentID: menu.ID, Sort: 115, Visible: 0, Status: 1},
+		{Name: "查看数据库拓扑", Code: "database:topology:view", Type: 3, ParentID: menu.ID, Sort: 116, Visible: 0, Status: 1},
+		{Name: "查看查询审计", Code: "database:audit:view", Type: 3, ParentID: menu.ID, Sort: 117, Visible: 0, Status: 1},
+		{Name: "导出查询审计", Code: "database:audit:export", Type: 3, ParentID: menu.ID, Sort: 118, Visible: 0, Status: 1},
+		{Name: "查看备份任务", Code: "database:backup:view", Type: 3, ParentID: menu.ID, Sort: 119, Visible: 0, Status: 1},
+		{Name: "新增备份任务", Code: "database:backup:create", Type: 3, ParentID: menu.ID, Sort: 120, Visible: 0, Status: 1},
+		{Name: "编辑备份任务", Code: "database:backup:update", Type: 3, ParentID: menu.ID, Sort: 121, Visible: 0, Status: 1},
+		{Name: "删除备份任务", Code: "database:backup:delete", Type: 3, ParentID: menu.ID, Sort: 122, Visible: 0, Status: 1},
+		{Name: "执行备份任务", Code: "database:backup:run", Type: 3, ParentID: menu.ID, Sort: 123, Visible: 0, Status: 1},
+		{Name: "下载备份文件", Code: "database:backup:download", Type: 3, ParentID: menu.ID, Sort: 124, Visible: 0, Status: 1},
+		{Name: "查看恢复演练", Code: "database:restore:view", Type: 3, ParentID: menu.ID, Sort: 125, Visible: 0, Status: 1},
+		{Name: "执行恢复演练", Code: "database:restore:run", Type: 3, ParentID: menu.ID, Sort: 126, Visible: 0, Status: 1},
+		{Name: "查看容量趋势", Code: "database:capacity:view", Type: 3, ParentID: menu.ID, Sort: 127, Visible: 0, Status: 1},
+		{Name: "采集容量快照", Code: "database:capacity:collect", Type: 3, ParentID: menu.ID, Sort: 128, Visible: 0, Status: 1},
+		{Name: "查看巡检报告", Code: "database:inspection:view", Type: 3, ParentID: menu.ID, Sort: 129, Visible: 0, Status: 1},
+		{Name: "生成巡检报告", Code: "database:inspection:run", Type: 3, ParentID: menu.ID, Sort: 130, Visible: 0, Status: 1},
+	}
+	for _, item := range buttons {
+		var button rbacmodel.SysMenu
+		err := db.Where("code = ?", item.Code).First(&button).Error
+		if err != nil {
+			if err != gorm.ErrRecordNotFound {
+				return err
+			}
+			button = item
+			if err := db.Create(&button).Error; err != nil {
+				return err
+			}
+			if err := db.Model(&button).Update("visible", item.Visible).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := db.Model(&button).Updates(map[string]interface{}{
+				"name":      item.Name,
+				"type":      item.Type,
+				"parent_id": item.ParentID,
+				"sort":      item.Sort,
+				"visible":   item.Visible,
+				"status":    item.Status,
+			}).Error; err != nil {
+				return err
+			}
+		}
+		if err := db.Exec("INSERT INTO sys_role_menu (role_id, menu_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE role_id = role_id", adminRole.ID, button.ID).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

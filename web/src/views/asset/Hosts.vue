@@ -106,7 +106,7 @@
                   <span class="node-label">{{ node.label }}</span>
                   <span class="node-count">({{ data.hostCount || 0 }})</span>
                   <span class="node-actions" @click.stop>
-                    <el-dropdown trigger="click" @command="(cmd) => handleGroupAction(cmd, data)">
+                    <el-dropdown trigger="click" @command="(cmd: string) => handleGroupAction(cmd, data)">
                       <el-icon class="more-icon"><MoreFilled /></el-icon>
                       <template #dropdown>
                         <el-dropdown-menu>
@@ -213,6 +213,10 @@
                       <span class="ip">{{ row.ip }}</span>
                       <span class="port">:{{ row.port }}</span>
                     </div>
+                    <div v-if="row.primaryPrivateIp || row.primaryPublicIp" class="host-network">
+                      <span v-if="row.primaryPrivateIp" class="network-chip network-private">内网 {{ row.primaryPrivateIp }}</span>
+                      <span v-if="row.primaryPublicIp" class="network-chip network-public">公网 {{ row.primaryPublicIp }}</span>
+                    </div>
                   </div>
                 </div>
               </template>
@@ -289,18 +293,18 @@
               </template>
             </el-table-column>
 
-            <el-table-column label="标签" min-width="80">
+            <el-table-column label="标签" min-width="72">
               <template #default="{ row }">
                 <div v-if="row.tags && row.tags.length > 0" class="tags-cell">
                   <el-tag
                     v-for="(tag, index) in row.tags.slice(0, 2)"
                     :key="index"
                     size="small"
-                    class="tag-item"
+                    class="tag-item host-row-tag"
                   >
                     {{ tag }}
                   </el-tag>
-                  <el-tag v-if="row.tags.length > 2" size="small" type="info" class="tag-more">
+                  <el-tag v-if="row.tags.length > 2" size="small" type="info" class="tag-more host-row-tag host-row-tag-more">
                     +{{ row.tags.length - 2 }}
                   </el-tag>
                 </div>
@@ -324,9 +328,12 @@
               </template>
             </el-table-column>
 
-            <el-table-column label="操作" width="170" fixed="right" align="center">
+            <el-table-column label="操作" width="224" fixed="right" align="center">
               <template #default="{ row }">
-                <div class="action-buttons">
+                <div
+                  class="action-buttons"
+                  :class="{ 'action-buttons-compact': row.osType === 'windows' && row.desktopEnabled }"
+                >
                   <el-tooltip content="采集信息" placement="top">
                     <el-button
                       v-if="hasHostPermission(row.id, PERMISSION.COLLECT)"
@@ -337,6 +344,16 @@
                       <el-icon><Refresh /></el-icon>
                     </el-button>
                   </el-tooltip>
+                  <el-tooltip content="采集详情" placement="top">
+                    <el-button
+                      v-if="hasHostPermission(row.id, PERMISSION.VIEW)"
+                      link
+                      class="action-btn action-agent"
+                      @click="handleShowHostCollection(row)"
+                    >
+                      <el-icon><Connection /></el-icon>
+                    </el-button>
+                  </el-tooltip>
                   <el-tooltip content="文件管理" placement="top">
                     <el-button
                       v-if="hasHostPermission(row.id, PERMISSION.FILE)"
@@ -345,6 +362,16 @@
                       @click="handleFileManager(row)"
                     >
                       <el-icon><Folder /></el-icon>
+                    </el-button>
+                  </el-tooltip>
+                  <el-tooltip content="桌面连接" placement="top">
+                    <el-button
+                      v-if="row.osType === 'windows' && row.desktopEnabled && hasHostPermission(row.id, PERMISSION.DESKTOP)"
+                      link
+                      class="action-btn action-desktop"
+                      @click="handleOpenDesktop(row)"
+                    >
+                      <el-icon><Operation /></el-icon>
                     </el-button>
                   </el-tooltip>
                   <el-tooltip content="编辑" placement="top">
@@ -547,7 +574,14 @@
               />
             </el-form-item>
           </el-col>
-          <el-col :span="12"></el-col>
+          <el-col :span="12">
+            <el-form-item label="操作系统" prop="osType">
+              <el-select v-model="hostForm.osType" placeholder="请选择操作系统" style="width: 100%" @change="handleHostOSTypeChange">
+                <el-option label="Linux" value="linux" />
+                <el-option label="Windows" value="windows" />
+              </el-select>
+            </el-form-item>
+          </el-col>
         </el-row>
 
         <el-row :gutter="20">
@@ -556,34 +590,202 @@
               <el-input v-model="hostForm.ip" placeholder="请输入IP地址" />
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col v-if="hostForm.osType === 'linux'" :span="12">
             <el-form-item label="SSH端口" prop="port">
               <el-input-number v-model="hostForm.port" :min="1" :max="65535" :step="1" />
             </el-form-item>
           </el-col>
+          <el-col v-else :span="12">
+            <el-form-item label="管理方式" prop="managementMode">
+              <el-select v-model="hostForm.managementMode" style="width: 100%" @change="handleManagementModeChange">
+                <el-option label="Agent（推荐）" value="agent" />
+                <el-option label="WinRM" value="winrm" />
+                <el-option label="SSH（兼容）" value="ssh" />
+                <el-option label="仅桌面" value="none" />
+              </el-select>
+            </el-form-item>
+          </el-col>
         </el-row>
 
-        <el-row :gutter="20">
+        <el-row v-if="hostForm.osType === 'linux' || hostForm.managementMode === 'ssh'" :gutter="20">
           <el-col :span="12">
             <el-form-item label="SSH用户名" prop="sshUser">
-              <el-input v-model="hostForm.sshUser" placeholder="如：root" />
+              <el-input v-model="hostForm.sshUser" :placeholder="hostForm.osType === 'windows' ? '如：Administrator' : '如：root'" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="认证凭据">
+            <el-form-item :label="hostForm.osType === 'windows' ? 'SSH凭据' : '认证凭据'">
               <el-select v-model="hostForm.credentialId" placeholder="选择或新建凭证" clearable filterable>
                 <el-option
-                  v-for="cred in credentialList"
+                  v-for="cred in sshCredentialOptions"
                   :key="cred.id"
                   :label="`${cred.name} (${cred.typeText})`"
                   :value="cred.id"
                 />
                 <template #footer>
-                  <el-button text @click="showCredentialDialog = true" style="width: 100%">
+                  <el-button text @click="openCredentialDialog('ssh')" style="width: 100%">
                     <el-icon><Plus /></el-icon> 新建凭证
                   </el-button>
                 </template>
               </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row v-if="hostForm.osType === 'windows' && hostForm.managementMode === 'ssh'" :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="SSH端口" prop="port">
+              <el-input-number v-model="hostForm.port" :min="1" :max="65535" :step="1" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="采集说明">
+              <el-alert title="兼容模式：继续通过 SSH 采集 Windows 指标。" type="warning" :closable="false" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row v-if="hostForm.osType === 'windows' && (hostForm.managementMode === 'winrm' || hostForm.managementMode === 'agent')" :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="WinRM端口" prop="managementPort">
+              <el-input-number v-model="hostForm.managementPort" :min="1" :max="65535" :step="1" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="WinRM凭据">
+              <el-select v-model="hostForm.managementCredentialId" placeholder="选择WinRM凭据" clearable filterable>
+                <el-option
+                  v-for="cred in winrmCredentialOptions"
+                  :key="cred.id"
+                  :label="`${cred.name} (${cred.typeText})`"
+                  :value="cred.id"
+                />
+                <template #footer>
+                  <el-button text @click="openCredentialDialog('winrm')" style="width: 100%">
+                    <el-icon><Plus /></el-icon> 新建WinRM凭据
+                  </el-button>
+                </template>
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col v-if="hostForm.managementMode === 'agent'" :span="24">
+            <el-alert
+              title="配置 WinRM 端口和凭据后，可在 Agent管理 中自动部署/卸载 Windows Agent；不配置则只能手工安装。"
+              type="info"
+              :closable="false"
+            />
+          </el-col>
+        </el-row>
+
+        <el-row v-if="hostForm.osType === 'windows' && (hostForm.managementMode === 'agent' || hostForm.managementMode === 'none')" :gutter="20">
+          <el-col :span="24">
+            <el-alert
+              :title="hostForm.managementMode === 'agent' ? '当前主机将通过 Agent 作为主采集通道。' : '当前主机仅保留桌面访问，不会采集 CPU/内存/磁盘。'"
+              :type="hostForm.managementMode === 'agent' ? 'success' : 'info'"
+              :closable="false"
+            />
+          </el-col>
+          <el-col v-if="hostForm.managementMode === 'agent'" :span="24">
+            <div class="agent-inline-actions">
+              <el-button
+                class="black-button"
+                size="small"
+                :disabled="!hostForm.id"
+                :loading="agentBootstrapLoading"
+                @click="handleGenerateAgentBootstrap"
+              >
+                生成安装命令
+              </el-button>
+              <span class="agent-inline-tip" v-if="!hostForm.id">请先保存主机后再生成 Agent 安装命令</span>
+            </div>
+          </el-col>
+          <el-col v-if="hostForm.managementMode === 'agent' && hostForm.id" :span="24">
+            <div class="agent-status-grid">
+              <div class="agent-status-item">
+                <span class="agent-status-label">Agent 状态</span>
+                <span class="agent-status-value">{{ getCollectStatusLabel(hostForm.collectStatus) }}</span>
+              </div>
+              <div class="agent-status-item">
+                <span class="agent-status-label">Agent ID</span>
+                <span class="agent-status-value">{{ hostForm.agentId || '未注册' }}</span>
+              </div>
+              <div class="agent-status-item">
+                <span class="agent-status-label">Agent 版本</span>
+                <span class="agent-status-value">{{ hostForm.agentVersion || '未上报' }}</span>
+              </div>
+              <div class="agent-status-item">
+                <span class="agent-status-label">最后心跳</span>
+                <span class="agent-status-value">{{ hostForm.agentLastHeartbeatAt || '未上报' }}</span>
+              </div>
+            </div>
+            <el-alert
+              v-if="hostForm.collectError"
+              :title="hostForm.collectError"
+              type="warning"
+              :closable="false"
+              class="agent-error-alert"
+            />
+          </el-col>
+        </el-row>
+
+        <el-row v-if="hostForm.osType === 'windows'" :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="启用桌面">
+              <el-switch v-model="hostForm.desktopEnabled" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="桌面协议">
+              <el-select v-model="hostForm.desktopProtocol" style="width: 100%" :disabled="true">
+                <el-option label="RDP" value="rdp" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row v-if="hostForm.osType === 'windows' && hostForm.desktopEnabled" :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="桌面端口" prop="desktopPort">
+              <el-input-number v-model="hostForm.desktopPort" :min="1" :max="65535" :step="1" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="安全模式">
+              <el-select v-model="hostForm.desktopSecurity" style="width: 100%">
+                <el-option label="NLA" value="nla" />
+                <el-option label="TLS" value="tls" />
+                <el-option label="Any" value="any" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row v-if="hostForm.osType === 'windows' && hostForm.desktopEnabled" :gutter="20">
+          <el-col :span="12">
+            <el-form-item label="桌面凭据">
+              <el-select v-model="hostForm.desktopCredentialId" placeholder="选择RDP凭据" clearable filterable>
+                <el-option
+                  v-for="cred in desktopCredentialOptions"
+                  :key="cred.id"
+                  :label="`${cred.name} (${cred.typeText})`"
+                  :value="cred.id"
+                />
+                <template #footer>
+                  <el-button text @click="openCredentialDialog('rdp')" style="width: 100%">
+                    <el-icon><Plus /></el-icon> 新建RDP凭据
+                  </el-button>
+                </template>
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="证书策略">
+              <el-switch
+                v-model="hostForm.desktopIgnoreCert"
+                inline-prompt
+                active-text="忽略"
+                inactive-text="校验"
+              />
             </el-form-item>
           </el-col>
         </el-row>
@@ -622,7 +824,7 @@
       class="host-detail-dialog"
       @close="handleCloseHostDetail"
     >
-      <template #header="{ close }">
+      <template #header>
         <div class="detail-dialog-header">
           <div class="detail-header-left">
             <div class="host-avatar-lg" :class="`host-status-${hostDetail?.status}`">
@@ -636,7 +838,6 @@
               </div>
             </div>
           </div>
-          <el-button link @click="close"><el-icon><Close /></el-icon></el-button>
         </div>
       </template>
       <div v-loading="hostDetailLoading" class="host-detail-content">
@@ -668,8 +869,20 @@
                   <span class="info-value">{{ hostDetail.sshUser }}</span>
                 </div>
                 <div class="info-row">
+                  <span class="info-label">管理方式</span>
+                  <span class="info-value">{{ hostDetail.managementModeText || '-' }}</span>
+                </div>
+                <div class="info-row">
                   <span class="info-label">分组</span>
                   <span class="info-value">{{ hostDetail.groupName || '未分组' }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">内网IP</span>
+                  <span class="info-value">{{ hostDetail.primaryPrivateIp || '-' }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">公网IP</span>
+                  <span class="info-value">{{ hostDetail.primaryPublicIp || '-' }}</span>
                 </div>
                 <div class="info-row">
                   <span class="info-label">最后连接</span>
@@ -706,6 +919,14 @@
                 <div class="info-row">
                   <span class="info-label">主机名</span>
                   <span class="info-value">{{ hostDetail.hostname || '-' }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Agent版本</span>
+                  <span class="info-value">{{ hostDetail.agentVersion || '-' }}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">最后上报</span>
+                  <span class="info-value">{{ hostDetail.agentLastReportAt || '-' }}</span>
                 </div>
               </div>
             </div>
@@ -764,71 +985,48 @@
                 <span class="info-card-title">资源信息</span>
               </div>
               <div class="info-card-body">
-                <div class="resource-grid">
-                  <!-- CPU -->
-                  <div class="resource-card">
-                    <div class="resource-card-header">
-                      <el-icon class="resource-icon cpu-icon"><Cpu /></el-icon>
-                      <span>CPU</span>
-                    </div>
-                    <div class="resource-card-body">
-                      <div class="resource-value">{{ hostDetail.cpuCores }}核</div>
-                      <div class="resource-usage" :class="`usage-${getUsageLevel(hostDetail.cpuUsage)}`">
-                        <el-progress
-                          :percentage="hostDetail.cpuUsage ? parseFloat(hostDetail.cpuUsage.toFixed(1)) : 0"
-                          :color="getUsageColor(hostDetail.cpuUsage)"
-                          :stroke-width="8"
-                          :show-text="false"
-                        />
-                        <span class="usage-text" :class="getUsageLevel(hostDetail.cpuUsage)">{{ hostDetail.cpuUsage ? hostDetail.cpuUsage.toFixed(1) : '-' }}%</span>
-                      </div>
-                    </div>
-                  </div>
-                  <!-- 内存 -->
-                  <div class="resource-card">
-                    <div class="resource-card-header">
-                      <el-icon class="resource-icon memory-icon"><Coin /></el-icon>
-                      <span>内存</span>
-                    </div>
-                    <div class="resource-card-body">
-                      <div class="resource-value">{{ formatBytes(hostDetail.memoryTotal) }}</div>
-                      <div class="resource-usage" :class="`usage-${getUsageLevel(hostDetail.memoryUsage)}`">
-                        <el-progress
-                          :percentage="hostDetail.memoryUsage ? parseFloat(hostDetail.memoryUsage.toFixed(1)) : 0"
-                          :color="getUsageColor(hostDetail.memoryUsage)"
-                          :stroke-width="8"
-                          :show-text="false"
-                        />
-                        <span class="usage-text" :class="getUsageLevel(hostDetail.memoryUsage)">{{ hostDetail.memoryUsage ? hostDetail.memoryUsage.toFixed(1) : '-' }}%</span>
-                      </div>
-                    </div>
-                  </div>
-                  <!-- 磁盘 -->
-                  <div class="resource-card">
-                    <div class="resource-card-header">
-                      <el-icon class="resource-icon disk-icon"><Files /></el-icon>
-                      <span>磁盘</span>
-                    </div>
-                    <div class="resource-card-body">
-                      <div class="resource-value">{{ formatBytes(hostDetail.diskTotal) }}</div>
-                      <div class="resource-usage" :class="`usage-${getUsageLevel(hostDetail.diskUsage)}`">
-                        <el-progress
-                          :percentage="hostDetail.diskUsage ? parseFloat(hostDetail.diskUsage.toFixed(1)) : 0"
-                          :color="getUsageColor(hostDetail.diskUsage)"
-                          :stroke-width="8"
-                          :show-text="false"
-                        />
-                        <span class="usage-text" :class="getUsageLevel(hostDetail.diskUsage)">{{ hostDetail.diskUsage ? hostDetail.diskUsage.toFixed(1) : '-' }}%</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div class="resource-legend">
-                  <span class="legend-item"><span class="legend-dot legend-low"></span>正常 &lt;70%</span>
-                  <span class="legend-item"><span class="legend-dot legend-high"></span>繁忙 ≥70%</span>
-                  <span class="legend-item"><span class="legend-dot legend-critical"></span>严重 ≥90%</span>
-                </div>
+                <HostMetricOverviewCards
+                  :summary="hostDetail"
+                  :trend="hostMetricTrend"
+                  show-legend
+                />
               </div>
+            </div>
+          </div>
+
+          <div class="trend-detail-section">
+            <div class="remark-header">
+              <div class="info-icon info-icon-trend">
+                <el-icon><DataLine /></el-icon>
+              </div>
+              <span class="section-title">监控趋势</span>
+            </div>
+            <div class="trend-detail-body">
+              <HostMetricTrendPanel
+                :trend="hostMetricTrend"
+                :loading="hostMetricTrendLoading"
+                :range="hostMetricTrendRange"
+                @change-range="handleHostMetricTrendRangeChange"
+              />
+            </div>
+          </div>
+
+          <div class="inventory-detail-section">
+            <div class="remark-header">
+              <div class="info-icon info-icon-agent">
+                <el-icon><Connection /></el-icon>
+              </div>
+              <span class="section-title">Agent采集详情</span>
+              <el-tag
+                class="inventory-status-tag"
+                :type="hostDetail.agentLastReportAt ? 'success' : 'info'"
+                size="small"
+              >
+                {{ hostDetail.agentLastReportAt ? `最后上报 ${hostDetail.agentLastReportAt}` : '暂无上报' }}
+              </el-tag>
+            </div>
+            <div class="inventory-detail-body">
+              <AgentInventoryPanel :inventory="hostInventory" :loading="hostInventoryLoading" />
             </div>
           </div>
 
@@ -934,7 +1132,7 @@
             <div class="file-info">
               <el-icon><Document /></el-icon>
               <span>{{ uploadedFile.name }}</span>
-              <el-tag size="small" type="success">{{ (uploadedFile.size / 1024).toFixed(2) }} KB</el-tag>
+              <el-tag size="small" type="success">{{ ((uploadedFile.size || 0) / 1024).toFixed(2) }} KB</el-tag>
             </div>
           </el-form-item>
         </el-form>
@@ -1116,19 +1314,43 @@
           <el-input v-model="credentialForm.name" placeholder="请输入凭证名称，如：生产环境root凭证" />
         </el-form-item>
 
-        <el-form-item label="认证方式" prop="type">
-          <el-radio-group v-model="credentialForm.type" @change="handleAuthTypeChange">
-            <el-radio label="password">密码认证</el-radio>
-            <el-radio label="key">密钥认证</el-radio>
+        <el-form-item label="协议类型" prop="protocol">
+          <el-radio-group v-model="credentialForm.protocol" @change="handleCredentialProtocolChange">
+            <el-radio label="ssh">SSH</el-radio>
+            <el-radio label="winrm">WinRM</el-radio>
+            <el-radio label="rdp">RDP</el-radio>
           </el-radio-group>
         </el-form-item>
 
-        <el-form-item v-if="credentialForm.type === 'password'" label="用户名" prop="username">
-          <el-input v-model="credentialForm.username" placeholder="如：root" />
+        <el-form-item label="认证方式" prop="type">
+          <el-radio-group v-model="credentialForm.type" @change="handleAuthTypeChange">
+            <el-radio label="password">密码认证</el-radio>
+            <el-radio label="key" :disabled="credentialForm.protocol !== 'ssh'">密钥认证</el-radio>
+          </el-radio-group>
         </el-form-item>
 
-        <el-form-item v-if="credentialForm.type === 'password'" label="密码" prop="password">
+        <el-form-item v-if="credentialForm.protocol === 'ssh' && credentialForm.type === 'password'" label="无认证">
+          <div class="credential-mode-row">
+            <el-switch v-model="credentialForm.anonymous" @change="handleCredentialAnonymousChange" />
+            <span class="credential-mode-text">无认证 / 匿名连接</span>
+          </div>
+          <div class="field-tip">用于 Redis、MongoDB、Elasticsearch、OpenSearch 等无账号密码场景。</div>
+        </el-form-item>
+
+        <el-form-item v-if="credentialForm.type === 'password' && !credentialForm.anonymous" label="用户名" prop="username">
+          <el-input v-model="credentialForm.username" :placeholder="credentialForm.protocol === 'ssh' ? '如：root' : '如：Administrator'" />
+        </el-form-item>
+
+        <el-form-item v-if="credentialForm.protocol !== 'ssh' && credentialForm.type === 'password' && !credentialForm.anonymous" label="域">
+          <el-input v-model="credentialForm.domain" placeholder="如：CORP（可选）" />
+        </el-form-item>
+
+        <el-form-item v-if="credentialForm.type === 'password' && !credentialForm.anonymous" label="密码" prop="password">
           <el-input v-model="credentialForm.password" type="password" placeholder="请输入密码" show-password />
+        </el-form-item>
+
+        <el-form-item v-if="credentialForm.type === 'password' && credentialForm.anonymous" label="连接说明">
+          <div class="field-tip">当前凭据将以空用户名、空密码保存。</div>
         </el-form-item>
 
         <el-form-item v-if="credentialForm.type === 'key'" label="用户名">
@@ -1252,11 +1474,47 @@
       </template>
     </el-dialog>
 
+    <el-dialog
+      v-model="agentBootstrapVisible"
+      title="Agent 安装命令"
+      width="720px"
+      class="responsive-dialog"
+    >
+      <div class="agent-bootstrap-content">
+        <el-alert
+          title="在目标 Windows 主机上使用管理员 PowerShell 执行下方命令。安装脚本会注册 Agent、写入配置并创建定时上报任务。"
+          type="success"
+          :closable="false"
+        />
+
+        <el-descriptions :column="1" border class="agent-bootstrap-meta">
+          <el-descriptions-item label="主机">{{ agentBootstrapData.hostName || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="命令有效期">{{ agentBootstrapData.expiresAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="脚本地址">{{ agentBootstrapData.installScriptUrl || '-' }}</el-descriptions-item>
+        </el-descriptions>
+
+        <el-input
+          v-model="agentBootstrapData.installCommand"
+          type="textarea"
+          :rows="6"
+          readonly
+          class="agent-bootstrap-command"
+        />
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="agentBootstrapVisible = false">关闭</el-button>
+          <el-button class="black-button" @click="copyAgentBootstrapCommand">复制命令</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <!-- 文件浏览器对话框 -->
     <HostFileBrowser
       v-model:visible="fileBrowserVisible"
       :hostId="selectedHostId"
       :hostName="selectedHostName"
+      :hostOsType="selectedHostOsType"
     />
 
   </div>
@@ -1269,12 +1527,14 @@ import { FitAddon } from 'xterm-addon-fit'
 import { WebLinksAddon } from 'xterm-addon-web-links'
 import 'xterm/css/xterm.css'
 import 'xterm/lib/xterm.js'
-import { ElMessage, ElMessageBox, FormInstance, FormRules, UploadFile, UploadProps } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import type { FormInstance, FormRules, UploadFile, UploadProps } from 'element-plus'
 import {
   Plus,
   Edit,
   Delete,
   Monitor,
+  Connection,
   Search,
   Refresh,
   RefreshLeft,
@@ -1296,13 +1556,13 @@ import {
   Operation,
   Cpu,
   Lock,
-  Key,
   DataLine,
-  InfoFilled,
-  Coin,
-  Files
+  InfoFilled
 } from '@element-plus/icons-vue'
 import HostFileBrowser from './components/HostFileBrowser.vue'
+import AgentInventoryPanel from './components/AgentInventoryPanel.vue'
+import HostMetricOverviewCards from './components/HostMetricOverviewCards.vue'
+import HostMetricTrendPanel from './components/HostMetricTrendPanel.vue'
 import {
   getGroupTree,
   createGroup,
@@ -1323,19 +1583,24 @@ import {
   getCloudRegions,
   getCloudInstances,
   collectHostInfo,
-  testHostConnection,
+  getHostAgentBootstrap,
+  createDesktopSession,
   batchCollectHostInfo,
   downloadExcelTemplate,
   importFromExcel,
-  batchDeleteHosts
+  batchDeleteHosts,
+  getHostMetricTrend
 } from '@/api/host'
-import type { CloudInstanceVO, CloudRegionVO } from '@/api/host'
+import { getAgentInventory } from '@/api/agent'
 import { PERMISSION, hasPermission } from '@/utils/permission'
 import { getUserHostPermissions } from '@/api/assetPermission'
 import { useUserStore } from '@/stores/user'
+import { useRoute, useRouter } from 'vue-router'
 
 // 用户状态
 const userStore = useUserStore()
+const route = useRoute()
+const router = useRouter()
 
 // 检查当前用户是否是管理员
 const isAdmin = computed(() => {
@@ -1358,7 +1623,6 @@ const groupSubmitting = ref(false)
 const activeView = ref('hosts') // 'hosts' | 'terminal'
 const activeTerminalHost = ref<any>(null)
 const terminalHostList = ref<any[]>([])
-const terminalSearchKeyword = ref('')
 
 // 终端相关
 const terminalRef = ref<HTMLElement | null>(null)
@@ -1373,17 +1637,48 @@ const cloudImportVisible = ref(false)
 const showCredentialDialog = ref(false)
 const showCloudAccountDialog = ref(false)
 const fileBrowserVisible = ref(false)
+const agentBootstrapVisible = ref(false)
 const selectedHostId = ref(0)
 const selectedHostName = ref('')
+const selectedHostOsType = ref('linux')
 
 // 主机详情
 const showHostDetailDialog = ref(false)
 const hostDetail = ref<any>(null)
 const hostDetailLoading = ref(false)
+const hostInventoryLoading = ref(false)
+const hostMetricTrendLoading = ref(false)
+const hostMetricTrendRange = ref<'1h' | '24h' | '7d' | '15d'>('1h')
 const groupDialogVisible = ref(false)
+const openingHostDetailFromQuery = ref(false)
 
 const groupDialogTitle = ref('')
 const isGroupEdit = ref(false)
+
+const createEmptyHostInventory = () => ({
+  hostId: 0,
+  privateIps: [] as string[],
+  publicIps: [] as string[],
+  publicIpHistory: [] as any[],
+  disks: [] as any[],
+  topProcesses: [] as any[],
+  listeningPorts: [] as any[],
+  configSummary: {} as Record<string, any>,
+  collectedAt: ''
+})
+
+const hostInventory = reactive(createEmptyHostInventory())
+
+const createEmptyHostMetricTrend = () => ({
+  hostId: 0,
+  range: '1h' as '1h' | '24h' | '7d' | '15d',
+  stepSeconds: 0,
+  start: '',
+  end: '',
+  points: [] as any[]
+})
+
+const hostMetricTrend = ref(createEmptyHostMetricTrend())
 
 // 表单引用
 const hostFormRef = ref<FormInstance>()
@@ -1401,11 +1696,11 @@ const selectedGroup = ref<any>(null)
 const isExpandAll = ref(false)
 
 // 主机列表数据
-const hostList = ref([])
+const hostList = ref<any[]>([])
 const hostPermissions = ref<Map<number, number>>(new Map()) // 存储每个主机的用户权限
 const userHasEditPermission = ref(false) // 用户是否有任何主机的编辑权限
-const credentialList = ref([])
-const cloudAccountList = ref([])
+const credentialList = ref<any[]>([])
+const cloudAccountList = ref<any[]>([])
 
 // 搜索表单
 const searchForm = reactive({
@@ -1436,19 +1731,45 @@ const hostForm = reactive({
   cloudProvider: '',
   cloudInstanceId: '',
   cloudAccountId: null as number | null,
+  osType: 'linux',
   sshUser: 'root',
   ip: '',
   port: 22,
   credentialId: null as number | null,
+  managementMode: 'ssh',
+  managementPort: 22,
+  managementCredentialId: null as number | null,
+  desktopEnabled: false,
+  desktopProtocol: 'rdp',
+  desktopPort: 3389,
+  desktopCredentialId: null as number | null,
+  desktopSecurity: 'nla',
+  desktopIgnoreCert: true,
   tags: '',
-  description: ''
+  description: '',
+  collectStatus: '',
+  collectError: '',
+  agentId: '',
+  agentVersion: '',
+  agentLastHeartbeatAt: ''
+})
+
+const agentBootstrapLoading = ref(false)
+const agentBootstrapData = reactive({
+  hostName: '',
+  installCommand: '',
+  installScriptUrl: '',
+  expiresAt: ''
 })
 
 // 凭证表单
 const credentialForm = reactive({
   name: '',
+  protocol: 'ssh',
   type: 'password',
+  anonymous: false,
   username: '',
+  domain: '',
   password: '',
   privateKey: '',
   passphrase: '',
@@ -1507,16 +1828,40 @@ const groupForm = reactive({
 const hostRules: FormRules = {
   name: [{ required: true, message: '请输入主机名称', trigger: 'blur' }],
   type: [{ required: true, message: '请选择主机类型', trigger: 'change' }],
-  ip: [{ required: true, message: '请输入IP地址', trigger: 'blur' }],
-  sshUser: [{ required: true, message: '请输入SSH用户名', trigger: 'blur' }],
-  port: [{ required: true, message: '请输入SSH端口', trigger: 'blur' }]
+  osType: [{ required: true, message: '请选择操作系统', trigger: 'change' }],
+  ip: [{ required: true, message: '请输入IP地址', trigger: 'blur' }]
+}
+
+const validateCredentialPassword = (_rule: any, value: string, callback: (error?: Error) => void) => {
+  if (credentialForm.type !== 'password' || credentialForm.anonymous) {
+    callback()
+    return
+  }
+  if (!value) {
+    callback(new Error('请输入密码'))
+    return
+  }
+  callback()
+}
+
+const validateCredentialPrivateKey = (_rule: any, value: string, callback: (error?: Error) => void) => {
+  if (credentialForm.type !== 'key') {
+    callback()
+    return
+  }
+  if (!value) {
+    callback(new Error('请输入私钥'))
+    return
+  }
+  callback()
 }
 
 const credentialRules: FormRules = {
   name: [{ required: true, message: '请输入凭证名称', trigger: 'blur' }],
+  protocol: [{ required: true, message: '请选择协议类型', trigger: 'change' }],
   type: [{ required: true, message: '请选择认证方式', trigger: 'change' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-  privateKey: [{ required: true, message: '请输入私钥', trigger: 'blur' }]
+  password: [{ validator: validateCredentialPassword, trigger: 'blur' }],
+  privateKey: [{ validator: validateCredentialPrivateKey, trigger: 'blur' }]
 }
 
 const cloudAccountRules: FormRules = {
@@ -1536,6 +1881,84 @@ const groupRules: FormRules = {
 const groupTreeOptions = computed(() => {
   return buildTreeOptions(groupTree.value)
 })
+
+const sshCredentialOptions = computed(() =>
+  credentialList.value.filter((cred: any) => (cred.protocol || 'ssh') === 'ssh')
+)
+
+const winrmCredentialOptions = computed(() =>
+  credentialList.value.filter((cred: any) => cred.protocol === 'winrm')
+)
+
+const desktopCredentialOptions = computed(() =>
+  credentialList.value.filter((cred: any) => (cred.protocol || 'ssh') === 'rdp')
+)
+
+const getCollectStatusLabel = (status?: string) => {
+  switch (status) {
+    case 'online':
+      return '在线'
+    case 'offline':
+      return '离线'
+    case 'not_configured':
+      return '未配置'
+    default:
+      return '未知'
+  }
+}
+
+const resetHostInventory = () => {
+  Object.assign(hostInventory, createEmptyHostInventory())
+}
+
+const resetHostMetricTrend = () => {
+  hostMetricTrend.value = createEmptyHostMetricTrend()
+}
+
+const applyHostInventory = (data: any, hostId: number) => {
+  hostInventory.hostId = data.hostId || hostId
+  hostInventory.privateIps = data.privateIps || []
+  hostInventory.publicIps = data.publicIps || []
+  hostInventory.publicIpHistory = data.publicIpHistory || []
+  hostInventory.disks = data.disks || []
+  hostInventory.topProcesses = data.topProcesses || []
+  hostInventory.listeningPorts = data.listeningPorts || []
+  hostInventory.configSummary = data.configSummary || {}
+  hostInventory.collectedAt = data.collectedAt || ''
+}
+
+const loadHostInventory = async (hostId: number) => {
+  hostInventoryLoading.value = true
+  try {
+    const data = await getAgentInventory(hostId)
+    applyHostInventory(data, hostId)
+  } catch (error: any) {
+    resetHostInventory()
+    ElMessage.warning(error.message || '获取 Agent 采集详情失败')
+  } finally {
+    hostInventoryLoading.value = false
+  }
+}
+
+const loadHostMetricTrend = async (hostId: number, range: '1h' | '24h' | '7d' | '15d' = hostMetricTrendRange.value) => {
+  hostMetricTrendLoading.value = true
+  try {
+    const data = await getHostMetricTrend(hostId, { range })
+    hostMetricTrend.value = {
+      hostId: data.hostId || hostId,
+      range: data.range || range,
+      stepSeconds: data.stepSeconds || 0,
+      start: data.start || '',
+      end: data.end || '',
+      points: data.points || []
+    }
+  } catch (error: any) {
+    resetHostMetricTrend()
+    ElMessage.warning(error.message || '获取主机趋势失败')
+  } finally {
+    hostMetricTrendLoading.value = false
+  }
+}
 
 // 构建树形选项
 const buildTreeOptions = (nodes: any[]): any[] => {
@@ -1753,11 +2176,6 @@ const enabledCloudAccounts = computed(() => {
 })
 
 // 终端相关方法
-const openTerminalTab = () => {
-  const url = window.location.origin + '/terminal'
-  window.open(url, '_blank')
-}
-
 const handleHostDblClick = async (data: any) => {
   // 如果是主机节点，跳转到终端页面
   if (data.type === 'host' || data.ip) {
@@ -1771,6 +2189,10 @@ const handleHostDblClick = async (data: any) => {
     // 如果是分组节点且不在终端视图，切换到终端视图
     await openTerminalView()
   }
+}
+
+const openTerminalView = async () => {
+  handleOpenTerminal()
 }
 
 // 终端视图相关方法
@@ -1789,19 +2211,6 @@ const loadTerminalHostList = async (groupId?: number) => {
     terminalHostList.value = []
   }
 }
-
-// 过滤终端主机列表
-const filteredTerminalHosts = computed(() => {
-  if (!terminalSearchKeyword.value) {
-    return terminalHostList.value
-  }
-  const keyword = terminalSearchKeyword.value.toLowerCase()
-  return terminalHostList.value.filter((host: any) => {
-    return host.name?.toLowerCase().includes(keyword) ||
-           host.ip?.includes(keyword) ||
-           host.groupName?.toLowerCase().includes(keyword)
-  })
-})
 
 // 构建终端视图的分组+主机树
 const terminalGroupTree = computed(() => {
@@ -1922,7 +2331,7 @@ const connectSSH = (host: any) => {
     }
   }
 
-  ws.value.onerror = (error) => {
+  ws.value.onerror = () => {
     if (terminal.value) {
       terminal.value.writeln('\x1b[1;31m连接错误\x1b[0m')
     }
@@ -1933,11 +2342,6 @@ const connectSSH = (host: any) => {
       terminal.value.writeln('\r\n\x1b[1;33m连接已关闭\x1b[0m')
     }
   }
-}
-
-const getTerminalUrl = (host: any): string => {
-  const token = localStorage.getItem('token') || ''
-  return `/api/v1/asset/terminal/${host.id}?token=${token}`
 }
 
 const closeTerminal = () => {
@@ -1991,6 +2395,73 @@ const handleImportCommand = (command: string) => {
   }
 }
 
+const handleHostOSTypeChange = (osType: string) => {
+  if (osType === 'windows') {
+    hostForm.desktopEnabled = true
+    hostForm.desktopProtocol = 'rdp'
+    hostForm.desktopPort = hostForm.desktopPort || 3389
+    hostForm.desktopSecurity = hostForm.desktopSecurity || 'nla'
+    hostForm.desktopIgnoreCert = true
+    hostForm.managementMode = 'agent'
+    hostForm.managementPort = hostForm.managementPort && hostForm.managementPort > 0 ? hostForm.managementPort : 5985
+    hostForm.sshUser = ''
+    hostForm.credentialId = null
+  } else {
+    hostForm.managementMode = 'ssh'
+    hostForm.managementPort = hostForm.port || 22
+    hostForm.managementCredentialId = hostForm.credentialId
+    hostForm.desktopEnabled = false
+    hostForm.desktopCredentialId = null
+    if (!hostForm.sshUser) {
+      hostForm.sshUser = 'root'
+    }
+  }
+}
+
+const handleManagementModeChange = (mode: string) => {
+  if (hostForm.osType !== 'windows') {
+    return
+  }
+
+  if (mode === 'ssh') {
+    hostForm.port = hostForm.port || 22
+    hostForm.sshUser = hostForm.sshUser || 'Administrator'
+    hostForm.managementPort = hostForm.port
+    hostForm.managementCredentialId = hostForm.credentialId
+    return
+  }
+
+  hostForm.sshUser = ''
+  hostForm.credentialId = null
+
+  if (mode === 'winrm') {
+    hostForm.managementPort = hostForm.managementPort && hostForm.managementPort > 0 ? hostForm.managementPort : 5985
+    return
+  }
+
+  if (mode === 'agent') {
+    hostForm.managementPort = hostForm.managementPort && hostForm.managementPort > 0 ? hostForm.managementPort : 5985
+    return
+  }
+
+  hostForm.managementPort = 0
+  hostForm.managementCredentialId = null
+}
+
+const openCredentialDialog = (protocol: 'ssh' | 'winrm' | 'rdp' = 'ssh') => {
+  credentialForm.protocol = protocol
+  credentialForm.type = 'password'
+  credentialForm.anonymous = false
+  credentialForm.username = ''
+  credentialForm.domain = ''
+  credentialForm.password = ''
+  credentialForm.privateKey = ''
+  credentialForm.passphrase = ''
+  credentialForm.description = ''
+  credentialForm.name = ''
+  showCredentialDialog.value = true
+}
+
 // 直接导入
 const handleDirectImport = async () => {
   // 确保凭证列表已加载
@@ -2001,12 +2472,27 @@ const handleDirectImport = async () => {
     name: '',
     groupId: selectedGroup.value?.id || null,
     type: 'self',
+    osType: 'linux',
     sshUser: 'root',
     ip: '',
     port: 22,
     credentialId: null,
+    managementMode: 'ssh',
+    managementPort: 22,
+    managementCredentialId: null,
+    desktopEnabled: false,
+    desktopProtocol: 'rdp',
+    desktopPort: 3389,
+    desktopCredentialId: null,
+    desktopSecurity: 'nla',
+    desktopIgnoreCert: true,
     tags: '',
-    description: ''
+    description: '',
+    collectStatus: '',
+    collectError: '',
+    agentId: '',
+    agentVersion: '',
+    agentLastHeartbeatAt: ''
   })
   directImportVisible.value = true
 }
@@ -2014,6 +2500,13 @@ const handleDirectImport = async () => {
 // 直接导入关闭
 const handleDirectImportClose = () => {
   hostFormRef.value?.resetFields()
+}
+
+const canAutoCollectCurrentHost = () => {
+  if (hostForm.osType === 'linux') {
+    return !!hostForm.credentialId
+  }
+  return hostForm.managementMode === 'ssh' && !!hostForm.credentialId
 }
 
 // 直接导入提交
@@ -2042,7 +2535,7 @@ const handleDirectImportSubmit = async () => {
       loadGroupTree()
 
       // 如果配置了凭证，自动采集主机信息
-      if (hostForm.credentialId && hostId > 0) {
+      if (hostId > 0 && canAutoCollectCurrentHost()) {
         setTimeout(async () => {
           try {
             await collectHostInfo(hostId)
@@ -2052,6 +2545,8 @@ const handleDirectImportSubmit = async () => {
             // 采集失败不阻塞主流程，只记录错误
           }
         }, 500)
+      } else if (hostId > 0 && hostForm.osType === 'windows' && hostForm.managementMode === 'agent') {
+        ElMessage.info('主机已保存，可重新编辑后生成 Agent 安装命令')
       }
     } catch (error: any) {
       ElMessage.error(error.message || '操作失败')
@@ -2109,6 +2604,10 @@ const handleExcelImportSubmit = async () => {
   try {
     excelImporting.value = true
     const file = uploadedFile.value.raw
+    if (!file) {
+      ElMessage.warning('上传文件无效，请重新选择')
+      return
+    }
     const result = await importFromExcel(file, excelImportForm.type, excelImportForm.groupId || undefined)
 
     if (result.successCount > 0) {
@@ -2119,7 +2618,7 @@ const handleExcelImportSubmit = async () => {
 
       // 自动采集新导入的主机（状态为-1的主机）
       await new Promise(resolve => setTimeout(resolve, 500))
-      const newHosts = hostList.value.filter((h: any) => h.status === -1)
+      const newHosts = hostList.value.filter((h: any) => h.status === -1 && h.managementMode === 'ssh' && h.credentialId)
       if (newHosts.length > 0) {
         ElMessage.info('正在自动采集主机信息...')
         const hostIds = newHosts.map((h: any) => h.id)
@@ -2237,8 +2736,8 @@ const handleBatchDelete = async () => {
 }
 
 // 全选云主机
-const handleSelectAllCloudHosts = (checked: boolean) => {
-  // TODO: 实现全选逻辑
+const handleSelectAllCloudHosts = () => {
+  selectedCloudHosts.value = selectAllCloudHosts.value ? [...cloudHostList.value] : []
 }
 
 // 云主机导入关闭
@@ -2277,12 +2776,36 @@ const handleAuthTypeChange = (type: string) => {
     credentialForm.privateKey = ''
     credentialForm.passphrase = ''
   } else {
+    credentialForm.anonymous = false
     credentialForm.password = ''
   }
+  credentialFormRef.value?.clearValidate(['password', 'privateKey'])
+}
+
+const handleCredentialProtocolChange = (protocol: string) => {
+  credentialForm.protocol = protocol
+  credentialForm.domain = ''
+  if (protocol !== 'ssh') {
+    credentialForm.type = 'password'
+    credentialForm.anonymous = false
+    credentialForm.privateKey = ''
+    credentialForm.passphrase = ''
+  }
+  credentialFormRef.value?.clearValidate(['password', 'privateKey'])
+}
+
+const handleCredentialAnonymousChange = (anonymous: boolean) => {
+  if (anonymous) {
+    credentialForm.username = ''
+    credentialForm.domain = ''
+    credentialForm.password = ''
+  }
+  credentialFormRef.value?.clearValidate('password')
 }
 
 // 凭证对话框关闭
 const handleCredentialDialogClose = () => {
+  credentialForm.anonymous = false
   credentialFormRef.value?.resetFields()
 }
 
@@ -2293,16 +2816,56 @@ const handleCredentialSubmit = async () => {
     if (!valid) return
     credentialSubmitting.value = true
     try {
-      await createCredential(credentialForm)
+      await createCredential({
+        ...credentialForm,
+        username: credentialForm.anonymous ? '' : credentialForm.username,
+        domain: credentialForm.anonymous ? '' : credentialForm.domain,
+        password: credentialForm.anonymous ? '' : credentialForm.password
+      })
       ElMessage.success('凭证创建成功')
       showCredentialDialog.value = false
-      loadCredentialList()
+      await loadCredentialList()
     } catch (error: any) {
       ElMessage.error(error.message || '创建失败')
     } finally {
       credentialSubmitting.value = false
     }
   })
+}
+
+const handleGenerateAgentBootstrap = async () => {
+  if (!hostForm.id) {
+    ElMessage.warning('请先保存主机')
+    return
+  }
+
+  try {
+    agentBootstrapLoading.value = true
+    const data = await getHostAgentBootstrap(hostForm.id)
+    agentBootstrapData.hostName = data.hostName || hostForm.name
+    agentBootstrapData.installCommand = data.installCommand || ''
+    agentBootstrapData.installScriptUrl = data.installScriptUrl || ''
+    agentBootstrapData.expiresAt = data.expiresAt || ''
+    agentBootstrapVisible.value = true
+  } catch (error: any) {
+    ElMessage.error(error.message || '生成 Agent 安装命令失败')
+  } finally {
+    agentBootstrapLoading.value = false
+  }
+}
+
+const copyAgentBootstrapCommand = async () => {
+  if (!agentBootstrapData.installCommand) {
+    ElMessage.warning('暂无可复制的安装命令')
+    return
+  }
+
+  try {
+    await navigator.clipboard.writeText(agentBootstrapData.installCommand)
+    ElMessage.success('安装命令已复制')
+  } catch (error) {
+    ElMessage.error('复制失败，请手动复制')
+  }
 }
 
 // 云平台账号对话框关闭
@@ -2334,6 +2897,11 @@ const handleEditHost = async (row: any) => {
   // 重新加载凭证列表，确保显示最新的凭证
   await loadCredentialList()
 
+  const resolvedManagementMode = row.managementMode
+    || (row.osType === 'windows'
+      ? ((row.managementCredentialId || row.credentialId) ? 'ssh' : 'agent')
+      : 'ssh')
+
   Object.assign(hostForm, {
     id: row.id,
     name: row.name,
@@ -2342,30 +2910,78 @@ const handleEditHost = async (row: any) => {
     cloudProvider: row.cloudProvider || '',
     cloudInstanceId: row.cloudInstanceId || '',
     cloudAccountId: row.cloudAccountId || null,
+    osType: row.osType || 'linux',
     sshUser: row.sshUser,
     ip: row.ip,
     port: row.port,
     credentialId: row.credentialId,
+    managementMode: resolvedManagementMode,
+    managementPort: row.managementPort || (resolvedManagementMode === 'winrm' ? 5985 : row.port || 22),
+    managementCredentialId: row.managementCredentialId || null,
+    desktopEnabled: !!row.desktopEnabled,
+    desktopProtocol: row.desktopProtocol || 'rdp',
+    desktopPort: row.desktopPort || 3389,
+    desktopCredentialId: row.desktopCredentialId || null,
+    desktopSecurity: row.desktopSecurity || 'nla',
+    desktopIgnoreCert: row.desktopIgnoreCert !== false,
     tags: Array.isArray(row.tags) ? row.tags.join(',') : row.tags,
-    description: row.description
+    description: row.description,
+    collectStatus: row.collectStatus || '',
+    collectError: row.collectError || '',
+    agentId: row.agentId || '',
+    agentVersion: row.agentVersion || '',
+    agentLastHeartbeatAt: row.agentLastHeartbeatAt || ''
   })
+  if (hostForm.osType === 'windows') {
+    handleManagementModeChange(hostForm.managementMode)
+  }
   directImportVisible.value = true
+}
+
+const handleOpenDesktop = async (row: any) => {
+  try {
+    const width = Math.max(window.innerWidth - 80, 1280)
+    const height = Math.max(window.innerHeight - 160, 720)
+    const res = await createDesktopSession(row.id, {
+      width,
+      height,
+      dpi: window.devicePixelRatio ? Math.round(window.devicePixelRatio * 96) : 96
+    })
+
+    localStorage.setItem(`desktop-launch:${res.sessionId}`, res.launchUrl)
+    const desktopUrl = `${window.location.origin}/desktop?sessionId=${res.sessionId}&hostName=${encodeURIComponent(row.name)}`
+    window.open(desktopUrl, '_blank')
+  } catch (error: any) {
+    ElMessage.error(error.message || '桌面连接创建失败')
+  }
 }
 
 // 文件管理
 const handleFileManager = (row: any) => {
   selectedHostId.value = row.id
   selectedHostName.value = row.name
+  selectedHostOsType.value = row.osType || 'linux'
   fileBrowserVisible.value = true
+}
+
+const handleShowHostCollection = async (row: any) => {
+  await handleShowHostDetail(row)
 }
 
 // 显示主机详情
 const handleShowHostDetail = async (row: any) => {
+  resetHostInventory()
+  resetHostMetricTrend()
+  hostMetricTrendRange.value = '1h'
   try {
     hostDetailLoading.value = true
     showHostDetailDialog.value = true
     const data = await getHost(row.id)
     hostDetail.value = data
+    await Promise.all([
+      loadHostInventory(row.id),
+      loadHostMetricTrend(row.id, hostMetricTrendRange.value)
+    ])
   } catch (error: any) {
     ElMessage.error(error.message || '获取主机详情失败')
   } finally {
@@ -2373,10 +2989,38 @@ const handleShowHostDetail = async (row: any) => {
   }
 }
 
+const openHostDetailFromRouteQuery = async () => {
+  const raw = route.query.hostId
+  const hostID = Number(Array.isArray(raw) ? raw[0] : raw)
+  if (!Number.isInteger(hostID) || hostID <= 0) {
+    return
+  }
+  if (openingHostDetailFromQuery.value) {
+    return
+  }
+
+  openingHostDetailFromQuery.value = true
+  try {
+    await handleShowHostDetail({ id: hostID })
+  } finally {
+    openingHostDetailFromQuery.value = false
+  }
+
+  const nextQuery: Record<string, any> = { ...route.query }
+  delete nextQuery.hostId
+  delete nextQuery.from
+  router.replace({
+    path: route.path,
+    query: nextQuery
+  })
+}
+
 // 关闭主机详情
 const handleCloseHostDetail = () => {
   showHostDetailDialog.value = false
   hostDetail.value = null
+  resetHostInventory()
+  resetHostMetricTrend()
 }
 
 // 从详情页采集主机信息
@@ -2389,6 +3033,10 @@ const handleCollectHostFromDetail = async () => {
     // 重新获取详情
     const data = await getHost(hostDetail.value.id)
     hostDetail.value = data
+    await Promise.all([
+      loadHostInventory(hostDetail.value.id),
+      loadHostMetricTrend(hostDetail.value.id, hostMetricTrendRange.value)
+    ])
     // 刷新列表
     loadHostList()
   } catch (error: any) {
@@ -2396,6 +3044,15 @@ const handleCollectHostFromDetail = async () => {
   } finally {
     hostDetailLoading.value = false
   }
+}
+
+const handleHostMetricTrendRangeChange = async (range: '1h' | '24h' | '7d' | '15d') => {
+  hostMetricTrendRange.value = range
+  if (!hostDetail.value?.id) {
+    resetHostMetricTrend()
+    return
+  }
+  await loadHostMetricTrend(hostDetail.value.id, range)
 }
 
 // 删除主机
@@ -2524,10 +3181,11 @@ const formatBytesCompact = (bytes: number): string => {
   const sizes = ['B', 'K', 'M', 'G', 'T']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   const value = bytes / Math.pow(k, i)
+  const unit = sizes[i] || 'B'
   if (value >= 100) {
-    return Math.round(value) + sizes[i]
+    return Math.round(value) + unit
   }
-  return parseFloat(value.toFixed(1)) + sizes[i]
+  return parseFloat(value.toFixed(1)) + unit
 }
 
 // 获取使用率颜色
@@ -2538,13 +3196,6 @@ const getUsageColor = (usage: number): string => {
 }
 
 // 获取使用率等级
-const getUsageLevel = (usage: number | undefined): string => {
-  if (!usage) return 'low'
-  if (usage >= 90) return 'critical'
-  if (usage >= 70) return 'high'
-  return 'low'
-}
-
 // 采集主机信息
 const handleCollectHost = async (row: any) => {
   try {
@@ -2593,16 +3244,27 @@ watch(() => cloudImportForm.accountId, async (accountId) => {
   }
 })
 
+watch(
+  () => route.query.hostId,
+  () => {
+    openHostDetailFromRouteQuery()
+  },
+  { immediate: true }
+)
+
 // 组件销毁时清理资源
 onBeforeUnmount(() => {
   closeTerminal()
 })
 
-onMounted(() => {
-  loadGroupTree()
-  loadHostList()
-  loadCredentialList()
-  loadCloudAccountList()
+onMounted(async () => {
+  await Promise.all([
+    loadGroupTree(),
+    loadHostList(),
+    loadCredentialList(),
+    loadCloudAccountList()
+  ])
+  await openHostDetailFromRouteQuery()
 })
 </script>
 
@@ -2979,6 +3641,32 @@ onMounted(() => {
   gap: 2px;
 }
 
+.host-network {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.network-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.network-private {
+  background: #ecfdf3;
+  color: #047857;
+}
+
+.network-public {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
 .ip {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3131,23 +3819,33 @@ onMounted(() => {
 /* 旧的操作按钮样式 - 保留兼容 */
 .action-buttons {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
   justify-content: center;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.action-buttons-compact {
+  gap: 4px;
 }
 
 .action-btn {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 !important;
+  margin: 0;
   border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   transition: all 0.2s ease;
 }
 
 .action-btn :deep(.el-icon) {
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .action-btn:hover {
@@ -3167,6 +3865,11 @@ onMounted(() => {
 .action-refresh:hover {
   background-color: #e8f4ff;
   color: #409eff;
+}
+
+.action-agent:hover {
+  background-color: #ecfeff;
+  color: #0f766e;
 }
 
 .action-files:hover {
@@ -3608,21 +4311,29 @@ onMounted(() => {
 .tags-cell {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px;
   align-items: center;
   justify-content: flex-start;
 }
 
-.tags-cell .tag-item {
-  font-size: 11px;
-  padding: 2px 6px;
-  height: auto;
+.tags-cell .tag-item,
+.tags-cell .tag-more {
+  max-width: 82px;
+  font-size: 10px;
+  padding: 0 5px;
+  height: 18px;
+  line-height: 16px;
+  border-radius: 999px;
 }
 
-.tags-cell .tag-more {
-  font-size: 11px;
-  padding: 2px 6px;
-  height: auto;
+.tags-cell :deep(.el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-row-tag-more {
+  max-width: none;
 }
 
 /* 凭证单元格样式 */
@@ -3721,6 +4432,14 @@ onMounted(() => {
   background: linear-gradient(135deg, #f56c6c 0%, #f78989 100%);
 }
 
+.info-icon-trend {
+  background: linear-gradient(135deg, #1d4ed8 0%, #38bdf8 100%);
+}
+
+.info-icon-agent {
+  background: linear-gradient(135deg, #0f766e 0%, #14b8a6 100%);
+}
+
 .info-icon-remark {
   background: linear-gradient(135deg, #606266 0%, #909399 100%);
 }
@@ -3764,6 +4483,24 @@ onMounted(() => {
 /* 资源区域 */
 .resource-section {
   margin-bottom: 24px;
+}
+
+.trend-detail-section,
+.inventory-detail-section {
+  margin-bottom: 24px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.trend-detail-body,
+.inventory-detail-body {
+  padding: 20px;
+}
+
+.inventory-status-tag {
+  margin-left: auto;
 }
 
 .resource-card-wrapper .info-card-body {
@@ -4392,11 +5129,81 @@ onMounted(() => {
 .legend-dot.critical {
   background: #f56c6c;
 }
-</style>
 
-// 文件管理
-const handleFileManager = (row: any) => {
-  selectedHostId.value = row.id
-  selectedHostName.value = row.name
-  fileBrowserVisible.value = true
+.agent-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
 }
+
+.agent-inline-tip {
+  color: #909399;
+  font-size: 13px;
+}
+
+.agent-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.agent-status-item {
+  padding: 12px 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.agent-status-label {
+  display: block;
+  color: #909399;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.agent-status-value {
+  display: block;
+  color: #303133;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.agent-error-alert {
+  margin-top: 12px;
+}
+
+.agent-bootstrap-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.agent-bootstrap-meta {
+  margin-top: 4px;
+}
+
+.agent-bootstrap-command :deep(textarea) {
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 13px;
+}
+
+.credential-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.credential-mode-text {
+  color: #303133;
+  font-size: 14px;
+}
+
+.field-tip {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.6;
+}
+</style>

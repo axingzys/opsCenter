@@ -47,22 +47,82 @@ func (TerminalSession) TableName() string {
 	return "ssh_terminal_sessions"
 }
 
+// TerminalCommandEvent SSH高危命令事件
+type TerminalCommandEvent struct {
+	ID                uint           `gorm:"primarykey" json:"id"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	UpdatedAt         time.Time      `json:"updatedAt"`
+	DeletedAt         gorm.DeletedAt `gorm:"index" json:"deletedAt,omitempty"`
+	SessionID         uint           `gorm:"column:session_id;not null;index;comment:终端会话ID" json:"sessionId"`
+	HostID            uint           `gorm:"column:host_id;not null;index;comment:主机ID" json:"hostId"`
+	HostName          string         `gorm:"type:varchar(100);comment:主机名称" json:"hostName"`
+	HostIP            string         `gorm:"type:varchar(50);comment:主机IP" json:"hostIp"`
+	UserID            uint           `gorm:"column:user_id;not null;index;comment:操作用户ID" json:"userId"`
+	Username          string         `gorm:"type:varchar(100);comment:用户名" json:"username"`
+	CommandText       string         `gorm:"type:text;comment:原始命令" json:"commandText"`
+	NormalizedCommand string         `gorm:"type:text;comment:归一化命令" json:"normalizedCommand"`
+	RiskLevel         string         `gorm:"type:varchar(20);index;comment:风险等级 high/medium" json:"riskLevel"`
+	RuleCode          string         `gorm:"type:varchar(100);comment:规则编码" json:"ruleCode"`
+	RuleName          string         `gorm:"type:varchar(200);comment:规则名称" json:"ruleName"`
+	RuleDescription   string         `gorm:"type:varchar(500);comment:规则说明" json:"ruleDescription"`
+	Source            string         `gorm:"type:varchar(20);default:'input';comment:来源 input" json:"source"`
+	Confidence        string         `gorm:"type:varchar(20);default:'medium';comment:置信度 low/medium/high" json:"confidence"`
+	ExecutedAt        time.Time      `gorm:"column:executed_at;index;comment:执行时间" json:"executedAt"`
+}
+
+// TableName 表名
+func (TerminalCommandEvent) TableName() string {
+	return "ssh_terminal_command_events"
+}
+
 // TerminalSessionInfo 终端会话信息VO
 type TerminalSessionInfo struct {
-	ID            uint      `json:"id"`
-	HostID        uint      `json:"hostId"`
-	HostName      string    `json:"hostName"`
-	HostIP        string    `json:"hostIp"`
-	UserID        uint      `json:"userId"`
-	Username      string    `json:"username"`
-	Duration      int       `json:"duration"`
-	DurationText  string    `json:"durationText"`  // 格式化的时长，如 "1m 30s"
-	FileSize      int64     `json:"fileSize"`
-	FileSizeText  string    `json:"fileSizeText"`  // 格式化的文件大小，如 "1.5 MB"
-	Status        string    `json:"status"`
-	StatusText    string    `json:"statusText"`
-	CreatedAt     time.Time `json:"createdAt"`
-	CreatedAtText string    `json:"createdAtText"` // 格式化的创建时间
+	ID                 uint      `json:"id"`
+	HostID             uint      `json:"hostId"`
+	HostName           string    `json:"hostName"`
+	HostIP             string    `json:"hostIp"`
+	UserID             uint      `json:"userId"`
+	Username           string    `json:"username"`
+	Duration           int       `json:"duration"`
+	DurationText       string    `json:"durationText"` // 格式化的时长，如 "1m 30s"
+	FileSize           int64     `json:"fileSize"`
+	FileSizeText       string    `json:"fileSizeText"` // 格式化的文件大小，如 "1.5 MB"
+	Status             string    `json:"status"`
+	StatusText         string    `json:"statusText"`
+	RecordingAvailable bool      `json:"recordingAvailable"`
+	RecordingIssue     string    `json:"recordingIssue"`
+	HighRiskCount      int       `json:"highRiskCount"`
+	MediumRiskCount    int       `json:"mediumRiskCount"`
+	TopRiskLevel       string    `json:"topRiskLevel"`
+	TopRiskLevelText   string    `json:"topRiskLevelText"`
+	CreatedAt          time.Time `json:"createdAt"`
+	CreatedAtText      string    `json:"createdAtText"` // 兼容旧字段
+	StartedAt          time.Time `json:"startedAt"`
+	StartedAtText      string    `json:"startedAtText"`
+	EndedAt            time.Time `json:"endedAt"`
+	EndedAtText        string    `json:"endedAtText"`
+}
+
+// TerminalCommandEventInfo 高危命令事件VO
+type TerminalCommandEventInfo struct {
+	ID                uint      `json:"id"`
+	SessionID         uint      `json:"sessionId"`
+	HostID            uint      `json:"hostId"`
+	HostName          string    `json:"hostName"`
+	HostIP            string    `json:"hostIp"`
+	UserID            uint      `json:"userId"`
+	Username          string    `json:"username"`
+	CommandText       string    `json:"commandText"`
+	NormalizedCommand string    `json:"normalizedCommand"`
+	RiskLevel         string    `json:"riskLevel"`
+	RiskLevelText     string    `json:"riskLevelText"`
+	RuleCode          string    `json:"ruleCode"`
+	RuleName          string    `json:"ruleName"`
+	RuleDescription   string    `json:"ruleDescription"`
+	Source            string    `json:"source"`
+	Confidence        string    `json:"confidence"`
+	ExecutedAt        time.Time `json:"executedAt"`
+	ExecutedAtText    string    `json:"executedAtText"`
 }
 
 // TerminalSessionListRequest 终端会话列表请求

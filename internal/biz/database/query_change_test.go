@@ -1,0 +1,81 @@
+package database
+
+import "testing"
+
+func TestSupportsWriteExecution(t *testing.T) {
+	tests := []struct {
+		dbType string
+		want   bool
+	}{
+		{dbType: DBTypeMySQL, want: true},
+		{dbType: DBTypeMariaDB, want: true},
+		{dbType: DBTypePostgreSQL, want: true},
+		{dbType: DBTypeSQLServer, want: false},
+		{dbType: DBTypeClickHouse, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.dbType, func(t *testing.T) {
+			if got := supportsWriteExecution(tt.dbType); got != tt.want {
+				t.Fatalf("supportsWriteExecution(%q) = %v, want %v", tt.dbType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsSupportedWriteExecuteType(t *testing.T) {
+	tests := []struct {
+		sqlType string
+		want    bool
+	}{
+		{sqlType: "INSERT", want: true},
+		{sqlType: "UPDATE", want: true},
+		{sqlType: "DELETE", want: true},
+		{sqlType: "ALTER", want: false},
+		{sqlType: "DROP", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sqlType, func(t *testing.T) {
+			if got := isSupportedWriteExecuteType(tt.sqlType); got != tt.want {
+				t.Fatalf("isSupportedWriteExecuteType(%q) = %v, want %v", tt.sqlType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildWriteRollbackSQLHint(t *testing.T) {
+	tests := []struct {
+		name    string
+		dbType  string
+		sqlType string
+		want    string
+	}{
+		{
+			name:    "insert hint",
+			dbType:  DBTypeMySQL,
+			sqlType: "INSERT",
+			want:    "暂不支持自动生成 INSERT 回滚 SQL，请基于主键或唯一键手工确认删除语句。",
+		},
+		{
+			name:    "update hint",
+			dbType:  DBTypePostgreSQL,
+			sqlType: "UPDATE",
+			want:    "暂不支持自动生成 UPDATE / DELETE 回滚 SQL，请优先结合逻辑备份、事务日志或变更前快照恢复。",
+		},
+		{
+			name:    "unsupported empty",
+			dbType:  DBTypeSQLServer,
+			sqlType: "ALTER",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildWriteRollbackSQLHint(tt.dbType, tt.sqlType); got != tt.want {
+				t.Fatalf("buildWriteRollbackSQLHint(%q, %q) = %q, want %q", tt.dbType, tt.sqlType, got, tt.want)
+			}
+		})
+	}
+}

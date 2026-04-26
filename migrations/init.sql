@@ -297,8 +297,10 @@ CREATE TABLE IF NOT EXISTS `asset_group` (
 CREATE TABLE IF NOT EXISTS `credentials` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `name` varchar(100) NOT NULL COMMENT '凭证名称',
+  `protocol` varchar(20) NOT NULL DEFAULT 'ssh' COMMENT '连接协议 ssh/rdp',
   `type` varchar(20) NOT NULL COMMENT '凭证类型 password/key',
   `username` varchar(100) COMMENT '用户名',
+  `domain` varchar(100) COMMENT 'Windows域名',
   `password` varchar(500) COMMENT '密码(加密)',
   `private_key` text COMMENT '私钥(加密)',
   `passphrase` varchar(500) COMMENT '私钥密码(加密)',
@@ -320,14 +322,35 @@ CREATE TABLE IF NOT EXISTS `hosts` (
   `cloud_provider` varchar(50) COMMENT '云厂商',
   `cloud_instance_id` varchar(100) COMMENT '云实例ID',
   `cloud_account_id` bigint unsigned COMMENT '云账户ID',
-  `ssh_user` varchar(50) NOT NULL COMMENT 'SSH用户',
+  `os_type` varchar(20) DEFAULT 'linux' COMMENT '操作系统类型 linux/windows',
+  `ssh_user` varchar(50) COMMENT 'SSH用户',
   `ip` varchar(50) NOT NULL COMMENT 'IP地址',
   `port` int DEFAULT 22 COMMENT 'SSH端口',
   `credential_id` bigint unsigned COMMENT '凭证ID',
+  `management_mode` varchar(20) DEFAULT 'ssh' COMMENT '管理方式 ssh/winrm/agent/none',
+  `management_port` int DEFAULT 22 COMMENT '管理端口',
+  `management_credential_id` bigint unsigned COMMENT '管理凭证ID',
+  `desktop_enabled` tinyint(1) DEFAULT 0 COMMENT '是否启用桌面访问',
+  `desktop_protocol` varchar(20) DEFAULT 'rdp' COMMENT '桌面协议 rdp',
+  `desktop_port` int DEFAULT 3389 COMMENT '桌面端口',
+  `desktop_credential_id` bigint unsigned COMMENT '桌面凭证ID',
+  `desktop_security` varchar(20) DEFAULT 'nla' COMMENT '桌面安全模式 nla/tls/any',
+  `desktop_ignore_cert` tinyint(1) DEFAULT 1 COMMENT '桌面是否忽略证书',
   `tags` varchar(500) COMMENT '标签',
   `description` varchar(500) COMMENT '描述',
   `status` tinyint DEFAULT -1 COMMENT '状态 1:在线 0:离线 -1:未知',
   `last_seen` datetime COMMENT '最后看到时间',
+  `collect_status` varchar(20) DEFAULT 'unknown' COMMENT '采集状态 online/offline/unknown/not_configured',
+  `collect_error` varchar(500) COMMENT '采集错误',
+  `last_collect_at` datetime COMMENT '最后采集时间',
+  `primary_private_ip` varchar(50) COMMENT '主内网IP',
+  `primary_public_ip` varchar(50) COMMENT '主公网IP',
+  `agent_id` varchar(100) COMMENT 'Agent ID',
+  `agent_version` varchar(50) COMMENT 'Agent版本',
+  `agent_last_heartbeat_at` datetime COMMENT 'Agent最后心跳时间',
+  `agent_port` int DEFAULT 19100 COMMENT 'Agent监听端口',
+  `agent_last_report_at` datetime COMMENT 'Agent最后上报时间',
+  `agent_last_error` varchar(500) COMMENT 'Agent最近错误',
   `os` varchar(100) COMMENT '操作系统',
   `kernel` varchar(100) COMMENT '内核版本',
   `arch` varchar(50) COMMENT '架构',
@@ -353,6 +376,76 @@ CREATE TABLE IF NOT EXISTS `hosts` (
   CONSTRAINT `fk_hosts_group` FOREIGN KEY (`group_id`) REFERENCES `asset_group` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Linux Agent 生命周期表
+CREATE TABLE IF NOT EXISTS `asset_agents` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  `host_id` bigint unsigned NOT NULL COMMENT '主机ID',
+  `agent_id` varchar(100) COMMENT 'Agent ID',
+  `access_token_ciphertext` text COMMENT 'Agent访问令牌密文',
+  `version` varchar(50) COMMENT 'Agent版本',
+  `status` varchar(32) DEFAULT 'pending' COMMENT 'Agent状态',
+  `listen_port` int DEFAULT 19100 COMMENT 'Agent监听端口',
+  `install_path` varchar(255) COMMENT '安装目录',
+  `service_name` varchar(64) COMMENT '服务名',
+  `install_progress` int DEFAULT 0 COMMENT '安装进度',
+  `install_stage` varchar(64) COMMENT '安装阶段',
+  `last_heartbeat_at` datetime COMMENT '最后心跳时间',
+  `last_report_at` datetime COMMENT '最后上报时间',
+  `last_error` text COMMENT '最近错误',
+  `deployed_by` bigint unsigned DEFAULT 0 COMMENT '部署人',
+  `deployed_at` datetime COMMENT '部署时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_asset_agents_host_id` (`host_id`),
+  KEY `idx_asset_agents_agent_id` (`agent_id`),
+  KEY `idx_asset_agents_status` (`status`),
+  KEY `idx_asset_agents_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Agent 操作任务表
+CREATE TABLE IF NOT EXISTS `asset_agent_jobs` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  `host_id` bigint unsigned NOT NULL COMMENT '主机ID',
+  `job_type` varchar(32) NOT NULL COMMENT '任务类型',
+  `status` varchar(32) NOT NULL DEFAULT 'pending' COMMENT '任务状态',
+  `progress` int DEFAULT 0 COMMENT '任务进度',
+  `stage` varchar(64) COMMENT '当前阶段',
+  `message` varchar(255) COMMENT '当前提示',
+  `error` text COMMENT '错误信息',
+  `operator_id` bigint unsigned DEFAULT 0 COMMENT '操作人',
+  `started_at` datetime COMMENT '开始时间',
+  `finished_at` datetime COMMENT '结束时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_asset_agent_jobs_host_id` (`host_id`),
+  KEY `idx_asset_agent_jobs_status` (`status`),
+  KEY `idx_asset_agent_jobs_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 主机库存快照表
+CREATE TABLE IF NOT EXISTS `asset_host_inventory` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  `host_id` bigint unsigned NOT NULL COMMENT '主机ID',
+  `private_ips_json` json COMMENT '内网IP列表',
+  `public_ips_json` json COMMENT '公网IP列表',
+  `interfaces_json` json COMMENT '网卡信息',
+  `disks_json` json COMMENT '磁盘详情',
+  `top_processes_json` json COMMENT '进程快照',
+  `listening_ports_json` json COMMENT '监听端口快照',
+  `config_summary_json` json COMMENT '配置摘要',
+  `collected_at` datetime COMMENT '采集时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_asset_host_inventory_host_id` (`host_id`),
+  KEY `idx_asset_host_inventory_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 云账户表
 CREATE TABLE IF NOT EXISTS `cloud_accounts` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -371,13 +464,238 @@ CREATE TABLE IF NOT EXISTS `cloud_accounts` (
   KEY `idx_deleted_at` (`deleted_at`)
 ) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 虚拟化平台表（ESXi/PVE）
+CREATE TABLE IF NOT EXISTS `virtualization_platforms` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `name` varchar(100) NOT NULL COMMENT '平台名称',
+  `provider` varchar(20) NOT NULL COMMENT '平台类型 esxi/pve',
+  `endpoint` varchar(255) NOT NULL COMMENT 'API地址',
+  `port` int NOT NULL DEFAULT 443 COMMENT 'API端口',
+  `username` varchar(100) NOT NULL COMMENT '用户名',
+  `password` varchar(500) NOT NULL COMMENT '密码或Token',
+  `insecure_skip_verify` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否跳过TLS验证',
+  `status` varchar(20) NOT NULL DEFAULT 'enabled' COMMENT '状态 enabled/disabled',
+  `last_sync_at` datetime COMMENT '最后同步时间',
+  `last_sync_status` varchar(20) NOT NULL DEFAULT 'idle' COMMENT '最后同步状态 idle/running/success/failed',
+  `last_sync_message` varchar(500) COMMENT '最后同步结果',
+  `description` varchar(500) COMMENT '备注',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_virtualization_platform_provider_endpoint` (`provider`, `endpoint`),
+  KEY `idx_virtualization_platform_provider` (`provider`),
+  KEY `idx_virtualization_platform_status` (`status`),
+  KEY `idx_virtualization_platform_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 虚拟化集群快照表
+CREATE TABLE IF NOT EXISTS `virtualization_clusters` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `platform_id` bigint unsigned NOT NULL COMMENT '平台ID',
+  `external_id` varchar(128) NOT NULL COMMENT '平台内集群ID',
+  `name` varchar(150) NOT NULL COMMENT '集群名称',
+  `datacenter` varchar(150) COMMENT '数据中心',
+  `host_count` int NOT NULL DEFAULT 0 COMMENT '主机数',
+  `guest_count` int NOT NULL DEFAULT 0 COMMENT '虚机数',
+  `status` varchar(20) NOT NULL DEFAULT 'unknown' COMMENT '状态 unknown/normal/warn/error',
+  `last_collected_at` datetime COMMENT '最后采集时间',
+  `raw_payload_digest` varchar(64) COMMENT '原始数据摘要',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_virtualization_cluster_platform_external` (`platform_id`, `external_id`),
+  KEY `idx_virtualization_cluster_platform` (`platform_id`),
+  KEY `idx_virtualization_cluster_status` (`status`),
+  KEY `idx_virtualization_cluster_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 虚拟化宿主机快照表
+CREATE TABLE IF NOT EXISTS `virtualization_hosts` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `platform_id` bigint unsigned NOT NULL COMMENT '平台ID',
+  `cluster_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT '集群ID',
+  `external_id` varchar(128) NOT NULL COMMENT '平台内宿主机ID',
+  `name` varchar(150) NOT NULL COMMENT '宿主机名称',
+  `management_ip` varchar(64) COMMENT '管理IP',
+  `cpu_model` varchar(255) COMMENT 'CPU型号',
+  `cpu_cores` int NOT NULL DEFAULT 0 COMMENT 'CPU核心数',
+  `memory_total_mb` bigint NOT NULL DEFAULT 0 COMMENT '总内存(MB)',
+  `memory_used_mb` bigint NOT NULL DEFAULT 0 COMMENT '已用内存(MB)',
+  `guest_count` int NOT NULL DEFAULT 0 COMMENT '虚机数',
+  `status` varchar(20) NOT NULL DEFAULT 'unknown' COMMENT '状态 unknown/online/offline/maintenance',
+  `last_collected_at` datetime COMMENT '最后采集时间',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_virtualization_host_platform_external` (`platform_id`, `external_id`),
+  KEY `idx_virtualization_host_platform` (`platform_id`),
+  KEY `idx_virtualization_host_cluster` (`cluster_id`),
+  KEY `idx_virtualization_host_status` (`status`),
+  KEY `idx_virtualization_host_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 虚拟机快照表
+CREATE TABLE IF NOT EXISTS `virtualization_guests` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `platform_id` bigint unsigned NOT NULL COMMENT '平台ID',
+  `cluster_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT '集群ID',
+  `host_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT '宿主机ID',
+  `external_id` varchar(128) NOT NULL COMMENT '平台内虚机ID',
+  `name` varchar(150) NOT NULL COMMENT '虚机名称',
+  `os_type` varchar(100) COMMENT '操作系统',
+  `power_state` varchar(20) NOT NULL DEFAULT 'unknown' COMMENT '电源状态 powered_on/powered_off/suspended/unknown',
+  `cpu_count` int NOT NULL DEFAULT 0 COMMENT 'CPU数量',
+  `memory_mb` bigint NOT NULL DEFAULT 0 COMMENT '内存(MB)',
+  `primary_ip` varchar(64) COMMENT '主IP',
+  `tools_status` varchar(50) COMMENT 'Tools状态',
+  `binding_status` varchar(20) NOT NULL DEFAULT 'unbound' COMMENT '纳管状态 bound/unbound/conflict',
+  `last_collected_at` datetime COMMENT '最后采集时间',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_virtualization_guest_platform_external` (`platform_id`, `external_id`),
+  KEY `idx_virtualization_guest_platform` (`platform_id`),
+  KEY `idx_virtualization_guest_cluster` (`cluster_id`),
+  KEY `idx_virtualization_guest_host` (`host_id`),
+  KEY `idx_virtualization_guest_power_state` (`power_state`),
+  KEY `idx_virtualization_guest_binding_status` (`binding_status`),
+  KEY `idx_virtualization_guest_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 虚机纳管关系表
+CREATE TABLE IF NOT EXISTS `virtualization_guest_bindings` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `guest_id` bigint unsigned NOT NULL COMMENT '虚机ID',
+  `asset_host_id` bigint unsigned NOT NULL COMMENT '资产主机ID',
+  `binding_type` varchar(20) NOT NULL DEFAULT 'manual' COMMENT '纳管类型 manual/auto',
+  `status` varchar(20) NOT NULL DEFAULT 'active' COMMENT '状态 active/inactive',
+  `bound_by` bigint unsigned COMMENT '绑定人',
+  `bound_at` datetime COMMENT '绑定时间',
+  `unbound_at` datetime COMMENT '解绑时间',
+  `binding_note` varchar(500) COMMENT '备注',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_virtualization_guest_binding_guest` (`guest_id`),
+  KEY `idx_virtualization_guest_binding_asset_host` (`asset_host_id`),
+  KEY `idx_virtualization_guest_binding_status` (`status`),
+  KEY `idx_virtualization_guest_binding_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 虚拟化平台同步任务表
+CREATE TABLE IF NOT EXISTS `virtualization_sync_jobs` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `platform_id` bigint unsigned NOT NULL COMMENT '平台ID',
+  `trigger_type` varchar(20) NOT NULL DEFAULT 'manual' COMMENT '触发方式 manual/schedule',
+  `status` varchar(20) NOT NULL DEFAULT 'pending' COMMENT '状态 pending/running/success/failed',
+  `started_at` datetime COMMENT '开始时间',
+  `finished_at` datetime COMMENT '结束时间',
+  `operator_id` bigint unsigned COMMENT '操作人ID',
+  `items_total` int NOT NULL DEFAULT 0 COMMENT '总条目数',
+  `items_created` int NOT NULL DEFAULT 0 COMMENT '新增条目数',
+  `items_updated` int NOT NULL DEFAULT 0 COMMENT '更新条目数',
+  `items_deleted` int NOT NULL DEFAULT 0 COMMENT '删除条目数',
+  `failure_reason` varchar(500) COMMENT '失败原因',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_virtualization_sync_job_platform` (`platform_id`),
+  KEY `idx_virtualization_sync_job_status` (`status`),
+  KEY `idx_virtualization_sync_job_started_at` (`started_at`),
+  KEY `idx_virtualization_sync_job_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 虚拟化平台趋势快照表
+CREATE TABLE IF NOT EXISTS `virtualization_platform_metrics` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `platform_id` bigint unsigned NOT NULL COMMENT '平台ID',
+  `collected_at` datetime NOT NULL COMMENT '采集时间',
+  `guest_total` int NOT NULL DEFAULT 0 COMMENT '虚机总数',
+  `powered_on_guests` int NOT NULL DEFAULT 0 COMMENT '开机虚机数',
+  `powered_off_guests` int NOT NULL DEFAULT 0 COMMENT '关机虚机数',
+  `suspended_guests` int NOT NULL DEFAULT 0 COMMENT '挂起虚机数',
+  `bound_guests` int NOT NULL DEFAULT 0 COMMENT '已纳管虚机数',
+  `online_guests` int NOT NULL DEFAULT 0 COMMENT '在线虚机数',
+  `offline_guests` int NOT NULL DEFAULT 0 COMMENT '离线虚机数',
+  `not_configured_guests` int NOT NULL DEFAULT 0 COMMENT '未配置采集虚机数',
+  `unknown_guests` int NOT NULL DEFAULT 0 COMMENT '未知虚机数',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_virtualization_platform_metric_platform` (`platform_id`),
+  KEY `idx_virtualization_platform_metric_collected_at` (`collected_at`),
+  KEY `idx_virtualization_platform_metric_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `virtualization_cluster_metrics` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `platform_id` bigint unsigned NOT NULL COMMENT '平台ID',
+  `cluster_id` bigint unsigned NOT NULL COMMENT '集群ID',
+  `collected_at` datetime NOT NULL COMMENT '采集时间',
+  `guest_total` int NOT NULL DEFAULT 0 COMMENT '虚机总数',
+  `powered_on_guests` int NOT NULL DEFAULT 0 COMMENT '开机虚机数',
+  `powered_off_guests` int NOT NULL DEFAULT 0 COMMENT '关机虚机数',
+  `suspended_guests` int NOT NULL DEFAULT 0 COMMENT '挂起虚机数',
+  `bound_guests` int NOT NULL DEFAULT 0 COMMENT '已纳管虚机数',
+  `online_guests` int NOT NULL DEFAULT 0 COMMENT '在线虚机数',
+  `offline_guests` int NOT NULL DEFAULT 0 COMMENT '离线虚机数',
+  `not_configured_guests` int NOT NULL DEFAULT 0 COMMENT '未配置采集虚机数',
+  `unknown_guests` int NOT NULL DEFAULT 0 COMMENT '未知虚机数',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_virtualization_cluster_metric_platform` (`platform_id`),
+  KEY `idx_virtualization_cluster_metric_cluster` (`cluster_id`),
+  KEY `idx_virtualization_cluster_metric_collected_at` (`collected_at`),
+  KEY `idx_virtualization_cluster_metric_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `virtualization_action_logs` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `platform_id` bigint unsigned NOT NULL COMMENT '平台ID',
+  `cluster_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT '集群ID',
+  `host_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT '宿主机ID',
+  `guest_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT '虚机ID',
+  `action` varchar(50) NOT NULL COMMENT '动作',
+  `risk_level` varchar(20) NOT NULL DEFAULT 'medium' COMMENT '风险等级',
+  `status` varchar(20) NOT NULL DEFAULT 'pending' COMMENT '状态',
+  `target_type` varchar(20) NOT NULL DEFAULT 'guest' COMMENT '目标类型',
+  `target_name` varchar(200) DEFAULT NULL COMMENT '目标名称',
+  `operator_id` bigint unsigned NOT NULL DEFAULT 0 COMMENT '操作人ID',
+  `operator_name` varchar(100) DEFAULT NULL COMMENT '操作人',
+  `confirm_required` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否需要二次确认',
+  `reason` varchar(500) DEFAULT NULL COMMENT '操作原因',
+  `request_payload` text COMMENT '请求载荷',
+  `result_message` varchar(500) DEFAULT NULL COMMENT '结果信息',
+  `started_at` datetime DEFAULT NULL COMMENT '开始时间',
+  `finished_at` datetime DEFAULT NULL COMMENT '结束时间',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_virtualization_action_log_platform` (`platform_id`),
+  KEY `idx_virtualization_action_log_cluster` (`cluster_id`),
+  KEY `idx_virtualization_action_log_host` (`host_id`),
+  KEY `idx_virtualization_action_log_guest` (`guest_id`),
+  KEY `idx_virtualization_action_log_operator` (`operator_id`),
+  KEY `idx_virtualization_action_log_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 角色资产权限表
 CREATE TABLE IF NOT EXISTS `sys_role_asset_permission` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `role_id` bigint unsigned NOT NULL COMMENT '角色ID',
   `asset_group_id` bigint unsigned NOT NULL COMMENT '资产组ID',
   `host_ids` json COMMENT '主机ID列表',
-  `permissions` int unsigned DEFAULT 63 COMMENT '权限位',
+  `permissions` int unsigned DEFAULT 127 COMMENT '权限位',
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `deleted_at` datetime COMMENT '删除时间',
@@ -405,6 +723,66 @@ CREATE TABLE IF NOT EXISTS `ssh_terminal_sessions` (
   `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `deleted_at` datetime COMMENT '删除时间',
   PRIMARY KEY (`id`),
+  KEY `idx_host_id` (`host_id`),
+  KEY `idx_user_id` (`user_id`),
+  KEY `idx_status` (`status`),
+  KEY `idx_created_at` (`created_at`),
+  KEY `idx_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- SSH终端高危命令事件表（资产管理-终端审计）
+CREATE TABLE IF NOT EXISTS `ssh_terminal_command_events` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `session_id` bigint unsigned NOT NULL COMMENT '终端会话ID',
+  `host_id` bigint unsigned NOT NULL COMMENT '主机ID',
+  `host_name` varchar(100) COMMENT '主机名称',
+  `host_ip` varchar(50) COMMENT '主机IP',
+  `user_id` bigint unsigned NOT NULL COMMENT '操作用户ID',
+  `username` varchar(100) COMMENT '用户名',
+  `command_text` text COMMENT '原始命令',
+  `normalized_command` text COMMENT '归一化命令',
+  `risk_level` varchar(20) NOT NULL COMMENT '风险等级 high/medium',
+  `rule_code` varchar(100) COMMENT '规则编码',
+  `rule_name` varchar(200) COMMENT '规则名称',
+  `rule_description` varchar(500) COMMENT '规则说明',
+  `source` varchar(20) DEFAULT 'input' COMMENT '来源 input',
+  `confidence` varchar(20) DEFAULT 'medium' COMMENT '置信度 low/medium/high',
+  `executed_at` datetime COMMENT '执行时间',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_session_id` (`session_id`),
+  KEY `idx_host_id` (`host_id`),
+  KEY `idx_user_id` (`user_id`),
+  KEY `idx_risk_level` (`risk_level`),
+  KEY `idx_executed_at` (`executed_at`),
+  KEY `idx_deleted_at` (`deleted_at`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Windows桌面会话记录表（资产管理-RDP桌面）
+CREATE TABLE IF NOT EXISTS `asset_desktop_sessions` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `session_uuid` varchar(100) NOT NULL COMMENT '会话UUID',
+  `host_id` bigint unsigned NOT NULL COMMENT '主机ID',
+  `host_name` varchar(100) COMMENT '主机名称',
+  `host_ip` varchar(50) COMMENT '主机IP',
+  `user_id` bigint unsigned NOT NULL COMMENT '操作用户ID',
+  `username` varchar(100) COMMENT '用户名',
+  `provider` varchar(50) NOT NULL DEFAULT 'guacamole' COMMENT '桌面网关提供方',
+  `protocol` varchar(20) NOT NULL DEFAULT 'rdp' COMMENT '桌面协议',
+  `status` varchar(20) NOT NULL DEFAULT 'active' COMMENT '会话状态 active/closed/failed',
+  `client_ip` varchar(50) COMMENT '客户端IP',
+  `resolution` varchar(50) COMMENT '分辨率',
+  `recording_path` varchar(500) COMMENT '录屏文件路径',
+  `close_reason` varchar(255) COMMENT '关闭原因',
+  `started_at` datetime COMMENT '开始时间',
+  `ended_at` datetime COMMENT '结束时间',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` datetime COMMENT '删除时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_session_uuid` (`session_uuid`),
   KEY `idx_host_id` (`host_id`),
   KEY `idx_user_id` (`user_id`),
   KEY `idx_status` (`status`),
@@ -1410,8 +1788,10 @@ VALUES
   (19, '凭据管理', 'asset:credentials', 3, 15, '/asset/credentials', 'asset/Credentials', 'Lock', 2, 1, 1, NOW(), NOW()),
   (17, '业务分组', 'business-group', 2, 15, '/asset/groups', 'asset/Groups', 'Collection', 3, 1, 1, NOW(), NOW()),
   (27, '云账号管理', 'cloud-accounts', 2, 15, '/asset/cloud-accounts', 'asset/CloudAccounts', 'Cloudy', 5, 1, 1, NOW(), NOW()),
-  (34, '终端审计', 'asset_terminal_audit', 2, 15, '/asset/terminal-audit', '', 'View', 5, 1, 1, NOW(), NOW()),
-  (65, '权限配置', 'asset_permission', 2, 15, '/asset/permissions', 'views/asset/AssetPermission.vue', 'Lock', 6, 1, 1, NOW(), NOW()),
+  (66, '虚拟化平台', 'asset_virtualization', 2, 15, '/asset/virtualization', 'asset/VirtualizationPlatforms', 'DataBoard', 6, 1, 1, NOW(), NOW()),
+  (67, '数据库管理', 'asset_databases', 2, 15, '/asset/databases', 'asset/DatabaseManagement', 'DataLine', 7, 1, 1, NOW(), NOW()),
+  (34, '会话审计', 'asset_terminal_audit', 2, 15, '/asset/terminal-audit', '', 'View', 8, 1, 1, NOW(), NOW()),
+  (65, '权限配置', 'asset_permission', 2, 15, '/asset/permissions', 'views/asset/AssetPermission.vue', 'Lock', 9, 1, 1, NOW(), NOW()),
 
   -- ========== 操作审计子菜单 (parent_id=23) ==========
   (24, '操作日志', 'operation-logs', 2, 23, '/audit/operation-logs', 'audit/OperationLogs', 'Document', 1, 1, 1, NOW(), NOW()),
@@ -1419,20 +1799,21 @@ VALUES
 
   -- ========== 插件管理子菜单 (parent_id=30) ==========
   (32, '插件列表', 'plugin-list', 2, 30, '/plugin/list', 'plugin/PluginList', 'Grid', 1, 1, 1, NOW(), NOW()),
-  (33, '插件安装', 'plugin-install', 2, 30, '/plugin/install', 'plugin/PluginInstall', 'Upload', 2, 1, 1, NOW(), NOW());
+  (33, '插件安装', 'plugin-install', 2, 30, '/plugin/install', 'plugin/PluginInstall', 'Upload', 2, 1, 1, NOW(), NOW()),
+  (35, 'Agent管理', 'plugin-agents', 2, 30, '/plugin/agents', 'asset/Agents', 'Connection', 3, 1, 1, NOW(), NOW());
 
 -- 为管理员角色分配所有菜单权限（不包括插件菜单，插件菜单权限在插件启用后单独分配）
 INSERT INTO `sys_role_menu` (`role_id`, `menu_id`)
 VALUES
   (1, 1), (1, 2), (1, 3), (1, 5), (1, 10), (1, 11), (1, 12), (1, 13), (1, 15), (1, 16), (1, 17), (1, 19),
-  (1, 23), (1, 24), (1, 25), (1, 27), (1, 29), (1, 30), (1, 32), (1, 33), (1, 34), (1, 65);
+  (1, 23), (1, 24), (1, 25), (1, 27), (1, 29), (1, 30), (1, 32), (1, 33), (1, 34), (1, 35), (1, 65), (1, 66), (1, 67);
   -- 身份认证模块暂不开放，如需启用请取消注释并改为逗号连接
   -- (1, 90), (1, 91), (1, 92), (1, 93), (1, 94), (1, 95), (1, 96);
 
 -- 为普通用户角色分配基础菜单权限
 INSERT INTO `sys_role_menu` (`role_id`, `menu_id`)
 VALUES
-  (2, 10), (2, 15), (2, 16), (2, 17), (2, 19), (2, 27), (2, 34), (2, 65),
+  (2, 10), (2, 15), (2, 16), (2, 17), (2, 19), (2, 27), (2, 34), (2, 65), (2, 66),
   (2, 23), (2, 24), (2, 25);
   -- 身份认证模块暂不开放
   -- (2, 90), (2, 92), (2, 93), (2, 96);
@@ -1474,6 +1855,7 @@ VALUES
   ('enable_captcha', 'true', 'bool', 'security', '是否开启验证码', NOW(), NOW()),
   ('max_login_attempts', '5', 'int', 'security', '最大登录失败次数', NOW(), NOW()),
   ('lockout_duration', '300', 'int', 'security', '账户锁定时间(秒)', NOW(), NOW()),
+  ('virtualization_onboard_conflict_policy', 'strict', 'string', 'security', '虚拟化纳管冲突策略 strict/warn', NOW(), NOW()),
   -- MFA配置
   ('mfa_enabled', 'false', 'bool', 'security', '是否启用MFA功能', NOW(), NOW()),
   ('mfa_enforced', 'false', 'bool', 'security', '是否强制所有用户启用MFA', NOW(), NOW()),

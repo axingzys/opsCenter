@@ -20,14 +20,14 @@ body,
     sans-serif;
 }
 
-/* 全局字体大小增加 */
+/* 全局字体大小收口到更紧凑的桌面密度 */
 html {
-  font-size: 20px; /* 增加到20px */
+  font-size: 16px;
   overflow-y: scroll; /* 始终显示滚动条，防止弹窗打开时页面抖动 */
 }
 
 body {
-  font-size: 1rem; /* 20px */
+  font-size: 1rem;
 }
 
 /* 修复 Element Plus Dialog 打开时页面抖动 */
@@ -65,65 +65,65 @@ body.el-popup-parent--hidden {
 
 /* 调整Element Plus组件字体大小 */
 .el-button {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-input__inner,
 .el-textarea__inner {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-form-item__label {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-table {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-table th,
 .el-table td {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-menu-item {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-dropdown-menu__item {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-dialog__title {
-  font-size: 20px !important;
-}
-
-.el-breadcrumb__inner {
-  font-size: 17px !important;
-}
-
-.el-tag {
   font-size: 16px !important;
 }
 
+.el-breadcrumb__inner {
+  font-size: 14px !important;
+}
+
+.el-tag {
+  font-size: 12px !important;
+}
+
 .el-pagination {
-  font-size: 17px !important;
+  font-size: 14px !important;
 }
 
 .el-card__header {
-  font-size: 18px !important;
+  font-size: 15px !important;
 }
 
 /* 侧边栏特殊字体 */
 .el-aside .user-name {
-  font-size: 16px !important;
+  font-size: 13px !important;
 }
 
 .el-aside .user-role {
-  font-size: 14px !important;
+  font-size: 12px !important;
 }
 
 .logo h3 {
-  font-size: 22px !important;
+  font-size: 18px !important;
 }
 </style>

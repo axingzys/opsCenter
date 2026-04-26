@@ -42,6 +42,7 @@
           <el-option label="全部" value="" />
           <el-option label="阿里云" value="aliyun" />
           <el-option label="腾讯云" value="tencent" />
+          <el-option label="AWS" value="aws" />
           <el-option label="京东云" value="jdcloud" />
         </el-select>
 
@@ -374,6 +375,7 @@ const formRef = ref()
 const providers = [
   { value: 'aliyun', label: '阿里云', short: '阿里' },
   { value: 'tencent', label: '腾讯云', short: '腾讯' },
+  { value: 'aws', label: 'AWS', short: 'AWS' },
   { value: 'jdcloud', label: '京东云', short: '京东' }
 ]
 
@@ -436,6 +438,7 @@ const getProviderType = (provider: string) => {
   const typeMap: Record<string, string> = {
     aliyun: 'warning',
     tencent: 'info',
+    aws: 'success',
     jdcloud: 'danger'
   }
   return typeMap[provider] || ''
@@ -687,6 +690,14 @@ const getLocalRegions = (provider: string): any[] => {
       { value: 'ap-beijing', label: '华北地区 (北京)' },
       { value: 'ap-chengdu', label: '西南地区 (成都)' },
       { value: 'ap-chongqing', label: '西南地区 (重庆)' }
+    ],
+    aws: [
+      { value: 'us-east-1', label: '美国东部 (弗吉尼亚北部)' },
+      { value: 'us-west-2', label: '美国西部 (俄勒冈)' },
+      { value: 'ap-east-1', label: '亚太地区 (香港)' },
+      { value: 'ap-southeast-1', label: '亚太地区 (新加坡)' },
+      { value: 'ap-northeast-1', label: '亚太地区 (东京)' },
+      { value: 'eu-central-1', label: '欧洲 (法兰克福)' }
     ]
   }
   return localMap[provider] || []
@@ -707,9 +718,12 @@ const getStatusType = (status: string) => {
   const statusLower = status.toLowerCase()
   const typeMap: Record<string, string> = {
     'running': 'success',
+    'pending': 'warning',
     'starting': 'warning',
     'stopping': 'warning',
+    'shutting-down': 'warning',
     'stopped': 'info',
+    'terminated': 'danger',
     'deleted': 'danger'
   }
   return typeMap[statusLower] || 'info'
@@ -721,9 +735,12 @@ const getStatusText = (status: string) => {
   const statusLower = status.toLowerCase()
   const textMap: Record<string, string> = {
     'running': '运行中',
+    'pending': '启动中',
     'starting': '启动中',
     'stopping': '停止中',
+    'shutting-down': '关闭中',
     'stopped': '已停止',
+    'terminated': '已终止',
     'deleted': '已删除'
   }
   return textMap[statusLower] || status

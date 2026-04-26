@@ -29,6 +29,11 @@ export default defineConfig({
         changeOrigin: true,
         cookieDomainRewrite: '',  // 重写 cookie domain
         cookiePathRewrite: '/'    // 重写 cookie path
+      },
+      '/guacamole': {
+        target: process.env.VITE_GUACAMOLE_BASE_URL || 'http://localhost:18080',
+        changeOrigin: true,
+        ws: true
       }
     }
   }

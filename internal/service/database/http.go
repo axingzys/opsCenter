@@ -1,0 +1,1345 @@
+package database
+
+import (
+	"bytes"
+	"encoding/csv"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	dbbiz "github.com/ydcloud-dy/opshub/internal/biz/database"
+	rbacservice "github.com/ydcloud-dy/opshub/internal/service/rbac"
+	"github.com/ydcloud-dy/opshub/pkg/response"
+)
+
+type Service struct {
+	useCase *dbbiz.UseCase
+}
+
+func NewService(useCase *dbbiz.UseCase) *Service {
+	return &Service{useCase: useCase}
+}
+
+func parseUintParam(c *gin.Context, key, name string) (uint, bool) {
+	raw := c.Param(key)
+	id, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil || id == 0 {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的"+name)
+		return 0, false
+	}
+	return uint(id), true
+}
+
+func writeDatabaseError(c *gin.Context, prefix string, err error) {
+	statusCode := http.StatusInternalServerError
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "不存在"):
+		statusCode = http.StatusNotFound
+	case strings.Contains(message, "不能为空"),
+		strings.Contains(message, "请选择"),
+		strings.Contains(message, "不支持"),
+		strings.Contains(message, "格式"),
+		strings.Contains(message, "表达式"),
+		strings.Contains(message, "执行中"),
+		strings.Contains(message, "后续批次"),
+		strings.Contains(message, "仅允许"),
+		strings.Contains(message, "禁止"),
+		strings.Contains(message, "不能"),
+		strings.Contains(message, "生产"),
+		strings.Contains(message, "已禁用"),
+		strings.Contains(message, "未确认"),
+		strings.Contains(message, "未开启"),
+		strings.Contains(message, "范围"):
+		statusCode = http.StatusBadRequest
+	}
+	response.ErrorCode(c, statusCode, prefix+message)
+}
+
+// GetSupportedTypes 获取支持的数据库类型
+// @Summary 获取支持的数据库类型
+// @Description 返回数据库管理一期支持的类型和能力标记
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/supported-types [get]
+func (s *Service) GetSupportedTypes(c *gin.Context) {
+	response.Success(c, s.useCase.SupportedTypes())
+}
+
+// ListQueryHistory 获取当前用户最近 SQL 历史
+// @Summary 获取 SQL 历史
+// @Description 获取当前登录用户最近执行的 SQL 历史，最多返回 50 条
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/query-history [get]
+func (s *Service) ListQueryHistory(c *gin.Context) {
+	var req dbbiz.DatabaseQueryHistoryRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, err := s.useCase.ListQueryHistory(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":  list,
+		"limit": req.Limit,
+	})
+}
+
+// ListQueryAudits 获取查询审计列表
+// @Summary 获取查询审计列表
+// @Description 分页查询 SQL 查询审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param page query int false "页码"
+// @Param pageSize query int false "每页数量"
+// @Param keyword query string false "关键字"
+// @Param instanceId query int false "实例ID"
+// @Param status query string false "状态"
+// @Param riskLevel query string false "风险等级"
+// @Param sqlType query string false "SQL类型"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/query-audits [get]
+func (s *Service) ListQueryAudits(c *gin.Context) {
+	var req dbbiz.DatabaseQueryAuditListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListQueryAudits(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+// ExportQueryAudits 导出查询审计 CSV
+// @Summary 导出查询审计
+// @Description 按筛选条件导出 SQL 查询审计 CSV，最多导出 5000 条
+// @Tags 数据库管理
+// @Accept json
+// @Produce text/csv
+// @Security Bearer
+// @Router /api/v1/databases/query-audits/export [get]
+func (s *Service) ExportQueryAudits(c *gin.Context) {
+	var req dbbiz.DatabaseQueryAuditListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, _, err := s.useCase.ExportQueryAudits(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+
+	var buf bytes.Buffer
+	buf.Write([]byte{0xEF, 0xBB, 0xBF})
+	writer := csv.NewWriter(&buf)
+	header := []string{"审计ID", "执行时间", "实例", "Schema", "操作者", "审计动作", "SQL类型", "风险", "状态", "返回行", "耗时ms", "客户端IP", "SQL", "错误信息", "SQL指纹"}
+	if err := writer.Write(header); err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+	for _, item := range list {
+		record := []string{
+			strconv.FormatUint(uint64(item.ID), 10),
+			item.CreatedAt,
+			safeCSVCell(item.InstanceName),
+			safeCSVCell(item.SchemaName),
+			safeCSVCell(item.OperatorName),
+			safeCSVCell(item.ActionText),
+			safeCSVCell(item.SQLType),
+			safeCSVCell(item.RiskLevelText),
+			safeCSVCell(item.StatusText),
+			strconv.Itoa(item.RowsReturned),
+			strconv.FormatInt(item.DurationMs, 10),
+			safeCSVCell(item.ClientIP),
+			safeCSVCell(item.SQLText),
+			safeCSVCell(item.ErrorMessage),
+			safeCSVCell(item.SQLFingerprint),
+		}
+		if err := writer.Write(record); err != nil {
+			writeDatabaseError(c, "导出失败: ", err)
+			return
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+
+	filename := "database-query-audits-" + time.Now().Format("20060102150405") + ".csv"
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
+}
+
+// ListBackupTasks 获取备份任务列表
+// @Summary 获取备份任务列表
+// @Description 分页查询数据库备份任务配置
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-tasks [get]
+func (s *Service) ListBackupTasks(c *gin.Context) {
+	var req dbbiz.DatabaseBackupTaskListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListBackupTasks(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+// CreateBackupTask 创建备份任务
+// @Summary 创建备份任务
+// @Description 创建数据库逻辑备份任务
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-tasks [post]
+func (s *Service) CreateBackupTask(c *gin.Context) {
+	var req dbbiz.DatabaseBackupTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.CreateBackupTask(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// UpdateBackupTask 更新备份任务
+// @Summary 更新备份任务
+// @Description 更新数据库逻辑备份任务
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-tasks/{id} [put]
+func (s *Service) UpdateBackupTask(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "任务ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseBackupTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.UpdateBackupTask(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// DeleteBackupTask 删除备份任务
+// @Summary 删除备份任务
+// @Description 删除数据库备份任务配置
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-tasks/{id} [delete]
+func (s *Service) DeleteBackupTask(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "任务ID")
+	if !ok {
+		return
+	}
+	if err := s.useCase.DeleteBackupTask(c.Request.Context(), id); err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+// RunBackupTask 手动触发备份任务
+// @Summary 手动触发备份任务
+// @Description 创建一条待执行备份记录并写入统一审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-tasks/{id}/run [post]
+func (s *Service) RunBackupTask(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "任务ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.RunBackupTask(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "触发失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// ListBackupRecords 获取备份记录列表
+// @Summary 获取备份记录列表
+// @Description 分页查询数据库备份执行记录
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-records [get]
+func (s *Service) ListBackupRecords(c *gin.Context) {
+	var req dbbiz.DatabaseBackupRecordListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListBackupRecords(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+// DownloadBackupRecord 下载备份文件
+// @Summary 下载备份文件
+// @Description 下载指定的成功备份文件，并写入统一审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce application/octet-stream
+// @Security Bearer
+// @Router /api/v1/databases/backup-records/{id}/download [get]
+func (s *Service) DownloadBackupRecord(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "记录ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.DownloadBackupRecord(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "下载失败: ", err)
+		return
+	}
+	if data.ContentType != "" {
+		c.Header("Content-Type", data.ContentType)
+	}
+	c.FileAttachment(data.FilePath, data.FileName)
+}
+
+// RunRestoreDryRun 发起恢复演练
+// @Summary 发起恢复演练
+// @Description 从成功备份记录恢复到非生产目标实例，并写入统一审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-records/{id}/restore-dry-run [post]
+func (s *Service) RunRestoreDryRun(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "备份记录ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRestoreDryRunRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.RunRestoreDryRun(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "恢复演练失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// ListRestoreJobs 获取恢复演练记录
+// @Summary 获取恢复演练记录
+// @Description 分页查询数据库恢复演练记录
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/restore-jobs [get]
+func (s *Service) ListRestoreJobs(c *gin.Context) {
+	var req dbbiz.DatabaseRestoreJobListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListRestoreJobs(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+// GetCapacityTrend 获取容量趋势
+// @Summary 获取容量趋势
+// @Description 获取实例容量采样趋势和 Top 对象
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/instances/{id}/capacity-trend [get]
+func (s *Service) GetCapacityTrend(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseCapacityTrendRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.GetCapacityTrend(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// CollectCapacitySnapshot 手动采集容量快照
+// @Summary 手动采集容量快照
+// @Description 基于已同步元数据采集实例、Schema、表级容量快照
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/instances/{id}/capacity-snapshots [post]
+func (s *Service) CollectCapacitySnapshot(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.CollectCapacitySnapshotForUser(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "采集失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// ListInspectionReports 获取巡检报告列表
+// @Summary 获取巡检报告列表
+// @Description 分页查询数据库巡检报告
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/inspection-reports [get]
+func (s *Service) ListInspectionReports(c *gin.Context) {
+	var req dbbiz.DatabaseInspectionReportListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListInspectionReports(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+// GetInspectionReport 获取巡检报告详情
+// @Summary 获取巡检报告详情
+// @Description 获取数据库巡检报告详情
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/inspection-reports/{id} [get]
+func (s *Service) GetInspectionReport(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "报告ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.GetInspectionReport(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// GenerateInspectionReport 手动生成巡检报告
+// @Summary 手动生成巡检报告
+// @Description 聚合容量、性能、安全和备份状态生成巡检报告
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/inspection-reports [post]
+func (s *Service) GenerateInspectionReport(c *gin.Context) {
+	var req dbbiz.DatabaseInspectionReportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.GenerateInspectionReport(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "生成失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// GetTopology 获取数据库拓扑
+// @Summary 获取数据库拓扑
+// @Description 获取 Redis Cluster、MongoDB ReplicaSet、Elasticsearch / OpenSearch 拓扑和分片信息
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/instances/{id}/topology [get]
+func (s *Service) GetTopology(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.GetTopology(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// ListInstances 获取数据库实例列表
+// @Summary 获取数据库实例列表
+// @Description 分页查询数据库实例
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param page query int false "页码"
+// @Param pageSize query int false "每页数量"
+// @Param keyword query string false "关键字"
+// @Param dbType query string false "数据库类型"
+// @Param status query string false "状态"
+// @Param environment query string false "环境"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances [get]
+func (s *Service) ListInstances(c *gin.Context) {
+	var req dbbiz.DatabaseInstanceListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListInstances(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+// CreateInstance 创建数据库实例
+// @Summary 创建数据库实例
+// @Description 创建数据库实例连接配置
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body dbbiz.DatabaseInstanceRequest true "实例信息"
+// @Success 200 {object} response.Response "创建成功"
+// @Router /api/v1/databases/instances [post]
+func (s *Service) CreateInstance(c *gin.Context) {
+	var req dbbiz.DatabaseInstanceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.CreateInstance(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// GetInstance 获取数据库实例详情
+// @Summary 获取数据库实例详情
+// @Description 获取单个数据库实例
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id} [get]
+func (s *Service) GetInstance(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.GetInstance(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "获取失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// UpdateInstance 更新数据库实例
+// @Summary 更新数据库实例
+// @Description 更新数据库实例连接配置
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseInstanceRequest true "实例信息"
+// @Success 200 {object} response.Response "更新成功"
+// @Router /api/v1/databases/instances/{id} [put]
+func (s *Service) UpdateInstance(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseInstanceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	req.ID = id
+	if err := s.useCase.UpdateInstance(c.Request.Context(), &req); err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "更新成功", nil)
+}
+
+// DeleteInstance 删除数据库实例
+// @Summary 删除数据库实例
+// @Description 删除指定数据库实例
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "删除成功"
+// @Router /api/v1/databases/instances/{id} [delete]
+func (s *Service) DeleteInstance(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	if err := s.useCase.DeleteInstance(c.Request.Context(), id); err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+// EnableInstance 启用数据库实例
+// @Summary 启用数据库实例
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "启用成功"
+// @Router /api/v1/databases/instances/{id}/enable [post]
+func (s *Service) EnableInstance(c *gin.Context) {
+	s.setInstanceStatus(c, dbbiz.DatabaseInstanceStatusEnabled, "启用成功")
+}
+
+// DisableInstance 禁用数据库实例
+// @Summary 禁用数据库实例
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "禁用成功"
+// @Router /api/v1/databases/instances/{id}/disable [post]
+func (s *Service) DisableInstance(c *gin.Context) {
+	s.setInstanceStatus(c, dbbiz.DatabaseInstanceStatusDisabled, "禁用成功")
+}
+
+// TestInstance 测试数据库实例连接
+// @Summary 测试数据库实例连接
+// @Description 测试数据库实例连通性并更新版本信息
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "测试成功"
+// @Router /api/v1/databases/instances/{id}/test [post]
+func (s *Service) TestInstance(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.TestInstance(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "连接测试失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// SyncMetadata 同步数据库元数据
+// @Summary 同步数据库元数据
+// @Description 拉取实例的 Schema、表、字段和索引元数据
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "同步成功"
+// @Router /api/v1/databases/instances/{id}/sync-metadata [post]
+func (s *Service) SyncMetadata(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.SyncMetadata(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "同步失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ListSchemas 获取实例 Schema 列表
+// @Summary 获取实例 Schema 列表
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/schemas [get]
+func (s *Service) ListSchemas(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.ListSchemas(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ListTables 获取表列表
+// @Summary 获取表列表
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param schemaName query string false "Schema名称"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/tables [get]
+func (s *Service) ListTables(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.ListTables(c.Request.Context(), id, c.Query("schemaName"))
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ListColumns 获取字段列表
+// @Summary 获取字段列表
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param schemaName query string false "Schema名称"
+// @Param tableName query string true "表名"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/columns [get]
+func (s *Service) ListColumns(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.ListColumns(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"))
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ListIndexes 获取索引列表
+// @Summary 获取索引列表
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param schemaName query string false "Schema名称"
+// @Param tableName query string true "表名"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/indexes [get]
+func (s *Service) ListIndexes(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.ListIndexes(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"))
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// GetTableDDL 获取表 DDL 预览
+// @Summary 获取表 DDL 预览
+// @Description 基于已同步元数据生成表结构 DDL 预览
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param schemaName query string false "Schema名称"
+// @Param tableName query string true "表名"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/ddl [get]
+func (s *Service) GetTableDDL(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.GetTableDDL(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"))
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ExportTableDictionary 导出表数据字典 CSV
+// @Summary 导出表数据字典
+// @Description 基于已同步元数据导出当前表的数据字典 CSV
+// @Tags 数据库管理
+// @Accept json
+// @Produce text/csv
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param schemaName query string false "Schema名称"
+// @Param tableName query string true "表名"
+// @Router /api/v1/databases/instances/{id}/dictionary/export [get]
+func (s *Service) ExportTableDictionary(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.ExportTableDictionary(c.Request.Context(), id, c.Query("schemaName"), c.Query("tableName"), dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+
+	var buf bytes.Buffer
+	buf.Write([]byte{0xEF, 0xBB, 0xBF})
+	writer := csv.NewWriter(&buf)
+	header := []string{
+		"导出时间", "实例", "数据库类型", "Schema", "表名", "表类型", "引擎", "表注释",
+		"行数估算", "数据大小(B)", "索引大小(B)", "字段序号", "字段名", "数据类型", "可空",
+		"默认值", "键类型", "敏感字段", "字段注释", "索引摘要",
+	}
+	if err := writer.Write(header); err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+	for _, row := range data.Rows {
+		record := []string{
+			data.ExportedAt,
+			safeCSVCell(data.InstanceName),
+			safeCSVCell(data.DBTypeText),
+			safeCSVCell(row.SchemaName),
+			safeCSVCell(row.TableName),
+			safeCSVCell(row.TableType),
+			safeCSVCell(row.Engine),
+			safeCSVCell(row.TableComment),
+			strconv.FormatInt(row.RowCount, 10),
+			strconv.FormatInt(row.DataSizeBytes, 10),
+			strconv.FormatInt(row.IndexSizeBytes, 10),
+			strconv.Itoa(row.ColumnOrder),
+			safeCSVCell(row.ColumnName),
+			safeCSVCell(row.DataType),
+			boolText(row.IsNullable),
+			safeCSVCell(row.DefaultValue),
+			safeCSVCell(row.ColumnKey),
+			boolText(row.IsSensitive),
+			safeCSVCell(row.ColumnComment),
+			safeCSVCell(row.IndexSummary),
+		}
+		if err := writer.Write(record); err != nil {
+			writeDatabaseError(c, "导出失败: ", err)
+			return
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+
+	filename := fmt.Sprintf(
+		"database-dictionary-%s-%s-%s.csv",
+		safeFilenamePart(data.SchemaName),
+		safeFilenamePart(data.TableName),
+		time.Now().Format("20060102150405"),
+	)
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
+}
+
+// GetDiagnosisMetrics 获取数据库诊断指标
+// @Summary 获取数据库诊断指标
+// @Description 获取当前实例的实时连接、活跃会话、对象数和容量信息
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/metrics [get]
+func (s *Service) GetDiagnosisMetrics(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	data, err := s.useCase.GetDiagnosisMetrics(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ListDiagnosisSessions 获取数据库活跃会话
+// @Summary 获取数据库活跃会话
+// @Description 获取当前实例的活跃会话列表
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param limit query int false "返回条数"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/sessions [get]
+func (s *Service) ListDiagnosisSessions(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseDiagnosisListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ListDiagnosisSessions(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ListSlowQueries 获取数据库慢 SQL
+// @Summary 获取数据库慢 SQL
+// @Description 获取当前实例的慢 SQL 摘要列表，不可用时返回能力提示
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param limit query int false "返回条数"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/slow-queries [get]
+func (s *Service) ListSlowQueries(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseDiagnosisListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ListSlowQueries(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// FormatQuerySQL 格式化只读 SQL
+// @Summary 格式化只读 SQL
+// @Description 对只读 SQL 做基础格式化和关键字规范化
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseQueryFormatRequest true "格式化请求"
+// @Success 200 {object} response.Response "格式化成功"
+// @Router /api/v1/databases/instances/{id}/query/format [post]
+func (s *Service) FormatQuerySQL(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseQueryFormatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.FormatQuerySQL(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "格式化失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ValidateWriteQuery 预检查写 SQL
+// @Summary 预检查写 SQL
+// @Description 对写 SQL 做风险识别、门禁校验和执行前确认项计算
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseWriteValidateRequest true "预检查请求"
+// @Success 200 {object} response.Response "预检查完成"
+// @Router /api/v1/databases/instances/{id}/query/write/validate [post]
+func (s *Service) ValidateWriteQuery(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseWriteValidateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ValidateWriteQuery(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "预检查失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ExecuteWriteQuery 执行写 SQL
+// @Summary 执行写 SQL
+// @Description 执行受控单条写 SQL，并写入统一审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseWriteExecuteRequest true "写操作执行请求"
+// @Success 200 {object} response.Response "执行成功"
+// @Router /api/v1/databases/instances/{id}/query/write [post]
+func (s *Service) ExecuteWriteQuery(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseWriteExecuteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ExecuteWriteQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "执行失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ExecuteQuery 执行只读 SQL 查询
+// @Summary 执行只读 SQL 查询
+// @Description 执行 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN / WITH 查询，并写入审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseQueryRequest true "查询请求"
+// @Success 200 {object} response.Response "查询成功"
+// @Router /api/v1/databases/instances/{id}/query [post]
+func (s *Service) ExecuteQuery(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseQueryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ExecuteQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ExplainQuery 获取 SQL 执行计划
+// @Summary 获取 SQL 执行计划
+// @Description 对 SELECT / WITH 查询执行 EXPLAIN，并写入审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseQueryRequest true "查询请求"
+// @Success 200 {object} response.Response "执行成功"
+// @Router /api/v1/databases/instances/{id}/query/explain [post]
+func (s *Service) ExplainQuery(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseQueryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ExplainQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "执行计划失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ExportQueryResult 导出 SQL 结果 CSV
+// @Summary 导出 SQL 结果
+// @Description 对只读 SQL 重新执行并导出结果 CSV，最多导出 5000 行
+// @Tags 数据库管理
+// @Accept json
+// @Produce text/csv
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseQueryRequest true "查询请求"
+// @Router /api/v1/databases/instances/{id}/query/export [post]
+func (s *Service) ExportQueryResult(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseQueryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ExportQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+
+	var buf bytes.Buffer
+	buf.Write([]byte{0xEF, 0xBB, 0xBF})
+	writer := csv.NewWriter(&buf)
+	if err := writer.Write(data.Columns); err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+	for _, row := range data.Rows {
+		record := make([]string, 0, len(data.Columns))
+		for _, column := range data.Columns {
+			record = append(record, safeCSVCell(stringifyQueryValue(row[column])))
+		}
+		if err := writer.Write(record); err != nil {
+			writeDatabaseError(c, "导出失败: ", err)
+			return
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		writeDatabaseError(c, "导出失败: ", err)
+		return
+	}
+
+	filename := fmt.Sprintf("database-query-result-%s.csv", time.Now().Format("20060102150405"))
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
+}
+
+func (s *Service) setInstanceStatus(c *gin.Context, status, message string) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	if err := s.useCase.SetInstanceStatus(c.Request.Context(), id, status); err != nil {
+		writeDatabaseError(c, "状态更新失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, message, nil)
+}
+
+func safeCSVCell(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	switch value[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + value
+	default:
+		return value
+	}
+}
+
+func boolText(value bool) string {
+	if value {
+		return "是"
+	}
+	return "否"
+}
+
+func safeFilenamePart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	replacer := strings.NewReplacer(" ", "_", "/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	return replacer.Replace(value)
+}
+
+func stringifyQueryValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}

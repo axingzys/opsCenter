@@ -8,7 +8,7 @@
         </div>
         <div>
           <h2 class="page-title">告警日志</h2>
-          <p class="page-subtitle">查看域名监控告警的发送历史和状态</p>
+          <p class="page-subtitle">查看域名监控和主机监控告警的发送历史与状态</p>
         </div>
       </div>
       <div class="header-actions">
@@ -63,8 +63,8 @@
     <div class="search-bar">
       <div class="search-inputs">
         <el-input
-          v-model="searchForm.domain"
-          placeholder="搜索域名..."
+          v-model="searchForm.keyword"
+          placeholder="搜索资源名称/IP/消息..."
           clearable
           class="search-input"
           @change="handleSearch"
@@ -73,6 +73,17 @@
             <el-icon class="search-icon"><Search /></el-icon>
           </template>
         </el-input>
+
+        <el-select
+          v-model="searchForm.resourceType"
+          placeholder="资源类型"
+          clearable
+          class="search-input"
+          @change="handleSearch"
+        >
+          <el-option label="域名监控" value="domain" />
+          <el-option label="主机监控" value="host" />
+        </el-select>
 
         <el-select
           v-model="searchForm.alertType"
@@ -86,6 +97,10 @@
           <el-option label="SSL证书即将过期" value="ssl_expiring" />
           <el-option label="SSL证书已过期" value="ssl_expired" />
           <el-option label="SSL证书无效" value="ssl_invalid" />
+          <el-option label="CPU使用率过高" value="high_cpu_usage" />
+          <el-option label="内存使用率过高" value="high_memory_usage" />
+          <el-option label="磁盘使用率过高" value="high_disk_usage" />
+          <el-option label="Agent离线" value="agent_offline" />
         </el-select>
 
         <el-select
@@ -116,13 +131,29 @@
         class="modern-table"
         :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
       >
-        <el-table-column label="域名" prop="domain" min-width="200" />
+        <el-table-column label="资源" min-width="220">
+          <template #default="{ row }">
+            <div class="resource-cell">
+              <div class="resource-name">{{ getResourceName(row) }}</div>
+              <div class="resource-meta">
+                <span>{{ row.resourceType === 'host' ? '主机' : '域名' }}</span>
+                <span v-if="getResourceTarget(row)">· {{ getResourceTarget(row) }}</span>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
 
         <el-table-column label="告警类型" width="140" align="center">
           <template #default="{ row }">
             <el-tag :type="getAlertTypeColor(row.alertType)" effect="dark">
               {{ getAlertTypeName(row.alertType) }}
             </el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="指标" width="140" align="center">
+          <template #default="{ row }">
+            <span>{{ getMetricName(row.metric) }}</span>
           </template>
         </el-table-column>
 
@@ -186,8 +217,12 @@
       <div v-if="currentLog" class="detail-content">
         <div class="detail-info">
           <div class="info-item">
-            <span class="info-label">域名:</span>
-            <span class="info-value">{{ currentLog.domain }}</span>
+            <span class="info-label">{{ currentLog.resourceType === 'host' ? '主机' : '域名' }}:</span>
+            <span class="info-value">{{ getResourceName(currentLog) }}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">目标:</span>
+            <span class="info-value">{{ getResourceTarget(currentLog) }}</span>
           </div>
           <div class="info-item">
             <span class="info-label">告警类型:</span>
@@ -204,6 +239,18 @@
           <div class="info-item">
             <span class="info-label">发送通道:</span>
             <span class="info-value">{{ currentLog.channelType || '-' }}</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">指标:</span>
+            <span class="info-value">{{ getMetricName(currentLog.metric) }}</span>
+          </div>
+          <div class="info-item" v-if="currentLog.currentValue !== undefined && currentLog.currentValue !== null">
+            <span class="info-label">当前值:</span>
+            <span class="info-value">{{ formatMetricValue(currentLog.metric, currentLog.currentValue) }}</span>
+          </div>
+          <div class="info-item" v-if="currentLog.thresholdValue !== undefined && currentLog.thresholdValue !== null">
+            <span class="info-label">阈值:</span>
+            <span class="info-value">{{ formatMetricValue(currentLog.metric, currentLog.thresholdValue) }}</span>
           </div>
         </div>
 
@@ -257,7 +304,8 @@ const detailDialogVisible = ref(false)
 
 // 搜索表单
 const searchForm = reactive({
-  domain: '',
+  keyword: '',
+  resourceType: '',
   alertType: '',
   status: ''
 })
@@ -290,7 +338,11 @@ const getAlertTypeColor = (type: string) => {
     high_response_time: 'warning',
     ssl_expiring: 'warning',
     ssl_expired: 'danger',
-    ssl_invalid: 'danger'
+    ssl_invalid: 'danger',
+    high_cpu_usage: 'warning',
+    high_memory_usage: 'warning',
+    high_disk_usage: 'danger',
+    agent_offline: 'danger'
   }
   return colorMap[type] || ''
 }
@@ -302,9 +354,27 @@ const getAlertTypeName = (type: string) => {
     high_response_time: '响应时间过高',
     ssl_expiring: 'SSL即将过期',
     ssl_expired: 'SSL已过期',
-    ssl_invalid: 'SSL无效'
+    ssl_invalid: 'SSL无效',
+    high_cpu_usage: 'CPU使用率过高',
+    high_memory_usage: '内存使用率过高',
+    high_disk_usage: '磁盘使用率过高',
+    agent_offline: 'Agent离线'
   }
   return nameMap[type] || type
+}
+
+const getMetricName = (metric?: string) => {
+  const nameMap: Record<string, string> = {
+    availability: '可用性',
+    response_time: '响应时间',
+    ssl: 'SSL',
+    cpu_usage: 'CPU使用率',
+    memory_usage: '内存使用率',
+    disk_usage: '磁盘使用率',
+    agent_offline: 'Agent离线'
+  }
+  if (!metric) return '-'
+  return nameMap[metric] || metric
 }
 
 // 获取通道类型名称
@@ -325,6 +395,22 @@ const formatDateTime = (dateTime: string | null | undefined) => {
   return String(dateTime).replace('T', ' ').split('+')[0].split('.')[0]
 }
 
+const getResourceName = (row: AlertLog) => {
+  return row.resourceName || row.domain || '-'
+}
+
+const getResourceTarget = (row: AlertLog) => {
+  return row.resourceTarget || row.domain || '-'
+}
+
+const formatMetricValue = (metric: string | undefined, value: number | undefined) => {
+  if (value === undefined || value === null) return '-'
+  if (metric === 'agent_offline') {
+    return `${Number(value).toFixed(0)} 秒`
+  }
+  return `${Number(value).toFixed(2)}%`
+}
+
 // 加载数据
 const loadData = async () => {
   loading.value = true
@@ -333,7 +419,8 @@ const loadData = async () => {
       page: pagination.page,
       pageSize: pagination.pageSize
     }
-    if (searchForm.domain) params.domainMonitorId = searchForm.domain
+    if (searchForm.keyword) params.keyword = searchForm.keyword
+    if (searchForm.resourceType) params.resourceType = searchForm.resourceType
     if (searchForm.alertType) params.alertType = searchForm.alertType
     if (searchForm.status) params.status = searchForm.status
 
@@ -365,7 +452,8 @@ const handleSearch = () => {
 
 // 重置搜索
 const handleReset = () => {
-  searchForm.domain = ''
+  searchForm.keyword = ''
+  searchForm.resourceType = ''
   searchForm.alertType = ''
   searchForm.status = ''
   pagination.page = 1
@@ -609,6 +697,22 @@ onMounted(() => {
 .action-view:hover {
   background-color: #e8f4ff;
   color: #409eff;
+}
+
+.resource-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.resource-name {
+  font-weight: 600;
+  color: #303133;
+}
+
+.resource-meta {
+  font-size: 12px;
+  color: #909399;
 }
 
 /* 详情对话框 */

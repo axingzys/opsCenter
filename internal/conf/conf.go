@@ -28,15 +28,19 @@ import (
 
 // Config 全局配置
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Redis    RedisConfig    `mapstructure:"redis"`
-	Log      LogConfig      `mapstructure:"log"`
+	Server     ServerConfig     `mapstructure:"server"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	Desktop    DesktopConfig    `mapstructure:"desktop"`
+	Terminal   TerminalConfig   `mapstructure:"terminal"`
+	Agent      AgentConfig      `mapstructure:"agent"`
+	Monitoring MonitoringConfig `mapstructure:"monitoring"`
+	Log        LogConfig        `mapstructure:"log"`
 }
 
 // ServerConfig 服务器配置
 type ServerConfig struct {
-	Mode         string `mapstructure:"mode"`          // debug, release, test
+	Mode         string `mapstructure:"mode"` // debug, release, test
 	HttpPort     int    `mapstructure:"http_port"`
 	RPCPort      int    `mapstructure:"rpc_port"`
 	ReadTimeout  int    `mapstructure:"read_timeout"`  // 毫秒
@@ -91,13 +95,130 @@ type RedisConfig struct {
 	MinIdleConn int    `mapstructure:"min_idle_conn"`
 }
 
+// DesktopConfig 远程桌面配置
+type DesktopConfig struct {
+	Enabled          bool   `mapstructure:"enabled"`
+	Provider         string `mapstructure:"provider"`
+	PublicPath       string `mapstructure:"public_path"`
+	TokenTTLSeconds  int    `mapstructure:"token_ttl_seconds"`
+	JSONSecretKey    string `mapstructure:"json_secret_key"`
+	RecordingPath    string `mapstructure:"recording_path"`
+	TransferRootPath string `mapstructure:"transfer_root_path"`
+	DriveName        string `mapstructure:"drive_name"`
+	DisableUpload    bool   `mapstructure:"disable_upload"`
+	DisableDownload  bool   `mapstructure:"disable_download"`
+}
+
+type TerminalConfig struct {
+	RecordingPath string `mapstructure:"recording_path"`
+}
+
+func (c *TerminalConfig) GetRecordingPath() string {
+	if strings.TrimSpace(c.RecordingPath) == "" {
+		return "./data/terminal-recordings"
+	}
+	return c.RecordingPath
+}
+
+type AgentConfig struct {
+	Enabled               bool   `mapstructure:"enabled"`
+	BundleDir             string `mapstructure:"bundle_dir"`
+	DefaultInstallPath    string `mapstructure:"default_install_path"`
+	DefaultListenPort     int    `mapstructure:"default_listen_port"`
+	BinaryName            string `mapstructure:"binary_name"`
+	ServicePrefix         string `mapstructure:"service_prefix"`
+	ReportIntervalSeconds int    `mapstructure:"report_interval_seconds"`
+}
+
+func (c *AgentConfig) GetBundleDir() string {
+	if strings.TrimSpace(c.BundleDir) == "" {
+		return "./agent-bundles"
+	}
+	return c.BundleDir
+}
+
+func (c *AgentConfig) GetDefaultInstallPath() string {
+	if strings.TrimSpace(c.DefaultInstallPath) == "" {
+		return "/opt/opshub-agent"
+	}
+	return c.DefaultInstallPath
+}
+
+func (c *AgentConfig) GetDefaultListenPort() int {
+	if c.DefaultListenPort <= 0 {
+		return 19100
+	}
+	return c.DefaultListenPort
+}
+
+func (c *AgentConfig) GetBinaryName() string {
+	if strings.TrimSpace(c.BinaryName) == "" {
+		return "opshub-agent"
+	}
+	return c.BinaryName
+}
+
+func (c *AgentConfig) GetServicePrefix() string {
+	if strings.TrimSpace(c.ServicePrefix) == "" {
+		return "opshub-agent"
+	}
+	return c.ServicePrefix
+}
+
+func (c *AgentConfig) GetReportIntervalSeconds() int {
+	if c.ReportIntervalSeconds <= 0 {
+		return 60
+	}
+	return c.ReportIntervalSeconds
+}
+
+type MonitoringConfig struct {
+	Prometheus PrometheusConfig `mapstructure:"prometheus"`
+}
+
+type PrometheusConfig struct {
+	Enabled             bool   `mapstructure:"enabled"`
+	BaseURL             string `mapstructure:"base_url"`
+	FileSDDir           string `mapstructure:"file_sd_dir"`
+	QueryTimeoutSeconds int    `mapstructure:"query_timeout_seconds"`
+}
+
+func (c *PrometheusConfig) GetBaseURL() string {
+	if strings.TrimSpace(c.BaseURL) == "" {
+		return "http://127.0.0.1:19090"
+	}
+	return strings.TrimRight(c.BaseURL, "/")
+}
+
+func (c *PrometheusConfig) GetFileSDDir() string {
+	if strings.TrimSpace(c.FileSDDir) == "" {
+		return "./data/prometheus/file_sd"
+	}
+	return c.FileSDDir
+}
+
+func (c *PrometheusConfig) GetQueryTimeoutSeconds() int {
+	if c.QueryTimeoutSeconds <= 0 {
+		return 10
+	}
+	return c.QueryTimeoutSeconds
+}
+
+// GetPublicPath 获取桌面访问路径
+func (c *DesktopConfig) GetPublicPath() string {
+	if c.PublicPath == "" {
+		return "/guacamole/"
+	}
+	return c.PublicPath
+}
+
 // LogConfig 日志配置
 type LogConfig struct {
 	Level      string `mapstructure:"level"`
 	Filename   string `mapstructure:"filename"`
-	MaxSize    int    `mapstructure:"max_size"`     // MB
+	MaxSize    int    `mapstructure:"max_size"` // MB
 	MaxBackups int    `mapstructure:"max_backups"`
-	MaxAge     int    `mapstructure:"max_age"`      // days
+	MaxAge     int    `mapstructure:"max_age"` // days
 	Compress   bool   `mapstructure:"compress"`
 	Console    bool   `mapstructure:"console"`
 }

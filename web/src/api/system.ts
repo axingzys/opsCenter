@@ -40,6 +40,37 @@ export const saveSecurityConfig = (data: {
   return request.put('/api/v1/system/config/security', data)
 }
 
+export interface MonitoringConfig {
+  prometheusRetentionDays: number
+  prometheusBaseUrl?: string
+  currentPrometheusRetention?: string
+}
+
+export interface DatabaseConfig {
+  writeEnabled: boolean
+  highRiskRequiresConfirm: boolean
+  operationReasonRequired: boolean
+  maxAffectedRows: number
+  defaultBackupRetentionDays: number
+  backupStoragePath: string
+}
+
+export const getMonitoringConfig = () => {
+  return request.get('/api/v1/system/config/monitoring')
+}
+
+export const saveMonitoringConfig = (data: MonitoringConfig) => {
+  return request.put('/api/v1/system/config/monitoring', data)
+}
+
+export const getDatabaseConfig = () => {
+  return request.get('/api/v1/system/config/database')
+}
+
+export const saveDatabaseConfig = (data: DatabaseConfig) => {
+  return request.put('/api/v1/system/config/database', data)
+}
+
 // 上传Logo
 export const uploadLogo = (file: File) => {
   const formData = new FormData()

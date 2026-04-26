@@ -20,9 +20,9 @@
           <span class="breadcrumb-title">当前位置</span>
         </div>
         <el-breadcrumb separator="/" class="path-breadcrumb">
-          <el-breadcrumb-item @click="navigateTo('~')" class="breadcrumb-home">
+          <el-breadcrumb-item @click="navigateToRoot" class="breadcrumb-home">
             <el-icon><HomeFilled /></el-icon>
-            <span>主目录</span>
+            <span>{{ rootLabel }}</span>
           </el-breadcrumb-item>
           <el-breadcrumb-item
             v-for="(segment, index) in pathSegments"
@@ -37,7 +37,7 @@
           <el-icon class="path-icon"><FolderOpened /></el-icon>
           <el-input
             v-model="pathInput"
-            placeholder="输入路径后按回车跳转"
+            :placeholder="pathPlaceholder"
             class="path-input"
             @keyup.enter="handlePathInput"
             clearable
@@ -59,7 +59,7 @@
           <el-button
             size="default"
             @click="navigateUp"
-            :disabled="currentPath === '~' || currentPath === '/'"
+            :disabled="isAtRoot"
             class="toolbar-btn"
           >
             <el-icon><Back /></el-icon>
@@ -74,8 +74,9 @@
             :show-file-list="false"
             :http-request="handleCustomUpload"
             :before-upload="beforeUpload"
+            :disabled="!canUpload"
           >
-            <el-button size="default" :loading="uploading" class="upload-btn">
+            <el-button size="default" :loading="uploading" :disabled="!canUpload" class="upload-btn">
               <el-icon><Upload /></el-icon>
               <span>上传文件</span>
             </el-button>
@@ -137,7 +138,7 @@
             </template>
           </el-table-column>
 
-          <el-table-column label="权限" width="130" align="center">
+          <el-table-column :label="permissionColumnLabel" width="130" align="center">
             <template #default="{ row }">
               <el-tag class="permission-tag" size="small">{{ row.mode || '-' }}</el-tag>
             </template>
@@ -156,16 +157,15 @@
             <template #default="{ row }">
               <div class="action-buttons">
                 <el-button
-                  v-if="!row.isDir"
                   type="primary"
                   link
                   size="small"
                   @click="downloadFile(row)"
-                  :loading="downloadingFiles[row.name]"
+                  :loading="downloadingFiles[getDownloadKey(row)]"
                   class="action-btn"
                 >
                   <el-icon><Download /></el-icon>
-                  <span>下载</span>
+                  <span>{{ row.isDir ? '下载目录' : '下载' }}</span>
                 </el-button>
                 <el-popconfirm
                   title="确定删除此文件吗?"
@@ -186,7 +186,6 @@
                     </el-button>
                   </template>
                 </el-popconfirm>
-                <span v-if="row.isDir" class="no-action">-</span>
               </div>
             </template>
           </el-table-column>
@@ -227,6 +226,7 @@ import { listHostFiles, downloadHostFile, deleteHostFile } from '@/api/host'
 
 interface FileInfo {
   name: string
+  path?: string
   size: number
   mode: string
   isDir: boolean
@@ -237,6 +237,7 @@ const props = defineProps<{
   visible: boolean
   hostId: number
   hostName: string
+  hostOsType?: string
 }>()
 
 const emit = defineEmits<{
@@ -256,8 +257,16 @@ const isProcessing = ref(false) // 是否在服务器处理中
 const downloadingFiles = ref<Record<string, boolean>>({})
 const deletingFiles = ref<Record<string, boolean>>({})
 const files = ref<FileInfo[]>([])
-const currentPath = ref('~')
-const pathInput = ref('~')
+const currentPath = ref('')
+const pathInput = ref('')
+
+const isWindowsHost = computed(() => props.hostOsType === 'windows')
+const rootPath = computed(() => isWindowsHost.value ? '' : '~')
+const rootLabel = computed(() => isWindowsHost.value ? '驱动器' : '主目录')
+const pathPlaceholder = computed(() => isWindowsHost.value ? '输入 Windows 路径，如 C:\\Users\\axing' : '输入路径后按回车跳转')
+const permissionColumnLabel = computed(() => isWindowsHost.value ? '属性' : '权限')
+const isAtRoot = computed(() => isWindowsHost.value ? currentPath.value === '' : currentPath.value === '~' || currentPath.value === '/')
+const canUpload = computed(() => !(isWindowsHost.value && currentPath.value === ''))
 
 // 计算上传状态文本
 const uploadStatusText = computed(() => {
@@ -271,8 +280,12 @@ const uploadStatusText = computed(() => {
 })
 
 const pathSegments = computed(() => {
-  if (currentPath.value === '~' || currentPath.value === '/') return []
-  const path = currentPath.value.startsWith('/') ? currentPath.value.slice(1) : currentPath.value.replace('~/', '')
+  if (isAtRoot.value) return []
+  if (isWindowsHost.value) {
+    const normalized = normalizeWindowsPath(currentPath.value)
+    return normalized ? normalized.split('\\').filter(Boolean) : []
+  }
+  const path = currentPath.value.startsWith('/') ? currentPath.value.slice(1) : currentPath.value.replace(/^~\/?/, '')
   return path ? path.split('/').filter(p => p) : []
 })
 
@@ -309,7 +322,7 @@ const formatSize = (size: number): string => {
   return Math.round((size / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i]
 }
 
-const loadFiles = async (path: string = '~') => {
+const loadFiles = async (path: string = rootPath.value) => {
   loading.value = true
   try {
     const response = await listHostFiles(props.hostId, path)
@@ -327,13 +340,22 @@ const refreshFiles = () => {
 }
 
 const navigateTo = (path: string) => {
-  currentPath.value = path
-  pathInput.value = path
-  loadFiles(path)
+  const nextPath = isWindowsHost.value ? normalizeWindowsPath(path) : path
+  currentPath.value = nextPath
+  pathInput.value = nextPath
+  loadFiles(nextPath)
+}
+
+const navigateToRoot = () => {
+  navigateTo(rootPath.value)
 }
 
 const handlePathInput = () => {
   if (!pathInput.value || pathInput.value.trim() === '') {
+    if (isWindowsHost.value) {
+      navigateToRoot()
+      return
+    }
     ElMessage.warning('请输入有效的路径')
     return
   }
@@ -341,7 +363,12 @@ const handlePathInput = () => {
 }
 
 const navigateUp = () => {
-  if (currentPath.value === '~' || currentPath.value === '/') return
+  if (isAtRoot.value) return
+
+  if (isWindowsHost.value) {
+    navigateTo(getWindowsParentPath(currentPath.value))
+    return
+  }
 
   const segments = currentPath.value.split('/').filter(s => s && s !== '~')
 
@@ -365,6 +392,18 @@ const navigateUp = () => {
 }
 
 const navigateToSegment = (index: number) => {
+  if (isWindowsHost.value) {
+    const segments = pathSegments.value.slice(0, index + 1)
+    if (segments.length === 0) {
+      navigateToRoot()
+      return
+    }
+    const [drive, ...rest] = segments
+    const path = rest.length > 0 ? `${drive}\\${rest.join('\\')}` : `${drive}\\`
+    navigateTo(path)
+    return
+  }
+
   const segments = pathSegments.value.slice(0, index + 1)
   const path = currentPath.value.startsWith('/')
     ? '/' + segments.join('/')
@@ -374,15 +413,7 @@ const navigateToSegment = (index: number) => {
 
 const handleFileClick = (file: FileInfo) => {
   if (file.isDir) {
-    let newPath: string
-    if (currentPath.value === '~') {
-      newPath = '~/' + file.name
-    } else if (currentPath.value === '/') {
-      newPath = '/' + file.name
-    } else {
-      newPath = currentPath.value + '/' + file.name
-    }
-    navigateTo(newPath)
+    navigateTo(resolveFilePath(file))
   }
 }
 
@@ -424,6 +455,26 @@ const handleCustomUpload = async (options: any) => {
     // 监听完成
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
+        let responseCode = 0
+        let responseMessage = ''
+        try {
+          const response = JSON.parse(xhr.responseText)
+          responseCode = response.code ?? 0
+          responseMessage = response.message || ''
+        } catch (e) {
+          responseCode = 0
+        }
+
+        if (responseCode !== 0) {
+          uploading.value = false
+          uploadProgress.value = 0
+          uploadingFileName.value = ''
+          isProcessing.value = false
+          ElMessage.error('文件上传失败: ' + (responseMessage || '未知错误'))
+          reject(new Error(responseMessage || '未知错误'))
+          return
+        }
+
         // 服务器处理完成
         isProcessing.value = false
         uploadProgress.value = 100
@@ -489,40 +540,63 @@ const handleCustomUpload = async (options: any) => {
 }
 
 const downloadFile = async (file: FileInfo) => {
-  downloadingFiles.value[file.name] = true
+  const downloadKey = getDownloadKey(file)
+  downloadingFiles.value[downloadKey] = true
   try {
-    const filePath = currentPath.value === '~' || currentPath.value === '/'
-      ? (currentPath.value === '~' ? '~/' : '/') + file.name
-      : currentPath.value + '/' + file.name
+    if (file.isDir) {
+      ElMessage.info('目录正在打包中，请稍候...')
+    }
 
-    const response = await downloadHostFile(props.hostId, filePath)
+    const response = await downloadHostFile(props.hostId, resolveFilePath(file))
+    const downloadName = file.isDir ? ensureArchiveName(file.name) : file.name
+    const blob = response instanceof Blob ? response : new Blob([response])
 
     // 创建下载链接
-    const url = window.URL.createObjectURL(new Blob([response.data]))
+    const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.setAttribute('download', file.name)
+    link.setAttribute('download', downloadName)
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
     window.URL.revokeObjectURL(url)
 
-    ElMessage.success('文件下载成功')
+    ElMessage.success(file.isDir ? '目录下载成功' : '文件下载成功')
   } catch (error: any) {
-    ElMessage.error('文件下载失败: ' + (error.message || '未知错误'))
+    let errorMessage = error?.message || '未知错误'
+    const errorBlob = error?.response?.data
+    if (errorBlob instanceof Blob) {
+      try {
+        const text = (await errorBlob.text()).trim()
+        if (text) {
+          try {
+            const payload = JSON.parse(text)
+            errorMessage = payload.message || payload.msg || text
+          } catch {
+            errorMessage = text
+          }
+        }
+      } catch {
+        // ignore blob parse error and keep original message
+      }
+    }
+
+    const isTimeout = error?.code === 'ECONNABORTED' || /timeout|超时/i.test(errorMessage)
+    if (file.isDir && isTimeout) {
+      ElMessage.error('目录打包下载超时，请缩小目录范围后重试')
+      return
+    }
+
+    ElMessage.error((file.isDir ? '目录下载失败: ' : '文件下载失败: ') + errorMessage)
   } finally {
-    downloadingFiles.value[file.name] = false
+    downloadingFiles.value[downloadKey] = false
   }
 }
 
 const deleteFile = async (file: FileInfo) => {
   deletingFiles.value[file.name] = true
   try {
-    const filePath = currentPath.value === '~' || currentPath.value === '/'
-      ? (currentPath.value === '~' ? '~/' : '/') + file.name
-      : currentPath.value + '/' + file.name
-
-    await deleteHostFile(props.hostId, filePath)
+    await deleteHostFile(props.hostId, resolveFilePath(file))
     ElMessage.success('文件删除成功')
     refreshFiles()
   } catch (error: any) {
@@ -536,12 +610,77 @@ const handleClose = () => {
   emit('update:visible', false)
 }
 
+const resolveFilePath = (file: FileInfo) => {
+  if (file.path && file.path.trim()) {
+    return file.path.trim()
+  }
+  if (isWindowsHost.value) {
+    if (currentPath.value === '') {
+      return normalizeWindowsPath(file.name)
+    }
+    return normalizeWindowsPath(`${currentPath.value}\\${file.name}`)
+  }
+  if (currentPath.value === '~' || currentPath.value === '/') {
+    return (currentPath.value === '~' ? '~/' : '/') + file.name
+  }
+  return currentPath.value + '/' + file.name
+}
+
+const getDownloadKey = (file: FileInfo) => {
+  return resolveFilePath(file)
+}
+
+const ensureArchiveName = (fileName: string) => {
+  const trimmed = (fileName || '').trim()
+  if (!trimmed) {
+    return 'download.zip'
+  }
+  if (trimmed.toLowerCase().endsWith('.zip')) {
+    return trimmed
+  }
+  return `${trimmed}.zip`
+}
+
+const normalizeWindowsPath = (path: string) => {
+  const trimmed = (path || '').trim().split('/').join('\\')
+  if (!trimmed) {
+    return ''
+  }
+  if (/^[A-Za-z]:$/.test(trimmed)) {
+    return `${trimmed}\\`
+  }
+  if (/^[A-Za-z]:[^\\]/.test(trimmed)) {
+    return `${trimmed.slice(0, 2)}\\${trimmed.slice(2)}`
+  }
+  return trimmed.replace(/\\{2,}/g, '\\')
+}
+
+const getWindowsParentPath = (path: string) => {
+  const normalized = normalizeWindowsPath(path).replace(/[\\]+$/, '')
+  if (!normalized) {
+    return ''
+  }
+
+  const segments = normalized.split('\\').filter(Boolean)
+  if (segments.length <= 1) {
+    return ''
+  }
+
+  const [drive, ...rest] = segments
+  rest.pop()
+  return rest.length > 0 ? `${drive}\\${rest.join('\\')}` : `${drive}\\`
+}
+
+const resetBrowserPath = () => {
+  currentPath.value = rootPath.value
+  pathInput.value = rootPath.value
+}
+
 // 监听对话框显示状态
 watch(() => props.visible, (visible) => {
   if (visible) {
-    currentPath.value = '~'
-    pathInput.value = '~'
-    loadFiles('~')
+    resetBrowserPath()
+    loadFiles(rootPath.value)
   }
 })
 </script>

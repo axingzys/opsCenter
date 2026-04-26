@@ -20,7 +20,9 @@
 package system
 
 import (
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +34,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-ldap/ldap/v3"
 	"github.com/ydcloud-dy/opshub/internal/biz/system"
+	"github.com/ydcloud-dy/opshub/internal/conf"
 	"github.com/ydcloud-dy/opshub/pkg/response"
 )
 
@@ -40,6 +43,8 @@ type ConfigService struct {
 	configUseCase *system.ConfigUseCase
 	uploadDir     string
 }
+
+const defaultPrometheusRetentionDays = 15
 
 // NewConfigService 创建系统配置服务
 func NewConfigService(configUseCase *system.ConfigUseCase, uploadDir string) *ConfigService {
@@ -141,6 +146,45 @@ func (s *ConfigService) GetSecurityConfig(c *gin.Context) {
 	response.Success(c, config)
 }
 
+// GetMonitoringConfig 获取监控配置
+// @Summary 获取监控配置
+// @Description 获取 Prometheus 监控数据保留相关配置
+// @Tags 系统配置
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Success 200 {object} response.Response{} "获取成功"
+// @Router /api/v1/system/config/monitoring [get]
+func (s *ConfigService) GetMonitoringConfig(c *gin.Context) {
+	config, err := s.configUseCase.GetMonitoringConfig(c.Request.Context())
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "获取监控配置失败: "+err.Error())
+		return
+	}
+
+	config.PrometheusBaseURL = s.getPrometheusBaseURL()
+	config.CurrentPrometheusRetention = s.getCurrentPrometheusRetention(c.Request.Context())
+	response.Success(c, config)
+}
+
+// GetDatabaseConfig 获取数据库配置
+// @Summary 获取数据库配置
+// @Description 获取数据库写开关、确认策略和备份默认参数
+// @Tags 系统配置
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Success 200 {object} response.Response{} "获取成功"
+// @Router /api/v1/system/config/database [get]
+func (s *ConfigService) GetDatabaseConfig(c *gin.Context) {
+	config, err := s.configUseCase.GetDatabaseConfig(c.Request.Context())
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "获取数据库配置失败: "+err.Error())
+		return
+	}
+	response.Success(c, config)
+}
+
 // SaveSecurityConfigRequest 保存安全配置请求
 type SaveSecurityConfigRequest struct {
 	PasswordMinLength int  `json:"passwordMinLength"`
@@ -153,6 +197,21 @@ type SaveSecurityConfigRequest struct {
 	MFAEnforced     bool   `json:"mfaEnforced"`
 	MFAType         string `json:"mfaType"`
 	MFASkipDuration int    `json:"mfaSkipDuration"`
+}
+
+// SaveMonitoringConfigRequest 保存监控配置请求
+type SaveMonitoringConfigRequest struct {
+	PrometheusRetentionDays int `json:"prometheusRetentionDays"`
+}
+
+// SaveDatabaseConfigRequest 保存数据库配置请求
+type SaveDatabaseConfigRequest struct {
+	WriteEnabled               bool   `json:"writeEnabled"`
+	HighRiskRequiresConfirm    bool   `json:"highRiskRequiresConfirm"`
+	OperationReasonRequired    bool   `json:"operationReasonRequired"`
+	MaxAffectedRows            int    `json:"maxAffectedRows"`
+	DefaultBackupRetentionDays int    `json:"defaultBackupRetentionDays"`
+	BackupStoragePath          string `json:"backupStoragePath"`
 }
 
 // SaveSecurityConfig 保存安全配置
@@ -201,6 +260,86 @@ func (s *ConfigService) SaveSecurityConfig(c *gin.Context) {
 	}
 
 	response.SuccessWithMessage(c, "保存成功", nil)
+}
+
+// SaveMonitoringConfig 保存监控配置
+// @Summary 保存监控配置
+// @Description 保存 Prometheus 监控数据保留天数
+// @Tags 系统配置
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body SaveMonitoringConfigRequest true "监控配置"
+// @Success 200 {object} response.Response "保存成功"
+// @Router /api/v1/system/config/monitoring [put]
+func (s *ConfigService) SaveMonitoringConfig(c *gin.Context) {
+	var req SaveMonitoringConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	if req.PrometheusRetentionDays < 1 || req.PrometheusRetentionDays > 3650 {
+		response.ErrorCode(c, http.StatusBadRequest, "监控数据保留天数必须在1-3650之间")
+		return
+	}
+
+	config := &system.MonitoringConfig{
+		PrometheusRetentionDays: req.PrometheusRetentionDays,
+	}
+	if err := s.configUseCase.SaveMonitoringConfig(c.Request.Context(), config); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "保存监控配置失败: "+err.Error())
+		return
+	}
+
+	response.SuccessWithMessage(c, "监控配置保存成功，Prometheus 侧需同步应用后生效", nil)
+}
+
+// SaveDatabaseConfig 保存数据库配置
+// @Summary 保存数据库配置
+// @Description 保存数据库写开关、确认策略和备份默认参数
+// @Tags 系统配置
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body SaveDatabaseConfigRequest true "数据库配置"
+// @Success 200 {object} response.Response "保存成功"
+// @Router /api/v1/system/config/database [put]
+func (s *ConfigService) SaveDatabaseConfig(c *gin.Context) {
+	var req SaveDatabaseConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	if req.MaxAffectedRows < 1 || req.MaxAffectedRows > 1000000 {
+		response.ErrorCode(c, http.StatusBadRequest, "最大影响行数必须在1-1000000之间")
+		return
+	}
+	if req.DefaultBackupRetentionDays < 1 || req.DefaultBackupRetentionDays > 3650 {
+		response.ErrorCode(c, http.StatusBadRequest, "默认备份保留天数必须在1-3650之间")
+		return
+	}
+
+	backupStoragePath := strings.TrimSpace(req.BackupStoragePath)
+	if backupStoragePath == "" {
+		backupStoragePath = "./data/database-backups"
+	}
+
+	config := &system.DatabaseConfig{
+		WriteEnabled:               req.WriteEnabled,
+		HighRiskRequiresConfirm:    req.HighRiskRequiresConfirm,
+		OperationReasonRequired:    req.OperationReasonRequired,
+		MaxAffectedRows:            req.MaxAffectedRows,
+		DefaultBackupRetentionDays: req.DefaultBackupRetentionDays,
+		BackupStoragePath:          backupStoragePath,
+	}
+	if err := s.configUseCase.SaveDatabaseConfig(c.Request.Context(), config); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "保存数据库配置失败: "+err.Error())
+		return
+	}
+
+	response.SuccessWithMessage(c, "数据库配置保存成功", nil)
 }
 
 // UploadLogo 上传系统Logo
@@ -318,6 +457,52 @@ func (s *ConfigService) GetPublicConfig(c *gin.Context) {
 // GetConfigUseCase 获取配置用例（供其他服务使用）
 func (s *ConfigService) GetConfigUseCase() *system.ConfigUseCase {
 	return s.configUseCase
+}
+
+func (s *ConfigService) getPrometheusBaseURL() string {
+	if cfg := conf.Get(); cfg != nil {
+		return cfg.Monitoring.Prometheus.GetBaseURL()
+	}
+	return (&conf.PrometheusConfig{}).GetBaseURL()
+}
+
+func (s *ConfigService) getCurrentPrometheusRetention(ctx context.Context) string {
+	baseURL := s.getPrometheusBaseURL()
+	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, baseURL+"/api/v1/status/flags", nil)
+	if err != nil {
+		return fmt.Sprintf("%dd（未能读取运行时状态）", defaultPrometheusRetentionDays)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Sprintf("%dd（未能连接 Prometheus）", defaultPrometheusRetentionDays)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		return fmt.Sprintf("%dd（Prometheus 返回 %d）", defaultPrometheusRetentionDays, resp.StatusCode)
+	}
+
+	var payload struct {
+		Status string                 `json:"status"`
+		Data   map[string]interface{} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return fmt.Sprintf("%dd（状态解析失败）", defaultPrometheusRetentionDays)
+	}
+
+	retentionTime := strings.TrimSpace(fmt.Sprint(payload.Data["storage.tsdb.retention.time"]))
+	retentionSize := strings.TrimSpace(fmt.Sprint(payload.Data["storage.tsdb.retention.size"]))
+	if retentionTime == "" || retentionTime == "<nil>" {
+		retentionTime = fmt.Sprintf("%dd", defaultPrometheusRetentionDays)
+	}
+	if retentionSize != "" && retentionSize != "<nil>" && retentionSize != "0B" && retentionSize != "0" {
+		return fmt.Sprintf("%s（同时受 %s 限制）", retentionTime, retentionSize)
+	}
+	return retentionTime
 }
 
 // GetLDAPConfig 获取LDAP配置

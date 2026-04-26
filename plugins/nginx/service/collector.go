@@ -70,7 +70,7 @@ func (s *CollectorService) CollectK8sIngressLogs(ctx context.Context, source *mo
 	if source.ClusterID == nil {
 		result.Status = "failed"
 		result.Error = "数据源未关联集群"
-		return result, fmt.Errorf(result.Error)
+		return result, fmt.Errorf("%s", result.Error)
 	}
 
 	namespace := source.Namespace
@@ -101,7 +101,7 @@ func (s *CollectorService) CollectK8sIngressLogs(ctx context.Context, source *mo
 	if len(pods.Items) == 0 {
 		result.Status = "failed"
 		result.Error = "未找到 Ingress-Nginx Controller Pod"
-		return result, fmt.Errorf(result.Error)
+		return result, fmt.Errorf("%s", result.Error)
 	}
 
 	// 计算采集时间范围

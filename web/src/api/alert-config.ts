@@ -105,6 +105,15 @@ export const updateReceiverChannelConfig = (receiverId: number, channelId: numbe
 export interface AlertLog {
   id: number
   alertType: string
+  resourceType: string
+  resourceId: number
+  resourceName: string
+  resourceTarget: string
+  metric?: string
+  severity?: string
+  currentValue?: number
+  thresholdValue?: number
+  alertRuleId?: number
   domainMonitorId: number
   domain: string
   status: string
@@ -115,7 +124,16 @@ export interface AlertLog {
   createdAt: string
 }
 
-export const getAlertLogs = (params?: { page?: number; pageSize?: number; domainMonitorId?: number; alertType?: string }) => {
+export const getAlertLogs = (params?: {
+  page?: number
+  pageSize?: number
+  domainMonitorId?: number
+  resourceType?: string
+  resourceId?: number
+  keyword?: string
+  status?: string
+  alertType?: string
+}) => {
   return request.get('/api/v1/plugins/monitor/alerts/logs', { params })
 }
 
