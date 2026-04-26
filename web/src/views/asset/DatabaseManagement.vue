@@ -676,6 +676,9 @@
                 <strong>{{ queryResult.auditId }}</strong>
               </div>
               <el-tag v-if="queryResult.truncated" type="warning">结果已截断</el-tag>
+              <el-tag v-if="queryResult.cellTruncated" type="warning">字段已截断</el-tag>
+              <el-tag v-if="queryResult.cellsMasked" type="info">敏感字段已脱敏</el-tag>
+              <el-tag v-if="queryResult.binaryPreviewed" type="info">二进制已预览</el-tag>
             </div>
             <el-alert
               v-if="queryResult.executedSql"

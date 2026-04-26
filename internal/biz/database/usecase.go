@@ -209,7 +209,7 @@ type DatabaseInstancePermissionAuditRequest struct {
 type DatabaseQueryRequest struct {
 	SchemaName     string `json:"schemaName" binding:"omitempty,max=150"`
 	SQLText        string `json:"sqlText" binding:"required"`
-	Limit          int    `json:"limit" binding:"omitempty,min=1,max=500"`
+	Limit          int    `json:"limit" binding:"omitempty,min=1,max=5000"`
 	TimeoutSeconds int    `json:"timeoutSeconds" binding:"omitempty,min=1,max=30"`
 }
 
@@ -391,20 +391,24 @@ type DatabaseIndexVO struct {
 }
 
 type DatabaseQueryResultVO struct {
-	AuditID      uint             `json:"auditId"`
-	InstanceID   uint             `json:"instanceId"`
-	SchemaName   string           `json:"schemaName"`
-	SQLType      string           `json:"sqlType"`
-	ExecutedSQL  string           `json:"executedSql"`
-	Columns      []string         `json:"columns"`
-	ColumnTypes  []string         `json:"columnTypes"`
-	Rows         []map[string]any `json:"rows"`
-	RowsReturned int              `json:"rowsReturned"`
-	DurationMs   int64            `json:"durationMs"`
-	Limit        int              `json:"limit"`
-	Truncated    bool             `json:"truncated"`
-	Message      string           `json:"message"`
-	ExecutedAt   string           `json:"executedAt"`
+	AuditID         uint             `json:"auditId"`
+	InstanceID      uint             `json:"instanceId"`
+	SchemaName      string           `json:"schemaName"`
+	SQLType         string           `json:"sqlType"`
+	ExecutedSQL     string           `json:"executedSql"`
+	Columns         []string         `json:"columns"`
+	ColumnTypes     []string         `json:"columnTypes"`
+	Rows            []map[string]any `json:"rows"`
+	RowsReturned    int              `json:"rowsReturned"`
+	DurationMs      int64            `json:"durationMs"`
+	Limit           int              `json:"limit"`
+	Truncated       bool             `json:"truncated"`
+	CellTruncated   bool             `json:"cellTruncated"`
+	CellsMasked     bool             `json:"cellsMasked"`
+	BinaryPreviewed bool             `json:"binaryPreviewed"`
+	ResultBytes     int              `json:"resultBytes"`
+	Message         string           `json:"message"`
+	ExecutedAt      string           `json:"executedAt"`
 }
 
 type DatabaseWriteValidateVO struct {
@@ -2052,7 +2056,7 @@ func normalizeSQLValue(value any) any {
 	case nil:
 		return nil
 	case []byte:
-		return string(v)
+		return queryRawBytes(append([]byte(nil), v...))
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05")
 	default:

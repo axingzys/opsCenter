@@ -234,10 +234,17 @@ func (uc *UseCase) runAuditedQuery(
 		uc.finishQueryAudit(ctx, audit, DatabaseQueryStatusFailed, 0, duration, err.Error())
 		return nil, err
 	}
+	if err := sanitizeDatabaseQueryResult(result, queryResultSafetyPolicyForAction(audit.AuditAction)); err != nil {
+		uc.finishQueryAudit(ctx, audit, DatabaseQueryStatusFailed, 0, duration, err.Error())
+		return nil, err
+	}
 
 	audit.Status = DatabaseQueryStatusSuccess
 	audit.RowsReturned = result.RowsReturned
 	audit.DurationMs = duration
+	if audit.AuditAction == DatabaseAuditActionQueryExport {
+		audit.Reason = buildQueryExportAuditReason(result)
+	}
 	if err := uc.auditRepo.Update(ctx, audit); err != nil {
 		return nil, fmt.Errorf("更新查询审计失败: %w", err)
 	}
