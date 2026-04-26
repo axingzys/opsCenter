@@ -54,6 +54,8 @@ const (
 	DatabaseAuditActionRestoreDryRun      = "restore_dry_run"
 	DatabaseAuditActionCapacityView       = "capacity_view"
 	DatabaseAuditActionInspectionGenerate = "inspection_generate"
+	DatabaseAuditActionPermissionUpsert   = "instance_permission_upsert"
+	DatabaseAuditActionPermissionDelete   = "instance_permission_delete"
 
 	DatabaseBackupTypeLogical        = "logical"
 	DatabaseBackupTypeLogicalCustom  = "logical_custom"

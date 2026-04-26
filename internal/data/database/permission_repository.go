@@ -15,6 +15,18 @@ type permissionRepo struct {
 	db *gorm.DB
 }
 
+type databasePermissionRow struct {
+	ID           uint
+	RoleID       uint
+	RoleName     string
+	RoleCode     string
+	InstanceID   uint
+	InstanceName string
+	Permissions  uint
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 func NewDatabasePermissionRepo(db *gorm.DB) dbbiz.DatabasePermissionRepo {
 	return &permissionRepo{db: db}
 }
@@ -102,25 +114,7 @@ func (r *permissionRepo) GetUserAccessibleInstanceIDs(ctx context.Context, userI
 }
 
 func (r *permissionRepo) List(ctx context.Context, req *dbbiz.DatabaseInstancePermissionListRequest) ([]*dbbiz.DatabaseInstancePermissionVO, int64, error) {
-	type row struct {
-		ID           uint
-		RoleID       uint
-		RoleName     string
-		RoleCode     string
-		InstanceID   uint
-		InstanceName string
-		Permissions  uint
-		CreatedAt    time.Time
-		UpdatedAt    time.Time
-	}
-
-	query := r.db.WithContext(ctx).
-		Table("database_instance_permissions AS p").
-		Select(`p.id, p.role_id, r.name AS role_name, r.code AS role_code,
-			p.instance_id, i.name AS instance_name, p.permissions, p.created_at, p.updated_at`).
-		Joins("LEFT JOIN sys_role AS r ON p.role_id = r.id").
-		Joins("LEFT JOIN database_instances AS i ON p.instance_id = i.id AND i.deleted_at IS NULL").
-		Where("p.deleted_at IS NULL")
+	query := r.permissionVOQuery(ctx)
 	if req != nil {
 		if req.RoleID > 0 {
 			query = query.Where("p.role_id = ?", req.RoleID)
@@ -152,26 +146,65 @@ func (r *permissionRepo) List(ctx context.Context, req *dbbiz.DatabaseInstancePe
 		pageSize = 10
 	}
 
-	var rows []row
+	var rows []databasePermissionRow
 	if err := query.Order("p.id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Scan(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 
 	list := make([]*dbbiz.DatabaseInstancePermissionVO, 0, len(rows))
 	for _, item := range rows {
-		list = append(list, &dbbiz.DatabaseInstancePermissionVO{
-			ID:           item.ID,
-			RoleID:       item.RoleID,
-			RoleName:     item.RoleName,
-			RoleCode:     item.RoleCode,
-			InstanceID:   item.InstanceID,
-			InstanceName: item.InstanceName,
-			Permissions:  item.Permissions,
-			CreatedAt:    item.CreatedAt.Format("2006-01-02 15:04:05"),
-			UpdatedAt:    item.UpdatedAt.Format("2006-01-02 15:04:05"),
-		})
+		list = append(list, databasePermissionRowToVO(item))
 	}
 	return list, total, nil
+}
+
+func (r *permissionRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseInstancePermissionVO, error) {
+	if id == 0 {
+		return nil, nil
+	}
+	return r.scanPermissionVO(r.permissionVOQuery(ctx).Where("p.id = ?", id))
+}
+
+func (r *permissionRepo) GetByRoleInstance(ctx context.Context, roleID, instanceID uint) (*dbbiz.DatabaseInstancePermissionVO, error) {
+	if roleID == 0 || instanceID == 0 {
+		return nil, nil
+	}
+	return r.scanPermissionVO(r.permissionVOQuery(ctx).Where("p.role_id = ? AND p.instance_id = ?", roleID, instanceID))
+}
+
+func (r *permissionRepo) permissionVOQuery(ctx context.Context) *gorm.DB {
+	return r.db.WithContext(ctx).
+		Table("database_instance_permissions AS p").
+		Select(`p.id, p.role_id, r.name AS role_name, r.code AS role_code,
+			p.instance_id, i.name AS instance_name, p.permissions, p.created_at, p.updated_at`).
+		Joins("LEFT JOIN sys_role AS r ON p.role_id = r.id").
+		Joins("LEFT JOIN database_instances AS i ON p.instance_id = i.id AND i.deleted_at IS NULL").
+		Where("p.deleted_at IS NULL")
+}
+
+func (r *permissionRepo) scanPermissionVO(query *gorm.DB) (*dbbiz.DatabaseInstancePermissionVO, error) {
+	var row databasePermissionRow
+	if err := query.Order("p.id DESC").Limit(1).Scan(&row).Error; err != nil {
+		return nil, err
+	}
+	if row.ID == 0 {
+		return nil, nil
+	}
+	return databasePermissionRowToVO(row), nil
+}
+
+func databasePermissionRowToVO(item databasePermissionRow) *dbbiz.DatabaseInstancePermissionVO {
+	return &dbbiz.DatabaseInstancePermissionVO{
+		ID:           item.ID,
+		RoleID:       item.RoleID,
+		RoleName:     item.RoleName,
+		RoleCode:     item.RoleCode,
+		InstanceID:   item.InstanceID,
+		InstanceName: item.InstanceName,
+		Permissions:  item.Permissions,
+		CreatedAt:    item.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:    item.UpdatedAt.Format("2006-01-02 15:04:05"),
+	}
 }
 
 func (r *permissionRepo) ValidateTarget(ctx context.Context, roleID, instanceID uint) error {

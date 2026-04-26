@@ -2580,7 +2580,7 @@ const queryAudits = ref<any[]>([])
 const auditTotal = ref(0)
 const auditDetailVisible = ref(false)
 const currentAudit = ref<any>()
-const sqlTypes = ['SELECT', 'SHOW', 'DESC', 'DESCRIBE', 'EXPLAIN', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'REPLACE', 'RENAME', 'GRANT', 'REVOKE', 'MERGE', 'EXPORT', 'DIAGNOSIS', 'BACKUP', 'RESTORE', 'CAPACITY', 'INSPECTION', 'UNKNOWN']
+const sqlTypes = ['SELECT', 'SHOW', 'DESC', 'DESCRIBE', 'EXPLAIN', 'WITH', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'REPLACE', 'RENAME', 'GRANT', 'REVOKE', 'MERGE', 'EXPORT', 'DIAGNOSIS', 'BACKUP', 'RESTORE', 'CAPACITY', 'INSPECTION', 'PERMISSION', 'UNKNOWN']
 const auditActions = [
   { label: '只读查询', value: 'query' },
   { label: '执行计划', value: 'explain' },
@@ -2592,6 +2592,8 @@ const auditActions = [
   { label: '恢复演练', value: 'restore_dry_run' },
   { label: '容量趋势查看', value: 'capacity_view' },
   { label: '巡检报告生成', value: 'inspection_generate' },
+  { label: '实例权限保存', value: 'instance_permission_upsert' },
+  { label: '实例权限删除', value: 'instance_permission_delete' },
   { label: '数据字典导出', value: 'metadata_export' },
   { label: '诊断指标查看', value: 'diagnosis_metrics' },
   { label: '活跃会话查看', value: 'diagnosis_sessions' },

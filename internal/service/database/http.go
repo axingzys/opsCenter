@@ -247,6 +247,15 @@ func (s *Service) UpsertInstancePermission(c *gin.Context) {
 		writeDatabaseError(c, "保存失败: ", err)
 		return
 	}
+	var before *dbbiz.DatabaseInstancePermissionVO
+	if s.useCase != nil {
+		var err error
+		before, err = s.permissionRepo.GetByRoleInstance(c.Request.Context(), req.RoleID, req.InstanceID)
+		if err != nil {
+			writeDatabaseError(c, "保存失败: ", err)
+			return
+		}
+	}
 	if err := s.permissionRepo.Upsert(c.Request.Context(), &dbbiz.DatabaseInstancePermission{
 		RoleID:      req.RoleID,
 		InstanceID:  req.InstanceID,
@@ -254,6 +263,22 @@ func (s *Service) UpsertInstancePermission(c *gin.Context) {
 	}); err != nil {
 		writeDatabaseError(c, "保存失败: ", err)
 		return
+	}
+	if s.useCase != nil {
+		after, err := s.permissionRepo.GetByRoleInstance(c.Request.Context(), req.RoleID, req.InstanceID)
+		if err != nil {
+			writeDatabaseError(c, "保存成功但记录审计失败: ", err)
+			return
+		}
+		auditReq := buildInstancePermissionAuditRequest(before, after, req.RoleID, req.InstanceID, permissions)
+		if err := s.useCase.RecordInstancePermissionAudit(c.Request.Context(), dbbiz.DatabaseAuditActionPermissionUpsert, auditReq, dbbiz.QueryOperator{
+			ID:       rbacservice.GetUserID(c),
+			Username: rbacservice.GetUsername(c),
+			ClientIP: c.ClientIP(),
+		}); err != nil {
+			writeDatabaseError(c, "保存成功但记录审计失败: ", err)
+			return
+		}
 	}
 	response.SuccessWithMessage(c, "保存成功", nil)
 }
@@ -268,11 +293,56 @@ func (s *Service) DeleteInstancePermission(c *gin.Context) {
 	if !ok {
 		return
 	}
+	existing, err := s.permissionRepo.GetByID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	if existing == nil {
+		response.ErrorCode(c, http.StatusNotFound, "数据库实例权限不存在")
+		return
+	}
 	if err := s.permissionRepo.Delete(c.Request.Context(), id); err != nil {
 		writeDatabaseError(c, "删除失败: ", err)
 		return
 	}
+	if s.useCase != nil {
+		auditReq := buildInstancePermissionAuditRequest(existing, nil, existing.RoleID, existing.InstanceID, 0)
+		if err := s.useCase.RecordInstancePermissionAudit(c.Request.Context(), dbbiz.DatabaseAuditActionPermissionDelete, auditReq, dbbiz.QueryOperator{
+			ID:       rbacservice.GetUserID(c),
+			Username: rbacservice.GetUsername(c),
+			ClientIP: c.ClientIP(),
+		}); err != nil {
+			writeDatabaseError(c, "删除成功但记录审计失败: ", err)
+			return
+		}
+	}
 	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+func buildInstancePermissionAuditRequest(before, after *dbbiz.DatabaseInstancePermissionVO, roleID, instanceID, afterPermissions uint) *dbbiz.DatabaseInstancePermissionAuditRequest {
+	result := &dbbiz.DatabaseInstancePermissionAuditRequest{
+		RoleID:           roleID,
+		InstanceID:       instanceID,
+		AfterPermissions: afterPermissions,
+	}
+	if before != nil {
+		result.RoleID = before.RoleID
+		result.RoleName = before.RoleName
+		result.RoleCode = before.RoleCode
+		result.InstanceID = before.InstanceID
+		result.InstanceName = before.InstanceName
+		result.BeforePermissions = before.Permissions
+	}
+	if after != nil {
+		result.RoleID = after.RoleID
+		result.RoleName = after.RoleName
+		result.RoleCode = after.RoleCode
+		result.InstanceID = after.InstanceID
+		result.InstanceName = after.InstanceName
+		result.AfterPermissions = after.Permissions
+	}
+	return result
 }
 
 // ListQueryHistory 获取当前用户最近 SQL 历史

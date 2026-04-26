@@ -721,6 +721,8 @@ type DatabaseAdapter interface {
 ### 1. 实例权限变更审计
 目标：让数据库实例对象级权限的新增、修改、删除可追溯。
 
+状态：已实现。实例权限保存和删除会写入统一审计，动作分别为 `instance_permission_upsert` 和 `instance_permission_delete`，审计内容包含角色、实例、变更前权限和变更后权限。
+
 改造范围：
 
 1. 对 `database_instance_permissions` 的新增、修改和删除写入统一审计。

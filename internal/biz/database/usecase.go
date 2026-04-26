@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -193,6 +194,16 @@ type DatabaseInstancePermissionRequest struct {
 	RoleID      uint `json:"roleId" binding:"required"`
 	InstanceID  uint `json:"instanceId" binding:"required"`
 	Permissions uint `json:"permissions" binding:"required"`
+}
+
+type DatabaseInstancePermissionAuditRequest struct {
+	RoleID            uint   `json:"roleId"`
+	RoleName          string `json:"roleName"`
+	RoleCode          string `json:"roleCode"`
+	InstanceID        uint   `json:"instanceId"`
+	InstanceName      string `json:"instanceName"`
+	BeforePermissions uint   `json:"beforePermissions"`
+	AfterPermissions  uint   `json:"afterPermissions"`
 }
 
 type DatabaseQueryRequest struct {
@@ -999,6 +1010,47 @@ func (uc *UseCase) finishQueryAudit(ctx context.Context, audit *DatabaseQueryAud
 	audit.DurationMs = durationMs
 	audit.ErrorMessage = trimText(errorMessage, 500)
 	_ = uc.auditRepo.Update(ctx, audit)
+}
+
+func (uc *UseCase) RecordInstancePermissionAudit(ctx context.Context, action string, req *DatabaseInstancePermissionAuditRequest, operator QueryOperator) error {
+	if uc == nil || uc.auditRepo == nil || req == nil {
+		return nil
+	}
+	action = normalizeAuditAction(action)
+	sqlText := buildInstancePermissionAuditSQL(action, req)
+	return uc.auditRepo.Create(ctx, &DatabaseQueryAudit{
+		InstanceID:     req.InstanceID,
+		OperatorID:     operator.ID,
+		OperatorName:   trimText(operator.Username, 100),
+		AuditAction:    action,
+		SQLText:        trimText(sqlText, 20000),
+		SQLFingerprint: sqlFingerprint(sqlText),
+		SQLType:        "PERMISSION",
+		RiskLevel:      DatabaseQueryRiskHigh,
+		Status:         DatabaseQueryStatusSuccess,
+		ClientIP:       trimText(operator.ClientIP, 64),
+	})
+}
+
+func buildInstancePermissionAuditSQL(action string, req *DatabaseInstancePermissionAuditRequest) string {
+	if req == nil {
+		return "{}"
+	}
+	payload := map[string]any{
+		"action":            normalizeAuditAction(action),
+		"roleId":            req.RoleID,
+		"roleName":          strings.TrimSpace(req.RoleName),
+		"roleCode":          strings.TrimSpace(req.RoleCode),
+		"instanceId":        req.InstanceID,
+		"instanceName":      strings.TrimSpace(req.InstanceName),
+		"beforePermissions": req.BeforePermissions,
+		"afterPermissions":  req.AfterPermissions,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }
 
 func (uc *UseCase) finishSyncJob(ctx context.Context, job *DatabaseSyncJob, status, message string, startedAt, finishedAt time.Time, schemasCount, tablesCount, columnsCount, indexesCount int) {
@@ -1903,6 +1955,10 @@ func QueryAuditActionText(action string) string {
 		return "容量趋势查看"
 	case DatabaseAuditActionInspectionGenerate:
 		return "巡检报告生成"
+	case DatabaseAuditActionPermissionUpsert:
+		return "实例权限保存"
+	case DatabaseAuditActionPermissionDelete:
+		return "实例权限删除"
 	default:
 		return strings.TrimSpace(action)
 	}
@@ -1938,6 +1994,10 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionCapacityView
 	case DatabaseAuditActionInspectionGenerate:
 		return DatabaseAuditActionInspectionGenerate
+	case DatabaseAuditActionPermissionUpsert:
+		return DatabaseAuditActionPermissionUpsert
+	case DatabaseAuditActionPermissionDelete:
+		return DatabaseAuditActionPermissionDelete
 	default:
 		return strings.ToLower(strings.TrimSpace(action))
 	}

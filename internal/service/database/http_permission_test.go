@@ -18,10 +18,14 @@ type fakeDatabasePermissionRepo struct {
 	allowedIDs          []uint
 	permissions         map[uint]uint
 	err                 error
+	deleteErr           error
 	validateErr         error
 	validatedRoleID     uint
 	validatedInstanceID uint
 	upserted            *dbbiz.DatabaseInstancePermission
+	deletedID           uint
+	byID                *dbbiz.DatabaseInstancePermissionVO
+	byRoleInstance      *dbbiz.DatabaseInstancePermissionVO
 }
 
 func (r *fakeDatabasePermissionRepo) HasAnyRules(context.Context) (bool, error) {
@@ -47,6 +51,28 @@ func (r *fakeDatabasePermissionRepo) List(context.Context, *dbbiz.DatabaseInstan
 	return nil, 0, errors.New("not implemented")
 }
 
+func (r *fakeDatabasePermissionRepo) GetByID(context.Context, uint) (*dbbiz.DatabaseInstancePermissionVO, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.byID == nil {
+		return nil, nil
+	}
+	item := *r.byID
+	return &item, nil
+}
+
+func (r *fakeDatabasePermissionRepo) GetByRoleInstance(context.Context, uint, uint) (*dbbiz.DatabaseInstancePermissionVO, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	if r.byRoleInstance == nil {
+		return nil, nil
+	}
+	item := *r.byRoleInstance
+	return &item, nil
+}
+
 func (r *fakeDatabasePermissionRepo) ValidateTarget(_ context.Context, roleID, instanceID uint) error {
 	r.validatedRoleID = roleID
 	r.validatedInstanceID = instanceID
@@ -55,11 +81,48 @@ func (r *fakeDatabasePermissionRepo) ValidateTarget(_ context.Context, roleID, i
 
 func (r *fakeDatabasePermissionRepo) Upsert(_ context.Context, item *dbbiz.DatabaseInstancePermission) error {
 	r.upserted = item
+	if r.byRoleInstance == nil {
+		r.byRoleInstance = &dbbiz.DatabaseInstancePermissionVO{
+			ID:           99,
+			RoleID:       item.RoleID,
+			RoleName:     "DBA",
+			RoleCode:     "dba",
+			InstanceID:   item.InstanceID,
+			InstanceName: "prod-mysql",
+		}
+	}
+	r.byRoleInstance.Permissions = item.Permissions
 	return r.err
 }
 
-func (r *fakeDatabasePermissionRepo) Delete(context.Context, uint) error {
-	return errors.New("not implemented")
+func (r *fakeDatabasePermissionRepo) Delete(_ context.Context, id uint) error {
+	r.deletedID = id
+	return r.deleteErr
+}
+
+type fakeDatabaseQueryAuditRepo struct {
+	created []*dbbiz.DatabaseQueryAudit
+	err     error
+}
+
+func (r *fakeDatabaseQueryAuditRepo) Create(_ context.Context, item *dbbiz.DatabaseQueryAudit) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.created = append(r.created, item)
+	return nil
+}
+
+func (r *fakeDatabaseQueryAuditRepo) Update(context.Context, *dbbiz.DatabaseQueryAudit) error {
+	return nil
+}
+
+func (r *fakeDatabaseQueryAuditRepo) List(context.Context, *dbbiz.DatabaseQueryAuditListRequest) ([]*dbbiz.DatabaseQueryAudit, int64, error) {
+	return nil, 0, nil
+}
+
+func (r *fakeDatabaseQueryAuditRepo) ListHistory(context.Context, uint, *dbbiz.DatabaseQueryHistoryRequest) ([]*dbbiz.DatabaseQueryAudit, error) {
+	return nil, nil
 }
 
 func newPermissionTestContext() (*gin.Context, *httptest.ResponseRecorder) {
@@ -68,7 +131,12 @@ func newPermissionTestContext() (*gin.Context, *httptest.ResponseRecorder) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest("GET", "/test", nil)
 	c.Set(rbacservice.UserIdKey, uint(7))
+	c.Set(rbacservice.UsernameKey, "alice")
 	return c, recorder
+}
+
+func newPermissionAuditUseCase(auditRepo dbbiz.QueryAuditRepo) *dbbiz.UseCase {
+	return dbbiz.NewUseCase(nil, nil, nil, nil, nil, nil, nil, nil, auditRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func TestEnsureInstancePermissionAllowsLegacyWhenNoRules(t *testing.T) {
@@ -152,5 +220,80 @@ func TestUpsertInstancePermissionRejectsInvalidTarget(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "角色不存在或已禁用") {
 		t.Fatalf("expected target validation error response, got %s", recorder.Body.String())
+	}
+}
+
+func TestUpsertInstancePermissionRecordsAudit(t *testing.T) {
+	c, recorder := newPermissionTestContext()
+	c.Request = httptest.NewRequest("POST", "/test", strings.NewReader(`{"roleId":3,"instanceId":42,"permissions":3}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	repo := &fakeDatabasePermissionRepo{
+		byRoleInstance: &dbbiz.DatabaseInstancePermissionVO{
+			ID:           11,
+			RoleID:       3,
+			RoleName:     "DBA",
+			RoleCode:     "dba",
+			InstanceID:   42,
+			InstanceName: "prod-mysql",
+			Permissions:  dbbiz.DatabasePermissionView,
+		},
+	}
+	auditRepo := &fakeDatabaseQueryAuditRepo{}
+	service := NewService(newPermissionAuditUseCase(auditRepo), repo)
+
+	service.UpsertInstancePermission(c)
+
+	if repo.upserted == nil {
+		t.Fatalf("expected permission to be saved, response=%s", recorder.Body.String())
+	}
+	if len(auditRepo.created) != 1 {
+		t.Fatalf("expected one audit record, got %d", len(auditRepo.created))
+	}
+	audit := auditRepo.created[0]
+	if audit.AuditAction != dbbiz.DatabaseAuditActionPermissionUpsert {
+		t.Fatalf("unexpected audit action: %s", audit.AuditAction)
+	}
+	if audit.InstanceID != 42 || audit.OperatorID != 7 || audit.OperatorName != "alice" {
+		t.Fatalf("unexpected audit identity: %#v", audit)
+	}
+	if audit.SQLType != "PERMISSION" || audit.RiskLevel != dbbiz.DatabaseQueryRiskHigh || audit.Status != dbbiz.DatabaseQueryStatusSuccess {
+		t.Fatalf("unexpected audit metadata: %#v", audit)
+	}
+	if !strings.Contains(audit.SQLText, `"beforePermissions":1`) || !strings.Contains(audit.SQLText, `"afterPermissions":3`) || !strings.Contains(audit.SQLText, `"roleName":"DBA"`) {
+		t.Fatalf("unexpected audit payload: %s", audit.SQLText)
+	}
+}
+
+func TestDeleteInstancePermissionRecordsAudit(t *testing.T) {
+	c, recorder := newPermissionTestContext()
+	c.Params = gin.Params{{Key: "id", Value: "5"}}
+	repo := &fakeDatabasePermissionRepo{
+		byID: &dbbiz.DatabaseInstancePermissionVO{
+			ID:           5,
+			RoleID:       3,
+			RoleName:     "DBA",
+			RoleCode:     "dba",
+			InstanceID:   42,
+			InstanceName: "prod-mysql",
+			Permissions:  dbbiz.DatabasePermissionQuery,
+		},
+	}
+	auditRepo := &fakeDatabaseQueryAuditRepo{}
+	service := NewService(newPermissionAuditUseCase(auditRepo), repo)
+
+	service.DeleteInstancePermission(c)
+
+	if repo.deletedID != 5 {
+		t.Fatalf("expected permission 5 to be deleted, got %d, response=%s", repo.deletedID, recorder.Body.String())
+	}
+	if len(auditRepo.created) != 1 {
+		t.Fatalf("expected one audit record, got %d", len(auditRepo.created))
+	}
+	audit := auditRepo.created[0]
+	if audit.AuditAction != dbbiz.DatabaseAuditActionPermissionDelete {
+		t.Fatalf("unexpected audit action: %s", audit.AuditAction)
+	}
+	if !strings.Contains(audit.SQLText, `"beforePermissions":2`) || !strings.Contains(audit.SQLText, `"afterPermissions":0`) {
+		t.Fatalf("unexpected audit payload: %s", audit.SQLText)
 	}
 }
