@@ -43,6 +43,11 @@ func TestAnalyzeReadOnlySQLRejectsUnsafeSQL(t *testing.T) {
 		"explain delete from users where id = 1",
 		"select * from users where id in (delete from t)",
 		"use mysql",
+		"select * from users into outfile '/tmp/users.csv'",
+		"select * from users into dumpfile '/tmp/users.bin'",
+		"select load_file('/etc/passwd')",
+		"select sleep(10)",
+		"select benchmark(1000000, md5('x'))",
 	}
 	for _, sqlText := range tests {
 		t.Run(sqlText, func(t *testing.T) {
