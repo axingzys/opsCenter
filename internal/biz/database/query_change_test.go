@@ -79,3 +79,27 @@ func TestBuildWriteRollbackSQLHint(t *testing.T) {
 		})
 	}
 }
+
+func TestEnforceRowsAffectedLimit(t *testing.T) {
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		limit        int64
+		wantErr      bool
+	}{
+		{name: "below limit", rowsAffected: 9, limit: 10, wantErr: false},
+		{name: "equals limit", rowsAffected: 10, limit: 10, wantErr: false},
+		{name: "above limit", rowsAffected: 11, limit: 10, wantErr: true},
+		{name: "no limit", rowsAffected: 100, limit: 0, wantErr: false},
+		{name: "negative rows normalized", rowsAffected: -1, limit: 0, wantErr: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := enforceRowsAffectedLimit(tt.rowsAffected, tt.limit)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("enforceRowsAffectedLimit(%d, %d) error = %v, wantErr %v", tt.rowsAffected, tt.limit, err, tt.wantErr)
+			}
+		})
+	}
+}

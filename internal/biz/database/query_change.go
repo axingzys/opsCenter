@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -81,10 +82,10 @@ func (uc *UseCase) ExecuteWriteQuery(ctx context.Context, instanceID uint, req *
 	}
 
 	start := time.Now()
-	rowsAffected, err := executeSQLChange(ctx, item, credential, schemaName, sqlText, timeout)
+	rowsAffected, err := executeSQLChange(ctx, item, credential, schemaName, sqlText, timeout, safety.RowsAffectedLimit)
 	duration := time.Since(start).Milliseconds()
 	if err != nil {
-		uc.finishChangeAudit(ctx, audit, DatabaseQueryStatusFailed, 0, duration, "", err.Error())
+		uc.finishChangeAudit(ctx, audit, DatabaseQueryStatusFailed, normalizeRowsAffected(rowsAffected), duration, "", err.Error())
 		return nil, err
 	}
 
@@ -161,18 +162,18 @@ func (uc *UseCase) finishChangeAudit(ctx context.Context, audit *DatabaseQueryAu
 	_ = uc.auditRepo.Update(ctx, audit)
 }
 
-func executeSQLChange(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlText string, timeoutSeconds int) (int64, error) {
+func executeSQLChange(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlText string, timeoutSeconds int, rowsAffectedLimit int64) (int64, error) {
 	switch normalizeDBType(item.DBType) {
 	case DBTypeMySQL, DBTypeMariaDB:
-		return executeMySQLChange(ctx, item, credential, schemaName, sqlText, timeoutSeconds)
+		return executeMySQLChange(ctx, item, credential, schemaName, sqlText, timeoutSeconds, rowsAffectedLimit)
 	case DBTypePostgreSQL:
-		return executePostgreSQLChange(ctx, item, credential, schemaName, sqlText, timeoutSeconds)
+		return executePostgreSQLChange(ctx, item, credential, schemaName, sqlText, timeoutSeconds, rowsAffectedLimit)
 	default:
 		return 0, fmt.Errorf("%s 写操作执行将在后续批次接入", DBTypeText(item.DBType))
 	}
 }
 
-func executeMySQLChange(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlText string, timeoutSeconds int) (int64, error) {
+func executeMySQLChange(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlText string, timeoutSeconds int, rowsAffectedLimit int64) (int64, error) {
 	queryItem := *item
 	if strings.TrimSpace(schemaName) != "" {
 		queryItem.DefaultDatabase = strings.TrimSpace(schemaName)
@@ -190,18 +191,35 @@ func executeMySQLChange(ctx context.Context, item *DatabaseInstance, credential 
 		return 0, fmt.Errorf("连接数据库失败: %w", err)
 	}
 
-	result, err := db.ExecContext(queryCtx, sqlText)
+	tx, err := db.BeginTx(queryCtx, &sql.TxOptions{})
 	if err != nil {
+		return 0, fmt.Errorf("开启写操作事务失败: %w", err)
+	}
+
+	result, err := tx.ExecContext(queryCtx, sqlText)
+	if err != nil {
+		rollbackSQLTx(tx)
 		return 0, fmt.Errorf("执行写操作失败: %w", err)
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return 0, nil
+		rollbackSQLTx(tx)
+		return 0, fmt.Errorf("读取写操作影响行数失败: %w", err)
 	}
-	return normalizeRowsAffected(rowsAffected), nil
+	normalizedRowsAffected := normalizeRowsAffected(rowsAffected)
+	if err := enforceRowsAffectedLimit(normalizedRowsAffected, rowsAffectedLimit); err != nil {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return normalizedRowsAffected, fmt.Errorf("%w；回滚失败: %v", err, rollbackErr)
+		}
+		return normalizedRowsAffected, err
+	}
+	if err := tx.Commit(); err != nil {
+		return normalizedRowsAffected, fmt.Errorf("提交写操作失败: %w", err)
+	}
+	return normalizedRowsAffected, nil
 }
 
-func executePostgreSQLChange(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlText string, timeoutSeconds int) (int64, error) {
+func executePostgreSQLChange(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlText string, timeoutSeconds int, rowsAffectedLimit int64) (int64, error) {
 	db, err := openPostgreSQLDB(item, credential)
 	if err != nil {
 		return 0, err
@@ -213,21 +231,39 @@ func executePostgreSQLChange(ctx context.Context, item *DatabaseInstance, creden
 	if err := db.PingContext(queryCtx); err != nil {
 		return 0, fmt.Errorf("连接数据库失败: %w", err)
 	}
+
+	tx, err := db.BeginTx(queryCtx, &sql.TxOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("开启写操作事务失败: %w", err)
+	}
 	if strings.TrimSpace(schemaName) != "" {
-		if _, err := db.ExecContext(queryCtx, "SET search_path TO "+quotePostgreSQLIdentifier(schemaName)+", public"); err != nil {
+		if _, err := tx.ExecContext(queryCtx, "SET search_path TO "+quotePostgreSQLIdentifier(schemaName)+", public"); err != nil {
+			rollbackSQLTx(tx)
 			return 0, fmt.Errorf("设置 Schema 失败: %w", err)
 		}
 	}
 
-	result, err := db.ExecContext(queryCtx, sqlText)
+	result, err := tx.ExecContext(queryCtx, sqlText)
 	if err != nil {
+		rollbackSQLTx(tx)
 		return 0, fmt.Errorf("执行写操作失败: %w", err)
 	}
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		return 0, nil
+		rollbackSQLTx(tx)
+		return 0, fmt.Errorf("读取写操作影响行数失败: %w", err)
 	}
-	return normalizeRowsAffected(rowsAffected), nil
+	normalizedRowsAffected := normalizeRowsAffected(rowsAffected)
+	if err := enforceRowsAffectedLimit(normalizedRowsAffected, rowsAffectedLimit); err != nil {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return normalizedRowsAffected, fmt.Errorf("%w；回滚失败: %v", err, rollbackErr)
+		}
+		return normalizedRowsAffected, err
+	}
+	if err := tx.Commit(); err != nil {
+		return normalizedRowsAffected, fmt.Errorf("提交写操作失败: %w", err)
+	}
+	return normalizedRowsAffected, nil
 }
 
 func supportsWriteExecution(dbType string) bool {
@@ -266,6 +302,20 @@ func buildWriteExecuteMessage(rowsAffected, limit int64) string {
 		return fmt.Sprintf("写操作执行成功，影响 %d 行，已超过预设阈值 %d 行，请立即复核", rowsAffected, limit)
 	}
 	return fmt.Sprintf("写操作执行成功，影响 %d 行", rowsAffected)
+}
+
+func enforceRowsAffectedLimit(rowsAffected, limit int64) error {
+	rowsAffected = normalizeRowsAffected(rowsAffected)
+	if limit > 0 && rowsAffected > limit {
+		return fmt.Errorf("写操作影响 %d 行，超过预设阈值 %d 行，已自动回滚", rowsAffected, limit)
+	}
+	return nil
+}
+
+func rollbackSQLTx(tx *sql.Tx) {
+	if tx != nil {
+		_ = tx.Rollback()
+	}
 }
 
 func normalizeRowsAffected(rowsAffected int64) int64 {
