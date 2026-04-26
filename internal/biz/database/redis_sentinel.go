@@ -82,7 +82,7 @@ func parseRedisSentinelSettingsFromParams(item *DatabaseInstance, credential *Co
 		DB:               connectionParamInt(params, 0, "db", "database"),
 	}
 	if item != nil && item.TLSEnabled {
-		settings.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify")}
+		settings.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify")}
 	}
 	return settings, nil
 }

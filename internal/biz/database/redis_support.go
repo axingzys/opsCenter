@@ -94,7 +94,7 @@ func openRedisClusterClient(item *DatabaseInstance, credential *ConnectionCreden
 		WriteTimeout: 10 * time.Second,
 	}
 	if item.TLSEnabled {
-		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify")}
+		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify")}
 	}
 	return redis.NewClusterClient(options), nil
 }
@@ -131,7 +131,7 @@ func openRedisClientWithDB(item *DatabaseInstance, credential *ConnectionCredent
 		WriteTimeout: 10 * time.Second,
 	}
 	if item.TLSEnabled {
-		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify")}
+		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify")}
 	}
 	return redis.NewClient(options), nil
 }
@@ -151,7 +151,7 @@ func openRedisNodeClientByAddr(address string, item *DatabaseInstance, credentia
 		WriteTimeout: 10 * time.Second,
 	}
 	if item.TLSEnabled {
-		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify")}
+		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify")}
 	}
 	return redis.NewClient(options), nil
 }

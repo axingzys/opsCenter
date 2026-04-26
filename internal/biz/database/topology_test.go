@@ -58,3 +58,37 @@ func TestStringFromMap(t *testing.T) {
 		t.Fatalf("missing path = %q, want empty", got)
 	}
 }
+
+func TestSearchEndpointTLSVerificationDefault(t *testing.T) {
+	endpoint, insecureSkipVerify, err := searchEndpoint(&DatabaseInstance{
+		DBType:     DBTypeElasticsearch,
+		Host:       "search.example.com",
+		Port:       9200,
+		TLSEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("searchEndpoint() error = %v", err)
+	}
+	if endpoint != "https://search.example.com:9200" {
+		t.Fatalf("endpoint = %q", endpoint)
+	}
+	if insecureSkipVerify {
+		t.Fatalf("expected TLS certificate verification by default")
+	}
+}
+
+func TestSearchEndpointAllowsExplicitInsecureSkipVerify(t *testing.T) {
+	_, insecureSkipVerify, err := searchEndpoint(&DatabaseInstance{
+		DBType:           DBTypeOpenSearch,
+		Host:             "search.example.com",
+		Port:             9200,
+		TLSEnabled:       true,
+		ConnectionParams: `{"insecureSkipVerify":true}`,
+	})
+	if err != nil {
+		t.Fatalf("searchEndpoint() error = %v", err)
+	}
+	if !insecureSkipVerify {
+		t.Fatalf("expected explicit insecureSkipVerify=true to be honored")
+	}
+}

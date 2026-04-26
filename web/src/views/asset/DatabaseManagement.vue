@@ -2746,12 +2746,12 @@ const connectionParamsPlaceholder = computed(() => {
     case 'oracle':
       return '{"serviceName":"XEPDB1"} 或 {"sid":"XE"}'
     case 'redis':
-      return '{"db":0,"insecureSkipVerify":true} 或 {"masterName":"mymaster","sentinelAddrs":["10.0.0.1:26379","10.0.0.2:26379"]}'
+      return '{"db":0,"insecureSkipVerify":false} 或 {"masterName":"mymaster","sentinelAddrs":["10.0.0.1:26379","10.0.0.2:26379"]}'
     case 'mongodb':
-      return '{"authSource":"admin","replicaSet":"rs0","insecureSkipVerify":true}'
+      return '{"authSource":"admin","replicaSet":"rs0","insecureSkipVerify":false}'
     case 'elasticsearch':
     case 'opensearch':
-      return '{"scheme":"https","insecureSkipVerify":true} 或 {"url":"https://search.example.com:9200"}'
+      return '{"scheme":"https","insecureSkipVerify":false} 或 {"url":"https://search.example.com:9200"}'
     case 'tidb':
     case 'oceanbase':
       return '兼容 MySQL 协议，可选 JSON 格式'

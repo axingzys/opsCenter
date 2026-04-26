@@ -132,7 +132,7 @@ func openClickHouseDB(item *DatabaseInstance, credential *ConnectionCredential, 
 		ConnMaxLifetime: time.Minute,
 	}
 	if item.TLSEnabled {
-		options.TLS = &tls.Config{InsecureSkipVerify: connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify")}
+		options.TLS = &tls.Config{InsecureSkipVerify: connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify")}
 	}
 
 	db := clickhouse.OpenDB(options)

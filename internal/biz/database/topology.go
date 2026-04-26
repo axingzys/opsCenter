@@ -308,7 +308,7 @@ func openRedisClient(item *DatabaseInstance, credential *ConnectionCredential) (
 		WriteTimeout: 10 * time.Second,
 	}
 	if item.TLSEnabled {
-		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify")}
+		options.TLSConfig = &tls.Config{InsecureSkipVerify: connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify")}
 	}
 	return redis.NewClient(options), nil
 }
@@ -439,7 +439,7 @@ func openMongoClient(ctx context.Context, item *DatabaseInstance, credential *Co
 		opts.SetReplicaSet(replicaSet)
 	}
 	if item.TLSEnabled {
-		opts.SetTLSConfig(&tls.Config{InsecureSkipVerify: connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify")})
+		opts.SetTLSConfig(&tls.Config{InsecureSkipVerify: connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify")})
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -722,7 +722,7 @@ func searchEndpoint(item *DatabaseInstance) (string, bool, error) {
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return "", true, fmt.Errorf("搜索集群 URL 格式错误")
 		}
-		return strings.TrimRight(rawURL, "/"), connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify"), nil
+		return strings.TrimRight(rawURL, "/"), connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify"), nil
 	}
 	scheme := connectionParamString(params, "scheme", "protocol")
 	if scheme == "" {
@@ -735,7 +735,7 @@ func searchEndpoint(item *DatabaseInstance) (string, bool, error) {
 	if scheme != "http" && scheme != "https" {
 		return "", true, fmt.Errorf("搜索集群协议仅支持 http 或 https")
 	}
-	return scheme + "://" + net.JoinHostPort(strings.TrimSpace(item.Host), fmt.Sprintf("%d", item.Port)), connectionParamBool(params, true, "insecureSkipVerify", "insecure_skip_verify"), nil
+	return scheme + "://" + net.JoinHostPort(strings.TrimSpace(item.Host), fmt.Sprintf("%d", item.Port)), connectionParamBool(params, false, "insecureSkipVerify", "insecure_skip_verify"), nil
 }
 
 func parseRedisInfo(infoText string) map[string]string {
