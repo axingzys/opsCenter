@@ -100,6 +100,66 @@ func TestCleanupExpiredBackupFilesByTask(t *testing.T) {
 	}
 }
 
+func TestReconcileStaleBackupRecords(t *testing.T) {
+	startedAt := time.Now().Add(-time.Hour)
+	recordRepo := &testBackupRecordRepo{
+		items: []*DatabaseBackupRecord{
+			{
+				Model:        gormModelForTest(2),
+				TaskID:       1,
+				Status:       DatabaseBackupStatusRunning,
+				FileName:     "running.sql.gz",
+				StartedAt:    &startedAt,
+				ErrorMessage: backupRunningMessage,
+			},
+		},
+	}
+	uc := &UseCase{
+		backupRecordRepo: recordRepo,
+		startedAt:        time.Now(),
+	}
+
+	uc.reconcileStaleBackupRecords(context.Background(), recordRepo.items)
+
+	if len(recordRepo.updated) != 1 {
+		t.Fatalf("expected one updated stale record, got %d", len(recordRepo.updated))
+	}
+	updated := recordRepo.updated[0]
+	if updated.Status != DatabaseBackupStatusFailed {
+		t.Fatalf("stale record status = %q, want failed", updated.Status)
+	}
+	if updated.FinishedAt == nil || updated.DurationMs <= 0 {
+		t.Fatalf("expected stale record finished metadata, got finishedAt=%v duration=%d", updated.FinishedAt, updated.DurationMs)
+	}
+	if updated.ErrorMessage != backupStaleMessage {
+		t.Fatalf("stale record message = %q", updated.ErrorMessage)
+	}
+}
+
+func TestReconcileStaleBackupRecordsKeepsCurrentRun(t *testing.T) {
+	startedAt := time.Now()
+	recordRepo := &testBackupRecordRepo{
+		items: []*DatabaseBackupRecord{
+			{
+				Model:     gormModelForTest(3),
+				TaskID:    1,
+				Status:    DatabaseBackupStatusRunning,
+				StartedAt: &startedAt,
+			},
+		},
+	}
+	uc := &UseCase{
+		backupRecordRepo: recordRepo,
+		startedAt:        time.Now().Add(-time.Minute),
+	}
+
+	uc.reconcileStaleBackupRecords(context.Background(), recordRepo.items)
+
+	if len(recordRepo.updated) != 0 {
+		t.Fatalf("expected current running record to stay untouched, got %d updates", len(recordRepo.updated))
+	}
+}
+
 func gormModelForTest(id uint) gorm.Model {
 	return gorm.Model{ID: id, CreatedAt: time.Now()}
 }

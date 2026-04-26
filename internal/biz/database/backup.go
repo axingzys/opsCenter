@@ -11,6 +11,8 @@ import (
 const (
 	backupRunningMessage = "逻辑备份执行中"
 	backupSuccessMessage = "逻辑备份完成"
+	backupStaleMessage   = "备份进程已中断、服务已重启或超过 6 小时未完成，已自动标记失败"
+	backupStaleTimeout   = 6 * time.Hour
 )
 
 func (uc *UseCase) ListBackupTasks(ctx context.Context, req *DatabaseBackupTaskListRequest) ([]*DatabaseBackupTaskVO, int64, error) {
@@ -117,6 +119,7 @@ func (uc *UseCase) ListBackupRecords(ctx context.Context, req *DatabaseBackupRec
 	if err != nil {
 		return nil, 0, err
 	}
+	uc.reconcileStaleBackupRecords(ctx, items)
 
 	taskNames := uc.loadBackupTaskNames(ctx, items)
 	instanceNames, _ := uc.loadBackupInstanceMetaByRecord(ctx, items)
@@ -125,6 +128,41 @@ func (uc *UseCase) ListBackupRecords(ctx context.Context, req *DatabaseBackupRec
 		list = append(list, uc.toBackupRecordVO(item, taskNames[item.TaskID], instanceNames[item.InstanceID]))
 	}
 	return list, total, nil
+}
+
+func (uc *UseCase) reconcileStaleBackupRecords(ctx context.Context, items []*DatabaseBackupRecord) {
+	if uc.backupRecordRepo == nil {
+		return
+	}
+	now := time.Now()
+	for _, item := range items {
+		if item == nil || strings.TrimSpace(item.Status) != DatabaseBackupStatusRunning || item.StartedAt == nil {
+			continue
+		}
+		if item.StartedAt.After(uc.startedAt) && now.Sub(*item.StartedAt) <= backupStaleTimeout {
+			continue
+		}
+		item.Status = DatabaseBackupStatusFailed
+		item.FinishedAt = &now
+		item.DurationMs = now.Sub(*item.StartedAt).Milliseconds()
+		item.ErrorMessage = trimText(backupStaleMessage, 500)
+		_ = uc.backupRecordRepo.Update(ctx, item)
+		uc.markBackupTaskStale(ctx, item.TaskID, now)
+	}
+}
+
+func (uc *UseCase) markBackupTaskStale(ctx context.Context, taskID uint, finishedAt time.Time) {
+	if uc.backupTaskRepo == nil || taskID == 0 {
+		return
+	}
+	task, err := uc.backupTaskRepo.GetByID(ctx, taskID)
+	if err != nil || task == nil || strings.TrimSpace(task.LastStatus) != DatabaseBackupStatusRunning {
+		return
+	}
+	task.LastStatus = DatabaseBackupStatusFailed
+	task.LastMessage = trimText(backupStaleMessage, 500)
+	task.UpdatedAt = finishedAt
+	_ = uc.backupTaskRepo.Update(ctx, task)
 }
 
 func (uc *UseCase) DownloadBackupRecord(ctx context.Context, id uint, operator QueryOperator) (*DatabaseBackupDownloadVO, error) {
