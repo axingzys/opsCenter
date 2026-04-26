@@ -35,7 +35,7 @@ func (r *permissionRepo) IsAdmin(ctx context.Context, userID uint) (bool, error)
 	err := r.db.WithContext(ctx).
 		Table("sys_user_role AS ur").
 		Joins("JOIN sys_role AS r ON ur.role_id = r.id").
-		Where("ur.user_id = ? AND r.code = ?", userID, "admin").
+		Where("ur.user_id = ? AND r.code = ? AND r.status = 1 AND r.deleted_at IS NULL", userID, "admin").
 		Count(&count).Error
 	return count > 0, err
 }
@@ -56,7 +56,8 @@ func (r *permissionRepo) GetUserInstancePermissions(ctx context.Context, userID,
 	err = r.db.WithContext(ctx).
 		Table("database_instance_permissions AS p").
 		Joins("JOIN sys_user_role AS ur ON p.role_id = ur.role_id").
-		Where("ur.user_id = ? AND p.instance_id = ? AND p.deleted_at IS NULL", userID, instanceID).
+		Joins("JOIN sys_role AS r ON ur.role_id = r.id").
+		Where("ur.user_id = ? AND p.instance_id = ? AND p.deleted_at IS NULL AND r.status = 1 AND r.deleted_at IS NULL", userID, instanceID).
 		Pluck("p.permissions", &permissions).Error
 	if err != nil {
 		return 0, err
@@ -87,7 +88,8 @@ func (r *permissionRepo) GetUserAccessibleInstanceIDs(ctx context.Context, userI
 	query := r.db.WithContext(ctx).
 		Table("database_instance_permissions AS p").
 		Joins("JOIN sys_user_role AS ur ON p.role_id = ur.role_id").
-		Where("ur.user_id = ? AND p.deleted_at IS NULL", userID)
+		Joins("JOIN sys_role AS r ON ur.role_id = r.id").
+		Where("ur.user_id = ? AND p.deleted_at IS NULL AND r.status = 1 AND r.deleted_at IS NULL", userID)
 	if required > 0 {
 		query = query.Where("(p.permissions & ?) > 0", required)
 	} else {
