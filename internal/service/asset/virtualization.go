@@ -20,6 +20,7 @@
 package asset
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -37,6 +38,13 @@ type VirtualizationService struct {
 
 func NewVirtualizationService(useCase *assetbiz.VirtualizationUseCase) *VirtualizationService {
 	return &VirtualizationService{useCase: useCase}
+}
+
+func (s *VirtualizationService) StartAutoSync(ctx context.Context, opts assetbiz.VirtualizationAutoSyncOptions) *assetbiz.VirtualizationAutoSyncScheduler {
+	if s == nil || s.useCase == nil {
+		return nil
+	}
+	return s.useCase.StartAutoSyncScheduler(ctx, opts)
 }
 
 func parseUintParam(c *gin.Context, key, name string) (uint, bool) {

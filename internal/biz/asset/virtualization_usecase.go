@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -44,6 +45,8 @@ type VirtualizationUseCase struct {
 	actionLogRepo     VirtualizationActionLogRepo
 	policyRepo        VirtualizationPolicyRepo
 	assetHostRepo     HostRepo
+	syncLocksMu       sync.Mutex
+	platformSyncLocks map[uint]*sync.Mutex
 }
 
 func NewVirtualizationUseCase(
@@ -71,6 +74,7 @@ func NewVirtualizationUseCase(
 		actionLogRepo:     actionLogRepo,
 		policyRepo:        policyRepo,
 		assetHostRepo:     assetHostRepo,
+		platformSyncLocks: make(map[uint]*sync.Mutex),
 	}
 }
 
@@ -223,15 +227,33 @@ func (uc *VirtualizationUseCase) TestPlatformConnection(ctx context.Context, id 
 }
 
 func (uc *VirtualizationUseCase) TriggerPlatformSync(ctx context.Context, id uint, operatorID uint) (*VirtualizationSyncJobVO, error) {
+	return uc.runPlatformSync(ctx, id, operatorID, "manual", true)
+}
+
+func (uc *VirtualizationUseCase) TriggerScheduledPlatformSync(ctx context.Context, id uint) (*VirtualizationSyncJobVO, error) {
+	return uc.runPlatformSync(ctx, id, 0, "schedule", false)
+}
+
+func (uc *VirtualizationUseCase) runPlatformSync(ctx context.Context, id uint, operatorID uint, triggerType string, waitForLock bool) (*VirtualizationSyncJobVO, error) {
 	platform, err := uc.platformRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("虚拟化平台不存在")
 	}
 
+	unlock, locked := uc.lockPlatformSync(platform.ID, waitForLock)
+	if !locked {
+		return nil, ErrVirtualizationSyncAlreadyRunning
+	}
+	defer unlock()
+
+	if strings.TrimSpace(triggerType) == "" {
+		triggerType = "manual"
+	}
+
 	now := time.Now()
 	job := &VirtualizationSyncJob{
 		PlatformID:  platform.ID,
-		TriggerType: "manual",
+		TriggerType: triggerType,
 		Status:      "running",
 		StartedAt:   &now,
 		OperatorID:  operatorID,
@@ -246,63 +268,25 @@ func (uc *VirtualizationUseCase) TriggerPlatformSync(ctx context.Context, id uin
 
 	adapter, err := newVirtualizationAdapter(platform.Provider)
 	if err != nil {
-		return nil, err
+		return nil, uc.failPlatformSync(ctx, platform, job, err)
 	}
 
 	snapshot, err := adapter.Collect(ctx, platform)
 	if err != nil {
-		finishedAt := time.Now()
-		job.Status = "failed"
-		job.FinishedAt = &finishedAt
-		job.FailureReason = err.Error()
-		_ = uc.syncJobRepo.Update(ctx, job)
-
-		platform.LastSyncAt = &finishedAt
-		platform.LastSyncStatus = "failed"
-		platform.LastSyncMessage = err.Error()
-		_ = uc.platformRepo.Update(ctx, platform)
-		return nil, err
+		return nil, uc.failPlatformSync(ctx, platform, job, err)
 	}
 
 	itemsTotal, err := uc.applySyncSnapshot(ctx, platform.ID, snapshot)
 	if err != nil {
-		finishedAt := time.Now()
-		job.Status = "failed"
-		job.FinishedAt = &finishedAt
-		job.FailureReason = err.Error()
-		_ = uc.syncJobRepo.Update(ctx, job)
-
-		platform.LastSyncAt = &finishedAt
-		platform.LastSyncStatus = "failed"
-		platform.LastSyncMessage = err.Error()
-		_ = uc.platformRepo.Update(ctx, platform)
-		return nil, err
+		return nil, uc.failPlatformSync(ctx, platform, job, err)
 	}
 
 	finishedAt := time.Now()
 	if err := uc.recordPlatformMetricSnapshot(ctx, platform.ID, finishedAt); err != nil {
-		job.Status = "failed"
-		job.FinishedAt = &finishedAt
-		job.FailureReason = err.Error()
-		_ = uc.syncJobRepo.Update(ctx, job)
-
-		platform.LastSyncAt = &finishedAt
-		platform.LastSyncStatus = "failed"
-		platform.LastSyncMessage = err.Error()
-		_ = uc.platformRepo.Update(ctx, platform)
-		return nil, err
+		return nil, uc.failPlatformSync(ctx, platform, job, err)
 	}
 	if err := uc.recordClusterMetricSnapshots(ctx, platform.ID, finishedAt); err != nil {
-		job.Status = "failed"
-		job.FinishedAt = &finishedAt
-		job.FailureReason = err.Error()
-		_ = uc.syncJobRepo.Update(ctx, job)
-
-		platform.LastSyncAt = &finishedAt
-		platform.LastSyncStatus = "failed"
-		platform.LastSyncMessage = err.Error()
-		_ = uc.platformRepo.Update(ctx, platform)
-		return nil, err
+		return nil, uc.failPlatformSync(ctx, platform, job, err)
 	}
 
 	job.Status = "success"
@@ -324,6 +308,47 @@ func (uc *VirtualizationUseCase) TriggerPlatformSync(ctx context.Context, id uin
 	}
 
 	return uc.toSyncJobVO(job), nil
+}
+
+func (uc *VirtualizationUseCase) failPlatformSync(ctx context.Context, platform *VirtualizationPlatform, job *VirtualizationSyncJob, cause error) error {
+	finishedAt := time.Now()
+	job.Status = "failed"
+	job.FinishedAt = &finishedAt
+	job.FailureReason = cause.Error()
+	_ = uc.syncJobRepo.Update(ctx, job)
+
+	platform.LastSyncAt = &finishedAt
+	platform.LastSyncStatus = "failed"
+	platform.LastSyncMessage = cause.Error()
+	_ = uc.platformRepo.Update(ctx, platform)
+	return cause
+}
+
+func (uc *VirtualizationUseCase) lockPlatformSync(platformID uint, wait bool) (func(), bool) {
+	lock := uc.getPlatformSyncLock(platformID)
+	if wait {
+		lock.Lock()
+		return lock.Unlock, true
+	}
+	if !lock.TryLock() {
+		return nil, false
+	}
+	return lock.Unlock, true
+}
+
+func (uc *VirtualizationUseCase) getPlatformSyncLock(platformID uint) *sync.Mutex {
+	uc.syncLocksMu.Lock()
+	defer uc.syncLocksMu.Unlock()
+
+	if uc.platformSyncLocks == nil {
+		uc.platformSyncLocks = make(map[uint]*sync.Mutex)
+	}
+	lock, ok := uc.platformSyncLocks[platformID]
+	if !ok {
+		lock = &sync.Mutex{}
+		uc.platformSyncLocks[platformID] = lock
+	}
+	return lock
 }
 
 func (uc *VirtualizationUseCase) ListPlatformSyncJobs(ctx context.Context, platformID uint, page, pageSize int) ([]*VirtualizationSyncJobVO, int64, error) {

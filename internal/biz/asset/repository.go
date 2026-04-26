@@ -111,6 +111,7 @@ type VirtualizationPlatformRepo interface {
 	Delete(ctx context.Context, id uint) error
 	GetByID(ctx context.Context, id uint) (*VirtualizationPlatform, error)
 	List(ctx context.Context, page, pageSize int, keyword string) ([]*VirtualizationPlatform, int64, error)
+	ListEnabled(ctx context.Context) ([]*VirtualizationPlatform, error)
 }
 
 type VirtualizationClusterRepo interface {

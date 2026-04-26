@@ -63,6 +63,7 @@ type HTTPServer struct {
 	pluginMgr *plugin.Manager
 	uploadSrv *UploadServer
 	database  *databaseserver.HTTPServer
+	asset     *assetserver.HTTPServer
 }
 
 // NewHTTPServer 创建HTTP服务器
@@ -188,7 +189,8 @@ func (s *HTTPServer) registerRoutes(router *gin.Engine, jwtSecret string) {
 	authMiddleware.SetAssetPermissionRepo(assetPermissionRepo)
 
 	// Asset 路由
-	assetServer := assetserver.NewHTTPServer(assetGroupService, hostService, agentService, desktopService, virtualizationService, terminalManager, s.conf.Terminal, s.db, authMiddleware)
+	assetServer := assetserver.NewHTTPServer(assetGroupService, hostService, agentService, desktopService, virtualizationService, terminalManager, s.conf.Terminal, s.conf.Virtualization, s.db, authMiddleware)
+	s.asset = assetServer
 
 	// API v1 - 公开接口(不需要认证)
 	public := router.Group("/api/v1/public")
@@ -456,6 +458,9 @@ func (s *HTTPServer) Start() error {
 	if s.database != nil {
 		s.database.StartBackground(context.Background())
 	}
+	if s.asset != nil {
+		s.asset.StartBackground(context.Background())
+	}
 
 	appLogger.Info("HTTP服务器启动",
 		zap.String("addr", s.server.Addr),
@@ -475,6 +480,11 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 	if s.database != nil {
 		if err := s.database.StopBackground(ctx); err != nil {
 			return fmt.Errorf("数据库备份调度器停止失败: %w", err)
+		}
+	}
+	if s.asset != nil {
+		if err := s.asset.StopBackground(ctx); err != nil {
+			return fmt.Errorf("资产后台调度器停止失败: %w", err)
 		}
 	}
 	if err := s.server.Shutdown(ctx); err != nil {

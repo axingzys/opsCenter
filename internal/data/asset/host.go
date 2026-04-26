@@ -542,6 +542,17 @@ func (r *virtualizationPlatformRepo) List(ctx context.Context, page, pageSize in
 	return items, total, nil
 }
 
+func (r *virtualizationPlatformRepo) ListEnabled(ctx context.Context) ([]*asset.VirtualizationPlatform, error) {
+	var items []*asset.VirtualizationPlatform
+	if err := r.db.WithContext(ctx).
+		Where("status = ?", "enabled").
+		Order("id ASC").
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 type virtualizationClusterRepo struct {
 	db *gorm.DB
 }

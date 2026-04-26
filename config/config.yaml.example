@@ -49,6 +49,14 @@ agent:
   service_prefix: opshub-agent
   report_interval_seconds: 60
 
+virtualization:
+  sync:
+    enabled: true
+    interval_seconds: 60
+    initial_delay_seconds: 15
+    platform_timeout_seconds: 300
+    concurrency: 4
+
 monitoring:
   prometheus:
     enabled: true

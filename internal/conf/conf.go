@@ -28,14 +28,15 @@ import (
 
 // Config 全局配置
 type Config struct {
-	Server     ServerConfig     `mapstructure:"server"`
-	Database   DatabaseConfig   `mapstructure:"database"`
-	Redis      RedisConfig      `mapstructure:"redis"`
-	Desktop    DesktopConfig    `mapstructure:"desktop"`
-	Terminal   TerminalConfig   `mapstructure:"terminal"`
-	Agent      AgentConfig      `mapstructure:"agent"`
-	Monitoring MonitoringConfig `mapstructure:"monitoring"`
-	Log        LogConfig        `mapstructure:"log"`
+	Server         ServerConfig         `mapstructure:"server"`
+	Database       DatabaseConfig       `mapstructure:"database"`
+	Redis          RedisConfig          `mapstructure:"redis"`
+	Desktop        DesktopConfig        `mapstructure:"desktop"`
+	Terminal       TerminalConfig       `mapstructure:"terminal"`
+	Agent          AgentConfig          `mapstructure:"agent"`
+	Virtualization VirtualizationConfig `mapstructure:"virtualization"`
+	Monitoring     MonitoringConfig     `mapstructure:"monitoring"`
+	Log            LogConfig            `mapstructure:"log"`
 }
 
 // ServerConfig 服务器配置
@@ -172,6 +173,46 @@ func (c *AgentConfig) GetReportIntervalSeconds() int {
 	return c.ReportIntervalSeconds
 }
 
+type VirtualizationConfig struct {
+	Sync VirtualizationSyncConfig `mapstructure:"sync"`
+}
+
+type VirtualizationSyncConfig struct {
+	Enabled                bool `mapstructure:"enabled"`
+	IntervalSeconds        int  `mapstructure:"interval_seconds"`
+	InitialDelaySeconds    int  `mapstructure:"initial_delay_seconds"`
+	PlatformTimeoutSeconds int  `mapstructure:"platform_timeout_seconds"`
+	Concurrency            int  `mapstructure:"concurrency"`
+}
+
+func (c *VirtualizationSyncConfig) GetIntervalSeconds() int {
+	if c.IntervalSeconds <= 0 {
+		return 60
+	}
+	return c.IntervalSeconds
+}
+
+func (c *VirtualizationSyncConfig) GetInitialDelaySeconds() int {
+	if c.InitialDelaySeconds < 0 {
+		return 15
+	}
+	return c.InitialDelaySeconds
+}
+
+func (c *VirtualizationSyncConfig) GetPlatformTimeoutSeconds() int {
+	if c.PlatformTimeoutSeconds <= 0 {
+		return 300
+	}
+	return c.PlatformTimeoutSeconds
+}
+
+func (c *VirtualizationSyncConfig) GetConcurrency() int {
+	if c.Concurrency <= 0 {
+		return 4
+	}
+	return c.Concurrency
+}
+
 type MonitoringConfig struct {
 	Prometheus PrometheusConfig `mapstructure:"prometheus"`
 }
@@ -232,6 +273,12 @@ func Load(configPath string) (*Config, error) {
 	// 设置配置文件
 	v.SetConfigFile(configPath)
 	v.SetConfigType("yaml")
+
+	v.SetDefault("virtualization.sync.enabled", true)
+	v.SetDefault("virtualization.sync.interval_seconds", 60)
+	v.SetDefault("virtualization.sync.initial_delay_seconds", 15)
+	v.SetDefault("virtualization.sync.platform_timeout_seconds", 300)
+	v.SetDefault("virtualization.sync.concurrency", 4)
 
 	// 环境变量前缀
 	v.SetEnvPrefix("OPSHUB")

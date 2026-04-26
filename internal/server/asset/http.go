@@ -35,14 +35,16 @@ import (
 )
 
 type HTTPServer struct {
-	assetGroupService     *assetService.AssetGroupService
-	hostService           *assetService.HostService
-	agentService          *assetService.AgentService
-	desktopService        *assetService.DesktopService
-	virtualizationService *assetService.VirtualizationService
-	terminalManager       *TerminalManager
-	terminalAuditHandler  *TerminalAuditHandler
-	authMiddleware        *rbacService.AuthMiddleware
+	assetGroupService           *assetService.AssetGroupService
+	hostService                 *assetService.HostService
+	agentService                *assetService.AgentService
+	desktopService              *assetService.DesktopService
+	virtualizationService       *assetService.VirtualizationService
+	virtualizationSyncOptions   assetbiz.VirtualizationAutoSyncOptions
+	virtualizationSyncScheduler *assetbiz.VirtualizationAutoSyncScheduler
+	terminalManager             *TerminalManager
+	terminalAuditHandler        *TerminalAuditHandler
+	authMiddleware              *rbacService.AuthMiddleware
 }
 
 func NewHTTPServer(
@@ -53,19 +55,45 @@ func NewHTTPServer(
 	virtualizationService *assetService.VirtualizationService,
 	terminalManager *TerminalManager,
 	terminalCfg conf.TerminalConfig,
+	virtualizationCfg conf.VirtualizationConfig,
 	db *gorm.DB,
 	authMiddleware *rbacService.AuthMiddleware,
 ) *HTTPServer {
 	return &HTTPServer{
-		assetGroupService:     assetGroupService,
-		hostService:           hostService,
-		agentService:          agentService,
-		desktopService:        desktopService,
-		virtualizationService: virtualizationService,
-		terminalManager:       terminalManager,
-		terminalAuditHandler:  NewTerminalAuditHandler(db, terminalCfg),
-		authMiddleware:        authMiddleware,
+		assetGroupService:         assetGroupService,
+		hostService:               hostService,
+		agentService:              agentService,
+		desktopService:            desktopService,
+		virtualizationService:     virtualizationService,
+		virtualizationSyncOptions: buildVirtualizationAutoSyncOptions(virtualizationCfg),
+		terminalManager:           terminalManager,
+		terminalAuditHandler:      NewTerminalAuditHandler(db, terminalCfg),
+		authMiddleware:            authMiddleware,
 	}
+}
+
+func buildVirtualizationAutoSyncOptions(cfg conf.VirtualizationConfig) assetbiz.VirtualizationAutoSyncOptions {
+	return assetbiz.VirtualizationAutoSyncOptions{
+		Enabled:         cfg.Sync.Enabled,
+		Interval:        time.Duration(cfg.Sync.GetIntervalSeconds()) * time.Second,
+		InitialDelay:    time.Duration(cfg.Sync.GetInitialDelaySeconds()) * time.Second,
+		PlatformTimeout: time.Duration(cfg.Sync.GetPlatformTimeoutSeconds()) * time.Second,
+		Concurrency:     cfg.Sync.GetConcurrency(),
+	}
+}
+
+func (s *HTTPServer) StartBackground(ctx context.Context) {
+	if s == nil || s.virtualizationService == nil {
+		return
+	}
+	s.virtualizationSyncScheduler = s.virtualizationService.StartAutoSync(ctx, s.virtualizationSyncOptions)
+}
+
+func (s *HTTPServer) StopBackground(ctx context.Context) error {
+	if s == nil || s.virtualizationSyncScheduler == nil {
+		return nil
+	}
+	return s.virtualizationSyncScheduler.Stop(ctx)
 }
 
 func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
