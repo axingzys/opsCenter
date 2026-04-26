@@ -176,89 +176,20 @@
       </el-tab-pane>
 
       <el-tab-pane v-if="canManageInstancePermissions" label="实例权限" name="permissions">
-        <div class="backup-card">
-          <div class="backup-toolbar">
-            <div class="backup-toolbar-group">
-              <el-input
-                v-model="permissionQuery.keyword"
-                placeholder="搜索角色或实例"
-                clearable
-                class="audit-search-input"
-                @keyup.enter="loadInstancePermissions"
-                @clear="loadInstancePermissions"
-              >
-                <template #prefix>
-                  <el-icon><Search /></el-icon>
-                </template>
-              </el-input>
-              <el-select v-model="permissionQuery.roleId" placeholder="角色" clearable filterable class="audit-select" @change="loadInstancePermissions">
-                <el-option v-for="role in roleOptions" :key="role.id" :label="role.name" :value="role.id" />
-              </el-select>
-              <el-select v-model="permissionQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadInstancePermissions">
-                <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
-              </el-select>
-            </div>
-            <el-button v-if="canManageInstancePermissions" type="primary" @click="openPermissionDialog()">
-              <el-icon style="margin-right: 6px;"><Plus /></el-icon>
-              添加权限
-            </el-button>
-          </div>
-
-          <el-table
-            :data="permissionRows"
-            v-loading="permissionLoading"
-            stripe
-            class="modern-table"
-            :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
-          >
-            <el-table-column label="角色" min-width="180">
-              <template #default="{ row }">
-                <div class="instance-name">
-                  <span>{{ row.roleName || '-' }}</span>
-                  <el-tag v-if="row.roleCode" size="small" type="info">{{ row.roleCode }}</el-tag>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="数据库实例" min-width="200">
-              <template #default="{ row }">{{ row.instanceName || '-' }}</template>
-            </el-table-column>
-            <el-table-column label="权限" min-width="360">
-              <template #default="{ row }">
-                <div class="permission-tag-list">
-                  <el-tag
-                    v-for="item in databasePermissionOptions.filter(option => hasPermissionMask(row.permissions, option.value))"
-                    :key="item.value"
-                    size="small"
-                    type="primary"
-                  >
-                    {{ item.label }}
-                  </el-tag>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="更新时间" width="170" align="center">
-              <template #default="{ row }">{{ row.updatedAt || '-' }}</template>
-            </el-table-column>
-            <el-table-column v-if="canManageInstancePermissions" label="操作" width="120" align="center" fixed="right">
-              <template #default="{ row }">
-                <el-button link type="primary" @click="openPermissionDialog(row)">编辑</el-button>
-                <el-button link type="danger" @click="handleDeletePermission(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-
-          <div class="pagination-container">
-            <el-pagination
-              v-model:current-page="permissionQuery.page"
-              v-model:page-size="permissionQuery.pageSize"
-              :page-sizes="[10, 20, 50, 100]"
-              :total="permissionTotal"
-              layout="total, sizes, prev, pager, next, jumper"
-              @size-change="loadInstancePermissions"
-              @current-change="loadInstancePermissions"
-            />
-          </div>
-        </div>
+        <DatabaseInstancePermissionsPanel
+          :query="permissionQuery"
+          :role-options="roleOptions"
+          :instances="instances"
+          :rows="permissionRows"
+          :loading="permissionLoading"
+          :total="permissionTotal"
+          :can-manage="canManageInstancePermissions"
+          :permission-options="databasePermissionOptions"
+          @load="loadInstancePermissions"
+          @add="openPermissionDialog()"
+          @edit="openPermissionDialog"
+          @delete="handleDeletePermission"
+        />
       </el-tab-pane>
 
       <el-tab-pane label="结构浏览" name="schemas">
@@ -2384,6 +2315,7 @@ import {
   Tickets
 } from '@element-plus/icons-vue'
 import { getCredentials } from '@/api/host'
+import DatabaseInstancePermissionsPanel from './components/DatabaseInstancePermissionsPanel.vue'
 import {
   DATABASE_PERMISSION,
   createDatabaseBackupTask,
