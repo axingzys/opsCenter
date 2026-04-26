@@ -1451,150 +1451,19 @@
       </el-tab-pane>
 
       <el-tab-pane label="巡检报告" name="inspection">
-        <div class="backup-panel">
-          <el-alert
-            title="巡检报告会聚合容量趋势、性能诊断、安全审计和备份状态，首批支持手动生成并落库留痕。"
-            type="info"
-            show-icon
-            :closable="false"
-          />
-
-          <div class="backup-card">
-            <div class="panel-title">
-              <span>生成报告</span>
-              <el-tag size="small" type="success">manual</el-tag>
-            </div>
-            <div class="backup-toolbar">
-              <div class="backup-toolbar-group">
-                <span class="toolbar-label">数据库实例</span>
-                <el-select
-                  v-model="inspectionForm.instanceId"
-                  placeholder="请选择实例"
-                  filterable
-                  class="metadata-instance-select"
-                >
-                  <el-option
-                    v-for="item in diagnosisInstances"
-                    :key="item.id"
-                    :label="`${item.name}（${item.dbTypeText || item.dbType} / ${item.endpoint || `${item.host}:${item.port}`}）`"
-                    :value="item.id"
-                  />
-                </el-select>
-              </div>
-              <el-button type="primary" :disabled="!inspectionForm.instanceId" :loading="inspectionGenerating" @click="handleGenerateInspectionReport">
-                生成巡检报告
-              </el-button>
-            </div>
-          </div>
-
-          <div class="backup-card">
-            <div class="panel-title">
-              <span>报告记录</span>
-              <el-tag size="small" type="info">{{ inspectionTotal }}</el-tag>
-            </div>
-            <div class="backup-toolbar">
-              <div class="backup-toolbar-group">
-                <el-select
-                  v-model="inspectionQuery.instanceId"
-                  placeholder="实例"
-                  clearable
-                  filterable
-                  class="audit-select"
-                  @change="loadInspectionReports"
-                >
-                  <el-option v-for="item in diagnosisInstances" :key="item.id" :label="item.name" :value="item.id" />
-                </el-select>
-                <el-select
-                  v-model="inspectionQuery.riskLevel"
-                  placeholder="风险"
-                  clearable
-                  class="audit-select"
-                  @change="loadInspectionReports"
-                >
-                  <el-option label="低" value="low" />
-                  <el-option label="中" value="medium" />
-                  <el-option label="高" value="high" />
-                  <el-option label="严重" value="critical" />
-                </el-select>
-                <el-select
-                  v-model="inspectionQuery.status"
-                  placeholder="状态"
-                  clearable
-                  class="audit-select"
-                  @change="loadInspectionReports"
-                >
-                  <el-option label="执行中" value="running" />
-                  <el-option label="成功" value="success" />
-                  <el-option label="失败" value="failed" />
-                </el-select>
-              </div>
-              <div class="backup-toolbar-group">
-                <el-button @click="resetInspectionQuery">
-                  <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
-                  重置
-                </el-button>
-                <el-button type="primary" plain :loading="inspectionLoading" @click="loadInspectionReports">
-                  刷新报告
-                </el-button>
-              </div>
-            </div>
-
-            <el-table
-              :data="inspectionReports"
-              v-loading="inspectionLoading"
-              stripe
-              class="modern-table"
-              :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
-            >
-              <el-table-column label="生成时间" prop="generatedAt" width="170" />
-              <el-table-column label="实例" min-width="160">
-                <template #default="{ row }">{{ row.instanceName || `#${row.instanceId}` }}</template>
-              </el-table-column>
-              <el-table-column label="健康分" width="100" align="center">
-                <template #default="{ row }">
-                  <el-tag :type="healthScoreTag(row.healthScore)" size="small">{{ row.healthScore }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="风险" width="100" align="center">
-                <template #default="{ row }">
-                  <el-tag :type="riskLevelTag(row.riskLevel)" size="small">
-                    {{ row.riskLevelText || row.riskLevel || '-' }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="100" align="center">
-                <template #default="{ row }">
-                  <el-tag :type="backupStatusTag(row.status)" size="small">
-                    {{ row.statusText || row.status || '-' }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column label="摘要" min-width="320" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.summary || row.errorMessage || '-' }}</template>
-              </el-table-column>
-              <el-table-column label="耗时" width="100" align="right">
-                <template #default="{ row }">{{ row.durationMs ? `${row.durationMs} ms` : '-' }}</template>
-              </el-table-column>
-              <el-table-column label="操作" width="100" align="center" fixed="right">
-                <template #default="{ row }">
-                  <el-button link type="primary" @click="openInspectionDetail(row)">详情</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-
-            <div class="pagination-container">
-              <el-pagination
-                v-model:current-page="inspectionQuery.page"
-                v-model:page-size="inspectionQuery.pageSize"
-                :page-sizes="[10, 20, 50, 100]"
-                :total="inspectionTotal"
-                layout="total, sizes, prev, pager, next, jumper"
-                @size-change="loadInspectionReports"
-                @current-change="loadInspectionReports"
-              />
-            </div>
-          </div>
-        </div>
+        <DatabaseInspectionReportsPanel
+          :form="inspectionForm"
+          :query="inspectionQuery"
+          :instances="diagnosisInstances"
+          :reports="inspectionReports"
+          :generating="inspectionGenerating"
+          :loading="inspectionLoading"
+          :total="inspectionTotal"
+          @generate="handleGenerateInspectionReport"
+          @load="loadInspectionReports"
+          @reset="resetInspectionQuery"
+          @detail="openInspectionDetail"
+        />
       </el-tab-pane>
 
       <el-tab-pane label="查询审计" name="audit">
@@ -2210,6 +2079,7 @@ import {
   Tickets
 } from '@element-plus/icons-vue'
 import { getCredentials } from '@/api/host'
+import DatabaseInspectionReportsPanel from './components/DatabaseInspectionReportsPanel.vue'
 import DatabaseInstancePermissionsPanel from './components/DatabaseInstancePermissionsPanel.vue'
 import DatabaseQueryAuditPanel from './components/DatabaseQueryAuditPanel.vue'
 import {
