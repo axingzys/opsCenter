@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // AsciinemaRecorder 实现终端录制功能，以asciinema格式保存
@@ -61,8 +63,8 @@ func NewAsciinemaRecorder(recordingDir string, cols, rows int) (*AsciinemaRecord
 		return nil, fmt.Errorf("创建录制目录失败: %w", err)
 	}
 
-	// 生成录制文件名：时间戳.cast
-	filename := time.Now().Format("20060102-150405") + ".cast"
+	// 生成录制文件名：时间戳 + UUID，避免同秒并发会话覆盖录制文件。
+	filename := time.Now().Format("20060102-150405.000000000") + "-" + uuid.NewString() + ".cast"
 	recordingPath := filepath.Join(recordingDir, filename)
 
 	// 创建录制文件

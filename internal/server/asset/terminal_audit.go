@@ -100,10 +100,13 @@ func (h *TerminalAuditHandler) ListTerminalSessions(c *gin.Context) {
 	riskSummary := h.loadRiskSummary(sessions)
 	list := make([]*assetbiz.TerminalSessionInfo, 0, len(sessions))
 	for _, session := range sessions {
-		endAt := session.CreatedAt
-		startAt := endAt
-		if session.Duration > 0 {
-			startAt = endAt.Add(-time.Duration(session.Duration) * time.Second)
+		startAt, endAt, endedAtText := resolveTerminalSessionTimes(session)
+		displayDuration := session.Duration
+		if session.Status == "recording" && !startAt.IsZero() {
+			displayDuration = int(time.Since(startAt).Seconds())
+			if displayDuration < 0 {
+				displayDuration = 0
+			}
 		}
 
 		recordingAvailable, recordingIssue := h.inspectRecording(session)
@@ -122,8 +125,8 @@ func (h *TerminalAuditHandler) ListTerminalSessions(c *gin.Context) {
 			HostIP:             session.HostIP,
 			UserID:             session.UserID,
 			Username:           session.Username,
-			Duration:           session.Duration,
-			DurationText:       formatDuration(session.Duration),
+			Duration:           displayDuration,
+			DurationText:       formatDuration(displayDuration),
 			FileSize:           session.FileSize,
 			FileSizeText:       formatFileSize(session.FileSize),
 			Status:             session.Status,
@@ -139,7 +142,8 @@ func (h *TerminalAuditHandler) ListTerminalSessions(c *gin.Context) {
 			StartedAt:          startAt,
 			StartedAtText:      startAt.Format("2006-01-02 15:04:05"),
 			EndedAt:            endAt,
-			EndedAtText:        endAt.Format("2006-01-02 15:04:05"),
+			EndedAtText:        endedAtText,
+			CloseReason:        session.CloseReason,
 		}
 		list = append(list, info)
 	}
@@ -148,6 +152,30 @@ func (h *TerminalAuditHandler) ListTerminalSessions(c *gin.Context) {
 		"total": total,
 		"list":  list,
 	})
+}
+
+func resolveTerminalSessionTimes(session *assetbiz.TerminalSession) (time.Time, time.Time, string) {
+	startAt := session.CreatedAt
+	if session.StartedAt != nil && !session.StartedAt.IsZero() {
+		startAt = *session.StartedAt
+	}
+
+	if session.EndedAt != nil && !session.EndedAt.IsZero() {
+		endAt := *session.EndedAt
+		return startAt, endAt, endAt.Format("2006-01-02 15:04:05")
+	}
+
+	if session.Duration > 0 && session.StartedAt == nil {
+		endAt := session.CreatedAt
+		startAt = endAt.Add(-time.Duration(session.Duration) * time.Second)
+		return startAt, endAt, endAt.Format("2006-01-02 15:04:05")
+	}
+
+	if session.Status != "recording" && !session.UpdatedAt.IsZero() {
+		return startAt, session.UpdatedAt, session.UpdatedAt.Format("2006-01-02 15:04:05")
+	}
+
+	return startAt, time.Time{}, "-"
 }
 
 // PlayTerminalSession 播放终端会话录制
@@ -410,6 +438,7 @@ func getStatusText(status string) string {
 		"recording": "录制中",
 		"completed": "已完成",
 		"failed":    "失败",
+		"timeout":   "超时",
 	}
 	if text, ok := statusMap[status]; ok {
 		return text

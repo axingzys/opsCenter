@@ -91,3 +91,21 @@ func TestValidateRestoreDryRunRecordAllowsPostgreSQLCustom(t *testing.T) {
 		t.Fatalf("expected custom backup record to be restorable, got %v", err)
 	}
 }
+
+func TestValidateRestoreStrategy(t *testing.T) {
+	if err := validateRestoreStrategy(DBTypeMySQL, DatabaseBackupTypeLogical, DatabaseRestoreStrategyObjectReplace); err != nil {
+		t.Fatalf("expected mysql object replace strategy to be allowed, got %v", err)
+	}
+	if err := validateRestoreStrategy(DBTypeMySQL, DatabaseBackupTypeLogical, DatabaseRestoreStrategyDatabaseClean); err != nil {
+		t.Fatalf("expected mysql database clean strategy to be allowed, got %v", err)
+	}
+	if err := validateRestoreStrategy(DBTypePostgreSQL, DatabaseBackupTypeLogicalCustom, DatabaseRestoreStrategyObjectReplace); err != nil {
+		t.Fatalf("expected postgresql custom object replace strategy to be allowed, got %v", err)
+	}
+	if err := validateRestoreStrategy(DBTypePostgreSQL, DatabaseBackupTypeLogical, DatabaseRestoreStrategyObjectReplace); err == nil {
+		t.Fatalf("expected postgresql plain object replace strategy to be rejected")
+	}
+	if err := validateRestoreStrategy(DBTypeRedis, DatabaseBackupTypeLogical, DatabaseRestoreStrategyDatabaseClean); err == nil {
+		t.Fatalf("expected redis database clean strategy to be rejected")
+	}
+}

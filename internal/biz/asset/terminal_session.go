@@ -39,7 +39,10 @@ type TerminalSession struct {
 	RecordingPath string         `gorm:"type:varchar(500);comment:录制文件路径" json:"recordingPath"`
 	Duration      int            `gorm:"type:int;comment:会话时长(秒)" json:"duration"`
 	FileSize      int64          `gorm:"type:bigint;comment:文件大小(字节)" json:"fileSize"`
-	Status        string         `gorm:"type:varchar(20);default:'recording';comment:会话状态 recording/completed/failed" json:"status"`
+	Status        string         `gorm:"type:varchar(20);default:'recording';comment:会话状态 recording/completed/failed/timeout" json:"status"`
+	StartedAt     *time.Time     `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	EndedAt       *time.Time     `gorm:"column:ended_at;comment:结束时间" json:"endedAt,omitempty"`
+	CloseReason   string         `gorm:"type:varchar(100);comment:结束原因" json:"closeReason,omitempty"`
 }
 
 // TableName 表名
@@ -101,6 +104,7 @@ type TerminalSessionInfo struct {
 	StartedAtText      string    `json:"startedAtText"`
 	EndedAt            time.Time `json:"endedAt"`
 	EndedAtText        string    `json:"endedAtText"`
+	CloseReason        string    `json:"closeReason"`
 }
 
 // TerminalCommandEventInfo 高危命令事件VO

@@ -1383,6 +1383,9 @@
               <el-table-column label="模式" width="110" align="center">
                 <template #default="{ row }">{{ row.restoreModeText || row.restoreMode || '-' }}</template>
               </el-table-column>
+              <el-table-column label="策略" width="150" align="center">
+                <template #default="{ row }">{{ row.restoreStrategyText || row.restoreStrategy || '-' }}</template>
+              </el-table-column>
               <el-table-column label="状态" width="100" align="center">
                 <template #default="{ row }">
                   <el-tag :type="backupStatusTag(row.status)" size="small">
@@ -2103,7 +2106,7 @@
       @close="resetRestoreForm"
     >
       <el-alert
-        title="恢复演练会把成功备份导入到非生产目标实例。Redis 恢复演练会覆盖同名 Key，但不会清空目标实例中的无关数据；请确认目标库为测试、预发或临时库，生产环境会被后端拒绝。"
+        title="恢复演练会把成功备份导入到非生产目标实例。MySQL / MariaDB / PostgreSQL 可选择仅覆盖备份对象或清空目标库后导入；Redis 会覆盖同名 Key，但不会清空目标实例中的无关数据。"
         type="warning"
         show-icon
         :closable="false"
@@ -2129,6 +2132,18 @@
         </el-form-item>
         <el-form-item label="演练模式">
           <el-input v-model="restoreForm.restoreMode" disabled />
+        </el-form-item>
+        <el-form-item label="目标处理" prop="restoreStrategy">
+          <el-radio-group v-model="restoreForm.restoreStrategy">
+            <el-radio-button
+              v-for="item in availableRestoreStrategyOptions"
+              :key="item.value"
+              :label="item.value"
+            >
+              {{ item.label }}
+            </el-radio-button>
+          </el-radio-group>
+          <div class="field-tip">{{ restoreStrategyTip }}</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -2522,7 +2537,8 @@ const backupTaskRules: FormRules = {
 
 const restoreForm = reactive<DatabaseRestoreDryRunPayload>({
   targetInstanceId: 0,
-  restoreMode: 'dry_run'
+  restoreMode: 'dry_run',
+  restoreStrategy: 'object_replace'
 })
 
 const inspectionForm = reactive({
@@ -2530,7 +2546,8 @@ const inspectionForm = reactive({
 })
 
 const restoreRules: FormRules = {
-  targetInstanceId: [{ required: true, message: '请选择目标实例', trigger: 'change' }]
+  targetInstanceId: [{ required: true, message: '请选择目标实例', trigger: 'change' }],
+  restoreStrategy: [{ required: true, message: '请选择目标处理策略', trigger: 'change' }]
 }
 
 const currentMetadataInstance = computed(() =>
@@ -2636,6 +2653,35 @@ const restoreTargetOptions = computed(() => {
     item.id !== restoreSourceRecord.value?.instanceId && isRestoreCompatibleType(sourceType, item.dbType)
   )
 })
+
+const restoreSourceDbType = computed(() =>
+  restoreSourceRecord.value
+    ? instances.value.find(item => item.id === restoreSourceRecord.value?.instanceId)?.dbType || ''
+    : ''
+)
+
+const availableRestoreStrategyOptions = computed(() => {
+  if (restoreSourceDbType.value === 'postgresql' && restoreSourceRecord.value?.backupType === 'logical') {
+    return [
+      { label: '清空库', value: 'database_clean' }
+    ]
+  }
+  if (['mysql', 'mariadb', 'postgresql'].includes(restoreSourceDbType.value)) {
+    return [
+      { label: '覆盖对象', value: 'object_replace' },
+      { label: '清空库', value: 'database_clean' }
+    ]
+  }
+  return [
+    { label: '覆盖对象', value: 'object_replace' }
+  ]
+})
+
+const restoreStrategyTip = computed(() =>
+  restoreForm.restoreStrategy === 'database_clean'
+    ? '先删除目标库中的业务对象再导入备份；目标库额外对象会被删除。'
+    : '仅替换备份中包含的对象；目标库额外对象会保留，同名对象按备份内容覆盖。'
+)
 
 const backupTaskOptions = computed(() =>
   backupTasks.value.map(item => ({
@@ -3152,7 +3198,15 @@ const resetRestoreForm = () => {
   restoreSourceRecord.value = undefined
   restoreForm.targetInstanceId = 0
   restoreForm.restoreMode = 'dry_run'
+  restoreForm.restoreStrategy = 'object_replace'
   restoreFormRef.value?.clearValidate()
+}
+
+const normalizeRestoreFormStrategy = () => {
+  const options = availableRestoreStrategyOptions.value
+  if (!options.some(item => item.value === restoreForm.restoreStrategy)) {
+    restoreForm.restoreStrategy = options[0]?.value || 'object_replace'
+  }
 }
 
 const openBackupTaskDialog = (row?: DatabaseBackupTaskResult) => {
@@ -3969,6 +4023,10 @@ const openRestoreDialog = (row: DatabaseBackupRecordResult) => {
   restoreSourceRecord.value = row
   restoreForm.targetInstanceId = 0
   restoreForm.restoreMode = 'dry_run'
+  restoreForm.restoreStrategy = row.backupType === 'logical' && restoreSourceDbType.value === 'postgresql'
+    ? 'database_clean'
+    : 'object_replace'
+  normalizeRestoreFormStrategy()
   const firstTarget = restoreTargetOptions.value.find(item => item.id !== row.instanceId)
   if (firstTarget) {
     restoreForm.targetInstanceId = firstTarget.id
@@ -3983,9 +4041,11 @@ const submitRestoreDryRun = async () => {
     ElMessage.warning('请选择目标实例')
     return
   }
+  normalizeRestoreFormStrategy()
   const target = instances.value.find(item => item.id === restoreForm.targetInstanceId)
+  const strategyText = availableRestoreStrategyOptions.value.find(item => item.value === restoreForm.restoreStrategy)?.label || restoreForm.restoreStrategy
   await ElMessageBox.confirm(
-    `确定把备份「${restoreSourceRecord.value.fileName}」恢复演练到「${target?.name || restoreForm.targetInstanceId}」吗？`,
+    `确定把备份「${restoreSourceRecord.value.fileName}」恢复演练到「${target?.name || restoreForm.targetInstanceId}」吗？目标处理：${strategyText}。`,
     '恢复演练确认',
     {
       type: 'warning',
@@ -3997,7 +4057,8 @@ const submitRestoreDryRun = async () => {
   try {
     const res = await runDatabaseRestoreDryRun(restoreSourceRecord.value.id, {
       targetInstanceId: restoreForm.targetInstanceId,
-      restoreMode: restoreForm.restoreMode
+      restoreMode: restoreForm.restoreMode,
+      restoreStrategy: restoreForm.restoreStrategy
     }) as DatabaseRestoreJobResult
     restoreDialogVisible.value = false
     ElMessage.success(res.message || '恢复演练已完成')

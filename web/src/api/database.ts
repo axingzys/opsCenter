@@ -166,6 +166,7 @@ export interface DatabaseBackupRunResult {
 export interface DatabaseRestoreDryRunPayload {
   targetInstanceId: number
   restoreMode?: string
+  restoreStrategy?: string
 }
 
 export interface DatabaseRestoreJobResult {
@@ -178,6 +179,8 @@ export interface DatabaseRestoreJobResult {
   targetEnvironment: string
   restoreMode: string
   restoreModeText: string
+  restoreStrategy: string
+  restoreStrategyText: string
   status: string
   statusText: string
   fileName: string

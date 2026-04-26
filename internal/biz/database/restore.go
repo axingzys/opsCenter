@@ -11,6 +11,7 @@ import (
 const (
 	restoreRunningMessage = "恢复演练执行中"
 	restoreSuccessMessage = "恢复演练完成"
+	restoreCommandTimeout = 2 * time.Hour
 )
 
 func (uc *UseCase) ListRestoreJobs(ctx context.Context, req *DatabaseRestoreJobListRequest) ([]*DatabaseRestoreJobVO, int64, error) {
@@ -22,6 +23,7 @@ func (uc *UseCase) ListRestoreJobs(ctx context.Context, req *DatabaseRestoreJobL
 	if err != nil {
 		return nil, 0, err
 	}
+	uc.reconcileStaleRestoreJobs(ctx, items)
 	sourceNames, targetNames, targetEnvs := uc.loadRestoreJobInstanceMeta(ctx, items)
 	list := make([]*DatabaseRestoreJobVO, 0, len(items))
 	for _, item := range items {
@@ -75,7 +77,12 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 	if err != nil {
 		return nil, err
 	}
-	spec, err := buildRestoreCommandSpec(target, credential, databaseName, record.BackupType)
+
+	strategy := normalizeRestoreStrategy(req.RestoreStrategy)
+	if err := validateRestoreStrategy(target.DBType, record.BackupType, strategy); err != nil {
+		return nil, err
+	}
+	spec, err := buildRestoreCommandSpec(target, credential, databaseName, record.BackupType, strategy)
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +97,7 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 		SourceInstanceID: record.InstanceID,
 		TargetInstanceID: target.ID,
 		RestoreMode:      mode,
+		RestoreStrategy:  strategy,
 		Status:           DatabaseBackupStatusRunning,
 		FileName:         record.FileName,
 		FileSize:         record.FileSize,
@@ -109,7 +117,16 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 		return nil, auditErr
 	}
 
-	runErr := runRestoreCommand(ctx, spec, record.FilePath)
+	vo := uc.toRestoreJobVO(job, source.Name, target.Name, target.Environment)
+	go uc.executeRestoreDryRunJob(job, audit, target, record, spec, databaseName, startedAt)
+	return vo, nil
+}
+
+func (uc *UseCase) executeRestoreDryRunJob(job *DatabaseRestoreJob, audit *DatabaseQueryAudit, target *DatabaseInstance, record *DatabaseBackupRecord, spec *restoreCommandSpec, databaseName string, startedAt time.Time) {
+	runCtx, cancel := context.WithTimeout(context.Background(), restoreCommandTimeout)
+	defer cancel()
+
+	runErr := runRestoreCommand(runCtx, spec, record.FilePath)
 	finishedAt := time.Now()
 	status := DatabaseBackupStatusSuccess
 	message := buildRestoreSuccessMessage(record.FileName, target.Name, databaseName)
@@ -117,13 +134,30 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 		status = DatabaseBackupStatusFailed
 		message = runErr.Error()
 	}
-	uc.finishRestoreJob(ctx, job, status, startedAt, finishedAt, message)
-	uc.finishRestoreAudit(ctx, audit, restoreAuditStatus(status), finishedAt.Sub(startedAt).Milliseconds(), message)
-	if runErr != nil {
-		return nil, runErr
-	}
+	updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer updateCancel()
+	uc.finishRestoreJob(updateCtx, job, status, startedAt, finishedAt, message)
+	uc.finishRestoreAudit(updateCtx, audit, restoreAuditStatus(status), finishedAt.Sub(startedAt).Milliseconds(), message)
+}
 
-	return uc.toRestoreJobVO(job, source.Name, target.Name, target.Environment), nil
+func (uc *UseCase) reconcileStaleRestoreJobs(ctx context.Context, items []*DatabaseRestoreJob) {
+	if uc.restoreJobRepo == nil {
+		return
+	}
+	now := time.Now()
+	for _, item := range items {
+		if item == nil || strings.TrimSpace(item.Status) != DatabaseBackupStatusRunning || item.StartedAt == nil {
+			continue
+		}
+		if item.StartedAt.After(uc.startedAt) && now.Sub(*item.StartedAt) <= restoreCommandTimeout {
+			continue
+		}
+		item.Status = DatabaseBackupStatusFailed
+		item.FinishedAt = &now
+		item.DurationMs = now.Sub(*item.StartedAt).Milliseconds()
+		item.ErrorMessage = trimText("恢复演练进程已中断、服务已重启或超过 2 小时未完成，已自动标记失败", 500)
+		_ = uc.restoreJobRepo.Update(ctx, item)
+	}
 }
 
 func validateRestoreDryRunRecord(record *DatabaseBackupRecord) error {
@@ -259,27 +293,29 @@ func (uc *UseCase) toRestoreJobVO(item *DatabaseRestoreJob, sourceName, targetNa
 		return nil
 	}
 	return &DatabaseRestoreJobVO{
-		ID:                 item.ID,
-		BackupRecordID:     item.BackupRecordID,
-		SourceInstanceID:   item.SourceInstanceID,
-		SourceInstanceName: sourceName,
-		TargetInstanceID:   item.TargetInstanceID,
-		TargetInstanceName: targetName,
-		TargetEnvironment:  targetEnvironment,
-		RestoreMode:        item.RestoreMode,
-		RestoreModeText:    RestoreModeText(item.RestoreMode),
-		Status:             item.Status,
-		StatusText:         BackupStatusText(item.Status),
-		FileName:           item.FileName,
-		FileSize:           item.FileSize,
-		OperatorID:         item.OperatorID,
-		OperatorName:       item.OperatorName,
-		StartedAt:          formatTime(item.StartedAt),
-		FinishedAt:         formatTime(item.FinishedAt),
-		DurationMs:         item.DurationMs,
-		Message:            buildRestoreJobMessage(item),
-		CreatedAt:          item.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:          item.UpdatedAt.Format("2006-01-02 15:04:05"),
+		ID:                  item.ID,
+		BackupRecordID:      item.BackupRecordID,
+		SourceInstanceID:    item.SourceInstanceID,
+		SourceInstanceName:  sourceName,
+		TargetInstanceID:    item.TargetInstanceID,
+		TargetInstanceName:  targetName,
+		TargetEnvironment:   targetEnvironment,
+		RestoreMode:         item.RestoreMode,
+		RestoreModeText:     RestoreModeText(item.RestoreMode),
+		RestoreStrategy:     normalizeRestoreStrategy(item.RestoreStrategy),
+		RestoreStrategyText: RestoreStrategyText(item.RestoreStrategy),
+		Status:              item.Status,
+		StatusText:          BackupStatusText(item.Status),
+		FileName:            item.FileName,
+		FileSize:            item.FileSize,
+		OperatorID:          item.OperatorID,
+		OperatorName:        item.OperatorName,
+		StartedAt:           formatTime(item.StartedAt),
+		FinishedAt:          formatTime(item.FinishedAt),
+		DurationMs:          item.DurationMs,
+		Message:             buildRestoreJobMessage(item),
+		CreatedAt:           item.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:           item.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
 }
 
@@ -289,6 +325,50 @@ func normalizeRestoreMode(mode string) string {
 		return DatabaseRestoreModeDryRun
 	}
 	return mode
+}
+
+func normalizeRestoreStrategy(strategy string) string {
+	strategy = strings.ToLower(strings.TrimSpace(strategy))
+	if strategy == "" {
+		return DatabaseRestoreStrategyObjectReplace
+	}
+	return strategy
+}
+
+func RestoreStrategyText(strategy string) string {
+	switch normalizeRestoreStrategy(strategy) {
+	case DatabaseRestoreStrategyDatabaseClean:
+		return "清空目标库后导入"
+	case DatabaseRestoreStrategyObjectReplace:
+		return "覆盖备份中的对象"
+	default:
+		return strategy
+	}
+}
+
+func validateRestoreStrategy(dbType, backupType, strategy string) error {
+	strategy = normalizeRestoreStrategy(strategy)
+	switch strategy {
+	case DatabaseRestoreStrategyObjectReplace:
+	case DatabaseRestoreStrategyDatabaseClean:
+	default:
+		return fmt.Errorf("不支持的恢复目标处理策略: %s", strategy)
+	}
+
+	dbType = normalizeDBType(dbType)
+	backupType = normalizeBackupType(backupType)
+	if strategy == DatabaseRestoreStrategyDatabaseClean {
+		switch dbType {
+		case DBTypeMySQL, DBTypeMariaDB, DBTypePostgreSQL:
+			return nil
+		default:
+			return fmt.Errorf("%s 暂不支持清空目标库后导入", DBTypeText(dbType))
+		}
+	}
+	if dbType == DBTypePostgreSQL && backupType == DatabaseBackupTypeLogical {
+		return fmt.Errorf("PostgreSQL Plain SQL 备份暂不支持覆盖备份中的对象，请选择清空目标库后导入，或使用 Custom 备份")
+	}
+	return nil
 }
 
 func supportsRestoreDryRun(dbType string) bool {
@@ -350,10 +430,14 @@ func buildRestoreAuditText(record *DatabaseBackupRecord, job *DatabaseRestoreJob
 	if job != nil {
 		targetID = job.TargetInstanceID
 	}
-	if strings.TrimSpace(databaseName) == "" {
-		return fmt.Sprintf("RESTORE DRY RUN BACKUP RECORD #%d FILE %s TARGET INSTANCE #%d", recordID, fileName, targetID)
+	strategyText := ""
+	if job != nil {
+		strategyText = RestoreStrategyText(job.RestoreStrategy)
 	}
-	return fmt.Sprintf("RESTORE DRY RUN BACKUP RECORD #%d FILE %s TARGET INSTANCE #%d DATABASE %s", recordID, fileName, targetID, strings.TrimSpace(databaseName))
+	if strings.TrimSpace(databaseName) == "" {
+		return fmt.Sprintf("RESTORE DRY RUN BACKUP RECORD #%d FILE %s TARGET INSTANCE #%d STRATEGY %s", recordID, fileName, targetID, strategyText)
+	}
+	return fmt.Sprintf("RESTORE DRY RUN BACKUP RECORD #%d FILE %s TARGET INSTANCE #%d DATABASE %s STRATEGY %s", recordID, fileName, targetID, strings.TrimSpace(databaseName), strategyText)
 }
 
 func buildRestoreSuccessMessage(fileName, targetName, databaseName string) string {

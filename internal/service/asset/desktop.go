@@ -175,6 +175,22 @@ func (s *DesktopService) CloseDesktopSession(c *gin.Context) {
 	response.SuccessWithMessage(c, "桌面会话已关闭", nil)
 }
 
+func (s *DesktopService) HeartbeatDesktopSession(c *gin.Context) {
+	id64, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "无效的会话ID")
+		return
+	}
+
+	userID := rbacService.GetUserID(c)
+	if err := s.useCase.Heartbeat(c.Request.Context(), uint(id64), userID); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	response.Success(c, nil)
+}
+
 func (s *DesktopService) UploadDesktopSessionFile(c *gin.Context) {
 	id64, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {

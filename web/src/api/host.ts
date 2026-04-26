@@ -170,6 +170,10 @@ export const closeDesktopSession = (id: number) => {
   return request.post(`/api/v1/desktop-sessions/${id}/close`)
 }
 
+export const heartbeatDesktopSession = (id: number) => {
+  return request.post(`/api/v1/desktop-sessions/${id}/heartbeat`)
+}
+
 export const uploadDesktopSessionFile = (
   id: number,
   file: File,

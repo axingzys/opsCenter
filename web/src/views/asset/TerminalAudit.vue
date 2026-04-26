@@ -269,6 +269,7 @@ interface TerminalSession {
   startedAtText: string
   endedAt: string
   endedAtText: string
+  closeReason?: string
 }
 
 interface TerminalCommandEvent {
@@ -497,7 +498,8 @@ const getStatusType = (status: string): 'success' | 'info' | 'warning' | 'danger
   const typeMap: Record<string, 'success' | 'info' | 'warning' | 'danger'> = {
     completed: 'success',
     recording: 'warning',
-    failed: 'danger'
+    failed: 'danger',
+    timeout: 'warning'
   }
   return typeMap[status] || 'info'
 }

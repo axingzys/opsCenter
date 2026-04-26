@@ -20,6 +20,9 @@
 package asset
 
 import (
+	"context"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	assetbiz "github.com/ydcloud-dy/opshub/internal/biz/asset"
 	rbacbiz "github.com/ydcloud-dy/opshub/internal/biz/rbac"
@@ -260,6 +263,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			s.desktopService.DeleteDesktopSession)
 		desktopSessions.GET("/:id", s.desktopService.GetDesktopSession)
 		desktopSessions.POST("/:id/files/upload", s.desktopService.UploadDesktopSessionFile)
+		desktopSessions.POST("/:id/heartbeat", s.desktopService.HeartbeatDesktopSession)
 		desktopSessions.POST("/:id/close", s.desktopService.CloseDesktopSession)
 	}
 }
@@ -314,6 +318,7 @@ func NewAssetServices(db *gorm.DB, cfg *conf.Config) (
 	hostUseCase := assetbiz.NewHostUseCase(hostRepo, credentialRepo, assetGroupRepo, cloudAccountRepo, agentRepo, hostInventoryRepo, cfg.Monitoring.Prometheus, []byte(cfg.Server.JWTSecret))
 	agentUseCase := assetbiz.NewAgentUseCase(hostRepo, credentialRepo, agentRepo, hostInventoryRepo, publicIPHistoryRepo, agentJobRepo, cfg.Server.JWTSecret, cfg.Agent, cfg.Monitoring.Prometheus)
 	desktopSessionUseCase := assetbiz.NewDesktopSessionUseCase(hostRepo, credentialRepo, desktopSessionRepo, cfg.Desktop)
+	desktopSessionUseCase.StartStaleSessionReconciler(context.Background())
 	virtualizationUseCase := assetbiz.NewVirtualizationUseCase(
 		virtualizationPlatformRepo,
 		virtualizationClusterRepo,
@@ -339,6 +344,7 @@ func NewAssetServices(db *gorm.DB, cfg *conf.Config) (
 	// 初始化TerminalManager
 	recordingStore := newTerminalRecordingStore(cfg.Terminal)
 	terminalManager := NewTerminalManager(hostUseCase, db, recordingStore)
+	_, _ = terminalManager.ReconcileOrphanTerminalSessions(context.Background(), time.Now())
 
 	return assetGroupService, hostService, agentService, desktopService, virtualizationService, terminalManager
 }

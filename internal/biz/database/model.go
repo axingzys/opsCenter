@@ -68,6 +68,9 @@ const (
 
 	DatabaseRestoreModeDryRun = "dry_run"
 
+	DatabaseRestoreStrategyObjectReplace = "object_replace"
+	DatabaseRestoreStrategyDatabaseClean = "database_clean"
+
 	DatabaseCapacityObjectInstance = "instance"
 	DatabaseCapacityObjectSchema   = "schema"
 	DatabaseCapacityObjectTable    = "table"
@@ -313,6 +316,7 @@ type DatabaseRestoreJob struct {
 	SourceInstanceID uint       `gorm:"column:source_instance_id;not null;index;comment:来源实例ID" json:"sourceInstanceId"`
 	TargetInstanceID uint       `gorm:"column:target_instance_id;not null;index;comment:目标实例ID" json:"targetInstanceId"`
 	RestoreMode      string     `gorm:"column:restore_mode;type:varchar(30);default:'dry_run';comment:恢复模式" json:"restoreMode"`
+	RestoreStrategy  string     `gorm:"column:restore_strategy;type:varchar(30);default:'object_replace';comment:恢复目标处理策略" json:"restoreStrategy"`
 	Status           string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
 	FileName         string     `gorm:"column:file_name;type:varchar(255);comment:备份文件名" json:"fileName"`
 	FileSize         int64      `gorm:"column:file_size;type:bigint;default:0;comment:备份文件大小" json:"fileSize"`

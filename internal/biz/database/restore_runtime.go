@@ -11,12 +11,14 @@ import (
 )
 
 type restoreCommandSpec struct {
-	Commands     []string
-	Args         []string
-	Env          []string
-	DatabaseName string
-	InputMode    string
-	Runner       func(ctx context.Context, inputPath string) error
+	Commands        []string
+	Args            []string
+	Env             []string
+	DatabaseName    string
+	RestoreStrategy string
+	InputMode       string
+	PreRun          func(ctx context.Context) error
+	Runner          func(ctx context.Context, inputPath string) error
 }
 
 const (
@@ -24,7 +26,7 @@ const (
 	restoreInputModeFileArg = "file_arg"
 )
 
-func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCredential, databaseName, backupType string) (*restoreCommandSpec, error) {
+func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCredential, databaseName, backupType, restoreStrategy string) (*restoreCommandSpec, error) {
 	if item == nil {
 		return nil, fmt.Errorf("目标数据库实例不存在")
 	}
@@ -32,6 +34,10 @@ func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCrede
 		return nil, fmt.Errorf("恢复目标数据库不能为空")
 	}
 	backupType = normalizeBackupType(backupType)
+	restoreStrategy = normalizeRestoreStrategy(restoreStrategy)
+	if err := validateRestoreStrategy(item.DBType, backupType, restoreStrategy); err != nil {
+		return nil, err
+	}
 	if !supportsBackupType(item.DBType, backupType) {
 		return nil, fmt.Errorf("%s 不支持恢复备份类型 %s", DBTypeText(item.DBType), backupType)
 	}
@@ -59,11 +65,15 @@ func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCrede
 			args = append(args[:len(args)-1], append([]string{"--ssl"}, args[len(args)-1])...)
 		}
 		return &restoreCommandSpec{
-			Commands:     []string{"mysql", "mariadb"},
-			Args:         args,
-			Env:          []string{"MYSQL_PWD=" + credential.Password},
-			DatabaseName: databaseName,
-			InputMode:    restoreInputModeStdin,
+			Commands:        []string{"mysql", "mariadb"},
+			Args:            args,
+			Env:             []string{"MYSQL_PWD=" + credential.Password},
+			DatabaseName:    databaseName,
+			RestoreStrategy: restoreStrategy,
+			InputMode:       restoreInputModeStdin,
+			Runner: func(ctx context.Context, inputPath string) error {
+				return runMySQLLogicalRestore(ctx, item, credential, databaseName, inputPath, restoreStrategy)
+			},
 		}, nil
 	case DBTypePostgreSQL:
 		if credential == nil || strings.TrimSpace(credential.Username) == "" {
@@ -85,6 +95,7 @@ func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCrede
 		}
 		commands := []string{"psql"}
 		inputMode := restoreInputModeStdin
+		var preRun func(ctx context.Context) error
 		if backupType == DatabaseBackupTypeLogicalCustom {
 			commands = []string{"pg_restore"}
 			args = append(args,
@@ -93,6 +104,12 @@ func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCrede
 				"--single-transaction",
 				"--exit-on-error",
 			)
+			if restoreStrategy == DatabaseRestoreStrategyObjectReplace {
+				args = append(args,
+					"--clean",
+					"--if-exists",
+				)
+			}
 			inputMode = restoreInputModeFileArg
 		} else {
 			args = append(args,
@@ -101,6 +118,11 @@ func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCrede
 				"--set", "ON_ERROR_STOP=on",
 			)
 		}
+		if restoreStrategy == DatabaseRestoreStrategyDatabaseClean {
+			preRun = func(ctx context.Context) error {
+				return cleanPostgreSQLDatabase(ctx, item, credential, databaseName)
+			}
+		}
 		return &restoreCommandSpec{
 			Commands: commands,
 			Args:     args,
@@ -108,8 +130,10 @@ func buildRestoreCommandSpec(item *DatabaseInstance, credential *ConnectionCrede
 				"PGPASSWORD=" + credential.Password,
 				"PGSSLMODE=" + sslMode,
 			},
-			DatabaseName: databaseName,
-			InputMode:    inputMode,
+			DatabaseName:    databaseName,
+			RestoreStrategy: restoreStrategy,
+			InputMode:       inputMode,
+			PreRun:          preRun,
 		}, nil
 	case DBTypeRedis:
 		return buildRedisRestoreCommandSpec(item, credential, databaseName)
@@ -147,6 +171,11 @@ func resolveRestoreDatabaseName(item *DatabaseInstance, credential *ConnectionCr
 func runRestoreCommand(ctx context.Context, spec *restoreCommandSpec, inputPath string) error {
 	if spec == nil {
 		return fmt.Errorf("恢复命令不能为空")
+	}
+	if spec.PreRun != nil {
+		if err := spec.PreRun(ctx); err != nil {
+			return err
+		}
 	}
 	if spec.Runner != nil {
 		return spec.Runner(ctx, inputPath)

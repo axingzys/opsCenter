@@ -25,6 +25,12 @@ type DesktopSessionUseCase struct {
 	cfg            conf.DesktopConfig
 }
 
+const (
+	desktopSessionStaleAfter        = 2 * time.Minute
+	desktopSessionReconcileInterval = 1 * time.Minute
+	desktopSessionReconcileBatch    = 100
+)
+
 func NewDesktopSessionUseCase(hostRepo HostRepo, credentialRepo CredentialRepo, sessionRepo DesktopSessionRepo, cfg conf.DesktopConfig) *DesktopSessionUseCase {
 	return &DesktopSessionUseCase{
 		hostRepo:       hostRepo,
@@ -191,6 +197,24 @@ func (uc *DesktopSessionUseCase) CreateLaunch(ctx context.Context, hostID, userI
 	}, nil
 }
 
+func (uc *DesktopSessionUseCase) StartStaleSessionReconciler(ctx context.Context) {
+	go func() {
+		_, _ = uc.ReconcileStaleOpenSessions(ctx, time.Now())
+
+		ticker := time.NewTicker(desktopSessionReconcileInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				_, _ = uc.ReconcileStaleOpenSessions(ctx, now)
+			}
+		}
+	}()
+}
+
 func (uc *DesktopSessionUseCase) getDriveName() string {
 	name := strings.TrimSpace(uc.cfg.DriveName)
 	if name == "" {
@@ -286,6 +310,21 @@ func (uc *DesktopSessionUseCase) GetByID(ctx context.Context, id, userID uint) (
 	return toDesktopSessionInfo(session), nil
 }
 
+func (uc *DesktopSessionUseCase) Heartbeat(ctx context.Context, id, userID uint) error {
+	session, err := uc.sessionRepo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if session.UserID != userID {
+		return fmt.Errorf("无权访问该桌面会话")
+	}
+	if session.Status != "active" && session.Status != "creating" {
+		return nil
+	}
+
+	return uc.sessionRepo.Touch(ctx, id, time.Now())
+}
+
 func (uc *DesktopSessionUseCase) Close(ctx context.Context, id, userID uint, reason string) error {
 	session, err := uc.sessionRepo.GetByID(ctx, id)
 	if err != nil {
@@ -303,6 +342,37 @@ func (uc *DesktopSessionUseCase) Close(ctx context.Context, id, userID uint, rea
 	session.CloseReason = reason
 	session.EndedAt = &now
 	return uc.sessionRepo.Update(ctx, session)
+}
+
+func (uc *DesktopSessionUseCase) ReconcileStaleOpenSessions(ctx context.Context, now time.Time) (int, error) {
+	cutoff := now.Add(-desktopSessionStaleAfter)
+	sessions, err := uc.sessionRepo.ListStaleOpen(ctx, cutoff, desktopSessionReconcileBatch)
+	if err != nil {
+		return 0, err
+	}
+
+	closed := 0
+	for _, session := range sessions {
+		endedAt := session.UpdatedAt
+		if endedAt.IsZero() {
+			endedAt = now
+		} else {
+			endedAt = endedAt.Add(desktopSessionStaleAfter)
+			if endedAt.After(now) {
+				endedAt = now
+			}
+		}
+
+		session.Status = "timeout"
+		session.CloseReason = "heartbeat_timeout"
+		session.EndedAt = &endedAt
+		if err := uc.sessionRepo.Update(ctx, session); err != nil {
+			return closed, err
+		}
+		closed++
+	}
+
+	return closed, nil
 }
 
 func (uc *DesktopSessionUseCase) Delete(ctx context.Context, id uint) error {

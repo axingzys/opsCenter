@@ -97,10 +97,12 @@ type CloudAccountRepo interface {
 type DesktopSessionRepo interface {
 	Create(ctx context.Context, session *DesktopSession) error
 	Update(ctx context.Context, session *DesktopSession) error
+	Touch(ctx context.Context, id uint, at time.Time) error
 	Delete(ctx context.Context, id uint) error
 	GetByID(ctx context.Context, id uint) (*DesktopSession, error)
 	GetBySessionUUID(ctx context.Context, sessionUUID string) (*DesktopSession, error)
 	List(ctx context.Context, page, pageSize int, keyword, status string, userID uint) ([]*DesktopSession, int64, error)
+	ListStaleOpen(ctx context.Context, cutoff time.Time, limit int) ([]*DesktopSession, error)
 }
 
 type VirtualizationPlatformRepo interface {

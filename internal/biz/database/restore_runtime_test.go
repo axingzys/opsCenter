@@ -10,7 +10,7 @@ func TestBuildRestoreCommandSpec(t *testing.T) {
 	}, &ConnectionCredential{
 		Username: "root",
 		Password: "secret",
-	}, "restore_db", DatabaseBackupTypeLogical)
+	}, "restore_db", DatabaseBackupTypeLogical, DatabaseRestoreStrategyObjectReplace)
 	if err != nil {
 		t.Fatalf("buildRestoreCommandSpec(mysql) error = %v", err)
 	}
@@ -32,7 +32,7 @@ func TestBuildRestoreCommandSpec(t *testing.T) {
 	}, &ConnectionCredential{
 		Username: "postgres",
 		Password: "secret",
-	}, "restore_db", DatabaseBackupTypeLogical)
+	}, "restore_db", DatabaseBackupTypeLogical, DatabaseRestoreStrategyDatabaseClean)
 	if err != nil {
 		t.Fatalf("buildRestoreCommandSpec(postgresql) error = %v", err)
 	}
@@ -51,6 +51,9 @@ func TestBuildRestoreCommandSpec(t *testing.T) {
 	if pgSpec.InputMode != restoreInputModeStdin {
 		t.Fatalf("unexpected postgresql plain input mode: %s", pgSpec.InputMode)
 	}
+	if pgSpec.PreRun == nil {
+		t.Fatalf("expected postgresql clean strategy pre-run")
+	}
 
 	pgCustomSpec, err := buildRestoreCommandSpec(&DatabaseInstance{
 		DBType: DBTypePostgreSQL,
@@ -59,7 +62,7 @@ func TestBuildRestoreCommandSpec(t *testing.T) {
 	}, &ConnectionCredential{
 		Username: "postgres",
 		Password: "secret",
-	}, "restore_db", DatabaseBackupTypeLogicalCustom)
+	}, "restore_db", DatabaseBackupTypeLogicalCustom, DatabaseRestoreStrategyObjectReplace)
 	if err != nil {
 		t.Fatalf("buildRestoreCommandSpec(postgresql custom) error = %v", err)
 	}
@@ -72,12 +75,15 @@ func TestBuildRestoreCommandSpec(t *testing.T) {
 	if !containsString(pgCustomSpec.Args, "--exit-on-error") {
 		t.Fatalf("expected pg_restore exit-on-error arg, got %#v", pgCustomSpec.Args)
 	}
+	if !containsString(pgCustomSpec.Args, "--clean") || !containsString(pgCustomSpec.Args, "--if-exists") {
+		t.Fatalf("expected pg_restore clean args for object replace, got %#v", pgCustomSpec.Args)
+	}
 
 	redisSpec, err := buildRestoreCommandSpec(&DatabaseInstance{
 		DBType: DBTypeRedis,
 		Host:   "127.0.0.1",
 		Port:   6379,
-	}, &ConnectionCredential{}, "all-dbs", DatabaseBackupTypeLogical)
+	}, &ConnectionCredential{}, "all-dbs", DatabaseBackupTypeLogical, DatabaseRestoreStrategyObjectReplace)
 	if err != nil {
 		t.Fatalf("buildRestoreCommandSpec(redis) error = %v", err)
 	}

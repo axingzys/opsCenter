@@ -2,6 +2,7 @@ package asset
 
 import (
 	"context"
+	"time"
 
 	"github.com/ydcloud-dy/opshub/internal/biz/asset"
 	"gorm.io/gorm"
@@ -22,6 +23,13 @@ func (r *desktopSessionRepo) Create(ctx context.Context, session *asset.DesktopS
 
 func (r *desktopSessionRepo) Update(ctx context.Context, session *asset.DesktopSession) error {
 	return r.db.WithContext(ctx).Save(session).Error
+}
+
+func (r *desktopSessionRepo) Touch(ctx context.Context, id uint, at time.Time) error {
+	return r.db.WithContext(ctx).
+		Model(&asset.DesktopSession{}).
+		Where("id = ?", id).
+		Update("updated_at", at).Error
 }
 
 func (r *desktopSessionRepo) Delete(ctx context.Context, id uint) error {
@@ -72,4 +80,20 @@ func (r *desktopSessionRepo) List(ctx context.Context, page, pageSize int, keywo
 	}
 
 	return list, total, nil
+}
+
+func (r *desktopSessionRepo) ListStaleOpen(ctx context.Context, cutoff time.Time, limit int) ([]*asset.DesktopSession, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var list []*asset.DesktopSession
+	if err := r.db.WithContext(ctx).
+		Where("status IN ? AND updated_at < ?", []string{"creating", "active"}, cutoff).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
 }

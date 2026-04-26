@@ -198,7 +198,19 @@ type restoreJobRepo struct {
 }
 
 func NewRestoreJobRepo(db *gorm.DB) dbbiz.RestoreJobRepo {
+	_ = ensureRestoreJobStrategyColumn(db)
 	return &restoreJobRepo{db: db}
+}
+
+func ensureRestoreJobStrategyColumn(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+	model := &dbbiz.DatabaseRestoreJob{}
+	if !db.Migrator().HasTable(model) || db.Migrator().HasColumn(model, "RestoreStrategy") {
+		return nil
+	}
+	return db.Migrator().AddColumn(model, "RestoreStrategy")
 }
 
 func (r *restoreJobRepo) Create(ctx context.Context, item *dbbiz.DatabaseRestoreJob) error {

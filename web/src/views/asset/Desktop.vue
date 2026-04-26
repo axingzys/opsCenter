@@ -57,7 +57,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { closeDesktopSession, uploadDesktopSessionFile } from '@/api/host'
+import { closeDesktopSession, heartbeatDesktopSession, uploadDesktopSessionFile } from '@/api/host'
 
 const route = useRoute()
 const router = useRouter()
@@ -65,7 +65,7 @@ const iframeRef = ref<HTMLIFrameElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const launchUrl = ref('')
 const errorMessage = ref('')
-const closeRequested = ref(false)
+const closeSubmitted = ref(false)
 const uploading = ref(false)
 const uploadingFileName = ref('')
 const uploadProgress = ref(0)
@@ -73,6 +73,7 @@ const uploadQueueIndex = ref(0)
 const uploadQueueTotal = ref(0)
 const GUAC_AUTH_TOKEN_KEY = 'GUAC_AUTH_TOKEN'
 let detachIframeDropGuards: (() => void) | null = null
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
 
 type FileSystemEntryLike = {
   isDirectory: boolean
@@ -86,23 +87,77 @@ type TransferItemWithEntry = DataTransferItem & {
 const sessionId = computed(() => Number(route.query.sessionId || 0))
 const hostName = computed(() => String(route.query.hostName || ''))
 
-const closeSession = async () => {
-  if (closeRequested.value || !sessionId.value) return
-  closeRequested.value = true
-
+const buildCloseUrl = () => {
   const token = localStorage.getItem('token')
-  const beaconUrl = token
+  return token && sessionId.value
     ? `/api/v1/desktop-sessions/${sessionId.value}/close?token=${encodeURIComponent(token)}`
     : ''
+}
 
-  if (document.visibilityState === 'hidden' && beaconUrl && navigator.sendBeacon) {
-    navigator.sendBeacon(beaconUrl, '')
+const stopHeartbeat = () => {
+  if (!heartbeatTimer) return
+  clearInterval(heartbeatTimer)
+  heartbeatTimer = null
+}
+
+const sendHeartbeat = async () => {
+  if (!sessionId.value || closeSubmitted.value) return
+  try {
+    await heartbeatDesktopSession(sessionId.value)
+  } catch {
+    // 心跳失败交给后端过期扫描处理，避免干扰桌面操作
+  }
+}
+
+const startHeartbeat = () => {
+  stopHeartbeat()
+  void sendHeartbeat()
+  heartbeatTimer = setInterval(() => {
+    void sendHeartbeat()
+  }, 30_000)
+}
+
+const submitCloseDuringUnload = () => {
+  const closeUrl = buildCloseUrl()
+  if (!closeUrl) return false
+
+  if (navigator.sendBeacon) {
+    try {
+      if (navigator.sendBeacon(closeUrl, new Blob([], { type: 'text/plain;charset=UTF-8' }))) {
+        return true
+      }
+    } catch {
+      // 继续尝试 keepalive fetch
+    }
+  }
+
+  try {
+    fetch(closeUrl, {
+      method: 'POST',
+      credentials: 'include',
+      keepalive: true
+    }).catch(() => {})
+    return true
+  } catch {
+    return false
+  }
+}
+
+type CloseMode = 'normal' | 'unload'
+
+const closeSession = async (mode: CloseMode = 'normal') => {
+  if (closeSubmitted.value || !sessionId.value) return
+  stopHeartbeat()
+
+  if (mode === 'unload' && submitCloseDuringUnload()) {
+    closeSubmitted.value = true
     localStorage.removeItem(GUAC_AUTH_TOKEN_KEY)
     return
   }
 
   try {
     await closeDesktopSession(sessionId.value)
+    closeSubmitted.value = true
   } catch {
     // 页面关闭时忽略关闭失败
   }
@@ -266,7 +321,7 @@ const installIframeDropGuards = () => {
 }
 
 const handleClose = async () => {
-  await closeSession()
+  await closeSession('normal')
   window.close()
   router.push('/asset/hosts')
 }
@@ -289,7 +344,18 @@ const handleIframeLoad = () => {
   }
 }
 
+const handleBeforeUnload = () => {
+  void closeSession('unload')
+}
+
+const handlePageHide = () => {
+  void closeSession('unload')
+}
+
 onMounted(() => {
+  window.addEventListener('beforeunload', handleBeforeUnload)
+  window.addEventListener('pagehide', handlePageHide)
+
   if (!sessionId.value) {
     errorMessage.value = '缺少桌面会话 ID'
     return
@@ -305,15 +371,15 @@ onMounted(() => {
   localStorage.removeItem(GUAC_AUTH_TOKEN_KEY)
   launchUrl.value = storedLaunchUrl
   localStorage.removeItem(storageKey)
+  startHeartbeat()
 })
-
-window.addEventListener('beforeunload', closeSession)
 
 onBeforeUnmount(() => {
   detachIframeDropGuards?.()
   detachIframeDropGuards = null
-  window.removeEventListener('beforeunload', closeSession)
-  void closeSession()
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  window.removeEventListener('pagehide', handlePageHide)
+  void closeSession('unload')
 })
 </script>
 

@@ -25,11 +25,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	assetbiz "github.com/ydcloud-dy/opshub/internal/biz/asset"
 	appLogger "github.com/ydcloud-dy/opshub/pkg/logger"
@@ -44,6 +46,18 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+}
+
+const (
+	terminalWSReadTimeout   = 90 * time.Second
+	terminalWSWriteTimeout  = 10 * time.Second
+	terminalWSPingInterval  = 30 * time.Second
+	terminalWSOutputBufSize = 128
+)
+
+type terminalWSMessage struct {
+	messageType int
+	data        []byte
 }
 
 // HostInfo 主机信息
@@ -82,6 +96,10 @@ type TerminalSession struct {
 	CommandTracker *terminalCommandTracker
 	RiskEvents     []*assetbiz.TerminalCommandEvent
 	CreatedAt      time.Time
+	closeOnce      sync.Once
+	closeErr       error
+	closeReasonMu  sync.Mutex
+	closeReason    string
 }
 
 // TerminalManager 终端管理器
@@ -101,6 +119,26 @@ func NewTerminalManager(hostUseCase *assetbiz.HostUseCase, db *gorm.DB, recordin
 		db:             db,
 		recordingStore: recordingStore,
 	}
+}
+
+func (s *TerminalSession) SetCloseReason(reason string) {
+	if reason == "" {
+		return
+	}
+	s.closeReasonMu.Lock()
+	defer s.closeReasonMu.Unlock()
+	if s.closeReason == "" {
+		s.closeReason = reason
+	}
+}
+
+func (s *TerminalSession) CloseReason() string {
+	s.closeReasonMu.Lock()
+	defer s.closeReasonMu.Unlock()
+	if s.closeReason == "" {
+		return "client_closed"
+	}
+	return s.closeReason
 }
 
 // CreateSession 创建SSH会话
@@ -207,6 +245,8 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 		return nil, fmt.Errorf("启动shell失败: %w", err)
 	}
 
+	startedAt := time.Now()
+
 	// 创建录制器
 	recorder, err := tm.recordingStore.CreateRecorder(int(cols), int(rows))
 	if err != nil {
@@ -215,12 +255,13 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 	}
 
 	auditRecord := &assetbiz.TerminalSession{
-		HostID:   hostID,
-		HostName: hostVO.Name,
-		HostIP:   hostVO.IP,
-		UserID:   userID,
-		Username: username,
-		Status:   "recording",
+		HostID:    hostID,
+		HostName:  hostVO.Name,
+		HostIP:    hostVO.IP,
+		UserID:    userID,
+		Username:  username,
+		Status:    "recording",
+		StartedAt: &startedAt,
 	}
 	if recorder != nil {
 		auditRecord.RecordingPath = tm.recordingStore.NormalizeForSave(recorder.GetRecordingPath())
@@ -232,7 +273,7 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 
 	// 创建会话对象
 	terminalSession := &TerminalSession{
-		ID:             fmt.Sprintf("%d-%d", hostID, time.Now().Unix()),
+		ID:             uuid.NewString(),
 		HostID:         hostID,
 		HostName:       hostVO.Name,
 		HostIP:         hostVO.IP,
@@ -247,7 +288,7 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 		Recorder:       recorder,
 		CommandTracker: newTerminalCommandTracker(),
 		RiskEvents:     make([]*assetbiz.TerminalCommandEvent, 0, 4),
-		CreatedAt:      time.Now(),
+		CreatedAt:      startedAt,
 	}
 	if auditRecord != nil {
 		terminalSession.AuditRecordID = auditRecord.ID
@@ -272,16 +313,31 @@ func (tm *TerminalManager) GetSession(sessionID string) (*TerminalSession, bool)
 // CloseSession 关闭会话
 func (tm *TerminalManager) CloseSession(sessionID string) error {
 	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
 	session, ok := tm.sessions[sessionID]
+	if ok {
+		delete(tm.sessions, sessionID)
+	}
+	tm.mu.Unlock()
+
 	if !ok {
 		appLogger.Warn("尝试关闭不存在的会话", zap.String("sessionID", sessionID))
 		return fmt.Errorf("会话不存在")
 	}
 
+	return tm.closeSession(session)
+}
+
+func (tm *TerminalManager) closeSession(session *TerminalSession) error {
+	session.closeOnce.Do(func() {
+		session.closeErr = tm.finishSession(session)
+	})
+	return session.closeErr
+}
+
+func (tm *TerminalManager) finishSession(session *TerminalSession) error {
+	endedAt := time.Now()
 	appLogger.Info("开始关闭终端会话",
-		zap.String("sessionID", sessionID),
+		zap.String("sessionID", session.ID),
 		zap.Uint("hostID", session.HostID),
 		zap.String("hostName", session.HostName),
 		zap.Uint("userID", session.UserID),
@@ -311,7 +367,13 @@ func (tm *TerminalManager) CloseSession(sessionID string) error {
 			zap.Int64("fileSize", fileSize))
 
 	} else {
-		appLogger.Warn("会话没有录制器", zap.String("sessionID", sessionID))
+		appLogger.Warn("会话没有录制器", zap.String("sessionID", session.ID))
+		if !session.CreatedAt.IsZero() {
+			duration = int(endedAt.Sub(session.CreatedAt).Seconds())
+			if duration < 0 {
+				duration = 0
+			}
+		}
 	}
 
 	if session.AuditRecordID > 0 {
@@ -320,6 +382,9 @@ func (tm *TerminalManager) CloseSession(sessionID string) error {
 			"duration":       duration,
 			"file_size":      fileSize,
 			"status":         status,
+			"started_at":     session.CreatedAt,
+			"ended_at":       endedAt,
+			"close_reason":   session.CloseReason(),
 		}
 		if err := tm.db.Model(&assetbiz.TerminalSession{}).Where("id = ?", session.AuditRecordID).Updates(updates).Error; err != nil {
 			appLogger.Error("更新终端会话记录失败",
@@ -347,9 +412,69 @@ func (tm *TerminalManager) CloseSession(sessionID string) error {
 		session.SSHClient.Close()
 	}
 
-	delete(tm.sessions, sessionID)
-	appLogger.Info("终端会话已关闭", zap.String("sessionID", sessionID))
+	appLogger.Info("终端会话已关闭", zap.String("sessionID", session.ID))
 	return nil
+}
+
+func (tm *TerminalManager) ReconcileOrphanTerminalSessions(ctx context.Context, now time.Time) (int, error) {
+	var sessions []*assetbiz.TerminalSession
+	if err := tm.db.WithContext(ctx).
+		Where("status = ?", "recording").
+		Find(&sessions).Error; err != nil {
+		return 0, err
+	}
+
+	closed := 0
+	for _, session := range sessions {
+		startedAt := session.CreatedAt
+		if session.StartedAt != nil && !session.StartedAt.IsZero() {
+			startedAt = *session.StartedAt
+		}
+
+		endedAt := session.UpdatedAt
+		if endedAt.IsZero() || (!startedAt.IsZero() && endedAt.Before(startedAt)) {
+			endedAt = now
+		}
+
+		duration := session.Duration
+		if !startedAt.IsZero() && duration <= 0 {
+			duration = int(endedAt.Sub(startedAt).Seconds())
+			if duration < 0 {
+				duration = 0
+			}
+		}
+
+		recordingPath := session.RecordingPath
+		fileSize := session.FileSize
+		if resolvedPath, err := tm.recordingStore.Resolve(session.RecordingPath); err == nil {
+			if fileInfo, statErr := os.Stat(resolvedPath); statErr == nil && !fileInfo.IsDir() {
+				recordingPath = tm.recordingStore.NormalizeForSave(resolvedPath)
+				fileSize = fileInfo.Size()
+			}
+		}
+
+		updates := map[string]interface{}{
+			"duration":     duration,
+			"file_size":    fileSize,
+			"status":       "timeout",
+			"started_at":   startedAt,
+			"ended_at":     endedAt,
+			"close_reason": "server_restarted",
+		}
+		if recordingPath != "" {
+			updates["recording_path"] = recordingPath
+		}
+
+		if err := tm.db.WithContext(ctx).
+			Model(&assetbiz.TerminalSession{}).
+			Where("id = ? AND status = ?", session.ID, "recording").
+			Updates(updates).Error; err != nil {
+			return closed, err
+		}
+		closed++
+	}
+
+	return closed, nil
 }
 
 // HandleSSHConnection 处理SSH WebSocket连接
@@ -411,12 +536,28 @@ func (s *HTTPServer) HandleSSHConnection(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "WebSocket升级失败"})
 		return
 	}
-	defer conn.Close()
+	wsCtx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
+	var closeWebSocketOnce sync.Once
+	closeWebSocket := func() {
+		closeWebSocketOnce.Do(func() {
+			_ = conn.Close()
+		})
+	}
+	defer closeWebSocket()
 
 	// 设置读取超时，确保连接断开时能及时检测
-	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+	refreshReadDeadline := func() {
+		_ = conn.SetReadDeadline(time.Now().Add(terminalWSReadTimeout))
+	}
+	refreshReadDeadline()
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		refreshReadDeadline()
+		return nil
+	})
+	conn.SetCloseHandler(func(code int, text string) error {
+		cancel()
 		return nil
 	})
 
@@ -428,77 +569,168 @@ func (s *HTTPServer) HandleSSHConnection(c *gin.Context) {
 		return
 	}
 
-	// 确保会话被关闭 - 使用显式调用而不是 defer
-	sessionClosed := false
-	closeSession := func() {
-		if !sessionClosed {
-			sessionClosed = true
-			s.terminalManager.CloseSession(session.ID)
-		}
+	var closeSSHOnce sync.Once
+	closeSSH := func() {
+		closeSSHOnce.Do(func() {
+			if session.StdinPipe != nil {
+				_ = session.StdinPipe.Close()
+			}
+			if session.SSHSession != nil {
+				_ = session.SSHSession.Close()
+			}
+			if session.SSHClient != nil {
+				_ = session.SSHClient.Close()
+			}
+		})
 	}
-	defer closeSession()
+
+	defer func() {
+		cancel()
+		closeSSH()
+		if err := s.terminalManager.CloseSession(session.ID); err != nil {
+			appLogger.Warn("关闭终端会话失败", zap.String("sessionID", session.ID), zap.Error(err))
+		}
+	}()
 
 	appLogger.Info("SSH会话创建成功", zap.String("sessionID", session.ID), zap.Int("hostId", hostId))
 
-	// 启动goroutine从SSH读取输出并发送到WebSocket
-	var wg sync.WaitGroup
-	wg.Add(2)
+	writeCh := make(chan terminalWSMessage, terminalWSOutputBufSize)
+	var closeWriteOnce sync.Once
+	closeWriteCh := func() {
+		closeWriteOnce.Do(func() {
+			close(writeCh)
+		})
+	}
 
-	// 读取stdout
+	writerDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		buf := make([]byte, 1024)
-		for {
-			n, err := session.StdoutPipe.Read(buf)
-			if n > 0 {
-				// 录制输出
-				if session.Recorder != nil {
-					session.Recorder.RecordOutput(buf[:n])
-				}
-				// 使用二进制消息以保留原始字节（包括CR/LF控制字符）
-				conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+		defer close(writerDone)
+
+		pingTicker := time.NewTicker(terminalWSPingInterval)
+		defer pingTicker.Stop()
+
+		writeMessage := func(msg terminalWSMessage) bool {
+			_ = conn.SetWriteDeadline(time.Now().Add(terminalWSWriteTimeout))
+			if err := conn.WriteMessage(msg.messageType, msg.data); err != nil {
+				appLogger.Info("WebSocket写入失败",
+					zap.String("sessionID", session.ID),
+					zap.Error(err))
+				session.SetCloseReason("websocket_write_error")
+				cancel()
+				closeSSH()
+				closeWebSocket()
+				return false
 			}
-			if err != nil {
-				return
+			return true
+		}
+
+		for {
+			select {
+			case msg, ok := <-writeCh:
+				if !ok {
+					return
+				}
+				if !writeMessage(msg) {
+					return
+				}
+			case <-pingTicker.C:
+				if !writeMessage(terminalWSMessage{messageType: websocket.PingMessage, data: []byte("ping")}) {
+					return
+				}
+			case <-wsCtx.Done():
+				for {
+					select {
+					case msg, ok := <-writeCh:
+						if !ok {
+							return
+						}
+						if !writeMessage(msg) {
+							return
+						}
+					default:
+						return
+					}
+				}
 			}
 		}
 	}()
 
-	// 读取stderr
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 1024)
+	enqueueWebSocketMessage := func(messageType int, data []byte) bool {
+		payload := append([]byte(nil), data...)
+		select {
+		case writeCh <- terminalWSMessage{messageType: messageType, data: payload}:
+			return true
+		case <-wsCtx.Done():
+			return false
+		}
+	}
+
+	// 启动goroutine从SSH读取输出并投递给单写协程
+	var outputWG sync.WaitGroup
+	outputWG.Add(2)
+	readSSHOutput := func(streamName string, reader io.Reader) {
+		defer outputWG.Done()
+
+		buf := make([]byte, 4096)
 		for {
-			n, err := session.StderrPipe.Read(buf)
+			n, err := reader.Read(buf)
 			if n > 0 {
+				data := append([]byte(nil), buf[:n]...)
 				// 录制输出
 				if session.Recorder != nil {
-					session.Recorder.RecordOutput(buf[:n])
+					if recordErr := session.Recorder.RecordOutput(data); recordErr != nil {
+						appLogger.Warn("记录终端输出失败",
+							zap.String("sessionID", session.ID),
+							zap.String("stream", streamName),
+							zap.Error(recordErr))
+					}
 				}
-				// 使用二进制消息以保留原始字节（包括CR/LF控制字符）
-				conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+				if !enqueueWebSocketMessage(websocket.BinaryMessage, data) {
+					return
+				}
 			}
 			if err != nil {
+				if err != io.EOF {
+					appLogger.Info("SSH输出流关闭",
+						zap.String("sessionID", session.ID),
+						zap.String("stream", streamName),
+						zap.Error(err))
+					session.SetCloseReason("ssh_stream_closed")
+					cancel()
+					closeSSH()
+					closeWebSocket()
+				}
 				return
 			}
 		}
+	}
+
+	go readSSHOutput("stdout", session.StdoutPipe)
+	go readSSHOutput("stderr", session.StderrPipe)
+
+	outputDone := make(chan struct{})
+	go func() {
+		outputWG.Wait()
+		close(outputDone)
+		closeWriteCh()
+		session.SetCloseReason("ssh_stream_closed")
+		cancel()
+		<-writerDone
+		closeWebSocket()
 	}()
 
 	// 处理来自WebSocket的消息并发送到SSH
+readLoop:
 	for {
 		// 每次读取前更新超时时间
-		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		refreshReadDeadline()
 
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			appLogger.Info("WebSocket连接关闭", zap.String("sessionID", session.ID), zap.Error(err))
-			// 立即关闭SSH连接，让所有阻塞的Read操作返回
-			if session.SSHSession != nil {
-				session.SSHSession.Close()
-			}
-			if session.SSHClient != nil {
-				session.SSHClient.Close()
-			}
+			session.SetCloseReason("websocket_read_error")
+			cancel()
+			closeSSH()
 			break
 		}
 
@@ -521,29 +753,51 @@ func (s *HTTPServer) HandleSSHConnection(c *gin.Context) {
 			// 如果不是resize命令，当作普通输入发送到SSH
 			// 录制输入
 			if session.Recorder != nil {
-				session.Recorder.RecordInput(data)
+				if err := session.Recorder.RecordInput(data); err != nil {
+					appLogger.Warn("记录终端输入失败", zap.String("sessionID", session.ID), zap.Error(err))
+				}
 			}
 			for _, command := range session.CommandTracker.Feed(data) {
 				if event := buildTerminalRiskEvent(session, command, time.Now()); event != nil {
 					session.RiskEvents = append(session.RiskEvents, event)
 				}
 			}
-			session.StdinPipe.Write(data)
+			if _, err := session.StdinPipe.Write(data); err != nil {
+				appLogger.Info("写入SSH输入失败", zap.String("sessionID", session.ID), zap.Error(err))
+				session.SetCloseReason("stdin_write_error")
+				cancel()
+				closeSSH()
+				closeWebSocket()
+				break readLoop
+			}
 		} else if messageType == websocket.BinaryMessage {
 			// 录制输入
 			if session.Recorder != nil {
-				session.Recorder.RecordInput(data)
+				if err := session.Recorder.RecordInput(data); err != nil {
+					appLogger.Warn("记录终端输入失败", zap.String("sessionID", session.ID), zap.Error(err))
+				}
 			}
 			for _, command := range session.CommandTracker.Feed(data) {
 				if event := buildTerminalRiskEvent(session, command, time.Now()); event != nil {
 					session.RiskEvents = append(session.RiskEvents, event)
 				}
 			}
-			session.StdinPipe.Write(data)
+			if _, err := session.StdinPipe.Write(data); err != nil {
+				appLogger.Info("写入SSH输入失败", zap.String("sessionID", session.ID), zap.Error(err))
+				session.SetCloseReason("stdin_write_error")
+				cancel()
+				closeSSH()
+				closeWebSocket()
+				break readLoop
+			}
 		}
 	}
 
-	wg.Wait()
+	cancel()
+	closeSSH()
+	<-outputDone
+	closeWriteCh()
+	<-writerDone
 	appLogger.Info("终端会话结束", zap.String("sessionID", session.ID))
 }
 

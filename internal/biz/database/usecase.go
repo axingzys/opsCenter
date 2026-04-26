@@ -53,6 +53,7 @@ type UseCase struct {
 	backupPolicyResolver func(ctx context.Context) (*DatabaseBackupPolicy, error)
 	backupRunMu          sync.Mutex
 	backupRunningTasks   map[uint]struct{}
+	startedAt            time.Time
 }
 
 func NewUseCase(
@@ -95,6 +96,7 @@ func NewUseCase(
 		writePolicyResolver:  writePolicyResolver,
 		backupPolicyResolver: backupPolicyResolver,
 		backupRunningTasks:   make(map[uint]struct{}),
+		startedAt:            time.Now(),
 	}
 }
 
@@ -200,6 +202,7 @@ type DatabaseBackupTaskRequest struct {
 type DatabaseRestoreDryRunRequest struct {
 	TargetInstanceID uint   `json:"targetInstanceId" binding:"required"`
 	RestoreMode      string `json:"restoreMode" binding:"omitempty,max=30"`
+	RestoreStrategy  string `json:"restoreStrategy" binding:"omitempty,max=30"`
 }
 
 type QueryOperator struct {
@@ -460,27 +463,29 @@ type DatabaseBackupDownloadVO struct {
 }
 
 type DatabaseRestoreJobVO struct {
-	ID                 uint   `json:"id"`
-	BackupRecordID     uint   `json:"backupRecordId"`
-	SourceInstanceID   uint   `json:"sourceInstanceId"`
-	SourceInstanceName string `json:"sourceInstanceName"`
-	TargetInstanceID   uint   `json:"targetInstanceId"`
-	TargetInstanceName string `json:"targetInstanceName"`
-	TargetEnvironment  string `json:"targetEnvironment"`
-	RestoreMode        string `json:"restoreMode"`
-	RestoreModeText    string `json:"restoreModeText"`
-	Status             string `json:"status"`
-	StatusText         string `json:"statusText"`
-	FileName           string `json:"fileName"`
-	FileSize           int64  `json:"fileSize"`
-	OperatorID         uint   `json:"operatorId"`
-	OperatorName       string `json:"operatorName"`
-	StartedAt          string `json:"startedAt"`
-	FinishedAt         string `json:"finishedAt"`
-	DurationMs         int64  `json:"durationMs"`
-	Message            string `json:"message"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
+	ID                  uint   `json:"id"`
+	BackupRecordID      uint   `json:"backupRecordId"`
+	SourceInstanceID    uint   `json:"sourceInstanceId"`
+	SourceInstanceName  string `json:"sourceInstanceName"`
+	TargetInstanceID    uint   `json:"targetInstanceId"`
+	TargetInstanceName  string `json:"targetInstanceName"`
+	TargetEnvironment   string `json:"targetEnvironment"`
+	RestoreMode         string `json:"restoreMode"`
+	RestoreModeText     string `json:"restoreModeText"`
+	RestoreStrategy     string `json:"restoreStrategy"`
+	RestoreStrategyText string `json:"restoreStrategyText"`
+	Status              string `json:"status"`
+	StatusText          string `json:"statusText"`
+	FileName            string `json:"fileName"`
+	FileSize            int64  `json:"fileSize"`
+	OperatorID          uint   `json:"operatorId"`
+	OperatorName        string `json:"operatorName"`
+	StartedAt           string `json:"startedAt"`
+	FinishedAt          string `json:"finishedAt"`
+	DurationMs          int64  `json:"durationMs"`
+	Message             string `json:"message"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 type DatabaseQueryAuditVO struct {
