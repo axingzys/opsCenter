@@ -1423,16 +1423,6 @@ const handleTrendMetricChange = (values: Array<typeof trendMetricOptions[number]
   selectedTrendMetrics.value = values
 }
 
-const selectTrendCluster = async (platformId: number, clusterId: number) => {
-  trendScopeType.value = 'cluster'
-  trendClusterId.value = clusterId
-  if (topologyPlatformId.value !== platformId) {
-    topologyPlatformId.value = platformId
-    return
-  }
-  await loadPlatformTrend()
-}
-
 const loadGuests = async () => {
   if (!guestQuery.platformId) {
     guestList.value = []

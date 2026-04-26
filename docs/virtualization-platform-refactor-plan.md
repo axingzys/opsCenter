@@ -280,6 +280,30 @@ Datacenter
 - Node：CPU、内存、磁盘、网络、运行 VM/CT 数、维护状态。
 - Guest：电源状态、IP、OS、纳管状态、快照入口、控制台入口。
 
+阶段 2 实际落地的 PVE 服务器视图：
+
+```text
+顶部工具栏
+  服务器视图 / 平台选择 / 资源搜索 / 自动同步状态 / 趋势时间范围 / 刷新
+
+左侧资源树
+  数据中心
+    PVE Cluster
+      Node
+        QEMU VM / LXC CT
+
+右侧概要工作区
+  对象标题和状态
+  概要页签
+  CPU、内存、运行虚机、纳管率
+  当前对象基础信息
+  当前对象资源清单
+  虚机总量、电源状态、纳管状态、运行连通状态趋势
+  最近同步任务
+```
+
+当前阶段不放终端入口，终端能力由已有模块承接。拓扑接口返回宿主机下的 VM 列表，并补充宿主机 CPU、内存、采集时间、平台地址等基础字段，前端直接以这些字段构造 Proxmox 风格的服务器概要页。
+
 ### 5.3 vSphere 拓扑
 
 vCenter / ESXi 使用 vSphere inventory 风格：
@@ -637,14 +661,15 @@ UI 原则：
 目标：
 
 - 从大页面中拆出 TopologyExplorer。
-- PVE 拓扑使用 Proxmox 风格资源树。
+- PVE 拓扑使用 Proxmox 风格服务器视图，左侧按 Datacenter / Cluster / Node / VM 展开。
 - ESXi / vCenter 使用 vSphere 风格资源树。
-- 增加右侧详情面板和底部任务面板。
-- 保留现有 topology API，必要时做前端兼容层。
+- 增加对象概要、资源清单、趋势图和底部任务面板。
+- 拓扑 API 补充宿主机基础资源字段和宿主机下 VM 列表。
 
 验收：
 
 - `npm run build`
+- `go test ./internal/biz/asset ./internal/server/asset ./internal/service/asset`
 - 桌面和移动 viewport 无明显布局重叠。
 - PVE / ESXi mock 数据均能正常展示。
 

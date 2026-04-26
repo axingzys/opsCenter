@@ -519,9 +519,34 @@ func (uc *VirtualizationUseCase) GetTopology(ctx context.Context, platformID uin
 		if err != nil {
 			return nil, err
 		}
+		guests, err := uc.guestRepo.ListByPlatformID(ctx, platform.ID)
+		if err != nil {
+			return nil, err
+		}
 
 		clusterMap := make(map[uint]*VirtualizationTopologyClusterNode, len(clusters))
 		clusterNodes := make([]*VirtualizationTopologyClusterNode, 0, len(clusters)+1)
+		guestMap := make(map[uint][]*VirtualizationTopologyGuestNode)
+
+		for _, guest := range guests {
+			if guest == nil {
+				continue
+			}
+			guestNode := &VirtualizationTopologyGuestNode{
+				ID:            guest.ID,
+				Name:          guest.Name,
+				ClusterID:     guest.ClusterID,
+				HostID:        guest.HostID,
+				ExternalID:    guest.ExternalID,
+				PowerState:    guest.PowerState,
+				CPUCount:      guest.CPUCount,
+				MemoryMB:      guest.MemoryMB,
+				PrimaryIP:     guest.PrimaryIP,
+				ToolsStatus:   guest.ToolsStatus,
+				BindingStatus: guest.BindingStatus,
+			}
+			guestMap[guest.HostID] = append(guestMap[guest.HostID], guestNode)
+		}
 
 		for _, cluster := range clusters {
 			node := &VirtualizationTopologyClusterNode{
@@ -549,12 +574,22 @@ func (uc *VirtualizationUseCase) GetTopology(ctx context.Context, platformID uin
 
 		for _, host := range hosts {
 			node := &VirtualizationTopologyHostNode{
-				ID:           host.ID,
-				Name:         host.Name,
-				ClusterID:    host.ClusterID,
-				ManagementIP: host.ManagementIP,
-				Status:       host.Status,
-				GuestCount:   host.GuestCount,
+				ID:              host.ID,
+				Name:            host.Name,
+				ClusterID:       host.ClusterID,
+				ExternalID:      host.ExternalID,
+				ManagementIP:    host.ManagementIP,
+				CPUModel:        host.CPUModel,
+				CPUCores:        host.CPUCores,
+				MemoryTotalMB:   host.MemoryTotalMB,
+				MemoryUsedMB:    host.MemoryUsedMB,
+				Status:          host.Status,
+				GuestCount:      host.GuestCount,
+				LastCollectedAt: formatTime(host.LastCollectedAt),
+				Guests:          guestMap[host.ID],
+			}
+			if len(node.Guests) > 0 {
+				node.GuestCount = len(node.Guests)
 			}
 			if host.ClusterID > 0 {
 				if clusterNode, ok := clusterMap[host.ClusterID]; ok {
@@ -575,6 +610,8 @@ func (uc *VirtualizationUseCase) GetTopology(ctx context.Context, platformID uin
 			Name:         platform.Name,
 			Provider:     platform.Provider,
 			ProviderText: virtualizationProviderText(platform.Provider),
+			Endpoint:     platform.Endpoint,
+			Port:         platform.Port,
 			Status:       platform.Status,
 			LastSyncAt:   formatTime(platform.LastSyncAt),
 			Clusters:     clusterNodes,

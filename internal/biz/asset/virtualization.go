@@ -344,6 +344,8 @@ type VirtualizationTopologyPlatformNode struct {
 	Name         string                               `json:"name"`
 	Provider     string                               `json:"provider"`
 	ProviderText string                               `json:"providerText"`
+	Endpoint     string                               `json:"endpoint,omitempty"`
+	Port         int                                  `json:"port,omitempty"`
 	Status       string                               `json:"status"`
 	LastSyncAt   string                               `json:"lastSyncAt,omitempty"`
 	Clusters     []*VirtualizationTopologyClusterNode `json:"clusters"`
@@ -360,12 +362,33 @@ type VirtualizationTopologyClusterNode struct {
 }
 
 type VirtualizationTopologyHostNode struct {
-	ID           uint   `json:"id"`
-	Name         string `json:"name"`
-	ClusterID    uint   `json:"clusterId"`
-	ManagementIP string `json:"managementIp"`
-	Status       string `json:"status"`
-	GuestCount   int    `json:"guestCount"`
+	ID              uint                               `json:"id"`
+	Name            string                             `json:"name"`
+	ClusterID       uint                               `json:"clusterId"`
+	ExternalID      string                             `json:"externalId"`
+	ManagementIP    string                             `json:"managementIp"`
+	CPUModel        string                             `json:"cpuModel"`
+	CPUCores        int                                `json:"cpuCores"`
+	MemoryTotalMB   int64                              `json:"memoryTotalMb"`
+	MemoryUsedMB    int64                              `json:"memoryUsedMb"`
+	Status          string                             `json:"status"`
+	GuestCount      int                                `json:"guestCount"`
+	LastCollectedAt string                             `json:"lastCollectedAt,omitempty"`
+	Guests          []*VirtualizationTopologyGuestNode `json:"guests"`
+}
+
+type VirtualizationTopologyGuestNode struct {
+	ID            uint   `json:"id"`
+	Name          string `json:"name"`
+	ClusterID     uint   `json:"clusterId"`
+	HostID        uint   `json:"hostId"`
+	ExternalID    string `json:"externalId"`
+	PowerState    string `json:"powerState"`
+	CPUCount      int    `json:"cpuCount"`
+	MemoryMB      int64  `json:"memoryMb"`
+	PrimaryIP     string `json:"primaryIp"`
+	ToolsStatus   string `json:"toolsStatus"`
+	BindingStatus string `json:"bindingStatus"`
 }
 
 type VirtualizationGuestVO struct {
