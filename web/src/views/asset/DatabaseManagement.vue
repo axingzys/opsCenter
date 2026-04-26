@@ -175,6 +175,92 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="实例权限" name="permissions">
+        <div class="backup-card">
+          <div class="backup-toolbar">
+            <div class="backup-toolbar-group">
+              <el-input
+                v-model="permissionQuery.keyword"
+                placeholder="搜索角色或实例"
+                clearable
+                class="audit-search-input"
+                @keyup.enter="loadInstancePermissions"
+                @clear="loadInstancePermissions"
+              >
+                <template #prefix>
+                  <el-icon><Search /></el-icon>
+                </template>
+              </el-input>
+              <el-select v-model="permissionQuery.roleId" placeholder="角色" clearable filterable class="audit-select" @change="loadInstancePermissions">
+                <el-option v-for="role in roleOptions" :key="role.id" :label="role.name" :value="role.id" />
+              </el-select>
+              <el-select v-model="permissionQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadInstancePermissions">
+                <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+              </el-select>
+            </div>
+            <el-button type="primary" @click="openPermissionDialog()">
+              <el-icon style="margin-right: 6px;"><Plus /></el-icon>
+              添加权限
+            </el-button>
+          </div>
+
+          <el-table
+            :data="permissionRows"
+            v-loading="permissionLoading"
+            stripe
+            class="modern-table"
+            :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
+          >
+            <el-table-column label="角色" min-width="180">
+              <template #default="{ row }">
+                <div class="instance-name">
+                  <span>{{ row.roleName || '-' }}</span>
+                  <el-tag v-if="row.roleCode" size="small" type="info">{{ row.roleCode }}</el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="数据库实例" min-width="200">
+              <template #default="{ row }">{{ row.instanceName || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="权限" min-width="360">
+              <template #default="{ row }">
+                <div class="permission-tag-list">
+                  <el-tag
+                    v-for="item in databasePermissionOptions.filter(option => hasPermissionMask(row.permissions, option.value))"
+                    :key="item.value"
+                    size="small"
+                    type="primary"
+                  >
+                    {{ item.label }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="更新时间" width="170" align="center">
+              <template #default="{ row }">{{ row.updatedAt || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openPermissionDialog(row)">编辑</el-button>
+                <el-button link type="danger" @click="handleDeletePermission(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+              v-model:current-page="permissionQuery.page"
+              v-model:page-size="permissionQuery.pageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="permissionTotal"
+              layout="total, sizes, prev, pager, next, jumper"
+              @size-change="loadInstancePermissions"
+              @current-change="loadInstancePermissions"
+            />
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="结构浏览" name="schemas">
         <div class="metadata-browser">
           <div class="metadata-toolbar">
@@ -2227,6 +2313,42 @@
         <el-button @click="inspectionDetailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="permissionDialogVisible"
+      :title="permissionForm.id ? '编辑实例权限' : '添加实例权限'"
+      width="720px"
+      @close="resetPermissionForm"
+    >
+      <el-form ref="permissionFormRef" :model="permissionForm" :rules="permissionRules" label-width="100px">
+        <el-form-item label="角色" prop="roleId">
+          <el-select v-model="permissionForm.roleId" placeholder="请选择角色" filterable style="width: 100%;">
+            <el-option v-for="role in roleOptions" :key="role.id" :label="`${role.name}（${role.code}）`" :value="role.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="实例" prop="instanceId">
+          <el-select v-model="permissionForm.instanceId" placeholder="请选择数据库实例" filterable style="width: 100%;">
+            <el-option
+              v-for="item in instances"
+              :key="item.id"
+              :label="`${item.name}（${item.dbTypeText || item.dbType} / ${item.endpoint || `${item.host}:${item.port}`}）`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="权限" prop="permissions">
+          <el-checkbox-group v-model="permissionForm.permissions" class="permission-checkbox-grid">
+            <el-checkbox v-for="item in databasePermissionOptions" :key="item.value" :label="item.value">
+              {{ item.label }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="permissionDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="permissionSubmitting" @click="submitPermissionForm">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -2258,6 +2380,7 @@ import {
   collectDatabaseCapacitySnapshot,
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
+  deleteDatabaseInstancePermission,
   disableDatabaseInstance,
   downloadDatabaseBackupRecord,
   explainDatabaseQuery,
@@ -2283,6 +2406,7 @@ import {
   listDatabaseColumns,
   listDatabaseQueryHistory,
   listDatabaseInstances,
+  listDatabaseInstancePermissions,
   listDatabaseIndexes,
   listDatabaseQueryAudits,
   listDatabaseSchemas,
@@ -2294,6 +2418,7 @@ import {
   testDatabaseInstance,
   updateDatabaseBackupTask,
   updateDatabaseInstance,
+  upsertDatabaseInstancePermission,
   type DatabaseBackupRecordResult,
   type DatabaseBackupRunResult,
   type DatabaseBackupTaskPayload,
@@ -2312,6 +2437,7 @@ import {
   type DatabaseWriteValidateResult,
   validateDatabaseWriteQuery
 } from '@/api/database'
+import { getAllRoles } from '@/api/role'
 
 const activeTab = ref('instances')
 const loading = ref(false)
@@ -2322,6 +2448,7 @@ const dialogVisible = ref(false)
 const instances = ref<any[]>([])
 const supportedTypes = ref<DatabaseSupportedType[]>([])
 const credentials = ref<any[]>([])
+const roleOptions = ref<any[]>([])
 const total = ref(0)
 
 type DatabaseCapabilityKey = 'metadataEnabled' | 'queryEnabled' | 'testEnabled' | 'topologyEnabled'
@@ -2345,6 +2472,21 @@ const hasDatabasePermission = (item: any, permission: number) =>
 
 const canUseDatabaseFeature = (item: any, permission: number, capability?: DatabaseCapabilityKey) =>
   !!item && hasDatabasePermission(item, permission) && (!capability || hasInstanceCapability(item, capability))
+
+const hasPermissionMask = (mask: number | undefined, permission: number) =>
+  (Number(mask || 0) & permission) > 0
+
+const databasePermissionOptions = [
+  { label: '查看', value: DATABASE_PERMISSION.VIEW },
+  { label: '查询', value: DATABASE_PERMISSION.QUERY },
+  { label: '导出', value: DATABASE_PERMISSION.EXPORT },
+  { label: '写入', value: DATABASE_PERMISSION.WRITE },
+  { label: '备份', value: DATABASE_PERMISSION.BACKUP },
+  { label: '恢复', value: DATABASE_PERMISSION.RESTORE },
+  { label: '诊断', value: DATABASE_PERMISSION.DIAGNOSIS },
+  { label: '拓扑', value: DATABASE_PERMISSION.TOPOLOGY },
+  { label: '管理', value: DATABASE_PERMISSION.MANAGE }
+]
 
 const formRef = ref<FormInstance>()
 const metadataInstanceId = ref<number>()
@@ -2410,6 +2552,12 @@ const runningBackupTaskId = ref(0)
 const backupTasks = ref<DatabaseBackupTaskResult[]>([])
 const backupTaskTotal = ref(0)
 const backupTaskFormRef = ref<FormInstance>()
+const permissionFormRef = ref<FormInstance>()
+const permissionLoading = ref(false)
+const permissionSubmitting = ref(false)
+const permissionDialogVisible = ref(false)
+const permissionRows = ref<any[]>([])
+const permissionTotal = ref(0)
 const backupRecordLoading = ref(false)
 const backupRecords = ref<DatabaseBackupRecordResult[]>([])
 const backupRecordTotal = ref(0)
@@ -2489,6 +2637,14 @@ const backupTaskQuery = reactive({
   enabled: ''
 })
 
+const permissionQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  roleId: undefined as number | undefined,
+  instanceId: undefined as number | undefined
+})
+
 const backupRecordQuery = reactive({
   page: 1,
   pageSize: 10,
@@ -2553,10 +2709,23 @@ const backupTaskForm = reactive<DatabaseBackupTaskPayload & { id?: number }>({
 })
 const backupTaskFormInstanceDbType = ref('')
 
+const permissionForm = reactive({
+  id: undefined as number | undefined,
+  roleId: undefined as number | undefined,
+  instanceId: undefined as number | undefined,
+  permissions: [DATABASE_PERMISSION.VIEW] as number[]
+})
+
 const backupTaskRules: FormRules = {
   instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
   name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
   retentionDays: [{ required: true, message: '请输入保留天数', trigger: 'change' }]
+}
+
+const permissionRules: FormRules = {
+  roleId: [{ required: true, message: '请选择角色', trigger: 'change' }],
+  instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
+  permissions: [{ type: 'array', required: true, min: 1, message: '请选择权限', trigger: 'change' }]
 }
 
 const restoreForm = reactive<DatabaseRestoreDryRunPayload>({
@@ -2857,6 +3026,16 @@ const loadSupportedTypes = async () => {
 
 const loadCredentials = async () => {
   credentials.value = await getCredentials()
+}
+
+const loadRoles = async () => {
+  const res: any = await getAllRoles()
+  roleOptions.value = (res || []).map((item: any) => ({
+    ...item,
+    id: item.id || item.ID,
+    name: item.name || item.Name,
+    code: item.code || item.Code
+  }))
 }
 
 const loadInstances = async () => {
@@ -3299,6 +3478,75 @@ const submitBackupTaskForm = async () => {
   } finally {
     backupTaskSubmitting.value = false
   }
+}
+
+const loadInstancePermissions = async () => {
+  permissionLoading.value = true
+  try {
+    const res: any = await listDatabaseInstancePermissions(permissionQuery)
+    permissionRows.value = res.list || []
+    permissionTotal.value = res.total || 0
+    if (res.page) permissionQuery.page = res.page
+    if (res.pageSize) permissionQuery.pageSize = res.pageSize
+  } finally {
+    permissionLoading.value = false
+  }
+}
+
+const permissionMaskToBits = (mask: number | undefined) =>
+  databasePermissionOptions
+    .filter(item => hasPermissionMask(mask, item.value))
+    .map(item => item.value)
+
+const permissionBitsToMask = (bits: number[]) =>
+  bits.reduce((mask, item) => mask | item, 0)
+
+const resetPermissionForm = () => {
+  permissionForm.id = undefined
+  permissionForm.roleId = undefined
+  permissionForm.instanceId = undefined
+  permissionForm.permissions = [DATABASE_PERMISSION.VIEW]
+  permissionFormRef.value?.clearValidate()
+}
+
+const openPermissionDialog = (row?: any) => {
+  resetPermissionForm()
+  if (row?.id) {
+    permissionForm.id = row.id
+    permissionForm.roleId = row.roleId
+    permissionForm.instanceId = row.instanceId
+    permissionForm.permissions = permissionMaskToBits(row.permissions)
+  }
+  permissionDialogVisible.value = true
+}
+
+const submitPermissionForm = async () => {
+  if (!permissionFormRef.value) return
+  await permissionFormRef.value.validate()
+  permissionSubmitting.value = true
+  try {
+    await upsertDatabaseInstancePermission({
+      roleId: permissionForm.roleId!,
+      instanceId: permissionForm.instanceId!,
+      permissions: permissionBitsToMask(permissionForm.permissions)
+    })
+    ElMessage.success('实例权限已保存')
+    permissionDialogVisible.value = false
+    await Promise.all([loadInstancePermissions(), loadInstances()])
+  } finally {
+    permissionSubmitting.value = false
+  }
+}
+
+const handleDeletePermission = async (row: any) => {
+  await ElMessageBox.confirm(`确定删除「${row.roleName || '-'}」对「${row.instanceName || '-'}」的实例权限吗？`, '删除确认', {
+    type: 'warning',
+    confirmButtonText: '删除',
+    cancelButtonText: '取消'
+  })
+  await deleteDatabaseInstancePermission(row.id)
+  ElMessage.success('实例权限已删除')
+  await Promise.all([loadInstancePermissions(), loadInstances()])
 }
 
 const resetQuery = () => {
@@ -4420,6 +4668,9 @@ watch(activeTab, async (tab) => {
   if (tab === 'backup') {
     await Promise.all([loadBackupTasks(), loadBackupRecords(), loadRestoreJobs()])
   }
+  if (tab === 'permissions') {
+    await Promise.all([loadRoles(), loadInstancePermissions()])
+  }
   if (tab === 'inspection') {
     ensureInspectionDefaultInstance()
     await loadInspectionReports()
@@ -4448,7 +4699,7 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('resize', resizeCapacityChart)
-  await Promise.all([loadSupportedTypes(), loadCredentials()])
+  await Promise.all([loadSupportedTypes(), loadCredentials(), loadRoles()])
   await loadInstances()
 })
 
@@ -5049,6 +5300,20 @@ onBeforeUnmount(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.permission-tag-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.permission-checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 8px 16px;
+  width: 100%;
 }
 
 .backup-dialog-alert {
