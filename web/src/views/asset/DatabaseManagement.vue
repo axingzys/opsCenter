@@ -175,7 +175,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="实例权限" name="permissions">
+      <el-tab-pane v-if="canManageInstancePermissions" label="实例权限" name="permissions">
         <div class="backup-card">
           <div class="backup-toolbar">
             <div class="backup-toolbar-group">
@@ -198,7 +198,7 @@
                 <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
               </el-select>
             </div>
-            <el-button type="primary" @click="openPermissionDialog()">
+            <el-button v-if="canManageInstancePermissions" type="primary" @click="openPermissionDialog()">
               <el-icon style="margin-right: 6px;"><Plus /></el-icon>
               添加权限
             </el-button>
@@ -239,7 +239,7 @@
             <el-table-column label="更新时间" width="170" align="center">
               <template #default="{ row }">{{ row.updatedAt || '-' }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="120" align="center" fixed="right">
+            <el-table-column v-if="canManageInstancePermissions" label="操作" width="120" align="center" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openPermissionDialog(row)">编辑</el-button>
                 <el-button link type="danger" @click="handleDeletePermission(row)">删除</el-button>
@@ -2392,6 +2392,7 @@ import {
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
   getDatabaseTopology,
+  getDatabaseUIPermissions,
   exportDatabaseQueryResult,
   exportDatabaseQueryAudits,
   exportDatabaseTableDictionary,
@@ -2449,6 +2450,7 @@ const instances = ref<any[]>([])
 const supportedTypes = ref<DatabaseSupportedType[]>([])
 const credentials = ref<any[]>([])
 const roleOptions = ref<any[]>([])
+const uiPermissions = ref<Record<string, boolean>>({})
 const total = ref(0)
 
 type DatabaseCapabilityKey = 'metadataEnabled' | 'queryEnabled' | 'testEnabled' | 'topologyEnabled'
@@ -2472,6 +2474,8 @@ const hasDatabasePermission = (item: any, permission: number) =>
 
 const canUseDatabaseFeature = (item: any, permission: number, capability?: DatabaseCapabilityKey) =>
   !!item && hasDatabasePermission(item, permission) && (!capability || hasInstanceCapability(item, capability))
+
+const canManageInstancePermissions = computed(() => uiPermissions.value.instancePermissionManage === true)
 
 const hasPermissionMask = (mask: number | undefined, permission: number) =>
   (Number(mask || 0) & permission) > 0
@@ -3030,6 +3034,19 @@ const loadCredentials = async () => {
   credentials.value = await getCredentials()
 }
 
+const loadUIPermissions = async () => {
+  try {
+    const res: any = await getDatabaseUIPermissions()
+    uiPermissions.value = res || {}
+    if (activeTab.value === 'permissions' && !canManageInstancePermissions.value) {
+      activeTab.value = 'instances'
+    }
+  } catch (error: any) {
+    uiPermissions.value = {}
+    ElMessage.warning('加载数据库页面权限失败')
+  }
+}
+
 const loadRoles = async () => {
   const res: any = await getAllRoles()
   roleOptions.value = (res || []).map((item: any) => ({
@@ -3512,6 +3529,10 @@ const resetPermissionForm = () => {
 }
 
 const openPermissionDialog = (row?: any) => {
+  if (!canManageInstancePermissions.value) {
+    ElMessage.warning('无权配置实例权限')
+    return
+  }
   resetPermissionForm()
   if (row?.id) {
     permissionForm.id = row.id
@@ -3523,6 +3544,10 @@ const openPermissionDialog = (row?: any) => {
 }
 
 const submitPermissionForm = async () => {
+  if (!canManageInstancePermissions.value) {
+    ElMessage.warning('无权配置实例权限')
+    return
+  }
   if (!permissionFormRef.value) return
   await permissionFormRef.value.validate()
   permissionSubmitting.value = true
@@ -3541,6 +3566,10 @@ const submitPermissionForm = async () => {
 }
 
 const handleDeletePermission = async (row: any) => {
+  if (!canManageInstancePermissions.value) {
+    ElMessage.warning('无权配置实例权限')
+    return
+  }
   await ElMessageBox.confirm(`确定删除「${row.roleName || '-'}」对「${row.instanceName || '-'}」的实例权限吗？`, '删除确认', {
     type: 'warning',
     confirmButtonText: '删除',
@@ -4671,6 +4700,10 @@ watch(activeTab, async (tab) => {
     await Promise.all([loadBackupTasks(), loadBackupRecords(), loadRestoreJobs()])
   }
   if (tab === 'permissions') {
+    if (!canManageInstancePermissions.value) {
+      activeTab.value = 'instances'
+      return
+    }
     await Promise.all([loadRoles(), loadInstancePermissions()])
   }
   if (tab === 'inspection') {
@@ -4701,7 +4734,7 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('resize', resizeCapacityChart)
-  await Promise.all([loadSupportedTypes(), loadCredentials(), loadRoles()])
+  await Promise.all([loadSupportedTypes(), loadCredentials(), loadRoles(), loadUIPermissions()])
   await loadInstances()
 })
 

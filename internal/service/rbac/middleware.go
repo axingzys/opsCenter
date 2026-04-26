@@ -20,6 +20,8 @@
 package rbac
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -216,25 +218,7 @@ func (m *AuthMiddleware) RequireMenuPermission(code string) gin.HandlerFunc {
 			return
 		}
 
-		roles, err := m.authService.roleUseCase.GetByUserID(c.Request.Context(), userID)
-		if err != nil {
-			response.ErrorCode(c, http.StatusInternalServerError, "获取用户角色失败")
-			c.Abort()
-			return
-		}
-		for _, role := range roles {
-			if role.Code == "admin" {
-				c.Next()
-				return
-			}
-		}
-
-		if m.menuUseCase == nil {
-			response.ErrorCode(c, http.StatusInternalServerError, "权限检查未初始化")
-			c.Abort()
-			return
-		}
-		ok, err := m.menuUseCase.HasUserMenuCode(c.Request.Context(), userID, strings.TrimSpace(code))
+		ok, err := m.HasMenuPermission(c.Request.Context(), userID, code)
 		if err != nil {
 			response.ErrorCode(c, http.StatusInternalServerError, "权限检查失败")
 			c.Abort()
@@ -248,6 +232,30 @@ func (m *AuthMiddleware) RequireMenuPermission(code string) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// HasMenuPermission 检查用户是否拥有指定菜单或按钮权限编码，admin 角色自动放行。
+func (m *AuthMiddleware) HasMenuPermission(ctx context.Context, userID uint, code string) (bool, error) {
+	if m == nil || m.authService == nil || m.authService.roleUseCase == nil {
+		return false, errors.New("权限检查未初始化")
+	}
+	code = strings.TrimSpace(code)
+	if userID == 0 || code == "" {
+		return false, nil
+	}
+	roles, err := m.authService.roleUseCase.GetByUserID(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	for _, role := range roles {
+		if role.Code == "admin" {
+			return true, nil
+		}
+	}
+	if m.menuUseCase == nil {
+		return false, errors.New("权限检查未初始化")
+	}
+	return m.menuUseCase.HasUserMenuCode(ctx, userID, code)
 }
 
 // RequireHostPermission 检查主机操作权限的中间件

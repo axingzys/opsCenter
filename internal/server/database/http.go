@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,7 @@ import (
 	systemdata "github.com/ydcloud-dy/opshub/internal/data/system"
 	dbservice "github.com/ydcloud-dy/opshub/internal/service/database"
 	rbacservice "github.com/ydcloud-dy/opshub/internal/service/rbac"
+	"github.com/ydcloud-dy/opshub/pkg/response"
 	"gorm.io/gorm"
 )
 
@@ -47,6 +49,32 @@ const (
 	permDatabaseInspectionView  = "database:inspection:view"
 	permDatabaseInspectionRun   = "database:inspection:run"
 )
+
+var databaseUIPermissionCodes = map[string]string{
+	"instanceCreate":             permDatabaseInstanceCreate,
+	"instanceUpdate":             permDatabaseInstanceUpdate,
+	"instanceDelete":             permDatabaseInstanceDelete,
+	"instanceStatus":             permDatabaseInstanceStatus,
+	"connectionTest":             permDatabaseConnectionTest,
+	"metadataSync":               permDatabaseMetadataSync,
+	"metadataExport":             permDatabaseMetadataExport,
+	"queryExecute":               permDatabaseQueryExecute,
+	"queryWrite":                 permDatabaseQueryWrite,
+	"queryExplain":               permDatabaseQueryExplain,
+	"queryExport":                permDatabaseQueryExport,
+	"auditExport":                permDatabaseAuditExport,
+	"backupCreate":               permDatabaseBackupCreate,
+	"backupUpdate":               permDatabaseBackupUpdate,
+	"backupDelete":               permDatabaseBackupDelete,
+	"backupRun":                  permDatabaseBackupRun,
+	"backupDownload":             permDatabaseBackupDownload,
+	"restoreRun":                 permDatabaseRestoreRun,
+	"capacityCollect":            permDatabaseCapacityCollect,
+	"inspectionRun":              permDatabaseInspectionRun,
+	"instancePermissionView":     permDatabaseInstanceView,
+	"instancePermissionManage":   permDatabaseInstanceUpdate,
+	"instanceObjectPermissionUI": permDatabaseInstanceUpdate,
+}
 
 type HTTPServer struct {
 	service           *dbservice.Service
@@ -177,10 +205,29 @@ func (s *HTTPServer) StopBackground(ctx context.Context) error {
 	return nil
 }
 
+func (s *HTTPServer) GetUIPermissions(c *gin.Context) {
+	userID := rbacservice.GetUserID(c)
+	if userID == 0 {
+		response.ErrorCode(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+	result := gin.H{}
+	for key, code := range databaseUIPermissionCodes {
+		ok, err := s.authMiddleware.HasMenuPermission(c.Request.Context(), userID, code)
+		if err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "权限检查失败")
+			return
+		}
+		result[key] = ok
+	}
+	response.Success(c, result)
+}
+
 func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 	databases := r.Group("/databases")
 	{
 		databases.GET("/supported-types", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.service.GetSupportedTypes)
+		databases.GET("/ui-permissions", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.GetUIPermissions)
 		databases.GET("/instance-permissions", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceView), s.service.ListInstancePermissions)
 		databases.POST("/instance-permissions", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceUpdate), s.service.UpsertInstancePermission)
 		databases.DELETE("/instance-permissions/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInstanceUpdate), s.service.DeleteInstancePermission)

@@ -388,6 +388,9 @@ export interface DatabaseTableDDLPayload {
 export const getDatabaseSupportedTypes = () =>
   request.get('/api/v1/databases/supported-types')
 
+export const getDatabaseUIPermissions = () =>
+  request.get('/api/v1/databases/ui-permissions')
+
 export const listDatabaseInstancePermissions = (params?: {
   page?: number
   pageSize?: number
