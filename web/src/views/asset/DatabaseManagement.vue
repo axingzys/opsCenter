@@ -223,227 +223,43 @@
       </el-tab-pane>
 
       <el-tab-pane label="SQL 控制台" name="query">
-        <div class="query-console">
-          <el-alert
-            :title="queryConsoleAlert"
-            type="info"
-            show-icon
-            :closable="false"
-          />
-
-          <div class="query-toolbar">
-            <el-select
-              v-model="queryInstanceId"
-              placeholder="请选择实例"
-              filterable
-              class="query-select"
-              @change="handleQueryInstanceChange"
-            >
-              <el-option
-                v-for="item in queryInstances"
-                :key="item.id"
-                :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
-                :value="item.id"
-              />
-            </el-select>
-            <el-select v-model="querySchemaName" :placeholder="querySchemaPlaceholder" clearable filterable class="query-select">
-              <el-option v-for="item in querySchemas" :key="item.schemaName" :label="item.schemaName" :value="item.schemaName" />
-            </el-select>
-            <span class="query-option-label">最大行数</span>
-            <el-input-number v-model="queryLimit" :min="1" :max="500" :step="50" class="query-number" />
-            <span class="query-option-label">超时秒数</span>
-            <el-input-number v-model="queryTimeoutSeconds" :min="1" :max="30" class="query-number" />
-            <span class="query-option-label">导出上限</span>
-            <el-input-number v-model="queryExportLimit" :min="1" :max="5000" :step="100" class="query-number" />
-            <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="executeQuery">
-              {{ isRedisQueryInstance ? '执行命令' : '执行查询' }}
-            </el-button>
-            <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleFormatQuery">
-              {{ isRedisQueryInstance ? '格式化命令' : '格式化 SQL' }}
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleExplainQuery">
-              执行计划
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryWriteChecking" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handleValidateWriteQuery">
-              写前检查
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="danger" plain :loading="queryWritePreparing" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handlePrepareWriteExecute">
-              受控写入
-            </el-button>
-            <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')" @click="handleExportQuery">
-              <el-icon style="margin-right: 4px;"><Download /></el-icon>
-              导出结果
-            </el-button>
-            <el-button type="primary" plain :loading="queryHistoryLoading" @click="openQueryHistory">
-              最近历史
-            </el-button>
-            <el-button @click="resetQueryConsole">清空</el-button>
-          </div>
-
-          <el-input
-            v-model="querySQL"
-            type="textarea"
-            :rows="10"
-            class="sql-editor"
-            :placeholder="queryEditorPlaceholder"
-          />
-
-          <div class="query-hints">
-            <template v-if="isRedisQueryInstance">
-              <el-tag size="small">只读命令</el-tag>
-              <el-tag size="small" type="success">SCAN 自动 COUNT</el-tag>
-              <el-tag size="small" type="primary">命令格式化</el-tag>
-              <el-tag size="small" type="warning">CSV 导出</el-tag>
-              <el-tag size="small" type="danger">禁止写命令</el-tag>
-            </template>
-            <template v-else>
-              <el-tag size="small">只读</el-tag>
-              <el-tag size="small" type="danger">受控写入</el-tag>
-              <el-tag size="small" type="success">自动 LIMIT</el-tag>
-              <el-tag size="small" type="primary">SQL 格式化</el-tag>
-              <el-tag size="small" type="warning">执行计划 / CSV 导出</el-tag>
-              <el-tag size="small" type="warning">禁止多语句</el-tag>
-              <el-tag size="small" type="warning">原因 / 高风险确认</el-tag>
-            </template>
-            <span>当前实例：{{ currentQueryInstance?.name || '-' }}</span>
-          </div>
-
-          <div v-if="writeResult" class="query-result">
-            <div class="result-summary">
-              <div class="summary-card">
-                <span class="summary-label">影响行数</span>
-                <strong>{{ writeResult.rowsAffected }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">耗时</span>
-                <strong>{{ writeResult.durationMs }} ms</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">SQL 类型</span>
-                <strong>{{ writeResult.sqlType }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">风险等级</span>
-                <strong>{{ writeResult.riskLevelText }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">审计 ID</span>
-                <strong>{{ writeResult.auditId }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">影响阈值</span>
-                <strong>{{ writeResult.rowsAffectedLimit }}</strong>
-              </div>
-            </div>
-            <el-alert
-              :title="writeResult.message || '写操作执行完成'"
-              type="success"
-              show-icon
-              :closable="false"
-            />
-            <el-alert
-              v-if="writeResult.executedSql"
-              :title="`实际执行 SQL：${writeResult.executedSql}`"
-              type="warning"
-              show-icon
-              :closable="false"
-              class="executed-sql-alert"
-            />
-            <div class="write-meta-tags">
-              <el-tag :type="riskLevelTag(writeResult.riskLevel)">{{ writeResult.riskLevelText }}</el-tag>
-              <el-tag v-if="writeResult.reason" type="info">原因：{{ writeResult.reason }}</el-tag>
-              <el-tag v-if="writeResult.confirmRequired" :type="writeResult.confirmed ? 'success' : 'warning'">
-                {{ writeResult.confirmed ? '已确认执行' : '未确认' }}
-              </el-tag>
-            </div>
-            <div v-if="writeResult.rollbackSql" class="audit-sql-block">
-              <div class="audit-sql-title">回滚 SQL / 恢复提示</div>
-              <pre>{{ writeResult.rollbackSql }}</pre>
-            </div>
-          </div>
-          <div v-else-if="writeCheckResult" class="query-result">
-            <div class="result-summary">
-              <div class="summary-card">
-                <span class="summary-label">预检查结果</span>
-                <strong>{{ writeCheckResult.allowed ? '通过' : '未通过' }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">SQL 类型</span>
-                <strong>{{ writeCheckResult.sqlType }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">风险等级</span>
-                <strong>{{ writeCheckResult.riskLevelText }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">影响阈值</span>
-                <strong>{{ writeCheckResult.rowsAffectedLimit }}</strong>
-              </div>
-            </div>
-            <el-alert
-              :title="writeCheckResult.message || '写操作预检查完成'"
-              :type="writeCheckResult.allowed ? 'success' : 'warning'"
-              show-icon
-              :closable="false"
-            />
-            <div class="write-meta-tags">
-              <el-tag :type="riskLevelTag(writeCheckResult.riskLevel)">{{ writeCheckResult.riskLevelText }}</el-tag>
-              <el-tag :type="writeCheckResult.reasonRequired ? 'warning' : 'info'">
-                {{ writeCheckResult.reasonRequired ? '执行时必须填写原因' : '原因非必填' }}
-              </el-tag>
-              <el-tag :type="writeCheckResult.confirmRequired ? 'danger' : 'success'">
-                {{ writeCheckResult.confirmRequired ? '执行前需二次确认' : '无需二次确认' }}
-              </el-tag>
-            </div>
-          </div>
-          <div v-else-if="queryResult" class="query-result">
-            <div class="result-summary">
-              <div class="summary-card">
-                <span class="summary-label">返回行数</span>
-                <strong>{{ queryResult.rowsReturned }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">耗时</span>
-                <strong>{{ queryResult.durationMs }} ms</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">{{ isRedisQueryInstance ? '命令类型' : 'SQL 类型' }}</span>
-                <strong>{{ queryResult.sqlType }}</strong>
-              </div>
-              <div class="summary-card">
-                <span class="summary-label">审计 ID</span>
-                <strong>{{ queryResult.auditId }}</strong>
-              </div>
-              <el-tag v-if="queryResult.truncated" type="warning">结果已截断</el-tag>
-              <el-tag v-if="queryResult.cellTruncated" type="warning">字段已截断</el-tag>
-              <el-tag v-if="queryResult.cellsMasked" type="info">敏感字段已脱敏</el-tag>
-              <el-tag v-if="queryResult.binaryPreviewed" type="info">二进制已预览</el-tag>
-            </div>
-            <el-alert
-              v-if="queryResult.executedSql"
-              :title="`${isRedisQueryInstance ? '实际执行命令' : '实际执行 SQL'}：${queryResult.executedSql}`"
-              type="success"
-              show-icon
-              :closable="false"
-              class="executed-sql-alert"
-            />
-            <el-table :data="queryResult.rows || []" border stripe height="420" class="query-result-table">
-              <el-table-column
-                v-for="column in queryResult.columns || []"
-                :key="column"
-                :prop="column"
-                :label="column"
-                min-width="150"
-                show-overflow-tooltip
-              >
-                <template #default="{ row }">
-                  <span class="query-cell">{{ formatQueryCell(row[column]) }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-          </div>
-          <el-empty v-else :description="isRedisQueryInstance ? '执行 Redis 只读命令后在这里查看结果' : '执行只读 SQL、写前检查或受控写入后在这里查看结果'" :image-size="80" />
-        </div>
+        <DatabaseSqlConsolePanel
+          v-model:instance-id="queryInstanceId"
+          v-model:schema-name="querySchemaName"
+          v-model:limit="queryLimit"
+          v-model:timeout-seconds="queryTimeoutSeconds"
+          v-model:export-limit="queryExportLimit"
+          v-model:sql-text="querySQL"
+          :alert-title="queryConsoleAlert"
+          :instances="queryInstances"
+          :schemas="querySchemas"
+          :schema-placeholder="querySchemaPlaceholder"
+          :editor-placeholder="queryEditorPlaceholder"
+          :current-instance="currentQueryInstance"
+          :is-redis="isRedisQueryInstance"
+          :can-query="canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')"
+          :can-write="canWriteCurrentQueryInstance"
+          :can-export="canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')"
+          :running="queryRunning"
+          :formatting="queryFormatting"
+          :explaining="queryExplaining"
+          :write-checking="queryWriteChecking"
+          :write-preparing="queryWritePreparing"
+          :exporting="queryExporting"
+          :history-loading="queryHistoryLoading"
+          :query-result="queryResult"
+          :write-check-result="writeCheckResult"
+          :write-result="writeResult"
+          @instance-change="handleQueryInstanceChange"
+          @execute="executeQuery"
+          @format-query="handleFormatQuery"
+          @explain="handleExplainQuery"
+          @validate-write="handleValidateWriteQuery"
+          @prepare-write="handlePrepareWriteExecute"
+          @export-query="handleExportQuery"
+          @open-history="openQueryHistory"
+          @reset="resetQueryConsole"
+        />
       </el-tab-pane>
 
       <el-tab-pane label="诊断" name="diagnosis">
@@ -1742,7 +1558,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   DataLine,
   Delete,
-  Download,
   Edit,
   Connection,
   Plus,
@@ -1756,6 +1571,7 @@ import DatabaseInspectionReportsPanel from './components/DatabaseInspectionRepor
 import DatabaseInstancePermissionsPanel from './components/DatabaseInstancePermissionsPanel.vue'
 import DatabaseMetadataBrowserPanel from './components/DatabaseMetadataBrowserPanel.vue'
 import DatabaseQueryAuditPanel from './components/DatabaseQueryAuditPanel.vue'
+import DatabaseSqlConsolePanel from './components/DatabaseSqlConsolePanel.vue'
 import DatabaseTopologyPanel from './components/DatabaseTopologyPanel.vue'
 import {
   DATABASE_PERMISSION,
