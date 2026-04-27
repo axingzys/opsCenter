@@ -35,6 +35,36 @@ func (r operationPlanResourceRepo) Summary(ctx context.Context, instanceID uint)
 	return nil, nil
 }
 
+type operationPlanBindingRepo struct {
+	items []*MQBinding
+}
+
+func (r operationPlanBindingRepo) ListByInstanceID(ctx context.Context, instanceID uint) ([]*MQBinding, error) {
+	return r.items, nil
+}
+
+type operationPlanConsumerGroupRepo struct {
+	item *MQConsumerGroup
+}
+
+func (r operationPlanConsumerGroupRepo) List(ctx context.Context, instanceID uint, req *ConsumerGroupListRequest) ([]*MQConsumerGroup, int64, error) {
+	return nil, 0, nil
+}
+
+func (r operationPlanConsumerGroupRepo) GetByUnique(ctx context.Context, instanceID uint, namespace, resourceName, groupName string) (*MQConsumerGroup, error) {
+	if r.item == nil {
+		return nil, nil
+	}
+	if r.item.InstanceID == instanceID && r.item.GroupName == groupName && (resourceName == "" || r.item.ResourceName == resourceName) {
+		return r.item, nil
+	}
+	return nil, nil
+}
+
+func (r operationPlanConsumerGroupRepo) Summary(ctx context.Context, instanceID uint) (*ConsumerGroupSummary, error) {
+	return nil, nil
+}
+
 func TestValidateKafkaConfigDecreaseEscalatesHighRisk(t *testing.T) {
 	now := time.Now()
 	uc := NewUseCase(
@@ -84,6 +114,116 @@ func TestValidateKafkaConfigDecreaseEscalatesHighRisk(t *testing.T) {
 	if !found {
 		t.Fatalf("expected high risk retention.ms diff, got %#v", validation.Diff)
 	}
+}
+
+func TestValidateRabbitMQExchangeDeleteRequiresForceWhenBound(t *testing.T) {
+	now := time.Now()
+	uc := NewUseCase(
+		highRiskInstanceRepo{item: &MQInstance{
+			Model:      gorm.Model{ID: 1},
+			Name:       "rabbit",
+			MQType:     MQTypeRabbitMQ,
+			Status:     InstanceStatusEnabled,
+			LastSyncAt: &now,
+		}},
+		nil, nil, nil,
+		operationPlanBindingRepo{items: []*MQBinding{{InstanceID: 1, VHost: "/", Source: "orders.ex", Destination: "orders.q", DestinationType: ResourceTypeQueue}}},
+		nil, nil, nil, nil, nil, nil,
+		nil,
+		nil,
+		nil,
+		NewAdapterRegistry(NewRabbitMQAdapter()),
+	)
+
+	validation, err := uc.ValidateResourceOperation(context.Background(), 1, &ResourceOperationRequest{
+		Action:       OperationActionRabbitMQExchangeDelete,
+		Namespace:    "/",
+		ResourceName: "orders.ex",
+		Params:       map[string]any{"ifUnused": false},
+	})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if validation.Supported {
+		t.Fatalf("expected delete exchange with bindings to require force")
+	}
+	if !strings.Contains(validation.Message, "force=true") {
+		t.Fatalf("expected force message, got %q", validation.Message)
+	}
+
+	validation, err = uc.ValidateResourceOperation(context.Background(), 1, &ResourceOperationRequest{
+		Action:       OperationActionRabbitMQExchangeDelete,
+		Namespace:    "/",
+		ResourceName: "orders.ex",
+		Params:       map[string]any{"ifUnused": false, "force": true},
+	})
+	if err != nil {
+		t.Fatalf("validate force: %v", err)
+	}
+	if !validation.Supported {
+		t.Fatalf("expected force delete supported, got %q", validation.Message)
+	}
+	if len(validation.Impacts) < 3 {
+		t.Fatalf("expected binding impact, got %#v", validation.Impacts)
+	}
+}
+
+func TestValidatePulsarSubscriptionSkipIncludesBacklogImpact(t *testing.T) {
+	now := time.Now()
+	topic := "persistent://public/default/orders"
+	uc := NewUseCase(
+		highRiskInstanceRepo{item: &MQInstance{
+			Model:      gorm.Model{ID: 1},
+			Name:       "pulsar",
+			MQType:     MQTypePulsar,
+			Status:     InstanceStatusEnabled,
+			LastSyncAt: &now,
+		}},
+		nil, nil, nil, nil,
+		operationPlanConsumerGroupRepo{item: &MQConsumerGroup{
+			Model:               gorm.Model{ID: 10},
+			InstanceID:          1,
+			GroupName:           "sub-a",
+			ResourceName:        topic,
+			State:               "active",
+			ConsumerCount:       2,
+			ActiveConsumerCount: 1,
+			Backlog:             123,
+			Lag:                 123,
+			LastSyncAt:          &now,
+		}},
+		nil, nil, nil, nil, nil,
+		nil,
+		nil,
+		nil,
+		NewAdapterRegistry(NewPulsarAdapter()),
+	)
+
+	validation, err := uc.ValidateResourceOperation(context.Background(), 1, &ResourceOperationRequest{
+		Action: OperationActionPulsarSubscriptionSkip,
+		Params: map[string]any{"topic": topic, "subscription": "sub-a"},
+	})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if validation.Before["backlog"] != int64(123) {
+		t.Fatalf("expected backlog snapshot, got %#v", validation.Before)
+	}
+	if !containsText(validation.Impacts, "当前 backlog: 123") {
+		t.Fatalf("expected backlog impact, got %#v", validation.Impacts)
+	}
+	if !containsText(validation.Warnings, "在线消费者") {
+		t.Fatalf("expected online consumer warning, got %#v", validation.Warnings)
+	}
+}
+
+func containsText(items []string, want string) bool {
+	for _, item := range items {
+		if strings.Contains(item, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestValidateRabbitMQQueueImmutableChangeRejected(t *testing.T) {

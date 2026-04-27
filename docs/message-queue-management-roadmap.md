@@ -42,7 +42,7 @@
 7. 前端 `资源管理` Tab 新增“资源操作”入口，按实例类型提供操作模板，支持先校验影响再确认执行，并刷新操作审计。
 
 ## 三期落地状态
-截至 2026-04-27，已开始落地三期“高风险操作”能力，默认仍保持关闭，需要配置、菜单权限、对象级高危权限、二次确认和操作原因同时满足后才允许执行。
+截至 2026-04-27，已落地三期“高风险操作”能力，默认仍保持关闭，需要配置、菜单权限、对象级高危权限、二次确认、资源名输入确认和操作原因同时满足后才允许执行。
 
 1. 新增系统配置：
    - `messageQueueHighRiskEnabled`：MQ 高危操作总开关，默认 `false`。
@@ -51,6 +51,7 @@
    - 低/中风险资源操作沿用 `messagequeue:resource:manage` 和对象级 `RESOURCE_MANAGE`。
    - 高风险/严重风险操作额外要求 `messagequeue:operation:high-risk` 菜单权限和对象级 `HIGH_RISK`。
    - 高危操作必须传入 `confirmed=true`，并在原因必填配置开启时填写 `reason`。
+   - 高危操作必须传入 `confirmText`，后端校验 `confirmText == resourceName`。
 3. RabbitMQ 已支持：
    - `rabbitmq_queue_purge`：清空 queue。
    - `rabbitmq_queue_delete`：删除 queue。
@@ -61,9 +62,12 @@
    - `pulsar_topic_delete`：删除 topic。
    - `pulsar_subscription_skip`：跳过 subscription 全部积压消息。
    - `pulsar_subscription_reset`：按时间戳重置 subscription cursor。
-6. 高危操作执行成功后会自动触发元数据刷新，刷新状态写入本次操作结果；刷新失败不会回滚已提交的 MQ 操作，但会写入操作审计消息。
-7. 前端 `资源操作` 弹窗增加高危模板，权限不足时禁用高危选项；高危执行前会展示风险、影响范围、警告和二次确认。
-8. 集成测试已覆盖 RabbitMQ purge/delete、Kafka delete topic、Pulsar delete topic。
+6. 高危操作执行前会记录 before snapshot、diff、warnings 和 impact summary，执行后会尽量记录刷新后的 after snapshot。
+7. 高危操作执行成功后会自动触发元数据刷新，刷新状态写入本次操作结果；刷新失败不会回滚已提交的 MQ 操作，但会写入操作审计消息并标记为 `partial_success`。
+8. RabbitMQ 删除 exchange 前会检查 binding；存在 binding 时默认拒绝，必须显式传入 `force=true`。
+9. Pulsar subscription skip/reset 会在 validate 阶段展示当前 backlog、lag、消费者数和在线消费者风险提示。
+10. 前端 `资源操作` 弹窗增加高危模板，权限不足时禁用高危选项；高危执行前会展示风险、影响范围、警告、diff、二次确认和资源名输入确认。
+11. 集成测试已覆盖 RabbitMQ purge/delete、Kafka delete topic、Pulsar delete topic；单元测试覆盖高危配置、资源名确认、RabbitMQ binding 保护和 Pulsar backlog 影响提示。
 
 ## 生产化优化补充清单
 以下内容为结合当前一二三期落地状态、现有代码结构和后续四期目标整理出的优化项。除上文“落地状态”明确说明的能力外，本节均表示后续建议，不代表当前已全部实现。

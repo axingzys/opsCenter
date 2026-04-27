@@ -224,6 +224,25 @@ func (r *consumerGroupRepo) List(ctx context.Context, instanceID uint, req *mqbi
 	return items, total, nil
 }
 
+func (r *consumerGroupRepo) GetByUnique(ctx context.Context, instanceID uint, namespace, resourceName, groupName string) (*mqbiz.MQConsumerGroup, error) {
+	var item mqbiz.MQConsumerGroup
+	query := r.db.WithContext(ctx).Where("instance_id = ? AND group_name = ?", instanceID, groupName)
+	if namespace != "" {
+		query = query.Where("namespace = ?", namespace)
+	}
+	if resourceName != "" {
+		query = query.Where("resource_name = ?", resourceName)
+	}
+	err := query.Order("id DESC").First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 func (r *consumerGroupRepo) Summary(ctx context.Context, instanceID uint) (*mqbiz.ConsumerGroupSummary, error) {
 	var row mqbiz.ConsumerGroupSummary
 	err := r.db.WithContext(ctx).Model(&mqbiz.MQConsumerGroup{}).

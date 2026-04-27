@@ -41,6 +41,7 @@ type BindingRepo interface {
 
 type ConsumerGroupRepo interface {
 	List(ctx context.Context, instanceID uint, req *ConsumerGroupListRequest) ([]*MQConsumerGroup, int64, error)
+	GetByUnique(ctx context.Context, instanceID uint, namespace, resourceName, groupName string) (*MQConsumerGroup, error)
 	Summary(ctx context.Context, instanceID uint) (*ConsumerGroupSummary, error)
 }
 

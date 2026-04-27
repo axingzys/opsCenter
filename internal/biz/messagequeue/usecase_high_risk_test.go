@@ -58,12 +58,15 @@ func TestExecuteHighRiskOperationConfigGate(t *testing.T) {
 		name      string
 		config    *HighRiskOperationConfig
 		reason    string
+		confirm   string
 		wantErr   string
 		wantApply bool
 	}{
 		{name: "disabled", config: &HighRiskOperationConfig{Enabled: false, ReasonRequired: true}, reason: "change window", wantErr: "未开启"},
 		{name: "reason required", config: &HighRiskOperationConfig{Enabled: true, ReasonRequired: true}, wantErr: "原因不能为空"},
-		{name: "allowed", config: &HighRiskOperationConfig{Enabled: true, ReasonRequired: true}, reason: "change window", wantApply: true},
+		{name: "confirm text required", config: &HighRiskOperationConfig{Enabled: true, ReasonRequired: true}, reason: "change window", wantErr: "资源名确认"},
+		{name: "confirm text mismatch", config: &HighRiskOperationConfig{Enabled: true, ReasonRequired: true}, reason: "change window", confirm: "wrong", wantErr: "确认不一致"},
+		{name: "allowed", config: &HighRiskOperationConfig{Enabled: true, ReasonRequired: true}, reason: "change window", confirm: "orders", wantApply: true},
 	}
 
 	for _, tt := range tests {
@@ -83,6 +86,7 @@ func TestExecuteHighRiskOperationConfigGate(t *testing.T) {
 				Action:       OperationActionRabbitMQQueueDelete,
 				ResourceName: "orders",
 				Reason:       tt.reason,
+				ConfirmText:  tt.confirm,
 				Confirmed:    true,
 			}, Operator{ID: 1, Username: "admin"})
 			if tt.wantErr != "" {

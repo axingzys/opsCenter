@@ -461,6 +461,7 @@ func (a *RabbitMQAdapter) validateExchangeDelete(instance *MQInstance, req *Reso
 		"vhost":    vhost,
 		"exchange": name,
 		"ifUnused": operationBoolParam(req.Params, false, "ifUnused", "if_unused"),
+		"force":    operationBoolParam(req.Params, false, "force"),
 	}
 	req.ResourceType = ResourceTypeExchange
 	req.Namespace = vhost
@@ -471,7 +472,7 @@ func (a *RabbitMQAdapter) validateExchangeDelete(instance *MQInstance, req *Reso
 	validation.ResourceName = name
 	validation.Message = "将删除 RabbitMQ Exchange"
 	validation.Impacts = []string{"目标 vhost: " + vhost, "Exchange: " + name, "Exchange 删除后相关路由会失效"}
-	validation.Warnings = []string{"删除 Exchange 会影响后续消息路由，请确认没有生产者继续写入"}
+	validation.Warnings = []string{"删除 Exchange 会影响后续消息路由，请确认没有生产者继续写入；存在 binding 时必须显式 force=true"}
 	setNormalizedParams(req, validation, params)
 	return validation, nil
 }

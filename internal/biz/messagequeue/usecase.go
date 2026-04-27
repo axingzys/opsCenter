@@ -535,6 +535,9 @@ func (uc *UseCase) ExecuteResourceOperation(ctx context.Context, instanceID uint
 		if cfg.ReasonRequired && strings.TrimSpace(req.Reason) == "" {
 			return nil, fmt.Errorf("高风险操作原因不能为空")
 		}
+		if err := validateHighRiskConfirmText(req, validation); err != nil {
+			return nil, err
+		}
 	}
 	if result, ok, err := uc.idempotentResourceOperationResult(ctx, instance, validation, req); err != nil {
 		return nil, err
@@ -587,7 +590,9 @@ func (uc *UseCase) ExecuteResourceOperation(ctx context.Context, instanceID uint
 	if audit != nil {
 		audit.MetadataRefreshStatus = metadataRefreshStatus
 		audit.MetadataRefreshError = trimText(metadataRefreshError, 500)
-		if len(validation.After) > 0 {
+		if snapshot, snapErr := uc.afterOperationSnapshot(ctx, instance.ID, validation, resourceType, namespace, resourceName); snapErr == nil && len(snapshot) > 0 {
+			audit.AfterSnapshotJSON = mustJSON(snapshot)
+		} else if len(validation.After) > 0 {
 			audit.AfterSnapshotJSON = mustJSON(validation.After)
 		}
 	}
@@ -790,11 +795,21 @@ func (uc *UseCase) enrichResourceOperationPlan(ctx context.Context, instance *MQ
 	if resource != nil {
 		validation.Before = resourceSnapshot(resource)
 	}
+	if validation.ResourceType == ResourceTypeSubscription {
+		consumerGroup, err := uc.lookupOperationConsumerGroup(ctx, instance.ID, validation)
+		if err != nil {
+			return err
+		}
+		if consumerGroup != nil {
+			validation.Before = consumerGroupSnapshot(consumerGroup)
+		}
+	}
 	validation.After = operationDesiredSnapshot(validation)
 	validation.Diff = buildOperationDiff(validation.Before, validation.After)
 
 	applyRabbitMQImmutableGuards(validation)
 	applyDestructiveConfigRisk(validation)
+	uc.applyHighRiskOperationGuards(ctx, instance, validation, req)
 	return nil
 }
 
@@ -803,6 +818,16 @@ func (uc *UseCase) lookupOperationResource(ctx context.Context, instanceID uint,
 		return nil, nil
 	}
 	return uc.resourceRepo.GetByUnique(ctx, instanceID, validation.ResourceType, validation.Namespace, validation.ResourceName)
+}
+
+func (uc *UseCase) lookupOperationConsumerGroup(ctx context.Context, instanceID uint, validation *ResourceOperationValidationVO) (*MQConsumerGroup, error) {
+	if uc.consumerGroupRepo == nil || validation == nil {
+		return nil, nil
+	}
+	params := cloneParams(validation.NormalizedParams)
+	resourceName := firstNonEmpty(operationStringParam(params, "topic", "topicName", "name"), validation.ResourceName)
+	groupName := firstNonEmpty(operationStringParam(params, "subscription", "subscriptionName", "groupName"), validation.ResourceName)
+	return uc.consumerGroupRepo.GetByUnique(ctx, instanceID, validation.Namespace, resourceName, groupName)
 }
 
 func applyMetadataFreshnessWarning(instance *MQInstance, validation *ResourceOperationValidationVO) {
@@ -843,6 +868,30 @@ func resourceSnapshot(resource *MQResource) map[string]any {
 		"lastSyncAt":     formatTimePtr(resource.LastSyncAt),
 	}
 	return snapshot
+}
+
+func consumerGroupSnapshot(item *MQConsumerGroup) map[string]any {
+	if item == nil {
+		return nil
+	}
+	return map[string]any{
+		"id":                  item.ID,
+		"resourceType":        ResourceTypeSubscription,
+		"namespace":           item.Namespace,
+		"name":                item.GroupName,
+		"groupName":           item.GroupName,
+		"resourceName":        item.ResourceName,
+		"state":               item.State,
+		"consumerCount":       item.ConsumerCount,
+		"activeConsumerCount": item.ActiveConsumerCount,
+		"currentOffset":       item.CurrentOffset,
+		"endOffset":           item.EndOffset,
+		"lag":                 item.Lag,
+		"backlog":             item.Backlog,
+		"lastConsumedAt":      formatTimePtr(item.LastConsumedAt),
+		"lastSyncAt":          formatTimePtr(item.LastSyncAt),
+		"metadata":            parseJSONMap(item.MetadataJSON),
+	}
 }
 
 func operationDesiredSnapshot(validation *ResourceOperationValidationVO) map[string]any {
@@ -888,10 +937,146 @@ func operationDesiredSnapshot(validation *ResourceOperationValidationVO) map[str
 		snapshot["config"] = map[string]any{
 			"messageTTLInSeconds": operationIntParam(params, 0, "messageTTLInSeconds", "ttlSeconds"),
 		}
+	case OperationActionPulsarSubscriptionSkip:
+		snapshot["topic"] = operationStringParam(params, "topic", "topicName", "name")
+		snapshot["subscription"] = operationStringParam(params, "subscription", "subscriptionName", "groupName")
+		snapshot["backlog"] = 0
+		snapshot["lag"] = 0
+	case OperationActionPulsarSubscriptionReset:
+		snapshot["topic"] = operationStringParam(params, "topic", "topicName", "name")
+		snapshot["subscription"] = operationStringParam(params, "subscription", "subscriptionName", "groupName")
+		snapshot["targetTimestampMs"] = operationIntParam(params, 0, "timestampMs", "timestamp")
 	default:
 		snapshot["params"] = params
 	}
 	return snapshot
+}
+
+func (uc *UseCase) applyHighRiskOperationGuards(ctx context.Context, instance *MQInstance, validation *ResourceOperationValidationVO, req *ResourceOperationRequest) {
+	if uc == nil || instance == nil || validation == nil || req == nil {
+		return
+	}
+	switch validation.Action {
+	case OperationActionRabbitMQExchangeDelete:
+		bindingCount, err := uc.countRabbitMQExchangeBindings(ctx, instance.ID, validation.Namespace, validation.ResourceName)
+		if err != nil {
+			validation.Warnings = appendUniqueString(validation.Warnings, "检查 Exchange 绑定关系失败: "+err.Error())
+			return
+		}
+		if bindingCount <= 0 {
+			return
+		}
+		impact := fmt.Sprintf("该 Exchange 当前存在 %d 条 binding，删除后相关消息路由会失效", bindingCount)
+		validation.Impacts = appendUniqueString(validation.Impacts, impact)
+		validation.Warnings = appendUniqueString(validation.Warnings, impact)
+		if !operationBoolParam(req.Params, false, "force") {
+			markOperationUnsupported(validation, "Exchange 存在 binding，需在参数中显式设置 force=true 后才允许删除")
+		}
+	case OperationActionPulsarSubscriptionSkip, OperationActionPulsarSubscriptionReset:
+		if len(validation.Before) == 0 {
+			return
+		}
+		backlog := int64Value(validation.Before["backlog"])
+		consumerCount := intValue(validation.Before["consumerCount"])
+		activeConsumerCount := intValue(validation.Before["activeConsumerCount"])
+		validation.Impacts = appendUniqueString(validation.Impacts, fmt.Sprintf("当前 backlog: %d", backlog))
+		validation.Impacts = appendUniqueString(validation.Impacts, fmt.Sprintf("当前消费者数: %d，活跃消费者数: %d", consumerCount, activeConsumerCount))
+		if activeConsumerCount > 0 {
+			validation.Warnings = appendUniqueString(validation.Warnings, "当前 subscription 存在在线消费者，reset/skip 后可能立即影响消费结果")
+		}
+	}
+}
+
+func (uc *UseCase) countRabbitMQExchangeBindings(ctx context.Context, instanceID uint, vhost, exchange string) (int, error) {
+	if uc.bindingRepo == nil {
+		return 0, nil
+	}
+	bindings, err := uc.bindingRepo.ListByInstanceID(ctx, instanceID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, binding := range bindings {
+		if binding == nil {
+			continue
+		}
+		if vhost != "" && binding.VHost != vhost {
+			continue
+		}
+		if binding.Source == exchange || (binding.DestinationType == ResourceTypeExchange && binding.Destination == exchange) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func validateHighRiskConfirmText(req *ResourceOperationRequest, validation *ResourceOperationValidationVO) error {
+	if req == nil || validation == nil {
+		return nil
+	}
+	expected := strings.TrimSpace(validation.ResourceName)
+	actual := strings.TrimSpace(req.ConfirmText)
+	if expected == "" {
+		return nil
+	}
+	if actual == "" {
+		return fmt.Errorf("高风险操作必须输入资源名确认")
+	}
+	if actual != expected {
+		return fmt.Errorf("高风险操作资源名确认不一致")
+	}
+	return nil
+}
+
+func (uc *UseCase) afterOperationSnapshot(ctx context.Context, instanceID uint, validation *ResourceOperationValidationVO, resourceType, namespace, resourceName string) (map[string]any, error) {
+	if validation == nil {
+		return nil, nil
+	}
+	if validation.ResourceType == ResourceTypeSubscription {
+		consumerGroup, err := uc.lookupOperationConsumerGroup(ctx, instanceID, validation)
+		if err != nil {
+			return nil, err
+		}
+		if consumerGroup != nil {
+			return consumerGroupSnapshot(consumerGroup), nil
+		}
+		return map[string]any{
+			"resourceType": ResourceTypeSubscription,
+			"namespace":    validation.Namespace,
+			"name":         validation.ResourceName,
+			"action":       validation.Action,
+			"exists":       false,
+		}, nil
+	}
+	if uc.resourceRepo != nil && resourceType != "" && resourceName != "" {
+		resource, err := uc.resourceRepo.GetByUnique(ctx, instanceID, resourceType, namespace, resourceName)
+		if err != nil {
+			return nil, err
+		}
+		if resource != nil {
+			return resourceSnapshot(resource), nil
+		}
+	}
+	if operationDeletesResource(validation.Action) {
+		return map[string]any{
+			"resourceType": resourceType,
+			"namespace":    namespace,
+			"name":         resourceName,
+			"action":       validation.Action,
+			"exists":       false,
+			"deleted":      true,
+		}, nil
+	}
+	return validation.After, nil
+}
+
+func operationDeletesResource(action string) bool {
+	switch action {
+	case OperationActionRabbitMQQueueDelete, OperationActionRabbitMQExchangeDelete, OperationActionKafkaTopicDelete, OperationActionPulsarTopicDelete:
+		return true
+	default:
+		return false
+	}
 }
 
 func buildOperationDiff(before, after map[string]any) []OperationDiffItem {

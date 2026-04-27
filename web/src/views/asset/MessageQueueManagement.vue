@@ -632,7 +632,7 @@ const operationTemplateMap: Record<string, OperationTemplate[]> = {
     { label: '创建 Binding', value: 'rabbitmq_binding_upsert', resourceType: 'binding', params: { source: 'amq.direct', destinationType: 'queue', routingKey: '', arguments: {} } },
     { label: '清空 Queue', value: 'rabbitmq_queue_purge', resourceType: 'queue', highRisk: true, params: {} },
     { label: '删除 Queue', value: 'rabbitmq_queue_delete', resourceType: 'queue', highRisk: true, params: { ifUnused: false, ifEmpty: false } },
-    { label: '删除 Exchange', value: 'rabbitmq_exchange_delete', resourceType: 'exchange', highRisk: true, params: { ifUnused: false } }
+    { label: '删除 Exchange', value: 'rabbitmq_exchange_delete', resourceType: 'exchange', highRisk: true, params: { ifUnused: false, force: false } }
   ],
   kafka: [
     { label: '创建 Topic', value: 'kafka_topic_create', resourceType: 'topic', params: { partitions: 1, replicationFactor: 1, configs: {} } },
