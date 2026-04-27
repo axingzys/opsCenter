@@ -74,7 +74,7 @@ func TestExecuteHighRiskOperationConfigGate(t *testing.T) {
 			adapter := &highRiskStubAdapter{}
 			uc := NewUseCase(
 				highRiskInstanceRepo{item: &MQInstance{Model: gorm.Model{ID: 1}, Name: "rabbit", MQType: MQTypeRabbitMQ, Status: InstanceStatusEnabled}},
-				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+				nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 				nil,
 				nil,
 				func(ctx context.Context) (*HighRiskOperationConfig, error) {

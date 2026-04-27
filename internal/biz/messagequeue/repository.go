@@ -59,6 +59,12 @@ type SyncJobRepo interface {
 	Update(ctx context.Context, item *MQSyncJob) error
 }
 
+type MetricSnapshotRepo interface {
+	Create(ctx context.Context, item *MQMetricSnapshot) error
+	List(ctx context.Context, instanceID uint, req *MetricSnapshotListRequest) ([]*MQMetricSnapshot, int64, error)
+	Latest(ctx context.Context, instanceID uint) (*MQMetricSnapshot, error)
+}
+
 type OperationAuditRepo interface {
 	Create(ctx context.Context, item *MQOperationAudit) error
 	Update(ctx context.Context, item *MQOperationAudit) error
@@ -72,11 +78,14 @@ type MessageAuditRepo interface {
 }
 
 type ResourceSummary struct {
-	Count        int64
-	MessageCount int64
-	Backlog      int64
-	ProducedRate float64
-	ConsumedRate float64
+	Count                   int64
+	MessageCount            int64
+	Backlog                 int64
+	ProducedRate            float64
+	ConsumedRate            float64
+	NoConsumerResourceCount int64
+	DLQResourceCount        int64
+	RetryResourceCount      int64
 }
 
 type ConsumerGroupSummary struct {

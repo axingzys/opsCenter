@@ -43,6 +43,8 @@ const (
 	AuditActionConnectionTest = "connection_test"
 	AuditActionMetadataSync   = "metadata_sync"
 	AuditActionMessageSample  = "message_sample"
+	AuditActionMetricSnapshot = "metric_snapshot_collect"
+	AuditActionInspectionRun  = "inspection_run"
 	AuditActionPermissionSet  = "instance_permission_upsert"
 	AuditActionPermissionDel  = "instance_permission_delete"
 
@@ -421,6 +423,15 @@ type AuditListRequest struct {
 	EndTime    string `form:"endTime"`
 }
 
+type MetricSnapshotListRequest struct {
+	Page         int    `form:"page"`
+	PageSize     int    `form:"pageSize"`
+	ResourceType string `form:"resourceType"`
+	ResourceName string `form:"resourceName"`
+	StartTime    string `form:"startTime"`
+	EndTime      string `form:"endTime"`
+}
+
 type InstancePermissionListRequest struct {
 	Page       int    `form:"page"`
 	PageSize   int    `form:"pageSize"`
@@ -547,6 +558,9 @@ type OverviewVO struct {
 	InstanceName        string        `json:"instanceName"`
 	MQType              string        `json:"mqType"`
 	HealthStatus        string        `json:"healthStatus"`
+	HealthText          string        `json:"healthText"`
+	HealthReasons       []string      `json:"healthReasons"`
+	AnomalyTags         []string      `json:"anomalyTags"`
 	BrokerCount         int64         `json:"brokerCount"`
 	OnlineBrokerCount   int64         `json:"onlineBrokerCount"`
 	ResourceCount       int64         `json:"resourceCount"`
@@ -557,8 +571,77 @@ type OverviewVO struct {
 	Lag                 int64         `json:"lag"`
 	ProducedRate        float64       `json:"producedRate"`
 	ConsumedRate        float64       `json:"consumedRate"`
+	NoConsumerResources int64         `json:"noConsumerResources"`
+	DLQResources        int64         `json:"dlqResources"`
+	RetryResources      int64         `json:"retryResources"`
 	TopBacklogResources []*ResourceVO `json:"topBacklogResources"`
 	LastSyncAt          string        `json:"lastSyncAt,omitempty"`
+	LastMetricAt        string        `json:"lastMetricAt,omitempty"`
+}
+
+type MetricSnapshotVO struct {
+	ID                uint    `json:"id"`
+	InstanceID        uint    `json:"instanceId"`
+	ResourceID        uint    `json:"resourceId"`
+	ResourceType      string  `json:"resourceType"`
+	ResourceName      string  `json:"resourceName"`
+	BrokerCount       int     `json:"brokerCount"`
+	OnlineBrokerCount int     `json:"onlineBrokerCount"`
+	MessageCount      int64   `json:"messageCount"`
+	Backlog           int64   `json:"backlog"`
+	Lag               int64   `json:"lag"`
+	ProducedRate      float64 `json:"producedRate"`
+	ConsumedRate      float64 `json:"consumedRate"`
+	ConsumerCount     int     `json:"consumerCount"`
+	CollectedAt       string  `json:"collectedAt"`
+}
+
+type MetricCollectResultVO struct {
+	InstanceID    uint              `json:"instanceId"`
+	InstanceName  string            `json:"instanceName"`
+	MQType        string            `json:"mqType"`
+	HealthStatus  string            `json:"healthStatus"`
+	HealthText    string            `json:"healthText"`
+	HealthReasons []string          `json:"healthReasons"`
+	AnomalyTags   []string          `json:"anomalyTags"`
+	Snapshot      *MetricSnapshotVO `json:"snapshot"`
+	Message       string            `json:"message"`
+	CollectedAt   string            `json:"collectedAt"`
+}
+
+type InspectionMetricVO struct {
+	Name   string `json:"name"`
+	Value  any    `json:"value"`
+	Status string `json:"status"`
+}
+
+type InspectionSectionVO struct {
+	Key     string                `json:"key"`
+	Title   string                `json:"title"`
+	Status  string                `json:"status"`
+	Summary string                `json:"summary"`
+	Metrics []*InspectionMetricVO `json:"metrics"`
+}
+
+type InspectionFindingVO struct {
+	Severity     string `json:"severity"`
+	Category     string `json:"category"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	ResourceType string `json:"resourceType"`
+	ResourceName string `json:"resourceName"`
+}
+
+type InspectionReportVO struct {
+	InstanceID   uint                   `json:"instanceId"`
+	InstanceName string                 `json:"instanceName"`
+	MQType       string                 `json:"mqType"`
+	Score        int                    `json:"score"`
+	RiskLevel    string                 `json:"riskLevel"`
+	Summary      string                 `json:"summary"`
+	Sections     []*InspectionSectionVO `json:"sections"`
+	Findings     []*InspectionFindingVO `json:"findings"`
+	GeneratedAt  string                 `json:"generatedAt"`
 }
 
 type BrokerVO struct {

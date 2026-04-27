@@ -84,6 +84,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	partitionRepo := mqdata.NewPartitionRepo(db)
 	metadataRepo := mqdata.NewMetadataRepo(db)
 	syncJobRepo := mqdata.NewSyncJobRepo(db)
+	metricSnapshotRepo := mqdata.NewMetricSnapshotRepo(db)
 	operationAuditRepo := mqdata.NewOperationAuditRepo(db)
 	messageAuditRepo := mqdata.NewMessageAuditRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
@@ -99,6 +100,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		partitionRepo,
 		metadataRepo,
 		syncJobRepo,
+		metricSnapshotRepo,
 		operationAuditRepo,
 		messageAuditRepo,
 		func(ctx context.Context, id uint) error {
@@ -202,6 +204,9 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.POST("/:id/test", s.authMiddleware.RequireMenuPermission(permMQConnectionTest), s.service.TestInstance)
 			instances.POST("/:id/sync-metadata", s.authMiddleware.RequireMenuPermission(permMQMetadataSync), s.service.SyncMetadata)
 			instances.GET("/:id/overview", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetOverview)
+			instances.POST("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.CollectMetricSnapshot)
+			instances.GET("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListMetricSnapshots)
+			instances.POST("/:id/inspection-reports", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GenerateInspectionReport)
 			instances.GET("/:id/brokers", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListBrokers)
 			instances.GET("/:id/resources", s.authMiddleware.RequireMenuPermission(permMQMetadataView), s.service.ListResources)
 			instances.GET("/:id/bindings", s.authMiddleware.RequireMenuPermission(permMQMetadataView), s.service.ListBindings)

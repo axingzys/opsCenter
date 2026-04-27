@@ -201,13 +201,67 @@
 
       <el-tab-pane label="消费诊断" name="diagnosis">
         <div class="workspace-toolbar">
-          <el-select v-model="selectedInstanceId" placeholder="选择实例" filterable class="instance-select" @change="loadDiagnosis">
+          <el-select v-model="selectedInstanceId" placeholder="选择实例" filterable class="instance-select" @change="handleDiagnosisInstanceChange">
             <el-option v-for="item in diagnosableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
           </el-select>
           <el-input v-model="consumerQuery.keyword" placeholder="搜索消费组、订阅或资源..." clearable class="search-input" @keyup.enter="loadConsumerGroups" @clear="loadConsumerGroups">
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
           <el-checkbox v-model="consumerHasLag" @change="loadConsumerGroups">仅看Lag</el-checkbox>
+          <el-button :loading="metricCollecting" :disabled="!selectedInstanceId || !uiPermissions.diagnosisView" @click="handleCollectMetrics">
+            <el-icon style="margin-right: 6px;"><DataBoard /></el-icon>
+            采集指标
+          </el-button>
+          <el-button type="primary" :loading="inspectionLoading" :disabled="!selectedInstanceId || !uiPermissions.diagnosisView" @click="handleGenerateInspection">
+            <el-icon style="margin-right: 6px;"><View /></el-icon>
+            生成巡检
+          </el-button>
+        </div>
+
+        <div v-if="overview" class="diagnosis-summary">
+          <div class="summary-tags">
+            <el-tag :type="healthTag(overview.healthStatus)">{{ overview.healthText || overview.healthStatus || '未知' }}</el-tag>
+            <el-tag v-for="item in overview.anomalyTags || []" :key="item" type="warning">{{ item }}</el-tag>
+            <span class="summary-time">最近指标：{{ overview.lastMetricAt || '-' }}</span>
+          </div>
+          <div v-if="overview.healthReasons?.length" class="health-reasons">
+            <span v-for="item in overview.healthReasons" :key="item">{{ item }}</span>
+          </div>
+        </div>
+
+        <div v-if="inspectionReport" class="inspection-panel">
+          <div class="inspection-head">
+            <div>
+              <div class="panel-title">巡检结果</div>
+              <div class="inspection-summary">{{ inspectionReport.summary }}</div>
+            </div>
+            <div class="score-box" :class="inspectionReport.riskLevel">
+              <strong>{{ inspectionReport.score }}</strong>
+              <span>{{ inspectionReport.generatedAt }}</span>
+            </div>
+          </div>
+          <div class="inspection-sections">
+            <div v-for="section in inspectionReport.sections || []" :key="section.key" class="inspection-section">
+              <div class="section-title">
+                <span>{{ section.title }}</span>
+                <el-tag size="small" :type="severityTag(section.status)">{{ sectionStatusText(section.status) }}</el-tag>
+              </div>
+              <div class="section-summary">{{ section.summary }}</div>
+              <div class="section-metrics">
+                <span v-for="metric in section.metrics || []" :key="metric.name">
+                  {{ metric.name }}：{{ formatDiffValue(metric.value) }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <el-table v-if="inspectionReport.findings?.length" :data="inspectionReport.findings" size="small" class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="级别" width="90">
+              <template #default="{ row }"><el-tag :type="severityTag(row.severity)">{{ sectionStatusText(row.severity) }}</el-tag></template>
+            </el-table-column>
+            <el-table-column prop="title" label="问题" min-width="160" />
+            <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
+            <el-table-column prop="category" label="分类" width="110" />
+          </el-table>
         </div>
 
         <div class="split-layout">
@@ -486,12 +540,14 @@ import { getCredentials } from '@/api/host'
 import { getAllRoles } from '@/api/role'
 import {
   MQ_PERMISSION,
+  collectMQMetricSnapshot,
   createMQInstance,
   deleteMQInstance,
   deleteMQInstancePermission,
   disableMQInstance,
   enableMQInstance,
   executeMQResourceOperation,
+  generateMQInspectionReport,
   getMQOverview,
   getMQSupportedTypes,
   getMQUIPermissions,
@@ -555,6 +611,9 @@ const consumerGroups = ref<any[]>([])
 const partitions = ref<any[]>([])
 const consumerLoading = ref(false)
 const partitionLoading = ref(false)
+const metricCollecting = ref(false)
+const inspectionLoading = ref(false)
+const inspectionReport = ref<any>(null)
 const consumerHasLag = ref(false)
 const consumerQuery = reactive({ page: 1, pageSize: 20, keyword: '', resourceName: '', namespace: '' })
 
@@ -750,9 +809,39 @@ const loadDiagnosis = async () => {
   await Promise.all([loadOverview(), loadConsumerGroups(), loadPartitions()])
 }
 
+const handleDiagnosisInstanceChange = async () => {
+  inspectionReport.value = null
+  consumerQuery.page = 1
+  await loadDiagnosis()
+}
+
 const handleResourceInstanceChange = async () => {
   resourceQuery.page = 1
   await Promise.all([loadOverview(), loadResources()])
+}
+
+const handleCollectMetrics = async () => {
+  if (!selectedInstanceId.value) return
+  metricCollecting.value = true
+  try {
+    const res = await collectMQMetricSnapshot(selectedInstanceId.value)
+    ElMessage.success(res.message || '指标采集完成')
+    await Promise.all([loadOverview(), loadInstances(), loadAudits()])
+  } finally {
+    metricCollecting.value = false
+  }
+}
+
+const handleGenerateInspection = async () => {
+  if (!selectedInstanceId.value) return
+  inspectionLoading.value = true
+  try {
+    inspectionReport.value = await generateMQInspectionReport(selectedInstanceId.value)
+    ElMessage.success('巡检完成')
+    await loadAudits()
+  } finally {
+    inspectionLoading.value = false
+  }
 }
 
 const loadAudits = async () => {
@@ -1080,6 +1169,8 @@ const formatRate = (value: number) => Number(value || 0).toFixed(2)
 const isHighRisk = (riskLevel: string) => ['high', 'critical'].includes(String(riskLevel || '').toLowerCase())
 const riskTag = (riskLevel: string) => riskLevel === 'critical' ? 'danger' : riskLevel === 'high' ? 'danger' : riskLevel === 'medium' ? 'warning' : 'info'
 const riskText = (riskLevel: string) => ({ low: '低风险', medium: '中风险', high: '高风险', critical: '严重风险' } as Record<string, string>)[riskLevel] || riskLevel || '-'
+const severityTag = (status: string) => ['critical', 'danger', 'failed'].includes(String(status || '').toLowerCase()) ? 'danger' : status === 'warning' ? 'warning' : status === 'info' ? 'info' : 'success'
+const sectionStatusText = (status: string) => ({ success: '正常', healthy: '健康', warning: '警告', critical: '异常', info: '提示' } as Record<string, string>)[status] || status || '-'
 const formatDiffValue = (value: any) => {
   if (value === undefined || value === null || value === '') return '-'
   if (typeof value === 'object') return JSON.stringify(value)
@@ -1270,6 +1361,113 @@ onMounted(async () => {
   gap: 16px;
 }
 
+.diagnosis-summary,
+.inspection-panel {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.summary-tags,
+.health-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.summary-time {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.health-reasons {
+  margin-top: 10px;
+}
+
+.health-reasons span {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+}
+
+.inspection-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.inspection-summary {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.score-box {
+  min-width: 140px;
+  text-align: right;
+}
+
+.score-box strong {
+  display: block;
+  color: #111827;
+  font-size: 32px;
+  line-height: 1;
+}
+
+.score-box span {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.score-box.warning strong {
+  color: #d97706;
+}
+
+.score-box.critical strong {
+  color: #dc2626;
+}
+
+.inspection-sections {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.inspection-section {
+  padding: 12px;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.section-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.section-summary,
+.section-metrics {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.section-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
 .panel {
   padding: 16px;
 }
@@ -1389,7 +1587,8 @@ onMounted(async () => {
 
   .split-layout,
   .message-sampler,
-  .metric-grid {
+  .metric-grid,
+  .inspection-sections {
     grid-template-columns: 1fr;
   }
 

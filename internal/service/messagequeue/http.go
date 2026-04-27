@@ -525,6 +525,50 @@ func (s *Service) GetOverview(c *gin.Context) {
 	response.Success(c, data)
 }
 
+func (s *Service) CollectMetricSnapshot(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionDiagnose) {
+		return
+	}
+	data, err := s.useCase.CollectMetricSnapshot(c.Request.Context(), id, currentOperator(c))
+	if err != nil {
+		writeError(c, "采集失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) ListMetricSnapshots(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionDiagnose) {
+		return
+	}
+	var req mqbiz.MetricSnapshotListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListMetricSnapshots(c.Request.Context(), id, &req)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) GenerateInspectionReport(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionDiagnose) {
+		return
+	}
+	data, err := s.useCase.GenerateInspectionReport(c.Request.Context(), id, currentOperator(c))
+	if err != nil {
+		writeError(c, "巡检失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 func (s *Service) SampleMessages(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionMessageRead) {

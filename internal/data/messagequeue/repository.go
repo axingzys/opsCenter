@@ -165,7 +165,14 @@ func (r *resourceRepo) TopBacklog(ctx context.Context, instanceID uint, limit in
 func (r *resourceRepo) Summary(ctx context.Context, instanceID uint) (*mqbiz.ResourceSummary, error) {
 	var row mqbiz.ResourceSummary
 	err := r.db.WithContext(ctx).Model(&mqbiz.MQResource{}).
-		Select("COUNT(*) AS count, COALESCE(SUM(message_count),0) AS message_count, COALESCE(SUM(backlog),0) AS backlog, COALESCE(SUM(produced_rate),0) AS produced_rate, COALESCE(SUM(consumed_rate),0) AS consumed_rate").
+		Select(`COUNT(*) AS count,
+			COALESCE(SUM(message_count),0) AS message_count,
+			COALESCE(SUM(backlog),0) AS backlog,
+			COALESCE(SUM(produced_rate),0) AS produced_rate,
+			COALESCE(SUM(consumed_rate),0) AS consumed_rate,
+			COALESCE(SUM(CASE WHEN resource_type IN ('queue','topic') AND consumer_count = 0 THEN 1 ELSE 0 END),0) AS no_consumer_resource_count,
+			COALESCE(SUM(CASE WHEN LOWER(name) LIKE '%dlq%' OR LOWER(name) LIKE '%dead%' OR LOWER(name) LIKE '%dead-letter%' OR LOWER(name) LIKE '%dead_letter%' THEN 1 ELSE 0 END),0) AS dlq_resource_count,
+			COALESCE(SUM(CASE WHEN LOWER(name) LIKE '%retry%' OR LOWER(name) LIKE '%reconsume%' THEN 1 ELSE 0 END),0) AS retry_resource_count`).
 		Where("instance_id = ?", instanceID).
 		Scan(&row).Error
 	return &row, err
@@ -358,6 +365,63 @@ func (r *syncJobRepo) Update(ctx context.Context, item *mqbiz.MQSyncJob) error {
 	return r.db.WithContext(ctx).Save(item).Error
 }
 
+type metricSnapshotRepo struct {
+	db *gorm.DB
+}
+
+func NewMetricSnapshotRepo(db *gorm.DB) mqbiz.MetricSnapshotRepo {
+	return &metricSnapshotRepo{db: db}
+}
+
+func (r *metricSnapshotRepo) Create(ctx context.Context, item *mqbiz.MQMetricSnapshot) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *metricSnapshotRepo) List(ctx context.Context, instanceID uint, req *mqbiz.MetricSnapshotListRequest) ([]*mqbiz.MQMetricSnapshot, int64, error) {
+	var (
+		items []*mqbiz.MQMetricSnapshot
+		total int64
+	)
+	query := r.db.WithContext(ctx).Where("instance_id = ?", instanceID).Model(&mqbiz.MQMetricSnapshot{})
+	if req != nil {
+		if req.ResourceType != "" {
+			query = query.Where("resource_type = ?", req.ResourceType)
+		}
+		if req.ResourceName != "" {
+			query = query.Where("resource_name = ?", req.ResourceName)
+		}
+		if start, ok := parseTime(req.StartTime); ok {
+			query = query.Where("collected_at >= ?", start)
+		}
+		if end, ok := parseTime(req.EndTime); ok {
+			query = query.Where("collected_at <= ?", end)
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := pageParams(req)
+	if err := query.Order("collected_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (r *metricSnapshotRepo) Latest(ctx context.Context, instanceID uint) (*mqbiz.MQMetricSnapshot, error) {
+	var item mqbiz.MQMetricSnapshot
+	err := r.db.WithContext(ctx).
+		Where("instance_id = ? AND resource_type = ?", instanceID, "instance").
+		Order("collected_at DESC, id DESC").
+		First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 func applyAllowedInstanceFilter(query *gorm.DB, column string, restrict bool, allowedIDs []uint) *gorm.DB {
 	if !restrict {
 		return query
@@ -381,6 +445,8 @@ func pageParams(req any) (int, int) {
 	case *mqbiz.PartitionListRequest:
 		page, pageSize = item.Page, item.PageSize
 	case *mqbiz.AuditListRequest:
+		page, pageSize = item.Page, item.PageSize
+	case *mqbiz.MetricSnapshotListRequest:
 		page, pageSize = item.Page, item.PageSize
 	case *mqbiz.InstancePermissionListRequest:
 		page, pageSize = item.Page, item.PageSize

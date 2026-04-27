@@ -116,6 +116,21 @@ export const syncMQMetadata = (id: number) =>
 export const getMQOverview = (id: number) =>
   request.get(`/api/v1/message-queues/instances/${id}/overview`)
 
+export const collectMQMetricSnapshot = (id: number) =>
+  request.post(`/api/v1/message-queues/instances/${id}/metric-snapshots`)
+
+export const listMQMetricSnapshots = (id: number, params?: {
+  page?: number
+  pageSize?: number
+  resourceType?: string
+  resourceName?: string
+  startTime?: string
+  endTime?: string
+}) => request.get(`/api/v1/message-queues/instances/${id}/metric-snapshots`, { params })
+
+export const generateMQInspectionReport = (id: number) =>
+  request.post(`/api/v1/message-queues/instances/${id}/inspection-reports`)
+
 export const listMQBrokers = (id: number) =>
   request.get(`/api/v1/message-queues/instances/${id}/brokers`)
 

@@ -21,6 +21,7 @@ type UseCase struct {
 	partitionRepo          PartitionRepo
 	metadataRepo           MetadataRepo
 	syncJobRepo            SyncJobRepo
+	metricSnapshotRepo     MetricSnapshotRepo
 	operationAuditRepo     OperationAuditRepo
 	messageAuditRepo       MessageAuditRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
@@ -39,6 +40,7 @@ func NewUseCase(
 	partitionRepo PartitionRepo,
 	metadataRepo MetadataRepo,
 	syncJobRepo SyncJobRepo,
+	metricSnapshotRepo MetricSnapshotRepo,
 	operationAuditRepo OperationAuditRepo,
 	messageAuditRepo MessageAuditRepo,
 	credentialIDExists func(ctx context.Context, id uint) error,
@@ -59,6 +61,7 @@ func NewUseCase(
 		partitionRepo:          partitionRepo,
 		metadataRepo:           metadataRepo,
 		syncJobRepo:            syncJobRepo,
+		metricSnapshotRepo:     metricSnapshotRepo,
 		operationAuditRepo:     operationAuditRepo,
 		messageAuditRepo:       messageAuditRepo,
 		credentialIDExists:     credentialIDExists,
@@ -385,6 +388,134 @@ func (uc *UseCase) ListPartitions(ctx context.Context, instanceID uint, req *Par
 }
 
 func (uc *UseCase) GetOverview(ctx context.Context, instanceID uint) (*OverviewVO, error) {
+	return uc.buildOverview(ctx, instanceID)
+}
+
+func (uc *UseCase) CollectMetricSnapshot(ctx context.Context, instanceID uint, operator Operator) (*MetricCollectResultVO, error) {
+	if uc.metricSnapshotRepo == nil {
+		return nil, fmt.Errorf("MQ指标快照仓库未配置")
+	}
+	overview, err := uc.buildOverview(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	collectedAt := time.Now()
+	snapshot := &MQMetricSnapshot{
+		InstanceID:        overview.InstanceID,
+		ResourceType:      "instance",
+		ResourceName:      overview.InstanceName,
+		BrokerCount:       int(overview.BrokerCount),
+		OnlineBrokerCount: int(overview.OnlineBrokerCount),
+		MessageCount:      overview.MessageCount,
+		Backlog:           overview.Backlog,
+		Lag:               overview.Lag,
+		ProducedRate:      overview.ProducedRate,
+		ConsumedRate:      overview.ConsumedRate,
+		ConsumerCount:     int(overview.ConsumerGroupCount),
+		CollectedAt:       collectedAt,
+	}
+	if err := uc.metricSnapshotRepo.Create(ctx, snapshot); err != nil {
+		return nil, err
+	}
+	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("MQ实例不存在")
+	}
+	instance.LastMetricAt = &collectedAt
+	overview.LastMetricAt = formatTimePtr(instance.LastMetricAt)
+	overview.HealthStatus, overview.HealthReasons, overview.AnomalyTags = evaluateMQHealth(
+		instance,
+		int64(snapshot.BrokerCount),
+		int64(snapshot.OnlineBrokerCount),
+		&ResourceSummary{
+			Count:                   overview.ResourceCount,
+			MessageCount:            overview.MessageCount,
+			Backlog:                 overview.Backlog,
+			ProducedRate:            overview.ProducedRate,
+			ConsumedRate:            overview.ConsumedRate,
+			NoConsumerResourceCount: overview.NoConsumerResources,
+			DLQResourceCount:        overview.DLQResources,
+			RetryResourceCount:      overview.RetryResources,
+		},
+		&ConsumerGroupSummary{Count: overview.ConsumerGroupCount, Lag: snapshot.Lag},
+		snapshot.Backlog,
+	)
+	overview.HealthText = HealthText(overview.HealthStatus)
+	instance.HealthStatus = overview.HealthStatus
+	if err := uc.instanceRepo.Update(ctx, instance); err != nil {
+		return nil, err
+	}
+	audit := uc.startOperationAudit(ctx, instance, AuditActionMetricSnapshot, RiskLevelLow, operator, map[string]any{"source": "manual"})
+	uc.finishOperationAudit(ctx, audit, AuditStatusSuccess, "MQ指标快照采集成功", map[string]any{
+		"snapshotId":    snapshot.ID,
+		"healthStatus":  overview.HealthStatus,
+		"anomalyTags":   overview.AnomalyTags,
+		"healthReasons": overview.HealthReasons,
+	}, collectedAt, time.Now())
+	return &MetricCollectResultVO{
+		InstanceID:    overview.InstanceID,
+		InstanceName:  overview.InstanceName,
+		MQType:        overview.MQType,
+		HealthStatus:  overview.HealthStatus,
+		HealthText:    overview.HealthText,
+		HealthReasons: overview.HealthReasons,
+		AnomalyTags:   overview.AnomalyTags,
+		Snapshot:      toMetricSnapshotVO(snapshot),
+		Message:       "MQ指标快照采集成功",
+		CollectedAt:   collectedAt.Format("2006-01-02 15:04:05"),
+	}, nil
+}
+
+func (uc *UseCase) ListMetricSnapshots(ctx context.Context, instanceID uint, req *MetricSnapshotListRequest) ([]*MetricSnapshotVO, int64, error) {
+	if uc.metricSnapshotRepo == nil {
+		return nil, 0, fmt.Errorf("MQ指标快照仓库未配置")
+	}
+	normalizeMetricSnapshotListRequest(req)
+	items, total, err := uc.metricSnapshotRepo.List(ctx, instanceID, req)
+	if err != nil {
+		return nil, 0, err
+	}
+	list := make([]*MetricSnapshotVO, 0, len(items))
+	for _, item := range items {
+		list = append(list, toMetricSnapshotVO(item))
+	}
+	return list, total, nil
+}
+
+func (uc *UseCase) GenerateInspectionReport(ctx context.Context, instanceID uint, operator Operator) (*InspectionReportVO, error) {
+	overview, err := uc.buildOverview(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("MQ实例不存在")
+	}
+	now := time.Now()
+	findings := uc.buildInspectionFindings(ctx, instance, overview)
+	sections := buildInspectionSections(instance, overview, findings)
+	score, riskLevel := calculateInspectionScore(findings)
+	report := &InspectionReportVO{
+		InstanceID:   instance.ID,
+		InstanceName: instance.Name,
+		MQType:       instance.MQType,
+		Score:        score,
+		RiskLevel:    riskLevel,
+		Summary:      buildInspectionSummary(score, riskLevel, findings),
+		Sections:     sections,
+		Findings:     findings,
+		GeneratedAt:  now.Format("2006-01-02 15:04:05"),
+	}
+	audit := uc.startOperationAudit(ctx, instance, AuditActionInspectionRun, RiskLevelLow, operator, map[string]any{"source": "manual"})
+	uc.finishOperationAudit(ctx, audit, AuditStatusSuccess, "MQ巡检报告生成成功", map[string]any{
+		"score":        report.Score,
+		"riskLevel":    report.RiskLevel,
+		"findingCount": len(report.Findings),
+	}, now, time.Now())
+	return report, nil
+}
+
+func (uc *UseCase) buildOverview(ctx context.Context, instanceID uint) (*OverviewVO, error) {
 	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("MQ实例不存在")
@@ -413,23 +544,32 @@ func (uc *UseCase) GetOverview(ctx context.Context, instanceID uint) (*OverviewV
 	for _, item := range top {
 		topVO = append(topVO, toResourceVO(item))
 	}
+	backlog := resourceSummary.Backlog + groupSummary.Backlog
+	healthStatus, healthReasons, anomalyTags := evaluateMQHealth(instance, brokerCount, onlineBrokerCount, resourceSummary, groupSummary, backlog)
 	return &OverviewVO{
 		InstanceID:          instance.ID,
 		InstanceName:        instance.Name,
 		MQType:              instance.MQType,
-		HealthStatus:        instance.HealthStatus,
+		HealthStatus:        healthStatus,
+		HealthText:          HealthText(healthStatus),
+		HealthReasons:       healthReasons,
+		AnomalyTags:         anomalyTags,
 		BrokerCount:         brokerCount,
 		OnlineBrokerCount:   onlineBrokerCount,
 		ResourceCount:       resourceSummary.Count,
 		ConsumerGroupCount:  groupSummary.Count,
 		PartitionCount:      partitionCount,
 		MessageCount:        resourceSummary.MessageCount,
-		Backlog:             resourceSummary.Backlog + groupSummary.Backlog,
+		Backlog:             backlog,
 		Lag:                 groupSummary.Lag,
 		ProducedRate:        resourceSummary.ProducedRate,
 		ConsumedRate:        resourceSummary.ConsumedRate,
+		NoConsumerResources: resourceSummary.NoConsumerResourceCount,
+		DLQResources:        resourceSummary.DLQResourceCount,
+		RetryResources:      resourceSummary.RetryResourceCount,
 		TopBacklogResources: topVO,
 		LastSyncAt:          formatTimePtr(instance.LastSyncAt),
+		LastMetricAt:        formatTimePtr(instance.LastMetricAt),
 	}, nil
 }
 
@@ -1638,6 +1778,320 @@ func normalizeAuditListRequest(req *AuditListRequest) {
 	req.RiskLevel = strings.TrimSpace(req.RiskLevel)
 }
 
+func normalizeMetricSnapshotListRequest(req *MetricSnapshotListRequest) {
+	if req == nil {
+		return
+	}
+	if req.Page <= 0 {
+		req.Page = 1
+	}
+	if req.PageSize <= 0 {
+		req.PageSize = 20
+	}
+	if req.PageSize > 500 {
+		req.PageSize = 500
+	}
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	req.ResourceName = strings.TrimSpace(req.ResourceName)
+	req.StartTime = strings.TrimSpace(req.StartTime)
+	req.EndTime = strings.TrimSpace(req.EndTime)
+}
+
+const (
+	mqWarningBacklogThreshold  = int64(1000)
+	mqCriticalBacklogThreshold = int64(100000)
+	mqWarningLagThreshold      = int64(1000)
+	mqCriticalLagThreshold     = int64(100000)
+	mqStaleSyncAge             = 30 * time.Minute
+	mqStaleMetricAge           = 10 * time.Minute
+)
+
+func evaluateMQHealth(instance *MQInstance, brokerCount, onlineBrokerCount int64, resourceSummary *ResourceSummary, groupSummary *ConsumerGroupSummary, backlog int64) (string, []string, []string) {
+	if instance == nil {
+		return HealthStatusUnknown, []string{"实例信息不可用"}, []string{"实例未知"}
+	}
+	reasons := make([]string, 0)
+	tags := make([]string, 0)
+	severity := 0
+	mark := func(level int, reason, tag string) {
+		if level > severity {
+			severity = level
+		}
+		if reason != "" {
+			reasons = appendUniqueString(reasons, reason)
+		}
+		if tag != "" {
+			tags = appendUniqueString(tags, tag)
+		}
+	}
+	if strings.TrimSpace(instance.Status) != InstanceStatusEnabled {
+		mark(1, "实例当前处于禁用状态", "实例禁用")
+	}
+	switch strings.TrimSpace(instance.HealthStatus) {
+	case HealthStatusCritical:
+		mark(3, "最近连接测试或同步结果异常", "连接异常")
+	case HealthStatusWarning:
+		mark(2, "实例已有警告状态", "实例警告")
+	}
+	if brokerCount > 0 && onlineBrokerCount == 0 {
+		mark(3, "全部 Broker 均非在线状态", "Broker 离线")
+	} else if brokerCount > 0 && onlineBrokerCount < brokerCount {
+		mark(2, fmt.Sprintf("Broker 在线数 %d/%d", onlineBrokerCount, brokerCount), "Broker 部分离线")
+	}
+	if instance.LastSyncAt == nil || instance.LastSyncAt.IsZero() {
+		mark(1, "尚未完成元数据同步", "同步过期")
+	} else if age := time.Since(*instance.LastSyncAt); age > mqStaleSyncAge {
+		mark(2, fmt.Sprintf("元数据同步已超过 %d 分钟", int(mqStaleSyncAge.Minutes())), "同步过期")
+	}
+	if instance.LastMetricAt == nil || instance.LastMetricAt.IsZero() {
+		mark(1, "尚未采集指标快照", "未采集指标")
+	} else if age := time.Since(*instance.LastMetricAt); age > mqStaleMetricAge {
+		mark(2, fmt.Sprintf("指标快照已超过 %d 分钟", int(mqStaleMetricAge.Minutes())), "指标过期")
+	}
+	if backlog >= mqCriticalBacklogThreshold {
+		mark(3, fmt.Sprintf("Backlog 已达到 %d", backlog), "堆积严重")
+	} else if backlog > 0 {
+		mark(2, fmt.Sprintf("Backlog 当前为 %d", backlog), "堆积增长")
+	}
+	lag := int64(0)
+	if groupSummary != nil {
+		lag = groupSummary.Lag
+	}
+	if lag >= mqCriticalLagThreshold {
+		mark(3, fmt.Sprintf("Lag 已达到 %d", lag), "消费严重延迟")
+	} else if lag > 0 {
+		mark(2, fmt.Sprintf("Lag 当前为 %d", lag), "消费延迟")
+	}
+	if resourceSummary != nil {
+		if resourceSummary.NoConsumerResourceCount > 0 {
+			mark(2, fmt.Sprintf("存在 %d 个无消费者 Topic/Queue", resourceSummary.NoConsumerResourceCount), "无消费者")
+		}
+		if resourceSummary.DLQResourceCount > 0 {
+			mark(2, fmt.Sprintf("识别到 %d 个 DLQ 资源", resourceSummary.DLQResourceCount), "DLQ 资源")
+		}
+		if resourceSummary.RetryResourceCount > 0 {
+			mark(2, fmt.Sprintf("识别到 %d 个 Retry 资源", resourceSummary.RetryResourceCount), "Retry 资源")
+		}
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "指标状态正常")
+	}
+	switch severity {
+	case 3:
+		return HealthStatusCritical, reasons, tags
+	case 2:
+		return HealthStatusWarning, reasons, tags
+	case 1:
+		return HealthStatusUnknown, reasons, tags
+	default:
+		return HealthStatusHealthy, reasons, tags
+	}
+}
+
+func (uc *UseCase) buildInspectionFindings(ctx context.Context, instance *MQInstance, overview *OverviewVO) []*InspectionFindingVO {
+	findings := make([]*InspectionFindingVO, 0)
+	add := func(severity, category, title, description, resourceType, resourceName string) {
+		findings = append(findings, &InspectionFindingVO{
+			Severity:     severity,
+			Category:     category,
+			Title:        title,
+			Description:  description,
+			ResourceType: resourceType,
+			ResourceName: resourceName,
+		})
+	}
+	if overview == nil || instance == nil {
+		add("critical", "health", "巡检数据不可用", "实例或概览数据为空", "instance", "")
+		return findings
+	}
+	switch overview.HealthStatus {
+	case HealthStatusCritical:
+		add("critical", "health", "实例健康异常", strings.Join(overview.HealthReasons, "；"), "instance", instance.Name)
+	case HealthStatusWarning:
+		add("warning", "health", "实例存在健康警告", strings.Join(overview.HealthReasons, "；"), "instance", instance.Name)
+	case HealthStatusUnknown:
+		add("warning", "health", "实例健康未知", strings.Join(overview.HealthReasons, "；"), "instance", instance.Name)
+	}
+	if overview.BrokerCount > 0 && overview.OnlineBrokerCount < overview.BrokerCount {
+		severity := "warning"
+		if overview.OnlineBrokerCount == 0 {
+			severity = "critical"
+		}
+		add(severity, "health", "Broker 在线状态异常", fmt.Sprintf("Broker 在线数 %d/%d", overview.OnlineBrokerCount, overview.BrokerCount), "broker", instance.Name)
+	}
+	if overview.Backlog >= mqCriticalBacklogThreshold {
+		add("critical", "capacity", "消息堆积严重", fmt.Sprintf("当前 Backlog %d", overview.Backlog), "instance", instance.Name)
+	} else if overview.Backlog >= mqWarningBacklogThreshold || overview.Backlog > 0 {
+		add("warning", "capacity", "存在消息堆积", fmt.Sprintf("当前 Backlog %d", overview.Backlog), "instance", instance.Name)
+	}
+	if overview.Lag >= mqCriticalLagThreshold {
+		add("critical", "consumer", "消费延迟严重", fmt.Sprintf("当前 Lag %d", overview.Lag), "consumer_group", instance.Name)
+	} else if overview.Lag >= mqWarningLagThreshold || overview.Lag > 0 {
+		add("warning", "consumer", "存在消费延迟", fmt.Sprintf("当前 Lag %d", overview.Lag), "consumer_group", instance.Name)
+	}
+	if overview.NoConsumerResources > 0 {
+		add("warning", "consumer", "存在无消费者资源", fmt.Sprintf("%d 个 Topic/Queue 当前消费者数为 0", overview.NoConsumerResources), "resource", instance.Name)
+	}
+	if overview.DLQResources > 0 {
+		add("warning", "governance", "识别到 DLQ 资源", fmt.Sprintf("%d 个资源命中 DLQ 命名规则，需要关注堆积趋势", overview.DLQResources), "resource", instance.Name)
+	}
+	if overview.RetryResources > 0 {
+		add("info", "governance", "识别到 Retry 资源", fmt.Sprintf("%d 个资源命中 Retry 命名规则", overview.RetryResources), "resource", instance.Name)
+	}
+	if strings.TrimSpace(instance.Owner) == "" {
+		add("warning", "governance", "实例未绑定负责人", "四期告警和巡检治理需要明确负责人", "instance", instance.Name)
+	}
+	if strings.TrimSpace(instance.BusinessSystem) == "" {
+		add("warning", "governance", "实例未绑定业务系统", "建议补充业务系统，用于告警路由和影响面判断", "instance", instance.Name)
+	}
+	if uc.operationAuditRepo != nil {
+		start := time.Now().Add(-7 * 24 * time.Hour).Format("2006-01-02 15:04:05")
+		_, highTotal, _ := uc.operationAuditRepo.List(ctx, &AuditListRequest{Page: 1, PageSize: 1, InstanceID: instance.ID, RiskLevel: RiskLevelHigh, Status: AuditStatusFailed, StartTime: start})
+		_, criticalTotal, _ := uc.operationAuditRepo.List(ctx, &AuditListRequest{Page: 1, PageSize: 1, InstanceID: instance.ID, RiskLevel: RiskLevelCritical, Status: AuditStatusFailed, StartTime: start})
+		if highTotal+criticalTotal > 0 {
+			add("warning", "governance", "近期存在高危操作失败", fmt.Sprintf("近 7 天高危/严重操作失败 %d 次", highTotal+criticalTotal), "audit", instance.Name)
+		}
+	}
+	return findings
+}
+
+func buildInspectionSections(instance *MQInstance, overview *OverviewVO, findings []*InspectionFindingVO) []*InspectionSectionVO {
+	if overview == nil {
+		return nil
+	}
+	return []*InspectionSectionVO{
+		{
+			Key:     "health",
+			Title:   "健康",
+			Status:  inspectionSectionStatus(findings, "health"),
+			Summary: strings.Join(overview.HealthReasons, "；"),
+			Metrics: []*InspectionMetricVO{
+				{Name: "健康状态", Value: overview.HealthText, Status: overview.HealthStatus},
+				{Name: "Broker 在线", Value: fmt.Sprintf("%d/%d", overview.OnlineBrokerCount, overview.BrokerCount), Status: metricStatus(overview.BrokerCount == 0 || overview.OnlineBrokerCount == overview.BrokerCount)},
+				{Name: "最近同步", Value: fallbackDash(overview.LastSyncAt), Status: metricStatus(overview.LastSyncAt != "")},
+				{Name: "最近指标", Value: fallbackDash(overview.LastMetricAt), Status: metricStatus(overview.LastMetricAt != "")},
+			},
+		},
+		{
+			Key:     "capacity",
+			Title:   "容量",
+			Status:  inspectionSectionStatus(findings, "capacity"),
+			Summary: fmt.Sprintf("消息数 %d，Backlog %d", overview.MessageCount, overview.Backlog),
+			Metrics: []*InspectionMetricVO{
+				{Name: "消息数", Value: overview.MessageCount, Status: "success"},
+				{Name: "Backlog", Value: overview.Backlog, Status: metricRiskStatus(overview.Backlog, mqWarningBacklogThreshold, mqCriticalBacklogThreshold)},
+				{Name: "生产/s", Value: overview.ProducedRate, Status: "success"},
+				{Name: "消费/s", Value: overview.ConsumedRate, Status: "success"},
+			},
+		},
+		{
+			Key:     "consumer",
+			Title:   "消费",
+			Status:  inspectionSectionStatus(findings, "consumer"),
+			Summary: fmt.Sprintf("消费组 %d，Lag %d", overview.ConsumerGroupCount, overview.Lag),
+			Metrics: []*InspectionMetricVO{
+				{Name: "消费组/订阅", Value: overview.ConsumerGroupCount, Status: "success"},
+				{Name: "Lag", Value: overview.Lag, Status: metricRiskStatus(overview.Lag, mqWarningLagThreshold, mqCriticalLagThreshold)},
+				{Name: "无消费者资源", Value: overview.NoConsumerResources, Status: metricStatus(overview.NoConsumerResources == 0)},
+			},
+		},
+		{
+			Key:     "governance",
+			Title:   "治理",
+			Status:  inspectionSectionStatus(findings, "governance"),
+			Summary: fmt.Sprintf("负责人：%s，业务系统：%s", fallbackDash(instance.Owner), fallbackDash(instance.BusinessSystem)),
+			Metrics: []*InspectionMetricVO{
+				{Name: "负责人", Value: fallbackDash(instance.Owner), Status: metricStatus(strings.TrimSpace(instance.Owner) != "")},
+				{Name: "业务系统", Value: fallbackDash(instance.BusinessSystem), Status: metricStatus(strings.TrimSpace(instance.BusinessSystem) != "")},
+				{Name: "DLQ 资源", Value: overview.DLQResources, Status: metricStatus(overview.DLQResources == 0)},
+				{Name: "Retry 资源", Value: overview.RetryResources, Status: "info"},
+			},
+		},
+	}
+}
+
+func calculateInspectionScore(findings []*InspectionFindingVO) (int, string) {
+	score := 100
+	critical := 0
+	warning := 0
+	for _, item := range findings {
+		if item == nil {
+			continue
+		}
+		switch item.Severity {
+		case "critical":
+			score -= 20
+			critical++
+		case "warning":
+			score -= 8
+			warning++
+		case "info":
+			score -= 2
+		}
+	}
+	if score < 0 {
+		score = 0
+	}
+	switch {
+	case critical > 0 || score < 60:
+		return score, HealthStatusCritical
+	case warning > 0 || score < 90:
+		return score, HealthStatusWarning
+	default:
+		return score, HealthStatusHealthy
+	}
+}
+
+func buildInspectionSummary(score int, riskLevel string, findings []*InspectionFindingVO) string {
+	if len(findings) == 0 {
+		return fmt.Sprintf("巡检评分 %d，当前未发现明显风险", score)
+	}
+	return fmt.Sprintf("巡检评分 %d，风险等级 %s，发现 %d 个关注项", score, HealthText(riskLevel), len(findings))
+}
+
+func inspectionSectionStatus(findings []*InspectionFindingVO, category string) string {
+	status := "success"
+	for _, item := range findings {
+		if item == nil || item.Category != category {
+			continue
+		}
+		if item.Severity == "critical" {
+			return "critical"
+		}
+		if item.Severity == "warning" {
+			status = "warning"
+		} else if item.Severity == "info" && status == "success" {
+			status = "info"
+		}
+	}
+	return status
+}
+
+func metricStatus(ok bool) string {
+	if ok {
+		return "success"
+	}
+	return "warning"
+}
+
+func metricRiskStatus(value, warningThreshold, criticalThreshold int64) string {
+	switch {
+	case value >= criticalThreshold:
+		return "critical"
+	case value >= warningThreshold || value > 0:
+		return "warning"
+	default:
+		return "success"
+	}
+}
+
+func fallbackDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
 func toBrokerVO(item *MQBroker) *BrokerVO {
 	return &BrokerVO{
 		ID:         item.ID,
@@ -1726,6 +2180,28 @@ func toPartitionVO(item *MQPartition) *PartitionVO {
 	}
 }
 
+func toMetricSnapshotVO(item *MQMetricSnapshot) *MetricSnapshotVO {
+	if item == nil {
+		return nil
+	}
+	return &MetricSnapshotVO{
+		ID:                item.ID,
+		InstanceID:        item.InstanceID,
+		ResourceID:        item.ResourceID,
+		ResourceType:      item.ResourceType,
+		ResourceName:      item.ResourceName,
+		BrokerCount:       item.BrokerCount,
+		OnlineBrokerCount: item.OnlineBrokerCount,
+		MessageCount:      item.MessageCount,
+		Backlog:           item.Backlog,
+		Lag:               item.Lag,
+		ProducedRate:      item.ProducedRate,
+		ConsumedRate:      item.ConsumedRate,
+		ConsumerCount:     item.ConsumerCount,
+		CollectedAt:       item.CollectedAt.Format("2006-01-02 15:04:05"),
+	}
+}
+
 func operationAuditToVO(item *MQOperationAudit) *AuditVO {
 	return &AuditVO{
 		ID:           item.ID,
@@ -1801,6 +2277,10 @@ func actionText(action string) string {
 		return "元数据同步"
 	case AuditActionMessageSample:
 		return "消息采样"
+	case AuditActionMetricSnapshot:
+		return "指标快照采集"
+	case AuditActionInspectionRun:
+		return "巡检报告生成"
 	case AuditActionPermissionSet:
 		return "实例权限保存"
 	case AuditActionPermissionDel:

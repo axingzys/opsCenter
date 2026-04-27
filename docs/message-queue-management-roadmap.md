@@ -69,6 +69,24 @@
 10. 前端 `资源操作` 弹窗增加高危模板，权限不足时禁用高危选项；高危执行前会展示风险、影响范围、警告、diff、二次确认和资源名输入确认。
 11. 集成测试已覆盖 RabbitMQ purge/delete、Kafka delete topic、Pulsar delete topic；单元测试覆盖高危配置、资源名确认、RabbitMQ binding 保护和 Pulsar backlog 影响提示。
 
+## 四期落地状态
+截至 2026-04-27，已开始落地四期“治理与巡检”能力，优先补齐告警和容量趋势之前的数据底座。
+
+1. 新增手动指标快照接口：
+   - `POST /api/v1/message-queues/instances/:id/metric-snapshots`：按当前元数据汇总 broker 在线数、资源数量、消息量、backlog、lag、生产/消费速率，并写入 `mq_metric_snapshots`。
+   - `GET /api/v1/message-queues/instances/:id/metric-snapshots`：分页查询实例指标快照。
+2. `GET /api/v1/message-queues/instances/:id/overview` 增加健康算法和异常标签：
+   - 返回 `healthReasons`、`anomalyTags`、`lastMetricAt`、无消费者资源数、DLQ/Retry 资源数。
+   - 默认识别同步过期、指标过期、Broker 离线、消息堆积、消费延迟、无消费者、DLQ/Retry 资源等治理信号。
+3. 新增手动巡检接口：
+   - `POST /api/v1/message-queues/instances/:id/inspection-reports`：即时生成巡检结果，覆盖健康、容量、消费和治理四类检查。
+   - 巡检结果包含评分、风险等级、分组指标和 findings；当前为 MVP 即时报告，暂不长期落库。
+4. 前端 `消费诊断` Tab 增加：
+   - “采集指标”按钮，采集后刷新实例健康和审计。
+   - “生成巡检”按钮，展示巡检评分、分区块摘要和风险项列表。
+   - 健康状态、异常标签、健康原因和最近指标时间展示。
+5. 四期单元测试覆盖指标快照采集、健康状态评估、异常标签和巡检治理项。
+
 ## 生产化优化补充清单
 以下内容为结合当前一二三期落地状态、现有代码结构和后续四期目标整理出的优化项。除上文“落地状态”明确说明的能力外，本节均表示后续建议，不代表当前已全部实现。
 
