@@ -516,7 +516,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="操作">
-          <el-select v-model="operationForm.action" placeholder="选择操作" @change="applyOperationTemplate">
+          <el-select v-model="operationForm.action" placeholder="选择操作" :loading="operationActionsLoading" @change="applyOperationTemplate">
             <el-option v-for="item in operationOptions" :key="item.value" :label="item.displayLabel" :value="item.value" :disabled="item.disabled" />
           </el-select>
         </el-form-item>
@@ -539,6 +539,7 @@
           <el-tag :type="operationValidation.supported ? 'success' : 'danger'">{{ operationValidation.supported ? '支持执行' : '暂不支持' }}</el-tag>
           <el-tag :type="riskTag(operationValidation.riskLevel)">{{ riskText(operationValidation.riskLevel) }}</el-tag>
           <el-tag v-if="operationValidation.metadataStale" type="warning">元数据过期</el-tag>
+          <el-tag v-if="operationValidation.metricStale" type="warning">指标过期</el-tag>
           <span>{{ operationValidation.message }}</span>
         </div>
         <div v-if="operationValidation.impacts?.length" class="validation-list">
@@ -617,6 +618,7 @@ import {
   listMQJobs,
   listMQMessageAudits,
   listMQOperationAudits,
+  listMQOperationActions,
   listMQPartitions,
   listMQResources,
   sampleMQMessages,
@@ -732,7 +734,9 @@ const permissionForm = reactive<any>({ id: 0, roleId: undefined, instanceId: und
 const operationDialogVisible = ref(false)
 const operationValidating = ref(false)
 const operationSubmitting = ref(false)
+const operationActionsLoading = ref(false)
 const operationValidation = ref<any>(null)
+const operationActionSchemas = ref<any[]>([])
 const operationForm = reactive<any>({ instanceId: undefined, action: '', resourceType: '', namespace: '', resourceName: '', reason: '', confirmText: '', idempotencyKey: '', paramsText: '{}' })
 
 const permissionOptions = [
@@ -747,7 +751,7 @@ const permissionOptions = [
   { label: '管理', value: MQ_PERMISSION.MANAGE }
 ]
 
-type OperationTemplate = { label: string; value: string; resourceType: string; params: Record<string, any>; highRisk?: boolean }
+type OperationTemplate = { label: string; value: string; resourceType: string; params: Record<string, any>; highRisk?: boolean; enabled?: boolean; disabledReason?: string }
 type OperationOption = OperationTemplate & { displayLabel: string; disabled: boolean }
 
 const operationTemplateMap: Record<string, OperationTemplate[]> = {
@@ -784,12 +788,27 @@ const selectedResourceInstance = computed(() => instances.value.find(item => ite
 const selectedOperationInstance = computed(() => instances.value.find(item => item.id === operationForm.instanceId))
 const selectedOperationHasHighRisk = computed(() => !!uiPermissions.highRisk && hasObjectPermission(selectedOperationInstance.value, MQ_PERMISSION.HIGH_RISK))
 const operationOptions = computed<OperationOption[]>(() => {
-  const options = operationTemplateMap[selectedOperationInstance.value?.mqType || ''] || []
-  return options.map(item => ({
-    ...item,
-    displayLabel: item.highRisk ? `${item.label}（高危）` : item.label,
-    disabled: !!item.highRisk && !selectedOperationHasHighRisk.value
-  }))
+  const options = operationActionSchemas.value.length
+    ? operationActionSchemas.value.map(item => ({
+        label: item.actionText || item.action,
+        value: item.action,
+        resourceType: item.resourceType || '',
+        params: item.defaultParams || {},
+        highRisk: !!item.requiresHighRiskAck || isHighRisk(item.riskLevel),
+        enabled: item.enabled,
+        disabledReason: item.disabledReason || ''
+      }))
+    : (operationTemplateMap[selectedOperationInstance.value?.mqType || ''] || [])
+  return options.map(item => {
+    const highRiskDenied = !!item.highRisk && !selectedOperationHasHighRisk.value
+    const disabledReason = item.disabledReason || (highRiskDenied ? '当前用户缺少高危操作权限' : '')
+    return {
+      ...item,
+      disabledReason,
+      displayLabel: `${item.highRisk ? `${item.label}（高危）` : item.label}${disabledReason ? ` - ${disabledReason}` : ''}`,
+      disabled: item.enabled === false || highRiskDenied
+    }
+  })
 })
 const canOperateSelectedInstance = computed(() => !!uiPermissions.resourceManage && resourceManageInstances.value.length > 0)
 
@@ -1096,7 +1115,22 @@ const openOperationDialog = () => {
   handleOperationInstanceChange()
 }
 
-const handleOperationInstanceChange = () => {
+const loadOperationActions = async () => {
+  operationActionSchemas.value = []
+  if (!operationForm.instanceId) return
+  operationActionsLoading.value = true
+  try {
+    const data = await listMQOperationActions(operationForm.instanceId)
+    operationActionSchemas.value = Array.isArray(data) ? data : []
+  } catch {
+    operationActionSchemas.value = []
+  } finally {
+    operationActionsLoading.value = false
+  }
+}
+
+const handleOperationInstanceChange = async () => {
+  await loadOperationActions()
   const first = operationOptions.value.find(item => !item.disabled) || operationOptions.value[0]
   operationForm.action = first?.value || ''
   applyOperationTemplate()
@@ -1108,7 +1142,7 @@ const applyOperationTemplate = () => {
   operationForm.confirmText = ''
   operationForm.idempotencyKey = ''
   if (!option || option.disabled) {
-    if (option?.disabled) ElMessage.warning('当前实例缺少高危操作权限')
+    if (option?.disabled) ElMessage.warning(option.disabledReason || '当前操作暂不可用')
     operationForm.resourceType = ''
     operationForm.paramsText = '{}'
     return

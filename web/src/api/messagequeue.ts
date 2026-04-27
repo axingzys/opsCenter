@@ -116,6 +116,9 @@ export const syncMQMetadata = (id: number) =>
 export const getMQOverview = (id: number) =>
   request.get(`/api/v1/message-queues/instances/${id}/overview`)
 
+export const getMQCapabilities = (id: number) =>
+  request.get(`/api/v1/message-queues/instances/${id}/capabilities`)
+
 export const collectMQMetricSnapshot = (id: number) =>
   request.post(`/api/v1/message-queues/instances/${id}/metric-snapshots`)
 
@@ -181,6 +184,9 @@ export const sampleMQMessages = (id: number, data: MQMessageSamplePayload) =>
 
 export const validateMQResourceOperation = (id: number, data: MQResourceOperationPayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/operations/validate`, data)
+
+export const listMQOperationActions = (id: number) =>
+  request.get(`/api/v1/message-queues/instances/${id}/operations/actions`)
 
 export const executeMQResourceOperation = (id: number, data: MQResourceOperationPayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/operations`, data)

@@ -150,6 +150,23 @@ func (s *Service) ensureHighRiskPermission(c *gin.Context, instanceID uint) bool
 	if s.permissionRepo == nil {
 		return true
 	}
+	hasRules, err := s.permissionRepo.HasAnyRules(c.Request.Context())
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "MQ实例权限检查失败")
+		return false
+	}
+	if !hasRules {
+		admin, err := s.permissionRepo.IsAdmin(c.Request.Context(), userID)
+		if err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "MQ实例权限检查失败")
+			return false
+		}
+		if !admin {
+			response.ErrorCode(c, http.StatusForbidden, "权限不足：无权对该MQ实例执行高危操作")
+			return false
+		}
+		return true
+	}
 	permissions, err := s.permissionRepo.GetUserInstancePermissions(c.Request.Context(), userID, instanceID)
 	if err != nil {
 		response.ErrorCode(c, http.StatusInternalServerError, "MQ实例权限检查失败")
@@ -160,6 +177,33 @@ func (s *Service) ensureHighRiskPermission(c *gin.Context, instanceID uint) bool
 		return false
 	}
 	return true
+}
+
+func (s *Service) userHasHighRiskAccess(c *gin.Context, instanceID uint) bool {
+	userID := rbacservice.GetUserID(c)
+	if userID == 0 || s.menuPermissionChecker == nil {
+		return false
+	}
+	ok, err := s.menuPermissionChecker(c.Request.Context(), userID, permMQHighRisk)
+	if err != nil || !ok {
+		return false
+	}
+	if s.permissionRepo == nil {
+		return true
+	}
+	hasRules, err := s.permissionRepo.HasAnyRules(c.Request.Context())
+	if err != nil {
+		return false
+	}
+	if !hasRules {
+		admin, err := s.permissionRepo.IsAdmin(c.Request.Context(), userID)
+		return err == nil && admin
+	}
+	permissions, err := s.permissionRepo.GetUserInstancePermissions(c.Request.Context(), userID, instanceID)
+	if err != nil {
+		return false
+	}
+	return permissions&mqbiz.PermissionHighRisk != 0
 }
 
 func applyInstancePermissionScope(req *mqbiz.InstanceListRequest, scope *permissionScope) {
@@ -567,6 +611,42 @@ func (s *Service) GetOverview(c *gin.Context) {
 	if err != nil {
 		writeError(c, "查询失败: ", err)
 		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) GetCapabilities(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionView) {
+		return
+	}
+	data, err := s.useCase.GetInstanceCapabilities(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) ListOperationActions(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionResourceManage) {
+		return
+	}
+	data, err := s.useCase.ListOperationActions(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	if !s.userHasHighRiskAccess(c, id) {
+		for _, item := range data {
+			if item != nil && item.RequiresHighRiskAck {
+				item.Enabled = false
+				if item.DisabledReason == "" {
+					item.DisabledReason = "当前用户缺少MQ高危操作权限"
+				}
+			}
+		}
 	}
 	response.Success(c, data)
 }

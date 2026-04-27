@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	mqbiz "github.com/ydcloud-dy/opshub/internal/biz/messagequeue"
@@ -130,9 +132,24 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 			if err != nil {
 				return nil, err
 			}
+			maxMetadataAgeMinutes, err := readIntConfig(ctx, configRepo, mqbiz.ConfigKeyMessageQueueOperationMaxMetadataAge, 30)
+			if err != nil {
+				return nil, err
+			}
+			maxMetricAgeMinutes, err := readIntConfig(ctx, configRepo, mqbiz.ConfigKeyMessageQueueOperationMaxMetricAge, 10)
+			if err != nil {
+				return nil, err
+			}
+			requireFreshMetric, err := readBoolConfig(ctx, configRepo, mqbiz.ConfigKeyMessageQueueRequireFreshMetric, true)
+			if err != nil {
+				return nil, err
+			}
 			return &mqbiz.HighRiskOperationConfig{
-				Enabled:        enabled,
-				ReasonRequired: reasonRequired,
+				Enabled:                    enabled,
+				ReasonRequired:             reasonRequired,
+				OperationMaxMetadataAge:    time.Duration(maxMetadataAgeMinutes) * time.Minute,
+				OperationMaxMetricAge:      time.Duration(maxMetricAgeMinutes) * time.Minute,
+				RequireFreshMetricHighRisk: requireFreshMetric,
 			}, nil
 		},
 		mqbiz.NewDefaultAdapterRegistry(),
@@ -163,6 +180,24 @@ func readBoolConfig(ctx context.Context, repo *systemdata.ConfigRepo, key string
 	default:
 		return fallback, nil
 	}
+}
+
+func readIntConfig(ctx context.Context, repo *systemdata.ConfigRepo, key string, fallback int) (int, error) {
+	if repo == nil {
+		return fallback, nil
+	}
+	config, err := repo.GetByKey(ctx, key)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fallback, nil
+		}
+		return fallback, err
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(config.Value))
+	if err != nil || value <= 0 {
+		return fallback, nil
+	}
+	return value, nil
 }
 
 func (s *HTTPServer) GetUIPermissions(c *gin.Context) {
@@ -208,6 +243,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.POST("/:id/test", s.authMiddleware.RequireMenuPermission(permMQConnectionTest), s.service.TestInstance)
 			instances.POST("/:id/sync-metadata", s.authMiddleware.RequireMenuPermission(permMQMetadataSync), s.service.SyncMetadata)
 			instances.GET("/:id/overview", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetOverview)
+			instances.GET("/:id/capabilities", s.authMiddleware.RequireMenuPermission(permMQInstanceView), s.service.GetCapabilities)
 			instances.POST("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.CollectMetricSnapshot)
 			instances.GET("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListMetricSnapshots)
 			instances.POST("/:id/inspection-reports", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GenerateInspectionReport)
@@ -217,6 +253,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.GET("/:id/consumer-groups", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListConsumerGroups)
 			instances.GET("/:id/partitions", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListPartitions)
 			instances.POST("/:id/messages/sample", s.authMiddleware.RequireMenuPermission(permMQMessageRead), s.service.SampleMessages)
+			instances.GET("/:id/operations/actions", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ListOperationActions)
 			instances.POST("/:id/operations/validate", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ValidateResourceOperation)
 			instances.POST("/:id/operations", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ExecuteResourceOperation)
 		}

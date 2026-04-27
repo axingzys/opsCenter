@@ -81,6 +81,8 @@ const (
 	ConfigKeyMessageQueueHighRiskEnabled         = "messageQueueHighRiskEnabled"
 	ConfigKeyMessageQueueOperationReasonRequired = "messageQueueOperationReasonRequired"
 	ConfigKeyMessageQueueOperationMaxMetadataAge = "messageQueueOperationMaxMetadataAgeMinutes"
+	ConfigKeyMessageQueueOperationMaxMetricAge   = "messageQueueOperationMaxMetricAgeMinutes"
+	ConfigKeyMessageQueueRequireFreshMetric      = "messageQueueRequireFreshMetricForHighRisk"
 
 	AuditStatusPending = "pending"
 	AuditStatusSuccess = "success"
@@ -345,6 +347,10 @@ type MQOperationAudit struct {
 	DiffJSON              string     `gorm:"column:diff_json;type:text;comment:配置差异" json:"diffJson"`
 	WarningsJSON          string     `gorm:"column:warnings_json;type:text;comment:风险提示" json:"warningsJson"`
 	ImpactSummaryJSON     string     `gorm:"column:impact_summary_json;type:text;comment:影响摘要" json:"impactSummaryJson"`
+	OperationBackupJSON   string     `gorm:"column:operation_backup_json;type:text;comment:操作备份包" json:"operationBackupJson"`
+	RollbackHintJSON      string     `gorm:"column:rollback_hint_json;type:text;comment:回滚建议" json:"rollbackHintJson"`
+	RollbackSupported     bool       `gorm:"column:rollback_supported;default:false;comment:是否支持回滚辅助" json:"rollbackSupported"`
+	RollbackRiskLevel     string     `gorm:"column:rollback_risk_level;type:varchar(30);comment:回滚风险等级" json:"rollbackRiskLevel"`
 	MetadataRefreshStatus string     `gorm:"column:metadata_refresh_status;type:varchar(30);comment:后置元数据刷新状态" json:"metadataRefreshStatus"`
 	MetadataRefreshError  string     `gorm:"column:metadata_refresh_error;type:varchar(500);comment:后置元数据刷新错误" json:"metadataRefreshError"`
 	Reason                string     `gorm:"type:varchar(500);comment:原因" json:"reason"`
@@ -805,26 +811,30 @@ type PartitionVO struct {
 }
 
 type AuditVO struct {
-	ID           uint   `json:"id"`
-	InstanceID   uint   `json:"instanceId"`
-	InstanceName string `json:"instanceName,omitempty"`
-	MQType       string `json:"mqType"`
-	ResourceType string `json:"resourceType"`
-	ResourceName string `json:"resourceName"`
-	Namespace    string `json:"namespace"`
-	Action       string `json:"action"`
-	ActionText   string `json:"actionText"`
-	RiskLevel    string `json:"riskLevel"`
-	Status       string `json:"status"`
-	StatusText   string `json:"statusText"`
-	Reason       string `json:"reason,omitempty"`
-	OperatorID   uint   `json:"operatorId"`
-	OperatorName string `json:"operatorName"`
-	ClientIP     string `json:"clientIp"`
-	DurationMs   int64  `json:"durationMs"`
-	Message      string `json:"message"`
-	CreatedAt    string `json:"createdAt"`
-	UpdatedAt    string `json:"updatedAt"`
+	ID                  uint   `json:"id"`
+	InstanceID          uint   `json:"instanceId"`
+	InstanceName        string `json:"instanceName,omitempty"`
+	MQType              string `json:"mqType"`
+	ResourceType        string `json:"resourceType"`
+	ResourceName        string `json:"resourceName"`
+	Namespace           string `json:"namespace"`
+	Action              string `json:"action"`
+	ActionText          string `json:"actionText"`
+	RiskLevel           string `json:"riskLevel"`
+	Status              string `json:"status"`
+	StatusText          string `json:"statusText"`
+	Reason              string `json:"reason,omitempty"`
+	OperationBackupJson string `json:"operationBackupJson,omitempty"`
+	RollbackHintJson    string `json:"rollbackHintJson,omitempty"`
+	RollbackSupported   bool   `json:"rollbackSupported"`
+	RollbackRiskLevel   string `json:"rollbackRiskLevel,omitempty"`
+	OperatorID          uint   `json:"operatorId"`
+	OperatorName        string `json:"operatorName"`
+	ClientIP            string `json:"clientIp"`
+	DurationMs          int64  `json:"durationMs"`
+	Message             string `json:"message"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 type MessageSampleResultVO struct {
@@ -853,8 +863,11 @@ type MessageSampleVO struct {
 }
 
 type HighRiskOperationConfig struct {
-	Enabled        bool
-	ReasonRequired bool
+	Enabled                    bool
+	ReasonRequired             bool
+	OperationMaxMetadataAge    time.Duration
+	OperationMaxMetricAge      time.Duration
+	RequireFreshMetricHighRisk bool
 }
 
 type OperationDiffItem struct {
@@ -884,9 +897,41 @@ type ResourceOperationValidationVO struct {
 	LockKey             string              `json:"lockKey,omitempty"`
 	MetadataStale       bool                `json:"metadataStale"`
 	MetadataStaleReason string              `json:"metadataStaleReason,omitempty"`
+	MetricStale         bool                `json:"metricStale"`
+	MetricStaleReason   string              `json:"metricStaleReason,omitempty"`
 	Message             string              `json:"message"`
 	RequiresConfirm     bool                `json:"requiresConfirm"`
 	RequiresHighRiskAck bool                `json:"requiresHighRiskAck"`
+}
+
+type MQCapabilityItemVO struct {
+	Key            string `json:"key"`
+	Name           string `json:"name"`
+	Enabled        bool   `json:"enabled"`
+	DisabledReason string `json:"disabledReason,omitempty"`
+}
+
+type MQCapabilitiesVO struct {
+	InstanceID   uint                   `json:"instanceId"`
+	InstanceName string                 `json:"instanceName"`
+	MQType       string                 `json:"mqType"`
+	MQTypeText   string                 `json:"mqTypeText"`
+	Capabilities []*MQCapabilityItemVO  `json:"capabilities"`
+	Actions      []*MQOperationActionVO `json:"actions"`
+}
+
+type MQOperationActionVO struct {
+	Action              string         `json:"action"`
+	ActionText          string         `json:"actionText"`
+	ResourceType        string         `json:"resourceType"`
+	RiskLevel           string         `json:"riskLevel"`
+	RequiredPermission  uint           `json:"requiredPermission"`
+	RequiresConfirm     bool           `json:"requiresConfirm"`
+	RequiresHighRiskAck bool           `json:"requiresHighRiskAck"`
+	Enabled             bool           `json:"enabled"`
+	DisabledReason      string         `json:"disabledReason,omitempty"`
+	DefaultParams       map[string]any `json:"defaultParams"`
+	FormSchema          map[string]any `json:"formSchema"`
 }
 
 type ResourceOperationApplyResult struct {

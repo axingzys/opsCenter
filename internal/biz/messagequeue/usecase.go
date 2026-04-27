@@ -697,8 +697,15 @@ func (uc *UseCase) ExecuteResourceOperation(ctx context.Context, instanceID uint
 		if err != nil {
 			return nil, err
 		}
+		applyOperationFreshnessWarning(instance, validation, cfg)
 		if !cfg.Enabled {
 			return nil, fmt.Errorf("MQ高风险操作未开启")
+		}
+		if validation.MetadataStale {
+			return nil, fmt.Errorf("高风险操作要求新鲜元数据，请先同步后再执行")
+		}
+		if cfg.RequireFreshMetricHighRisk && validation.MetricStale {
+			return nil, fmt.Errorf("高风险操作要求新鲜指标，请先采集指标后再执行")
 		}
 		if cfg.ReasonRequired && strings.TrimSpace(req.Reason) == "" {
 			return nil, fmt.Errorf("高风险操作原因不能为空")
@@ -900,7 +907,13 @@ func (uc *UseCase) resolveResourceOperationAdapter(ctx context.Context, instance
 }
 
 func (uc *UseCase) resolveHighRiskOperationConfig(ctx context.Context) (*HighRiskOperationConfig, error) {
-	cfg := &HighRiskOperationConfig{Enabled: false, ReasonRequired: true}
+	cfg := &HighRiskOperationConfig{
+		Enabled:                    false,
+		ReasonRequired:             true,
+		OperationMaxMetadataAge:    30 * time.Minute,
+		OperationMaxMetricAge:      10 * time.Minute,
+		RequireFreshMetricHighRisk: true,
+	}
 	if uc.highRiskConfigResolver == nil {
 		return cfg, nil
 	}
@@ -913,6 +926,13 @@ func (uc *UseCase) resolveHighRiskOperationConfig(ctx context.Context) (*HighRis
 	}
 	cfg.Enabled = resolved.Enabled
 	cfg.ReasonRequired = resolved.ReasonRequired
+	if resolved.OperationMaxMetadataAge > 0 {
+		cfg.OperationMaxMetadataAge = resolved.OperationMaxMetadataAge
+	}
+	if resolved.OperationMaxMetricAge > 0 {
+		cfg.OperationMaxMetricAge = resolved.OperationMaxMetricAge
+	}
+	cfg.RequireFreshMetricHighRisk = resolved.RequireFreshMetricHighRisk
 	return cfg, nil
 }
 
@@ -954,7 +974,11 @@ func (uc *UseCase) enrichResourceOperationPlan(ctx context.Context, instance *MQ
 		return nil
 	}
 	validation.LockKey = buildResourceOperationLockKey(instance.ID, validation)
-	applyMetadataFreshnessWarning(instance, validation)
+	cfg, cfgErr := uc.resolveHighRiskOperationConfig(ctx)
+	if cfgErr != nil {
+		return cfgErr
+	}
+	applyOperationFreshnessWarning(instance, validation, cfg)
 
 	resource, err := uc.lookupOperationResource(ctx, instance.ID, validation)
 	if err != nil {
@@ -998,21 +1022,37 @@ func (uc *UseCase) lookupOperationConsumerGroup(ctx context.Context, instanceID 
 	return uc.consumerGroupRepo.GetByUnique(ctx, instanceID, validation.Namespace, resourceName, groupName)
 }
 
-func applyMetadataFreshnessWarning(instance *MQInstance, validation *ResourceOperationValidationVO) {
+func applyOperationFreshnessWarning(instance *MQInstance, validation *ResourceOperationValidationVO, cfg *HighRiskOperationConfig) {
 	if instance == nil || validation == nil {
 		return
 	}
-	const maxAge = 30 * time.Minute
+	maxMetadataAge := 30 * time.Minute
+	maxMetricAge := 10 * time.Minute
+	if cfg != nil {
+		if cfg.OperationMaxMetadataAge > 0 {
+			maxMetadataAge = cfg.OperationMaxMetadataAge
+		}
+		if cfg.OperationMaxMetricAge > 0 {
+			maxMetricAge = cfg.OperationMaxMetricAge
+		}
+	}
 	if instance.LastSyncAt == nil || instance.LastSyncAt.IsZero() {
 		validation.MetadataStale = true
 		validation.MetadataStaleReason = "该实例尚未完成元数据同步，影响范围可能不准确"
 		validation.Warnings = appendUniqueString(validation.Warnings, validation.MetadataStaleReason)
-		return
-	}
-	if age := time.Since(*instance.LastSyncAt); age > maxAge {
+	} else if age := time.Since(*instance.LastSyncAt); age > maxMetadataAge {
 		validation.MetadataStale = true
-		validation.MetadataStaleReason = fmt.Sprintf("最近元数据同步已超过 %d 分钟，影响范围可能不准确", int(maxAge.Minutes()))
+		validation.MetadataStaleReason = fmt.Sprintf("最近元数据同步已超过 %d 分钟，影响范围可能不准确", int(maxMetadataAge.Minutes()))
 		validation.Warnings = appendUniqueString(validation.Warnings, validation.MetadataStaleReason)
+	}
+	if instance.LastMetricAt == nil || instance.LastMetricAt.IsZero() {
+		validation.MetricStale = true
+		validation.MetricStaleReason = "该实例尚未采集指标快照，backlog/lag 影响判断可能不准确"
+		validation.Warnings = appendUniqueString(validation.Warnings, validation.MetricStaleReason)
+	} else if age := time.Since(*instance.LastMetricAt); age > maxMetricAge {
+		validation.MetricStale = true
+		validation.MetricStaleReason = fmt.Sprintf("最近指标快照已超过 %d 分钟，backlog/lag 影响判断可能不准确", int(maxMetricAge.Minutes()))
+		validation.Warnings = appendUniqueString(validation.Warnings, validation.MetricStaleReason)
 	}
 }
 
@@ -1194,6 +1234,93 @@ func validateHighRiskConfirmText(req *ResourceOperationRequest, validation *Reso
 		return fmt.Errorf("高风险操作资源名确认不一致")
 	}
 	return nil
+}
+
+func buildOperationBackupPackage(instance *MQInstance, validation *ResourceOperationValidationVO) map[string]any {
+	if instance == nil || validation == nil {
+		return nil
+	}
+	backup := map[string]any{
+		"generatedAt": time.Now().Format("2006-01-02 15:04:05"),
+		"instance": map[string]any{
+			"id":             instance.ID,
+			"name":           instance.Name,
+			"mqType":         instance.MQType,
+			"environment":    instance.Environment,
+			"businessSystem": instance.BusinessSystem,
+			"owner":          instance.Owner,
+			"lastSyncAt":     formatTimePtr(instance.LastSyncAt),
+			"lastMetricAt":   formatTimePtr(instance.LastMetricAt),
+		},
+		"operation": map[string]any{
+			"action":       validation.Action,
+			"actionText":   validation.ActionText,
+			"riskLevel":    validation.RiskLevel,
+			"resourceType": validation.ResourceType,
+			"namespace":    validation.Namespace,
+			"resourceName": validation.ResourceName,
+		},
+		"before":   validation.Before,
+		"after":    validation.After,
+		"diff":     validation.Diff,
+		"warnings": validation.Warnings,
+		"impacts":  validation.Impacts,
+		"note":     "备份包用于恢复资源配置和事故复盘，不承诺恢复已删除或已清理的消息内容",
+	}
+	return backup
+}
+
+func buildRollbackHint(validation *ResourceOperationValidationVO) (map[string]any, bool, string) {
+	if validation == nil {
+		return nil, false, ""
+	}
+	hint := map[string]any{
+		"action":       validation.Action,
+		"resourceType": validation.ResourceType,
+		"resourceName": validation.ResourceName,
+		"namespace":    validation.Namespace,
+		"supported":    false,
+		"message":      "该操作不提供自动回滚，仅保留审计快照用于人工复盘",
+	}
+	switch validation.Action {
+	case OperationActionRabbitMQQueueDelete:
+		hint["supported"] = true
+		hint["supportLevel"] = "partial"
+		hint["message"] = "可根据 before snapshot 人工重建 queue 配置；已删除消息无法通过 OpsHub 恢复"
+		hint["steps"] = []string{"确认业务已停止写入该 queue", "按 before snapshot 重建 queue 参数和 arguments", "按备份信息恢复 binding", "同步元数据并通知业务验证"}
+		return hint, true, RiskLevelHigh
+	case OperationActionRabbitMQExchangeDelete:
+		hint["supported"] = true
+		hint["supportLevel"] = "partial"
+		hint["message"] = "可根据 before snapshot 人工重建 exchange 配置；删除期间丢失的路由关系影响需业务侧确认"
+		hint["steps"] = []string{"按 before snapshot 重建 exchange", "恢复相关 binding", "同步元数据并验证消息路由"}
+		return hint, true, RiskLevelHigh
+	case OperationActionKafkaTopicDelete:
+		hint["supported"] = true
+		hint["supportLevel"] = "partial"
+		hint["message"] = "可根据 before snapshot 人工重建 topic 分区、副本和配置；已删除消息无法通过 OpsHub 恢复"
+		hint["steps"] = []string{"确认 broker delete topic 已完成", "按 before snapshot 重建 topic", "恢复 topic config", "同步元数据并通知生产/消费方验证"}
+		return hint, true, RiskLevelCritical
+	case OperationActionPulsarTopicDelete:
+		hint["supported"] = true
+		hint["supportLevel"] = "partial"
+		hint["message"] = "可按 before snapshot 辅助重建 topic 或 namespace 策略；已删除消息无法通过 OpsHub 恢复"
+		hint["steps"] = []string{"按原 tenant/namespace/topic 重建资源", "恢复 namespace/topic 策略", "同步元数据并验证 subscription"}
+		return hint, true, RiskLevelCritical
+	case OperationActionRabbitMQQueuePurge:
+		hint["message"] = "purge 会清空队列消息，OpsHub 无法恢复已清理消息；仅可用 before snapshot 评估影响范围"
+		return hint, false, RiskLevelCritical
+	case OperationActionPulsarSubscriptionSkip, OperationActionPulsarSubscriptionReset:
+		hint["message"] = "subscription 位点变更无法保证自动回滚；如需恢复需按业务语义重新 reset 到明确时间或 message id"
+		hint["steps"] = []string{"保留执行前 cursor/backlog 快照", "确认业务期望位点", "通过高危操作重新 reset 到目标时间", "验证消费者处理结果"}
+		return hint, false, RiskLevelHigh
+	default:
+		if IsHighRiskLevel(validation.RiskLevel) {
+			hint["message"] = "高风险操作已保存 before/after/diff/impact，可用于人工恢复配置或事故复盘"
+			return hint, false, validation.RiskLevel
+		}
+		return hint, false, RiskLevelLow
+	}
 }
 
 func (uc *UseCase) afterOperationSnapshot(ctx context.Context, instanceID uint, validation *ResourceOperationValidationVO, resourceType, namespace, resourceName string) (map[string]any, error) {
@@ -1629,31 +1756,37 @@ func (uc *UseCase) startResourceOperationAudit(ctx context.Context, item *MQInst
 		confirmText = req.ConfirmText
 	}
 	operationID := fmt.Sprintf("mqop-%d-%d", item.ID, time.Now().UnixNano())
+	backup := buildOperationBackupPackage(item, validation)
+	rollbackHint, rollbackSupported, rollbackRiskLevel := buildRollbackHint(validation)
 	audit := &MQOperationAudit{
-		InstanceID:         item.ID,
-		InstanceName:       item.Name,
-		MQType:             item.MQType,
-		ResourceType:       validation.ResourceType,
-		ResourceName:       validation.ResourceName,
-		Namespace:          validation.Namespace,
-		Action:             validation.Action,
-		RiskLevel:          validation.RiskLevel,
-		Status:             AuditStatusPending,
-		OperationID:        operationID,
-		IdempotencyKey:     strings.TrimSpace(idempotencyKey),
-		LockKey:            validation.LockKey,
-		ConfirmText:        strings.TrimSpace(confirmText),
-		RequestJSON:        mustJSON(req),
-		BeforeSnapshotJSON: mustJSON(validation.Before),
-		AfterSnapshotJSON:  mustJSON(validation.After),
-		DiffJSON:           mustJSON(validation.Diff),
-		WarningsJSON:       mustJSON(validation.Warnings),
-		ImpactSummaryJSON:  mustJSON(validation.Impacts),
-		Reason:             trimText(reason, 500),
-		OperatorID:         operator.ID,
-		OperatorName:       operator.Username,
-		ClientIP:           operator.ClientIP,
-		StartedAt:          &now,
+		InstanceID:          item.ID,
+		InstanceName:        item.Name,
+		MQType:              item.MQType,
+		ResourceType:        validation.ResourceType,
+		ResourceName:        validation.ResourceName,
+		Namespace:           validation.Namespace,
+		Action:              validation.Action,
+		RiskLevel:           validation.RiskLevel,
+		Status:              AuditStatusPending,
+		OperationID:         operationID,
+		IdempotencyKey:      strings.TrimSpace(idempotencyKey),
+		LockKey:             validation.LockKey,
+		ConfirmText:         strings.TrimSpace(confirmText),
+		RequestJSON:         mustJSON(req),
+		BeforeSnapshotJSON:  mustJSON(validation.Before),
+		AfterSnapshotJSON:   mustJSON(validation.After),
+		DiffJSON:            mustJSON(validation.Diff),
+		WarningsJSON:        mustJSON(validation.Warnings),
+		ImpactSummaryJSON:   mustJSON(validation.Impacts),
+		OperationBackupJSON: mustJSON(backup),
+		RollbackHintJSON:    mustJSON(rollbackHint),
+		RollbackSupported:   rollbackSupported,
+		RollbackRiskLevel:   rollbackRiskLevel,
+		Reason:              trimText(reason, 500),
+		OperatorID:          operator.ID,
+		OperatorName:        operator.Username,
+		ClientIP:            operator.ClientIP,
+		StartedAt:           &now,
 	}
 	if err := uc.operationAuditRepo.Create(ctx, audit); err != nil {
 		return nil
@@ -2232,26 +2365,30 @@ func toMetricSnapshotVO(item *MQMetricSnapshot) *MetricSnapshotVO {
 
 func operationAuditToVO(item *MQOperationAudit) *AuditVO {
 	return &AuditVO{
-		ID:           item.ID,
-		InstanceID:   item.InstanceID,
-		InstanceName: item.InstanceName,
-		MQType:       item.MQType,
-		ResourceType: item.ResourceType,
-		ResourceName: item.ResourceName,
-		Namespace:    item.Namespace,
-		Action:       item.Action,
-		ActionText:   actionText(item.Action),
-		RiskLevel:    item.RiskLevel,
-		Status:       item.Status,
-		StatusText:   auditStatusText(item.Status),
-		Reason:       item.Reason,
-		OperatorID:   item.OperatorID,
-		OperatorName: item.OperatorName,
-		ClientIP:     item.ClientIP,
-		DurationMs:   item.DurationMs,
-		Message:      item.Message,
-		CreatedAt:    item.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:    item.UpdatedAt.Format("2006-01-02 15:04:05"),
+		ID:                  item.ID,
+		InstanceID:          item.InstanceID,
+		InstanceName:        item.InstanceName,
+		MQType:              item.MQType,
+		ResourceType:        item.ResourceType,
+		ResourceName:        item.ResourceName,
+		Namespace:           item.Namespace,
+		Action:              item.Action,
+		ActionText:          actionText(item.Action),
+		RiskLevel:           item.RiskLevel,
+		Status:              item.Status,
+		StatusText:          auditStatusText(item.Status),
+		Reason:              item.Reason,
+		OperationBackupJson: item.OperationBackupJSON,
+		RollbackHintJson:    item.RollbackHintJSON,
+		RollbackSupported:   item.RollbackSupported,
+		RollbackRiskLevel:   item.RollbackRiskLevel,
+		OperatorID:          item.OperatorID,
+		OperatorName:        item.OperatorName,
+		ClientIP:            item.ClientIP,
+		DurationMs:          item.DurationMs,
+		Message:             item.Message,
+		CreatedAt:           item.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:           item.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
 }
 

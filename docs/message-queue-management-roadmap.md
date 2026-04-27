@@ -151,7 +151,7 @@
    - 增加凭据健康检查：凭据过期、TLS 证书过期、Token 过期、凭据复用和最近认证失败。
 
 ### 五期当前落地状态
-截至 2026-04-27，五期已启动第一批能力：
+截至 2026-04-27，五期已启动底座能力：
 
 1. 新增统一任务模型 `mq_jobs`，覆盖任务类型、状态、进度、阶段、耗时、结果、错误和 `correlation_id`。
 2. `sync`、`metric_collect`、`inspection` 三类动作已写入统一任务中心。
@@ -160,6 +160,18 @@
    - `GET /api/v1/message-queues/jobs/:id`：查询单个任务详情。
 4. 前端新增 `任务中心` Tab，可按实例、任务类型、状态和关键字筛选任务，并展示进度、阶段、耗时、消息和链路 ID。
 5. 旧 `mq_sync_jobs` 继续保留，用于兼容现有同步任务结果和历史语义；新 `mq_jobs` 作为五期统一任务中心入口。
+6. 高危操作增加元数据和指标新鲜度强校验：
+   - `messageQueueOperationMaxMetadataAgeMinutes`：高危操作允许的最大元数据年龄，默认 30 分钟。
+   - `messageQueueOperationMaxMetricAgeMinutes`：高危操作允许的最大指标年龄，默认 10 分钟。
+   - `messageQueueRequireFreshMetricForHighRisk`：高危操作是否强制要求新鲜指标，默认开启。
+   - 高危操作在元数据过期时拒绝执行；开启指标新鲜度要求时，指标过期也拒绝执行。
+7. 高危操作审计增加配置备份包和回滚建议：
+   - 新增 `operation_backup_json`、`rollback_hint_json`、`rollback_supported`、`rollback_risk_level`。
+   - 删除 topic/queue/exchange 等操作提供“配置可辅助恢复、消息不可承诺恢复”的回滚提示。
+8. 新增实例能力和动态操作 schema：
+   - `GET /api/v1/message-queues/instances/:id/capabilities`：返回实例能力和操作列表。
+   - `GET /api/v1/message-queues/instances/:id/operations/actions`：返回当前实例真实可用资源操作、默认参数、风险级别和禁用原因。
+   - 前端资源操作弹窗优先使用后端 action schema，保留静态模板作为降级。
 
 ## 六期规划：高级消息治理与自动化
 六期建议放置更高风险或依赖业务配合的高级能力，不应在五期底座稳定前抢先开放。
@@ -1174,6 +1186,7 @@ type ConnectionCredential struct {
 | `GET` | `/api/v1/message-queues/instances/:id/consumer-groups` | 消费组或订阅列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/partitions` | 分区或队列维度 |
 | `GET` | `/api/v1/message-queues/instances/:id/overview` | 实例健康概览 |
+| `GET` | `/api/v1/message-queues/instances/:id/capabilities` | 实例真实能力矩阵 |
 | `GET` | `/api/v1/message-queues/instances/:id/lag-trend` | lag/backlog 趋势 |
 | `POST` | `/api/v1/message-queues/instances/:id/metric-snapshots` | 手动采集指标快照 |
 
@@ -1189,7 +1202,7 @@ type ConnectionCredential struct {
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/v1/message-queues/instances/:id/operations/validate` | 操作风险校验 |
-| `GET` | `/api/v1/message-queues/instances/:id/operations/actions` | 获取实例真实可用操作和表单 schema，后续增强 |
+| `GET` | `/api/v1/message-queues/instances/:id/operations/actions` | 获取实例真实可用操作、默认参数、风险级别和禁用原因 |
 | `POST` | `/api/v1/message-queues/instances/:id/operations/plan` | 生成操作 plan/diff，后续增强 |
 | `POST` | `/api/v1/message-queues/instances/:id/operations` | 执行资源操作 |
 | `POST` | `/api/v1/message-queues/operations/:operationId/approve` | 审批待执行高危操作，后续增强 |
