@@ -143,7 +143,10 @@ CREATE TABLE IF NOT EXISTS `mq_consumer_groups` (
   `metadata_json` text COMMENT '元数据JSON',
   `last_sync_at` datetime(3) DEFAULT NULL COMMENT '最近同步时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `idx_mq_consumer_group` (`instance_id`, `group_name`, `resource_name`, `namespace`),
+  KEY `idx_mq_consumer_groups_instance_id` (`instance_id`),
+  KEY `idx_mq_consumer_groups_group_name` (`group_name`),
+  KEY `idx_mq_consumer_groups_resource_name` (`resource_name`(191)),
+  KEY `idx_mq_consumer_groups_namespace` (`namespace`),
   KEY `idx_mq_consumer_groups_deleted_at` (`deleted_at`),
   KEY `idx_mq_consumer_groups_resource_id` (`resource_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MQ消费组/订阅元数据';
@@ -167,7 +170,9 @@ CREATE TABLE IF NOT EXISTS `mq_partitions` (
   `status` varchar(80) DEFAULT NULL COMMENT '状态',
   `last_sync_at` datetime(3) DEFAULT NULL COMMENT '最近同步时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `idx_mq_partition` (`instance_id`, `resource_name`, `partition_id`),
+  KEY `idx_mq_partitions_instance_id` (`instance_id`),
+  KEY `idx_mq_partitions_resource_name` (`resource_name`(191)),
+  KEY `idx_mq_partitions_partition_id` (`partition_id`),
   KEY `idx_mq_partitions_deleted_at` (`deleted_at`),
   KEY `idx_mq_partitions_resource_id` (`resource_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MQ分区元数据';
@@ -318,4 +323,3 @@ VALUES
   (1, 6809), (1, 6810), (1, 6811), (1, 6812), (1, 6813), (1, 6814), (1, 6815), (1, 6816), (1, 6817);
 
 SET FOREIGN_KEY_CHECKS = 1;
-

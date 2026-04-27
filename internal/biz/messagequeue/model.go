@@ -175,11 +175,11 @@ func (MQBinding) TableName() string {
 
 type MQConsumerGroup struct {
 	gorm.Model
-	InstanceID          uint       `gorm:"column:instance_id;not null;index:idx_mq_consumer_group,unique;comment:实例ID" json:"instanceId"`
+	InstanceID          uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
 	ResourceID          uint       `gorm:"column:resource_id;index;comment:资源ID" json:"resourceId"`
-	GroupName           string     `gorm:"column:group_name;type:varchar(255);not null;index:idx_mq_consumer_group,unique;comment:消费组/订阅" json:"groupName"`
-	ResourceName        string     `gorm:"column:resource_name;type:varchar(512);index:idx_mq_consumer_group,unique;comment:资源名称" json:"resourceName"`
-	Namespace           string     `gorm:"type:varchar(255);index:idx_mq_consumer_group,unique;comment:命名空间" json:"namespace"`
+	GroupName           string     `gorm:"column:group_name;type:varchar(255);not null;index;comment:消费组/订阅" json:"groupName"`
+	ResourceName        string     `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
+	Namespace           string     `gorm:"type:varchar(255);index;comment:命名空间" json:"namespace"`
 	State               string     `gorm:"type:varchar(80);comment:状态" json:"state"`
 	ConsumerCount       int        `gorm:"column:consumer_count;type:int;default:0;comment:消费者数" json:"consumerCount"`
 	ActiveConsumerCount int        `gorm:"column:active_consumer_count;type:int;default:0;comment:活跃消费者数" json:"activeConsumerCount"`
@@ -198,10 +198,10 @@ func (MQConsumerGroup) TableName() string {
 
 type MQPartition struct {
 	gorm.Model
-	InstanceID    uint       `gorm:"column:instance_id;not null;index:idx_mq_partition,unique;comment:实例ID" json:"instanceId"`
+	InstanceID    uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
 	ResourceID    uint       `gorm:"column:resource_id;index;comment:资源ID" json:"resourceId"`
-	ResourceName  string     `gorm:"column:resource_name;type:varchar(512);not null;index:idx_mq_partition,unique;comment:资源名称" json:"resourceName"`
-	PartitionID   int        `gorm:"column:partition_id;type:int;not null;index:idx_mq_partition,unique;comment:分区ID" json:"partitionId"`
+	ResourceName  string     `gorm:"column:resource_name;type:varchar(512);not null;index;comment:资源名称" json:"resourceName"`
+	PartitionID   int        `gorm:"column:partition_id;type:int;not null;index;comment:分区ID" json:"partitionId"`
 	Leader        string     `gorm:"type:varchar(255);comment:Leader" json:"leader"`
 	ReplicasJSON  string     `gorm:"column:replicas_json;type:text;comment:副本JSON" json:"replicasJson"`
 	ISRJSON       string     `gorm:"column:isr_json;type:text;comment:ISR JSON" json:"isrJson"`
