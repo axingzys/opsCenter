@@ -220,12 +220,16 @@
 2. 新增 DLQ/Retry 分析工作台：
    - `GET /api/v1/message-queues/dlq-analysis`：按实例权限过滤，自动识别 DLQ/Retry 资源，返回 backlog、消费者数、关联原资源推断、负责人、业务系统、处理建议、近期消息审计和错误摘要。
    - 前端新增 `DLQ治理` Tab，支持按实例、DLQ/Retry 类型、是否有积压和关键字过滤。
+   - 新增 `mq_dlq_records` 处理记录，支持维护处理状态、负责人和备注，让 DLQ 从“发现问题”进入“跟踪处理”。
 3. 新增消息重放申请评估入口：
    - `POST /api/v1/message-queues/instances/:id/messages/replay-requests`：只生成申请评估和消息审计，不执行真实重放。
    - 返回影响范围、限速、最大消息数、审批要求和风险提示，明确 `replayExecutable=false`。
    - 真实重放仍保留为后续审批、限速、小批量试跑和正式执行工作流，不在当前 MVP 中直接开放。
 4. 新增测试：
-   - 覆盖消息采样脱敏、DLQ 资源识别和重放申请只创建待审批审计。
+   - 覆盖消息采样脱敏、DLQ 资源识别、DLQ 处理记录覆盖和重放申请只创建待审批审计。
+5. 新增审计防篡改基础：
+   - `mq_operation_audits`、`mq_message_audits` 新增 `previous_audit_hash`、`audit_hash`。
+   - 新审计记录写入时计算 hash，并串联上一条审计 hash，作为后续审计导出签名和链路校验的基础。
    - 基于长期快照做趋势预测，输出扩分区、扩 broker、调整 retention、补告警等建议；生产自动修复默认不开放。
 
 ## 生产化优化补充清单
@@ -1104,6 +1108,8 @@ type ConnectionCredential struct {
 18. `finished_at`
 19. `duration_ms`
 20. `message`
+21. `previous_audit_hash`
+22. `audit_hash`
 
 后续增强字段建议：
 
@@ -1149,6 +1155,30 @@ type ConnectionCredential struct {
 18. `client_ip`
 19. `created_at`
 20. `message`
+21. `previous_audit_hash`
+22. `audit_hash`
+
+### `mq_dlq_records`
+用途：记录 DLQ/Retry 资源的治理处理状态，避免死信问题只停留在报表里。
+
+核心字段：
+
+1. `id`
+2. `instance_id`
+3. `resource_id`
+4. `resource_type`
+5. `namespace`
+6. `resource_name`
+7. `kind`
+8. `handling_status`
+9. `owner`
+10. `remark`
+11. `last_backlog`
+12. `last_message`
+13. `updated_by_id`
+14. `updated_by_name`
+15. `created_at`
+16. `updated_at`
 
 ## 权限设计
 ### 菜单权限
@@ -1221,6 +1251,7 @@ type ConnectionCredential struct {
 | `GET` | `/api/v1/message-queues/dashboard` | 全局 MQ 生产治理驾驶舱 |
 | `GET` | `/api/v1/message-queues/governance-report` | 全局 MQ 治理违规清单 |
 | `GET` | `/api/v1/message-queues/dlq-analysis` | DLQ/Retry 消息治理分析工作台 |
+| `POST` | `/api/v1/message-queues/dlq-records` | 保存 DLQ/Retry 处理状态、负责人和备注 |
 | `GET` | `/api/v1/message-queues/instances/:id/brokers` | broker 列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources` | 资源列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources/:resourceId` | 资源详情 |

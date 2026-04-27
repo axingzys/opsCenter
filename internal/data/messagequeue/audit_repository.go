@@ -2,6 +2,9 @@ package messagequeue
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -19,10 +22,12 @@ func NewOperationAuditRepo(db *gorm.DB) mqbiz.OperationAuditRepo {
 }
 
 func (r *operationAuditRepo) Create(ctx context.Context, item *mqbiz.MQOperationAudit) error {
+	r.fillOperationAuditHash(ctx, item)
 	return r.db.WithContext(ctx).Create(item).Error
 }
 
 func (r *operationAuditRepo) Update(ctx context.Context, item *mqbiz.MQOperationAudit) error {
+	r.fillOperationAuditHash(ctx, item)
 	return r.db.WithContext(ctx).Save(item).Error
 }
 
@@ -71,6 +76,7 @@ func NewMessageAuditRepo(db *gorm.DB) mqbiz.MessageAuditRepo {
 }
 
 func (r *messageAuditRepo) Create(ctx context.Context, item *mqbiz.MQMessageAudit) error {
+	r.fillMessageAuditHash(ctx, item)
 	return r.db.WithContext(ctx).Create(item).Error
 }
 
@@ -89,6 +95,88 @@ func (r *messageAuditRepo) List(ctx context.Context, req *mqbiz.AuditListRequest
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func (r *operationAuditRepo) fillOperationAuditHash(ctx context.Context, item *mqbiz.MQOperationAudit) {
+	if item == nil {
+		return
+	}
+	if item.PreviousAuditHash == "" {
+		var prev mqbiz.MQOperationAudit
+		err := r.db.WithContext(ctx).Model(&mqbiz.MQOperationAudit{}).
+			Where("id <> ?", item.ID).
+			Order("id DESC").
+			First(&prev).Error
+		if err == nil {
+			item.PreviousAuditHash = prev.AuditHash
+		}
+	}
+	item.AuditHash = auditHash(map[string]any{
+		"previous":     item.PreviousAuditHash,
+		"instanceId":   item.InstanceID,
+		"mqType":       item.MQType,
+		"resourceType": item.ResourceType,
+		"resourceName": item.ResourceName,
+		"namespace":    item.Namespace,
+		"action":       item.Action,
+		"riskLevel":    item.RiskLevel,
+		"status":       item.Status,
+		"operationId":  item.OperationID,
+		"request":      item.RequestJSON,
+		"result":       item.ResultJSON,
+		"before":       item.BeforeSnapshotJSON,
+		"after":        item.AfterSnapshotJSON,
+		"reason":       item.Reason,
+		"operatorId":   item.OperatorID,
+		"operatorName": item.OperatorName,
+		"message":      item.Message,
+		"durationMs":   item.DurationMs,
+	})
+}
+
+func (r *messageAuditRepo) fillMessageAuditHash(ctx context.Context, item *mqbiz.MQMessageAudit) {
+	if item == nil {
+		return
+	}
+	if item.PreviousAuditHash == "" {
+		var prev mqbiz.MQMessageAudit
+		err := r.db.WithContext(ctx).Model(&mqbiz.MQMessageAudit{}).
+			Where("id <> ?", item.ID).
+			Order("id DESC").
+			First(&prev).Error
+		if err == nil {
+			item.PreviousAuditHash = prev.AuditHash
+		}
+	}
+	item.AuditHash = auditHash(map[string]any{
+		"previous":          item.PreviousAuditHash,
+		"instanceId":        item.InstanceID,
+		"mqType":            item.MQType,
+		"resourceType":      item.ResourceType,
+		"resourceName":      item.ResourceName,
+		"namespace":         item.Namespace,
+		"action":            item.Action,
+		"sampleCount":       item.SampleCount,
+		"payloadBytes":      item.PayloadBytes,
+		"filter":            item.FilterJSON,
+		"payloadHash":       item.PayloadHash,
+		"sensitiveHitCount": item.SensitiveHitCount,
+		"rawPayloadVisible": item.RawPayloadVisible,
+		"dlp":               item.DLPResultJSON,
+		"status":            item.Status,
+		"operatorId":        item.OperatorID,
+		"operatorName":      item.OperatorName,
+		"message":           item.Message,
+	})
+}
+
+func auditHash(value map[string]any) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func applyOperationAuditFilter(query *gorm.DB, req *mqbiz.AuditListRequest) *gorm.DB {

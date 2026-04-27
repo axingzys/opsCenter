@@ -22,6 +22,29 @@ func (r *messageGovernanceAuditRepo) List(ctx context.Context, req *AuditListReq
 	return r.items, int64(len(r.items)), nil
 }
 
+type messageGovernanceDLQRecordRepo struct {
+	item *MQDLQRecord
+}
+
+func (r *messageGovernanceDLQRecordRepo) GetByResource(ctx context.Context, instanceID uint, resourceType, namespace, resourceName string) (*MQDLQRecord, error) {
+	if r.item == nil || r.item.InstanceID != instanceID || r.item.ResourceType != resourceType || r.item.Namespace != namespace || r.item.ResourceName != resourceName {
+		return nil, nil
+	}
+	return r.item, nil
+}
+
+func (r *messageGovernanceDLQRecordRepo) ListByInstanceID(ctx context.Context, instanceID uint) ([]*MQDLQRecord, error) {
+	if r.item == nil || r.item.InstanceID != instanceID {
+		return nil, nil
+	}
+	return []*MQDLQRecord{r.item}, nil
+}
+
+func (r *messageGovernanceDLQRecordRepo) Upsert(ctx context.Context, item *MQDLQRecord) error {
+	r.item = item
+	return nil
+}
+
 func TestMessageSampleDLPRedactsSensitivePayload(t *testing.T) {
 	result := &MessageSampleResultVO{Samples: []MessageSampleVO{{
 		Payload:     `{"username":"alice","password":"secret","phone":"13800138000","email":"alice@example.com"}`,
@@ -87,5 +110,37 @@ func TestPrepareMessageReplayApplicationOnlyCreatesPendingAudit(t *testing.T) {
 	}
 	if len(audits.items) != 1 || audits.items[0].Action != AuditActionMessageReplay || audits.items[0].Status != AuditStatusPending {
 		t.Fatalf("expected pending audit, got %#v", audits.items)
+	}
+}
+
+func TestDLQRecordOverlayAndUpdate(t *testing.T) {
+	repo := &messageGovernanceDLQRecordRepo{}
+	uc := NewUseCase(
+		productionInstanceRepo{items: []*MQInstance{{Model: gorm.Model{ID: 1}, Name: "rabbit-prod", MQType: MQTypeRabbitMQ}}},
+		nil, nil,
+		productionResourceRepo{items: map[uint][]*MQResource{1: {{Model: gorm.Model{ID: 10}, InstanceID: 1, ResourceType: ResourceTypeQueue, Name: "orders.dlq", Backlog: 20}}}},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+	).WithDLQRecordRepo(repo)
+	err := uc.UpsertDLQRecord(context.Background(), &DLQRecordRequest{
+		InstanceID:     1,
+		ResourceID:     10,
+		ResourceType:   ResourceTypeQueue,
+		ResourceName:   "orders.dlq",
+		HandlingStatus: "processing",
+		Owner:          "mq-owner",
+		Remark:         "排查中",
+	}, Operator{ID: 1, Username: "admin"})
+	if err != nil {
+		t.Fatalf("upsert record: %v", err)
+	}
+	report, err := uc.GetDLQAnalysis(context.Background(), &DLQAnalysisRequest{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("analysis: %v", err)
+	}
+	if got := report.Items[0].HandlingStatus; got != "processing" {
+		t.Fatalf("status=%s", got)
+	}
+	if got := report.Items[0].Owner; got != "mq-owner" {
+		t.Fatalf("owner=%s", got)
 	}
 }

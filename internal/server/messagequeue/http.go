@@ -76,6 +76,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		&mqbiz.MQMetricSnapshot{},
 		&mqbiz.MQOperationAudit{},
 		&mqbiz.MQMessageAudit{},
+		&mqbiz.MQDLQRecord{},
 	)
 
 	instanceRepo := mqdata.NewInstanceRepo(db)
@@ -91,6 +92,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	metricSnapshotRepo := mqdata.NewMetricSnapshotRepo(db)
 	operationAuditRepo := mqdata.NewOperationAuditRepo(db)
 	messageAuditRepo := mqdata.NewMessageAuditRepo(db)
+	dlqRecordRepo := mqdata.NewDLQRecordRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
 	configRepo := systemdata.NewConfigRepo(db)
 
@@ -153,7 +155,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 			}, nil
 		},
 		mqbiz.NewDefaultAdapterRegistry(),
-	).WithJobRepo(jobRepo)
+	).WithJobRepo(jobRepo).WithDLQRecordRepo(dlqRecordRepo)
 
 	return &HTTPServer{
 		service:        mqservice.NewService(useCase, permissionRepo, authMiddleware.HasMenuPermission),
@@ -233,6 +235,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		group.GET("/dashboard", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetProductionDashboard)
 		group.GET("/governance-report", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetGovernanceReport)
 		group.GET("/dlq-analysis", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetDLQAnalysis)
+		group.POST("/dlq-records", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.UpsertDLQRecord)
 
 		instances := group.Group("/instances")
 		{

@@ -84,6 +84,12 @@ type MessageAuditRepo interface {
 	List(ctx context.Context, req *AuditListRequest) ([]*MQMessageAudit, int64, error)
 }
 
+type DLQRecordRepo interface {
+	GetByResource(ctx context.Context, instanceID uint, resourceType, namespace, resourceName string) (*MQDLQRecord, error)
+	ListByInstanceID(ctx context.Context, instanceID uint) ([]*MQDLQRecord, error)
+	Upsert(ctx context.Context, item *MQDLQRecord) error
+}
+
 type ResourceSummary struct {
 	Count                   int64
 	MessageCount            int64

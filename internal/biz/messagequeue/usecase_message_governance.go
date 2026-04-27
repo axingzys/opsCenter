@@ -152,6 +152,44 @@ func (uc *UseCase) PrepareMessageReplayApplication(ctx context.Context, instance
 	}, nil
 }
 
+func (uc *UseCase) UpsertDLQRecord(ctx context.Context, req *DLQRecordRequest, operator Operator) error {
+	if uc.dlqRecordRepo == nil {
+		return fmt.Errorf("DLQ处理记录仓库未初始化")
+	}
+	if req == nil {
+		return fmt.Errorf("DLQ处理记录参数不能为空")
+	}
+	normalizeDLQRecordRequest(req)
+	if req.InstanceID == 0 || req.ResourceName == "" || req.ResourceType == "" {
+		return fmt.Errorf("实例、资源类型和资源名称不能为空")
+	}
+	if !isValidDLQHandlingStatus(req.HandlingStatus) {
+		return fmt.Errorf("不支持的DLQ处理状态")
+	}
+	instance, err := uc.instanceRepo.GetByID(ctx, req.InstanceID)
+	if err != nil || instance == nil {
+		return fmt.Errorf("MQ实例不存在")
+	}
+	if req.Kind == "" {
+		req.Kind = dlqResourceKind(req.ResourceName)
+	}
+	return uc.dlqRecordRepo.Upsert(ctx, &MQDLQRecord{
+		InstanceID:     req.InstanceID,
+		ResourceID:     req.ResourceID,
+		ResourceType:   req.ResourceType,
+		Namespace:      req.Namespace,
+		ResourceName:   req.ResourceName,
+		Kind:           req.Kind,
+		HandlingStatus: req.HandlingStatus,
+		Owner:          req.Owner,
+		Remark:         req.Remark,
+		LastBacklog:    req.LastBacklog,
+		LastMessage:    req.LastMessage,
+		UpdatedByID:    operator.ID,
+		UpdatedByName:  operator.Username,
+	})
+}
+
 func applyMessageSampleDLP(result *MessageSampleResultVO) messageAuditMeta {
 	meta := messageAuditMeta{}
 	if result == nil {
@@ -376,8 +414,26 @@ func (uc *UseCase) buildDLQIssue(ctx context.Context, instance *MQInstance, reso
 		ConsumerGroups:      consumerGroups,
 		RecentAudits:        recentAudits,
 	}
+	uc.applyDLQRecord(ctx, issue)
 	issue.ErrorSummary = buildDLQErrorSummary(issue, recentAudits)
 	return issue
+}
+
+func (uc *UseCase) applyDLQRecord(ctx context.Context, issue *DLQResourceIssueVO) {
+	if uc.dlqRecordRepo == nil || issue == nil {
+		return
+	}
+	record, err := uc.dlqRecordRepo.GetByResource(ctx, issue.InstanceID, issue.ResourceType, issue.Namespace, issue.ResourceName)
+	if err != nil || record == nil {
+		return
+	}
+	issue.HandlingStatus = firstNonEmpty(record.HandlingStatus, issue.HandlingStatus)
+	issue.HandlingRemark = record.Remark
+	issue.HandlingUpdatedBy = record.UpdatedByName
+	issue.HandlingUpdatedAt = record.UpdatedAt.Format("2006-01-02 15:04:05")
+	if record.Owner != "" {
+		issue.Owner = record.Owner
+	}
 }
 
 func (uc *UseCase) dlqConsumerGroups(ctx context.Context, resource *MQResource) []*ConsumerGroupVO {
@@ -493,6 +549,29 @@ func normalizeReplayApplicationRequest(req *MessageReplayApplicationRequest) {
 	}
 	if req.RateLimitPerSecond <= 0 {
 		req.RateLimitPerSecond = 10
+	}
+}
+
+func normalizeDLQRecordRequest(req *DLQRecordRequest) {
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	req.Namespace = strings.TrimSpace(req.Namespace)
+	req.ResourceName = strings.TrimSpace(req.ResourceName)
+	req.Kind = strings.ToLower(strings.TrimSpace(req.Kind))
+	if req.Kind != "dlq" && req.Kind != "retry" {
+		req.Kind = ""
+	}
+	req.HandlingStatus = strings.ToLower(strings.TrimSpace(req.HandlingStatus))
+	req.Owner = strings.TrimSpace(req.Owner)
+	req.Remark = strings.TrimSpace(req.Remark)
+	req.LastMessage = strings.TrimSpace(req.LastMessage)
+}
+
+func isValidDLQHandlingStatus(status string) bool {
+	switch status {
+	case "untriaged", "pending", "processing", "ignored", "replay_requested", "resolved":
+		return true
+	default:
+		return false
 	}
 }
 

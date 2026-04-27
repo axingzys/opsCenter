@@ -145,9 +145,10 @@
               <template #default="{ row }"><el-tag type="info">{{ dlqHandlingStatusText(row.handlingStatus) }}</el-tag></template>
             </el-table-column>
             <el-table-column label="建议" min-width="260" prop="suggestion" show-overflow-tooltip />
-            <el-table-column label="操作" width="130" fixed="right">
+            <el-table-column label="操作" width="160" fixed="right">
               <template #default="{ row }">
-                <el-button size="small" :disabled="!uiPermissions.messageWrite" @click="openReplayDialog(row)">申请重放</el-button>
+                <el-button size="small" @click="openDLQRecordDialog(row)">处理</el-button>
+                <el-button size="small" :disabled="!uiPermissions.messageWrite" @click="openReplayDialog(row)">重放</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -786,6 +787,34 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="dlqRecordDialogVisible" title="DLQ处理记录" width="620px">
+      <el-form :model="dlqRecordForm" label-width="110px">
+        <el-form-item label="资源">
+          <el-input :model-value="dlqRecordForm.resourceName" disabled />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="dlqRecordForm.handlingStatus" placeholder="处理状态">
+            <el-option label="未处理" value="untriaged" />
+            <el-option label="待处理" value="pending" />
+            <el-option label="处理中" value="processing" />
+            <el-option label="已忽略" value="ignored" />
+            <el-option label="已申请重放" value="replay_requested" />
+            <el-option label="已完成" value="resolved" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="负责人">
+          <el-input v-model="dlqRecordForm.owner" placeholder="处理负责人" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="dlqRecordForm.remark" type="textarea" :rows="4" placeholder="记录错误原因、处理进度、是否已重放或忽略依据" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dlqRecordDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="dlqRecordSubmitting" @click="submitDLQRecord">保存</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="permissionDialogVisible" title="MQ实例权限" width="560px">
       <el-form :model="permissionForm" label-width="100px">
         <el-form-item label="角色">
@@ -849,6 +878,7 @@ import {
   syncMQMetadata,
   testMQInstance,
   updateMQInstance,
+  upsertMQDLQRecord,
   upsertMQInstancePermission,
   validateMQResourceOperation,
   type MQInstancePayload,
@@ -899,6 +929,9 @@ const replayDialogVisible = ref(false)
 const replaySubmitting = ref(false)
 const replayPlan = ref<any>(null)
 const replayForm = reactive<any>({ instanceId: 0, instanceName: '', resourceType: 'topic', namespace: '', resourceName: '', targetResourceName: '', maxMessages: 100, rateLimitPerSecond: 10, reason: '' })
+const dlqRecordDialogVisible = ref(false)
+const dlqRecordSubmitting = ref(false)
+const dlqRecordForm = reactive<any>({ instanceId: 0, resourceId: 0, resourceType: 'topic', namespace: '', resourceName: '', kind: '', handlingStatus: 'untriaged', owner: '', remark: '', lastBacklog: 0 })
 
 const selectedInstanceId = ref<number | null>(null)
 const overview = ref<any>(null)
@@ -1249,6 +1282,50 @@ const openReplayDialog = (row: any) => {
     reason: ''
   })
   replayDialogVisible.value = true
+}
+
+const openDLQRecordDialog = (row: any) => {
+  Object.assign(dlqRecordForm, {
+    instanceId: row.instanceId,
+    resourceId: row.resourceId || 0,
+    resourceType: row.resourceType || 'topic',
+    namespace: row.namespace || '',
+    resourceName: row.resourceName,
+    kind: row.kind || '',
+    handlingStatus: row.handlingStatus || 'untriaged',
+    owner: row.owner || '',
+    remark: row.handlingRemark || '',
+    lastBacklog: row.backlog || 0
+  })
+  dlqRecordDialogVisible.value = true
+}
+
+const submitDLQRecord = async () => {
+  if (!dlqRecordForm.instanceId || !dlqRecordForm.resourceName) {
+    ElMessage.warning('请选择DLQ资源')
+    return
+  }
+  dlqRecordSubmitting.value = true
+  try {
+    await upsertMQDLQRecord({
+      instanceId: dlqRecordForm.instanceId,
+      resourceId: dlqRecordForm.resourceId,
+      resourceType: dlqRecordForm.resourceType,
+      namespace: dlqRecordForm.namespace,
+      resourceName: dlqRecordForm.resourceName,
+      kind: dlqRecordForm.kind,
+      handlingStatus: dlqRecordForm.handlingStatus,
+      owner: dlqRecordForm.owner,
+      remark: dlqRecordForm.remark,
+      lastBacklog: dlqRecordForm.lastBacklog,
+      lastMessage: dlqRecordForm.remark
+    })
+    ElMessage.success('DLQ处理记录已保存')
+    dlqRecordDialogVisible.value = false
+    await loadDLQAnalysis()
+  } finally {
+    dlqRecordSubmitting.value = false
+  }
 }
 
 const submitReplayApplication = async () => {
@@ -1628,7 +1705,7 @@ const governanceCategoryText = (value: string) => ({
   security: '安全',
   audit: '审计'
 } as Record<string, string>)[value] || value || '-'
-const dlqHandlingStatusText = (value: string) => ({ untriaged: '未处理', pending: '待处理', processing: '处理中', ignored: '已忽略', replay_requested: '已申请' } as Record<string, string>)[value] || value || '-'
+const dlqHandlingStatusText = (value: string) => ({ untriaged: '未处理', pending: '待处理', processing: '处理中', ignored: '已忽略', replay_requested: '已申请', resolved: '已完成' } as Record<string, string>)[value] || value || '-'
 const formatDiffValue = (value: any) => {
   if (value === undefined || value === null || value === '') return '-'
   if (typeof value === 'object') return JSON.stringify(value)

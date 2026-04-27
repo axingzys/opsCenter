@@ -167,6 +167,20 @@ export const getMQDLQAnalysis = (params?: {
   hasBacklog?: string
 }) => request.get('/api/v1/message-queues/dlq-analysis', { params })
 
+export const upsertMQDLQRecord = (data: {
+  instanceId: number
+  resourceId?: number
+  resourceType: string
+  namespace?: string
+  resourceName: string
+  kind?: string
+  handlingStatus: string
+  owner?: string
+  remark?: string
+  lastBacklog?: number
+  lastMessage?: string
+}) => request.post('/api/v1/message-queues/dlq-records', data)
+
 export const getMQTopology = (id: number) =>
   request.get(`/api/v1/message-queues/instances/${id}/topology`)
 

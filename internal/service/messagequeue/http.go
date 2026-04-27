@@ -589,6 +589,22 @@ func (s *Service) GetDLQAnalysis(c *gin.Context) {
 	response.Success(c, data)
 }
 
+func (s *Service) UpsertDLQRecord(c *gin.Context) {
+	var req mqbiz.DLQRecordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, mqbiz.PermissionDiagnose) {
+		return
+	}
+	if err := s.useCase.UpsertDLQRecord(c.Request.Context(), &req, currentOperator(c)); err != nil {
+		writeError(c, "保存失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"message": "DLQ处理记录已保存"})
+}
+
 func (s *Service) GetJob(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "任务ID")
 	if !ok {

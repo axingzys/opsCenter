@@ -362,6 +362,8 @@ type MQOperationAudit struct {
 	FinishedAt            *time.Time `gorm:"column:finished_at;comment:完成时间" json:"finishedAt,omitempty"`
 	DurationMs            int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
 	Message               string     `gorm:"type:varchar(500);comment:消息" json:"message"`
+	PreviousAuditHash     string     `gorm:"column:previous_audit_hash;type:varchar(80);comment:上一条审计hash" json:"previousAuditHash"`
+	AuditHash             string     `gorm:"column:audit_hash;type:varchar(80);index;comment:审计hash" json:"auditHash"`
 }
 
 func (MQOperationAudit) TableName() string {
@@ -388,10 +390,33 @@ type MQMessageAudit struct {
 	OperatorName      string `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
 	ClientIP          string `gorm:"column:client_ip;type:varchar(80);comment:客户端IP" json:"clientIp"`
 	Message           string `gorm:"type:varchar(500);comment:消息" json:"message"`
+	PreviousAuditHash string `gorm:"column:previous_audit_hash;type:varchar(80);comment:上一条审计hash" json:"previousAuditHash"`
+	AuditHash         string `gorm:"column:audit_hash;type:varchar(80);index;comment:审计hash" json:"auditHash"`
 }
 
 func (MQMessageAudit) TableName() string {
 	return "mq_message_audits"
+}
+
+type MQDLQRecord struct {
+	gorm.Model
+	InstanceID     uint   `gorm:"column:instance_id;not null;index:idx_mq_dlq_record_unique,unique;comment:实例ID" json:"instanceId"`
+	ResourceID     uint   `gorm:"column:resource_id;index;comment:资源ID" json:"resourceId"`
+	ResourceType   string `gorm:"column:resource_type;type:varchar(40);not null;index:idx_mq_dlq_record_unique,unique;comment:资源类型" json:"resourceType"`
+	Namespace      string `gorm:"type:varchar(255);index:idx_mq_dlq_record_unique,unique;comment:命名空间" json:"namespace"`
+	ResourceName   string `gorm:"column:resource_name;type:varchar(512);not null;index:idx_mq_dlq_record_unique,unique;comment:资源名称" json:"resourceName"`
+	Kind           string `gorm:"type:varchar(30);index;comment:dlq/retry" json:"kind"`
+	HandlingStatus string `gorm:"column:handling_status;type:varchar(40);default:'untriaged';index;comment:处理状态" json:"handlingStatus"`
+	Owner          string `gorm:"type:varchar(100);comment:负责人" json:"owner"`
+	Remark         string `gorm:"type:varchar(1000);comment:处理备注" json:"remark"`
+	LastBacklog    int64  `gorm:"column:last_backlog;type:bigint;default:0;comment:最近积压" json:"lastBacklog"`
+	LastMessage    string `gorm:"column:last_message;type:varchar(500);comment:最近处理说明" json:"lastMessage"`
+	UpdatedByID    uint   `gorm:"column:updated_by_id;index;comment:更新人ID" json:"updatedById"`
+	UpdatedByName  string `gorm:"column:updated_by_name;type:varchar(100);comment:更新人" json:"updatedByName"`
+}
+
+func (MQDLQRecord) TableName() string {
+	return "mq_dlq_records"
 }
 
 type ConnectionCredential struct {
@@ -519,6 +544,20 @@ type DLQAnalysisRequest struct {
 	HasBacklog        string `form:"hasBacklog"`
 	RestrictToAllowed bool   `form:"-" json:"-"`
 	AllowedIDs        []uint `form:"-" json:"-"`
+}
+
+type DLQRecordRequest struct {
+	InstanceID     uint   `json:"instanceId" binding:"required"`
+	ResourceID     uint   `json:"resourceId"`
+	ResourceType   string `json:"resourceType" binding:"required,max=40"`
+	Namespace      string `json:"namespace" binding:"omitempty,max=255"`
+	ResourceName   string `json:"resourceName" binding:"required,max=512"`
+	Kind           string `json:"kind" binding:"omitempty,max=30"`
+	HandlingStatus string `json:"handlingStatus" binding:"required,max=40"`
+	Owner          string `json:"owner" binding:"omitempty,max=100"`
+	Remark         string `json:"remark" binding:"omitempty,max=1000"`
+	LastBacklog    int64  `json:"lastBacklog"`
+	LastMessage    string `json:"lastMessage" binding:"omitempty,max=500"`
 }
 
 type InstancePermissionListRequest struct {
@@ -806,6 +845,9 @@ type DLQResourceIssueVO struct {
 	ConsumedRate        float64              `json:"consumedRate"`
 	RelatedResourceName string               `json:"relatedResourceName"`
 	HandlingStatus      string               `json:"handlingStatus"`
+	HandlingRemark      string               `json:"handlingRemark,omitempty"`
+	HandlingUpdatedBy   string               `json:"handlingUpdatedBy,omitempty"`
+	HandlingUpdatedAt   string               `json:"handlingUpdatedAt,omitempty"`
 	Suggestion          string               `json:"suggestion"`
 	LastSyncAt          string               `json:"lastSyncAt,omitempty"`
 	ConsumerGroups      []*ConsumerGroupVO   `json:"consumerGroups"`
@@ -1045,6 +1087,8 @@ type AuditVO struct {
 	PayloadHash         string `json:"payloadHash,omitempty"`
 	SensitiveHitCount   int    `json:"sensitiveHitCount,omitempty"`
 	RawPayloadVisible   bool   `json:"rawPayloadVisible,omitempty"`
+	PreviousAuditHash   string `json:"previousAuditHash,omitempty"`
+	AuditHash           string `json:"auditHash,omitempty"`
 	Message             string `json:"message"`
 	CreatedAt           string `json:"createdAt"`
 	UpdatedAt           string `json:"updatedAt"`

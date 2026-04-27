@@ -25,6 +25,7 @@ type UseCase struct {
 	metricSnapshotRepo     MetricSnapshotRepo
 	operationAuditRepo     OperationAuditRepo
 	messageAuditRepo       MessageAuditRepo
+	dlqRecordRepo          DLQRecordRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
 	highRiskConfigResolver func(ctx context.Context) (*HighRiskOperationConfig, error)
@@ -74,6 +75,11 @@ func NewUseCase(
 
 func (uc *UseCase) WithJobRepo(jobRepo JobRepo) *UseCase {
 	uc.jobRepo = jobRepo
+	return uc
+}
+
+func (uc *UseCase) WithDLQRecordRepo(repo DLQRecordRepo) *UseCase {
+	uc.dlqRecordRepo = repo
 	return uc
 }
 
@@ -2393,6 +2399,8 @@ func operationAuditToVO(item *MQOperationAudit) *AuditVO {
 		ClientIP:            item.ClientIP,
 		DurationMs:          item.DurationMs,
 		Message:             item.Message,
+		PreviousAuditHash:   item.PreviousAuditHash,
+		AuditHash:           item.AuditHash,
 		CreatedAt:           item.CreatedAt.Format("2006-01-02 15:04:05"),
 		UpdatedAt:           item.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
@@ -2418,6 +2426,8 @@ func messageAuditToVO(item *MQMessageAudit) *AuditVO {
 		PayloadHash:       item.PayloadHash,
 		SensitiveHitCount: item.SensitiveHitCount,
 		RawPayloadVisible: item.RawPayloadVisible,
+		PreviousAuditHash: item.PreviousAuditHash,
+		AuditHash:         item.AuditHash,
 		Message:           item.Message,
 		CreatedAt:         item.CreatedAt.Format("2006-01-02 15:04:05"),
 		UpdatedAt:         item.UpdatedAt.Format("2006-01-02 15:04:05"),

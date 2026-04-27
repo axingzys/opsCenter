@@ -487,6 +487,57 @@ func (r *metricSnapshotRepo) Latest(ctx context.Context, instanceID uint) (*mqbi
 	return &item, nil
 }
 
+type dlqRecordRepo struct {
+	db *gorm.DB
+}
+
+func NewDLQRecordRepo(db *gorm.DB) mqbiz.DLQRecordRepo {
+	return &dlqRecordRepo{db: db}
+}
+
+func (r *dlqRecordRepo) GetByResource(ctx context.Context, instanceID uint, resourceType, namespace, resourceName string) (*mqbiz.MQDLQRecord, error) {
+	var item mqbiz.MQDLQRecord
+	err := r.db.WithContext(ctx).
+		Where("instance_id = ? AND resource_type = ? AND namespace = ? AND resource_name = ?", instanceID, resourceType, namespace, resourceName).
+		First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *dlqRecordRepo) ListByInstanceID(ctx context.Context, instanceID uint) ([]*mqbiz.MQDLQRecord, error) {
+	var items []*mqbiz.MQDLQRecord
+	err := r.db.WithContext(ctx).Where("instance_id = ?", instanceID).Find(&items).Error
+	return items, err
+}
+
+func (r *dlqRecordRepo) Upsert(ctx context.Context, item *mqbiz.MQDLQRecord) error {
+	if item == nil {
+		return nil
+	}
+	existing, err := r.GetByResource(ctx, item.InstanceID, item.ResourceType, item.Namespace, item.ResourceName)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return r.db.WithContext(ctx).Create(item).Error
+	}
+	existing.ResourceID = item.ResourceID
+	existing.Kind = item.Kind
+	existing.HandlingStatus = item.HandlingStatus
+	existing.Owner = item.Owner
+	existing.Remark = item.Remark
+	existing.LastBacklog = item.LastBacklog
+	existing.LastMessage = item.LastMessage
+	existing.UpdatedByID = item.UpdatedByID
+	existing.UpdatedByName = item.UpdatedByName
+	return r.db.WithContext(ctx).Save(existing).Error
+}
+
 func applyAllowedInstanceFilter(query *gorm.DB, column string, restrict bool, allowedIDs []uint) *gorm.DB {
 	if !restrict {
 		return query
