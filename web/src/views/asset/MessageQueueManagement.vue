@@ -1,0 +1,1112 @@
+<template>
+  <div class="mq-page">
+    <div class="page-header">
+      <div class="page-title-group">
+        <div class="page-title-icon">
+          <el-icon><Connection /></el-icon>
+        </div>
+        <div>
+          <h2 class="page-title">消息队列管理</h2>
+          <p class="page-subtitle">统一纳管 RabbitMQ、Kafka、RocketMQ、ActiveMQ、Pulsar，优先提供只读诊断和审计</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <el-button class="black-button" :disabled="!uiPermissions.instanceCreate" @click="openInstanceDialog()">
+          <el-icon style="margin-right: 6px;"><Plus /></el-icon>
+          新增实例
+        </el-button>
+      </div>
+    </div>
+
+    <el-tabs v-model="activeTab" class="main-tabs">
+      <el-tab-pane label="实例管理" name="instances">
+        <div class="search-bar">
+          <div class="search-inputs">
+            <el-input v-model="instanceQuery.keyword" placeholder="搜索实例名称、地址、业务系统、负责人..." clearable class="search-input" @keyup.enter="loadInstances" @clear="loadInstances">
+              <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+            <el-select v-model="instanceQuery.mqType" placeholder="MQ类型" clearable class="search-select" @change="loadInstances">
+              <el-option v-for="item in supportedTypes" :key="item.type" :label="item.name" :value="item.type" />
+            </el-select>
+            <el-select v-model="instanceQuery.status" placeholder="状态" clearable class="search-select" @change="loadInstances">
+              <el-option label="启用" value="enabled" />
+              <el-option label="禁用" value="disabled" />
+            </el-select>
+            <el-select v-model="instanceQuery.healthStatus" placeholder="健康" clearable class="search-select" @change="loadInstances">
+              <el-option label="健康" value="healthy" />
+              <el-option label="警告" value="warning" />
+              <el-option label="异常" value="critical" />
+              <el-option label="未知" value="unknown" />
+            </el-select>
+          </div>
+          <el-button class="reset-btn" @click="resetInstanceQuery">
+            <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
+            重置
+          </el-button>
+        </div>
+
+        <div class="table-wrapper">
+          <el-table :data="instances" v-loading="instanceLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="实例名称" min-width="180">
+              <template #default="{ row }">
+                <div class="name-cell">
+                  <span>{{ row.name }}</span>
+                  <el-tag v-if="row.environment" size="small" type="info">{{ environmentText(row.environment) }}</el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="130" align="center">
+              <template #default="{ row }">
+                <el-tag :type="mqTypeTag(row.mqType)">{{ row.mqTypeText || row.mqType }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="连接地址" min-width="240" show-overflow-tooltip>
+              <template #default="{ row }"><span class="mono">{{ row.endpoint }}</span></template>
+            </el-table-column>
+            <el-table-column label="管理地址" min-width="220" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.managementUrl || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="业务系统" min-width="140">
+              <template #default="{ row }">{{ row.businessSystem || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="负责人" width="120">
+              <template #default="{ row }">{{ row.owner || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.status === 'enabled' ? 'success' : 'info'">{{ row.statusText || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="健康" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag :type="healthTag(row.healthStatus)">{{ row.healthText || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近同步" width="170" align="center">
+              <template #default="{ row }">{{ row.lastSyncAt || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="270" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-tooltip content="连接测试" placement="top">
+                  <el-button link type="primary" :loading="testingId === row.id" :disabled="!canUse(row, MQ_PERMISSION.MANAGE, 'connectionTest')" @click="handleTest(row)">
+                    <el-icon><Connection /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="同步元数据" placement="top">
+                  <el-button link type="success" :loading="syncingId === row.id" :disabled="!canUse(row, MQ_PERMISSION.MANAGE, 'metadataSync')" @click="handleSync(row)">
+                    <el-icon><Refresh /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="查看概览" placement="top">
+                  <el-button link type="info" :disabled="!canUse(row, MQ_PERMISSION.DIAGNOSE, 'diagnosisView')" @click="openOverview(row)">
+                    <el-icon><DataBoard /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip :content="row.status === 'enabled' ? '禁用' : '启用'" placement="top">
+                  <el-button link :type="row.status === 'enabled' ? 'warning' : 'success'" :disabled="!canUse(row, MQ_PERMISSION.MANAGE, 'instanceStatus')" @click="toggleStatus(row)">
+                    <el-icon><Switch /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="编辑" placement="top">
+                  <el-button link type="primary" :disabled="!canUse(row, MQ_PERMISSION.MANAGE, 'instanceUpdate')" @click="openInstanceDialog(row)">
+                    <el-icon><Edit /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="删除" placement="top">
+                  <el-button link type="danger" :disabled="!canUse(row, MQ_PERMISSION.MANAGE, 'instanceDelete')" @click="handleDelete(row)">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pagination-container">
+            <el-pagination v-model:current-page="instanceQuery.page" v-model:page-size="instanceQuery.pageSize" :page-sizes="[10, 20, 50, 100]" :total="instanceTotal" layout="total, sizes, prev, pager, next, jumper" @size-change="loadInstances" @current-change="loadInstances" />
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="资源管理" name="resources">
+        <div class="workspace-toolbar">
+          <el-select v-model="selectedInstanceId" placeholder="选择实例" filterable class="instance-select" @change="handleResourceInstanceChange">
+            <el-option v-for="item in viewableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+          </el-select>
+          <el-input v-model="resourceQuery.keyword" placeholder="搜索资源名称、命名空间..." clearable class="search-input" @keyup.enter="loadResources" @clear="loadResources">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="resourceQuery.resourceType" placeholder="资源类型" clearable class="search-select" @change="loadResources">
+            <el-option label="Topic" value="topic" />
+            <el-option label="Queue" value="queue" />
+            <el-option label="Exchange" value="exchange" />
+            <el-option label="VHost" value="vhost" />
+            <el-option label="Namespace" value="namespace" />
+            <el-option label="Tenant" value="tenant" />
+          </el-select>
+          <el-checkbox v-model="resourceHasBacklog" @change="loadResources">仅看堆积</el-checkbox>
+        </div>
+
+        <div class="metric-grid" v-if="overview">
+          <div class="metric-item">
+            <span class="metric-label">Broker</span>
+            <strong>{{ overview.onlineBrokerCount }}/{{ overview.brokerCount }}</strong>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">资源</span>
+            <strong>{{ overview.resourceCount }}</strong>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Backlog</span>
+            <strong>{{ overview.backlog }}</strong>
+          </div>
+          <div class="metric-item">
+            <span class="metric-label">Lag</span>
+            <strong>{{ overview.lag }}</strong>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <el-table :data="resources" v-loading="resourceLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="资源名称" min-width="240" show-overflow-tooltip>
+              <template #default="{ row }">
+                <div class="name-cell"><span>{{ row.name }}</span><el-tag size="small">{{ row.resourceTypeText || row.resourceType }}</el-tag></div>
+              </template>
+            </el-table-column>
+            <el-table-column label="命名空间" min-width="170" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.namespace || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="分区" width="90" align="center" prop="partitionCount" />
+            <el-table-column label="副本" width="90" align="center" prop="replicaCount" />
+            <el-table-column label="消息数" width="120" align="right" prop="messageCount" />
+            <el-table-column label="Backlog" width="120" align="right">
+              <template #default="{ row }"><span :class="{ danger: row.backlog > 0 }">{{ row.backlog }}</span></template>
+            </el-table-column>
+            <el-table-column label="生产/s" width="120" align="right">
+              <template #default="{ row }">{{ formatRate(row.producedRate) }}</template>
+            </el-table-column>
+            <el-table-column label="消费/s" width="120" align="right">
+              <template #default="{ row }">{{ formatRate(row.consumedRate) }}</template>
+            </el-table-column>
+            <el-table-column label="消费者" width="100" align="center" prop="consumerCount" />
+          </el-table>
+          <div class="pagination-container">
+            <el-pagination v-model:current-page="resourceQuery.page" v-model:page-size="resourceQuery.pageSize" :page-sizes="[10, 20, 50, 100]" :total="resourceTotal" layout="total, sizes, prev, pager, next, jumper" @size-change="loadResources" @current-change="loadResources" />
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="消费诊断" name="diagnosis">
+        <div class="workspace-toolbar">
+          <el-select v-model="selectedInstanceId" placeholder="选择实例" filterable class="instance-select" @change="loadDiagnosis">
+            <el-option v-for="item in diagnosableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+          </el-select>
+          <el-input v-model="consumerQuery.keyword" placeholder="搜索消费组、订阅或资源..." clearable class="search-input" @keyup.enter="loadConsumerGroups" @clear="loadConsumerGroups">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-checkbox v-model="consumerHasLag" @change="loadConsumerGroups">仅看Lag</el-checkbox>
+        </div>
+
+        <div class="split-layout">
+          <div class="panel">
+            <div class="panel-title">消费组 / 订阅</div>
+            <el-table :data="consumerGroups" v-loading="consumerLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="名称" min-width="180" prop="groupName" show-overflow-tooltip />
+              <el-table-column label="资源" min-width="180" prop="resourceName" show-overflow-tooltip />
+              <el-table-column label="消费者" width="90" align="center" prop="consumerCount" />
+              <el-table-column label="Lag" width="100" align="right">
+                <template #default="{ row }"><span :class="{ danger: row.lag > 0 }">{{ row.lag }}</span></template>
+              </el-table-column>
+              <el-table-column label="Backlog" width="110" align="right">
+                <template #default="{ row }"><span :class="{ danger: row.backlog > 0 }">{{ row.backlog }}</span></template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <div class="panel">
+            <div class="panel-title">分区 / 队列维度</div>
+            <el-table :data="partitions" v-loading="partitionLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="资源" min-width="170" prop="resourceName" show-overflow-tooltip />
+              <el-table-column label="分区" width="80" align="center" prop="partitionId" />
+              <el-table-column label="Leader" min-width="150" prop="leader" show-overflow-tooltip />
+              <el-table-column label="状态" width="90" align="center">
+                <template #default="{ row }"><el-tag size="small" :type="row.status === 'online' ? 'success' : 'warning'">{{ row.status || '-' }}</el-tag></template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="消息查看" name="messages">
+        <div class="message-sampler">
+          <el-form :model="sampleForm" label-width="120px" class="sampler-form">
+            <el-form-item label="实例">
+              <el-select v-model="sampleInstanceId" placeholder="选择实例" filterable>
+                <el-option v-for="item in messageReadableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="资源类型">
+              <el-select v-model="sampleForm.resourceType" placeholder="资源类型">
+                <el-option label="Topic" value="topic" />
+                <el-option label="Queue" value="queue" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="资源名称">
+              <el-input v-model="sampleForm.resourceName" placeholder="Kafka topic 或其他资源名称" />
+            </el-form-item>
+            <el-form-item label="Partition">
+              <el-input-number v-model="sampleForm.partitionId" :min="0" :max="100000" />
+            </el-form-item>
+            <el-form-item label="Offset">
+              <el-input-number v-model="sampleForm.offset" :min="0" :max="9007199254740991" />
+            </el-form-item>
+            <el-form-item label="条数">
+              <el-input-number v-model="sampleForm.limit" :min="1" :max="10" />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" :loading="sampleLoading" :disabled="!uiPermissions.messageRead || !sampleInstanceId || !sampleForm.resourceName" @click="handleSampleMessages">
+                <el-icon style="margin-right: 6px;"><View /></el-icon>
+                采样
+              </el-button>
+            </el-form-item>
+          </el-form>
+
+          <div class="sample-result">
+            <div class="panel-title">采样结果</div>
+            <el-empty v-if="messageSamples.length === 0" description="暂无消息样本" :image-size="72" />
+            <div v-else class="sample-list">
+              <div v-for="item in messageSamples" :key="`${item.partitionId}-${item.offset}`" class="sample-item">
+                <div class="sample-meta">
+                  <el-tag size="small">partition {{ item.partitionId }}</el-tag>
+                  <span>offset {{ item.offset }}</span>
+                  <span>{{ item.timestamp || '-' }}</span>
+                  <span v-if="item.truncated" class="danger">已截断</span>
+                </div>
+                <pre>{{ item.payload }}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="操作审计" name="audits">
+        <div class="workspace-toolbar">
+          <el-input v-model="auditQuery.keyword" placeholder="搜索实例、资源、操作人、消息..." clearable class="search-input" @keyup.enter="loadAudits" @clear="loadAudits">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="auditQuery.instanceId" placeholder="实例" clearable filterable class="search-select" @change="loadAudits">
+            <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+          <el-select v-model="auditQuery.status" placeholder="状态" clearable class="search-select" @change="loadAudits">
+            <el-option label="成功" value="success" />
+            <el-option label="失败" value="failed" />
+            <el-option label="执行中" value="pending" />
+          </el-select>
+          <el-radio-group v-model="auditType" @change="loadAudits">
+            <el-radio-button label="operation">操作审计</el-radio-button>
+            <el-radio-button label="message">消息审计</el-radio-button>
+          </el-radio-group>
+        </div>
+        <div class="table-wrapper">
+          <el-table :data="audits" v-loading="auditLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="动作" width="150" prop="actionText" />
+            <el-table-column label="实例" min-width="160" prop="instanceName" show-overflow-tooltip />
+            <el-table-column label="资源" min-width="200" prop="resourceName" show-overflow-tooltip />
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }"><el-tag :type="row.status === 'success' ? 'success' : row.status === 'failed' ? 'danger' : 'warning'">{{ row.statusText || row.status }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="操作人" width="120" prop="operatorName" />
+            <el-table-column label="耗时(ms)" width="110" align="right" prop="durationMs" />
+            <el-table-column label="消息" min-width="240" prop="message" show-overflow-tooltip />
+            <el-table-column label="时间" width="170" prop="createdAt" />
+          </el-table>
+          <div class="pagination-container">
+            <el-pagination v-model:current-page="auditQuery.page" v-model:page-size="auditQuery.pageSize" :page-sizes="[10, 20, 50, 100]" :total="auditTotal" layout="total, sizes, prev, pager, next, jumper" @size-change="loadAudits" @current-change="loadAudits" />
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane v-if="uiPermissions.permissionManage" label="实例权限" name="permissions">
+        <div class="workspace-toolbar">
+          <el-input v-model="permissionQuery.keyword" placeholder="搜索角色或实例" clearable class="search-input" @keyup.enter="loadPermissions" @clear="loadPermissions">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-button type="primary" @click="openPermissionDialog()">
+            <el-icon style="margin-right: 6px;"><Plus /></el-icon>
+            添加权限
+          </el-button>
+        </div>
+        <div class="table-wrapper">
+          <el-table :data="permissionRows" v-loading="permissionLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="角色" min-width="180">
+              <template #default="{ row }">{{ row.roleName || '-' }} <el-tag v-if="row.roleCode" size="small">{{ row.roleCode }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="实例" min-width="180" prop="instanceName" />
+            <el-table-column label="权限" min-width="420">
+              <template #default="{ row }">
+                <div class="permission-tag-list">
+                  <el-tag v-for="item in permissionOptions.filter(option => hasPermissionMask(row.permissions, option.value))" :key="item.value" size="small">{{ item.label }}</el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" align="center">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openPermissionDialog(row)">编辑</el-button>
+                <el-button link type="danger" @click="handleDeletePermission(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="pagination-container">
+            <el-pagination v-model:current-page="permissionQuery.page" v-model:page-size="permissionQuery.pageSize" :page-sizes="[10, 20, 50, 100]" :total="permissionTotal" layout="total, sizes, prev, pager, next, jumper" @size-change="loadPermissions" @current-change="loadPermissions" />
+          </div>
+        </div>
+      </el-tab-pane>
+    </el-tabs>
+
+    <el-dialog v-model="instanceDialogVisible" :title="instanceForm.id ? '编辑MQ实例' : '新增MQ实例'" width="720px">
+      <el-form ref="instanceFormRef" :model="instanceForm" :rules="instanceRules" label-width="120px">
+        <el-form-item label="实例名称" prop="name"><el-input v-model="instanceForm.name" /></el-form-item>
+        <el-form-item label="MQ类型" prop="mqType">
+          <el-select v-model="instanceForm.mqType" placeholder="选择类型" @change="applyTypeDefaults">
+            <el-option v-for="item in supportedTypes" :key="item.type" :label="item.name" :value="item.type" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="连接地址" prop="endpoint"><el-input v-model="instanceForm.endpoint" placeholder="host:port，Kafka可用逗号分隔多个bootstrap" /></el-form-item>
+        <el-form-item label="管理地址"><el-input v-model="instanceForm.managementUrl" placeholder="RabbitMQ/Pulsar/ActiveMQ 管理API地址，可选" /></el-form-item>
+        <el-form-item label="端口"><el-input-number v-model="instanceForm.port" :min="0" :max="65535" /></el-form-item>
+        <el-form-item label="凭据"><el-select v-model="instanceForm.credentialId" clearable filterable placeholder="可选">
+          <el-option v-for="item in credentials" :key="item.id" :label="`${item.name} (${item.username || '无用户名'})`" :value="item.id" />
+        </el-select></el-form-item>
+        <el-form-item label="TLS"><el-switch v-model="instanceForm.tlsEnabled" /></el-form-item>
+        <el-form-item label="环境"><el-select v-model="instanceForm.environment" clearable>
+          <el-option label="生产" value="prod" /><el-option label="预发" value="staging" /><el-option label="测试" value="test" /><el-option label="开发" value="dev" />
+        </el-select></el-form-item>
+        <el-form-item label="业务系统"><el-input v-model="instanceForm.businessSystem" /></el-form-item>
+        <el-form-item label="负责人"><el-input v-model="instanceForm.owner" /></el-form-item>
+        <el-form-item label="连接参数"><el-input v-model="instanceForm.connectionParams" type="textarea" :rows="3" placeholder='JSON，如 {"sasl":"plain"}' /></el-form-item>
+        <el-form-item label="备注"><el-input v-model="instanceForm.remark" type="textarea" :rows="2" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="instanceDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="instanceSubmitting" @click="submitInstance">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="permissionDialogVisible" title="MQ实例权限" width="560px">
+      <el-form :model="permissionForm" label-width="100px">
+        <el-form-item label="角色">
+          <el-select v-model="permissionForm.roleId" filterable placeholder="选择角色">
+            <el-option v-for="role in roles" :key="role.id" :label="role.name" :value="role.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="实例">
+          <el-select v-model="permissionForm.instanceId" filterable placeholder="选择实例">
+            <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="权限">
+          <el-checkbox-group v-model="permissionForm.permissionValues">
+            <el-checkbox v-for="item in permissionOptions" :key="item.value" :label="item.value">{{ item.label }}</el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="permissionDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="permissionSubmitting" @click="submitPermission">保存</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { Connection, DataBoard, Delete, Edit, Plus, Refresh, RefreshLeft, Search, Switch, View } from '@element-plus/icons-vue'
+import { getCredentials } from '@/api/host'
+import { getAllRoles } from '@/api/role'
+import {
+  MQ_PERMISSION,
+  createMQInstance,
+  deleteMQInstance,
+  deleteMQInstancePermission,
+  disableMQInstance,
+  enableMQInstance,
+  getMQOverview,
+  getMQSupportedTypes,
+  getMQUIPermissions,
+  listMQConsumerGroups,
+  listMQInstances,
+  listMQInstancePermissions,
+  listMQMessageAudits,
+  listMQOperationAudits,
+  listMQPartitions,
+  listMQResources,
+  sampleMQMessages,
+  syncMQMetadata,
+  testMQInstance,
+  updateMQInstance,
+  upsertMQInstancePermission,
+  type MQInstancePayload,
+  type MQSupportedType
+} from '@/api/messagequeue'
+
+const tableHeaderStyle = { background: '#fafbfc', color: '#606266', fontWeight: '600' }
+const activeTab = ref('instances')
+const supportedTypes = ref<MQSupportedType[]>([])
+const credentials = ref<any[]>([])
+const roles = ref<any[]>([])
+const uiPermissions = reactive<Record<string, boolean>>({
+  instanceCreate: false,
+  instanceUpdate: false,
+  instanceDelete: false,
+  instanceStatus: false,
+  connectionTest: false,
+  metadataSync: false,
+  diagnosisView: false,
+  messageRead: false,
+  permissionManage: false
+})
+
+const instances = ref<any[]>([])
+const instanceTotal = ref(0)
+const instanceLoading = ref(false)
+const testingId = ref(0)
+const syncingId = ref(0)
+const instanceQuery = reactive({ page: 1, pageSize: 10, keyword: '', mqType: '', status: '', healthStatus: '', environment: '' })
+
+const selectedInstanceId = ref<number | null>(null)
+const overview = ref<any>(null)
+const resources = ref<any[]>([])
+const resourceTotal = ref(0)
+const resourceLoading = ref(false)
+const resourceHasBacklog = ref(false)
+const resourceQuery = reactive({ page: 1, pageSize: 10, keyword: '', resourceType: '', namespace: '' })
+
+const consumerGroups = ref<any[]>([])
+const partitions = ref<any[]>([])
+const consumerLoading = ref(false)
+const partitionLoading = ref(false)
+const consumerHasLag = ref(false)
+const consumerQuery = reactive({ page: 1, pageSize: 20, keyword: '', resourceName: '', namespace: '' })
+
+const sampleInstanceId = ref<number | null>(null)
+const sampleLoading = ref(false)
+const messageSamples = ref<any[]>([])
+const sampleForm = reactive<any>({ resourceType: 'topic', resourceName: '', partitionId: 0, offset: null, limit: 5, maxBytes: 65536 })
+
+const auditType = ref('operation')
+const audits = ref<any[]>([])
+const auditTotal = ref(0)
+const auditLoading = ref(false)
+const auditQuery = reactive<any>({ page: 1, pageSize: 10, keyword: '', instanceId: undefined, status: '', action: '' })
+
+const permissionRows = ref<any[]>([])
+const permissionTotal = ref(0)
+const permissionLoading = ref(false)
+const permissionQuery = reactive({ page: 1, pageSize: 10, keyword: '' })
+
+const instanceDialogVisible = ref(false)
+const instanceSubmitting = ref(false)
+const instanceFormRef = ref<FormInstance>()
+const instanceForm = reactive<any>({
+  id: 0,
+  name: '',
+  mqType: 'rabbitmq',
+  endpoint: '',
+  managementUrl: '',
+  port: 5672,
+  credentialId: undefined,
+  tlsEnabled: false,
+  connectionParams: '',
+  status: 'enabled',
+  environment: '',
+  businessSystem: '',
+  owner: '',
+  tags: '',
+  remark: ''
+})
+const instanceRules: FormRules = {
+  name: [{ required: true, message: '请输入实例名称', trigger: 'blur' }],
+  mqType: [{ required: true, message: '请选择MQ类型', trigger: 'change' }],
+  endpoint: [{ required: true, message: '请输入连接地址', trigger: 'blur' }]
+}
+
+const permissionDialogVisible = ref(false)
+const permissionSubmitting = ref(false)
+const permissionForm = reactive<any>({ id: 0, roleId: undefined, instanceId: undefined, permissionValues: [MQ_PERMISSION.VIEW, MQ_PERMISSION.DIAGNOSE] })
+
+const permissionOptions = [
+  { label: '查看', value: MQ_PERMISSION.VIEW },
+  { label: '诊断', value: MQ_PERMISSION.DIAGNOSE },
+  { label: '消息查看', value: MQ_PERMISSION.MESSAGE_READ },
+  { label: '消息导出', value: MQ_PERMISSION.MESSAGE_EXPORT },
+  { label: '消息写入', value: MQ_PERMISSION.MESSAGE_WRITE },
+  { label: '资源管理', value: MQ_PERMISSION.RESOURCE_MANAGE },
+  { label: '高危操作', value: MQ_PERMISSION.HIGH_RISK },
+  { label: '审计', value: MQ_PERMISSION.AUDIT },
+  { label: '管理', value: MQ_PERMISSION.MANAGE }
+]
+
+const supportedTypeMap = computed(() => new Map(supportedTypes.value.map(item => [item.type, item])))
+const viewableInstances = computed(() => instances.value.filter(item => hasObjectPermission(item, MQ_PERMISSION.VIEW)))
+const diagnosableInstances = computed(() => instances.value.filter(item => hasObjectPermission(item, MQ_PERMISSION.DIAGNOSE)))
+const messageReadableInstances = computed(() => instances.value.filter(item => hasObjectPermission(item, MQ_PERMISSION.MESSAGE_READ)))
+
+const loadSupportedTypes = async () => {
+  supportedTypes.value = await getMQSupportedTypes()
+}
+
+const loadUIPermissions = async () => {
+  const data = await getMQUIPermissions()
+  Object.assign(uiPermissions, data || {})
+}
+
+const loadCredentials = async () => {
+  credentials.value = await getCredentials()
+}
+
+const loadRoles = async () => {
+  roles.value = await getAllRoles()
+}
+
+const loadInstances = async () => {
+  instanceLoading.value = true
+  try {
+    const res = await listMQInstances({ ...instanceQuery })
+    instances.value = res.list || []
+    instanceTotal.value = res.total || 0
+    if (!selectedInstanceId.value && instances.value.length > 0) {
+      selectedInstanceId.value = instances.value[0].id
+      sampleInstanceId.value = instances.value[0].id
+    }
+  } finally {
+    instanceLoading.value = false
+  }
+}
+
+const resetInstanceQuery = () => {
+  Object.assign(instanceQuery, { page: 1, keyword: '', mqType: '', status: '', healthStatus: '', environment: '' })
+  loadInstances()
+}
+
+const loadOverview = async () => {
+  if (!selectedInstanceId.value) return
+  overview.value = await getMQOverview(selectedInstanceId.value)
+}
+
+const loadResources = async () => {
+  if (!selectedInstanceId.value) return
+  resourceLoading.value = true
+  try {
+    const res = await listMQResources(selectedInstanceId.value, { ...resourceQuery, hasBacklog: resourceHasBacklog.value ? 'true' : '' })
+    resources.value = res.list || []
+    resourceTotal.value = res.total || 0
+  } finally {
+    resourceLoading.value = false
+  }
+}
+
+const loadConsumerGroups = async () => {
+  if (!selectedInstanceId.value) return
+  consumerLoading.value = true
+  try {
+    const res = await listMQConsumerGroups(selectedInstanceId.value, { ...consumerQuery, hasLag: consumerHasLag.value ? 'true' : '' })
+    consumerGroups.value = res.list || []
+  } finally {
+    consumerLoading.value = false
+  }
+}
+
+const loadPartitions = async () => {
+  if (!selectedInstanceId.value) return
+  partitionLoading.value = true
+  try {
+    const res = await listMQPartitions(selectedInstanceId.value, { page: 1, pageSize: 100 })
+    partitions.value = res.list || []
+  } finally {
+    partitionLoading.value = false
+  }
+}
+
+const loadDiagnosis = async () => {
+  await Promise.all([loadOverview(), loadConsumerGroups(), loadPartitions()])
+}
+
+const handleResourceInstanceChange = async () => {
+  resourceQuery.page = 1
+  await Promise.all([loadOverview(), loadResources()])
+}
+
+const loadAudits = async () => {
+  auditLoading.value = true
+  try {
+    const res = auditType.value === 'message'
+      ? await listMQMessageAudits({ ...auditQuery })
+      : await listMQOperationAudits({ ...auditQuery })
+    audits.value = res.list || []
+    auditTotal.value = res.total || 0
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+const loadPermissions = async () => {
+  if (!uiPermissions.permissionManage) return
+  permissionLoading.value = true
+  try {
+    const res = await listMQInstancePermissions({ ...permissionQuery })
+    permissionRows.value = res.list || []
+    permissionTotal.value = res.total || 0
+  } finally {
+    permissionLoading.value = false
+  }
+}
+
+const openInstanceDialog = (row?: any) => {
+  if (row) {
+    Object.assign(instanceForm, {
+      id: row.id,
+      name: row.name,
+      mqType: row.mqType,
+      endpoint: row.endpoint,
+      managementUrl: row.managementUrl || '',
+      port: row.port || supportedTypeMap.value.get(row.mqType)?.defaultPort || 0,
+      credentialId: row.credentialId || undefined,
+      tlsEnabled: !!row.tlsEnabled,
+      connectionParams: row.connectionParams || '',
+      status: row.status || 'enabled',
+      environment: row.environment || '',
+      businessSystem: row.businessSystem || '',
+      owner: row.owner || '',
+      tags: row.tags || '',
+      remark: row.remark || ''
+    })
+  } else {
+    Object.assign(instanceForm, {
+      id: 0,
+      name: '',
+      mqType: 'rabbitmq',
+      endpoint: '',
+      managementUrl: '',
+      port: 5672,
+      credentialId: undefined,
+      tlsEnabled: false,
+      connectionParams: '',
+      status: 'enabled',
+      environment: '',
+      businessSystem: '',
+      owner: '',
+      tags: '',
+      remark: ''
+    })
+  }
+  instanceDialogVisible.value = true
+}
+
+const applyTypeDefaults = () => {
+  const item = supportedTypeMap.value.get(instanceForm.mqType)
+  if (item) {
+    instanceForm.port = item.defaultPort
+  }
+}
+
+const submitInstance = async () => {
+  if (!instanceFormRef.value) return
+  await instanceFormRef.value.validate()
+  instanceSubmitting.value = true
+  try {
+    const payload: MQInstancePayload = { ...instanceForm, credentialId: instanceForm.credentialId || 0 }
+    if (instanceForm.id) {
+      await updateMQInstance(instanceForm.id, payload)
+      ElMessage.success('更新成功')
+    } else {
+      await createMQInstance(payload)
+      ElMessage.success('创建成功')
+    }
+    instanceDialogVisible.value = false
+    await loadInstances()
+  } finally {
+    instanceSubmitting.value = false
+  }
+}
+
+const handleTest = async (row: any) => {
+  testingId.value = row.id
+  try {
+    const res = await testMQInstance(row.id)
+    ElMessage.success(res.message || '连接测试成功')
+    await loadInstances()
+  } finally {
+    testingId.value = 0
+  }
+}
+
+const handleSync = async (row: any) => {
+  syncingId.value = row.id
+  try {
+    const res = await syncMQMetadata(row.id)
+    ElMessage.success(res.message || '同步成功')
+    await Promise.all([loadInstances(), loadResources(), loadDiagnosis(), loadAudits()])
+  } finally {
+    syncingId.value = 0
+  }
+}
+
+const openOverview = async (row: any) => {
+  selectedInstanceId.value = row.id
+  activeTab.value = 'resources'
+  await handleResourceInstanceChange()
+}
+
+const toggleStatus = async (row: any) => {
+  if (row.status === 'enabled') {
+    await disableMQInstance(row.id)
+    ElMessage.success('禁用成功')
+  } else {
+    await enableMQInstance(row.id)
+    ElMessage.success('启用成功')
+  }
+  await loadInstances()
+}
+
+const handleDelete = async (row: any) => {
+  await ElMessageBox.confirm(`确认删除 MQ 实例「${row.name}」？`, '删除确认', { type: 'warning' })
+  await deleteMQInstance(row.id)
+  ElMessage.success('删除成功')
+  await loadInstances()
+}
+
+const handleSampleMessages = async () => {
+  if (!sampleInstanceId.value) return
+  sampleLoading.value = true
+  try {
+    const payload = { ...sampleForm }
+    if (payload.offset === null || payload.offset === undefined) delete payload.offset
+    const res = await sampleMQMessages(sampleInstanceId.value, payload)
+    messageSamples.value = res.samples || []
+    ElMessage.success(res.message || '采样完成')
+    await loadAudits()
+  } finally {
+    sampleLoading.value = false
+  }
+}
+
+const openPermissionDialog = (row?: any) => {
+  if (row) {
+    Object.assign(permissionForm, {
+      id: row.id,
+      roleId: row.roleId,
+      instanceId: row.instanceId,
+      permissionValues: permissionOptions.filter(item => hasPermissionMask(row.permissions, item.value)).map(item => item.value)
+    })
+  } else {
+    Object.assign(permissionForm, { id: 0, roleId: undefined, instanceId: undefined, permissionValues: [MQ_PERMISSION.VIEW, MQ_PERMISSION.DIAGNOSE] })
+  }
+  permissionDialogVisible.value = true
+}
+
+const submitPermission = async () => {
+  if (!permissionForm.roleId || !permissionForm.instanceId) {
+    ElMessage.warning('请选择角色和实例')
+    return
+  }
+  const permissions = permissionForm.permissionValues.reduce((sum: number, value: number) => sum | value, 0)
+  permissionSubmitting.value = true
+  try {
+    await upsertMQInstancePermission({ roleId: permissionForm.roleId, instanceId: permissionForm.instanceId, permissions })
+    ElMessage.success('保存成功')
+    permissionDialogVisible.value = false
+    await Promise.all([loadPermissions(), loadInstances()])
+  } finally {
+    permissionSubmitting.value = false
+  }
+}
+
+const handleDeletePermission = async (row: any) => {
+  await ElMessageBox.confirm('确认删除该权限配置？', '删除确认', { type: 'warning' })
+  await deleteMQInstancePermission(row.id)
+  ElMessage.success('删除成功')
+  await Promise.all([loadPermissions(), loadInstances()])
+}
+
+const hasPermissionMask = (permissions: number, value: number) => (Number(permissions || 0) & value) > 0
+const hasObjectPermission = (row: any, permission: number) => !row || row.permissions === undefined || hasPermissionMask(row.permissions, permission)
+const canUse = (row: any, permission: number, uiKey: string) => !!uiPermissions[uiKey] && hasObjectPermission(row, permission)
+const mqTypeTag = (type: string) => type === 'rabbitmq' ? 'success' : type === 'kafka' ? 'warning' : type === 'pulsar' ? 'primary' : 'info'
+const healthTag = (status: string) => status === 'healthy' ? 'success' : status === 'critical' ? 'danger' : status === 'warning' ? 'warning' : 'info'
+const environmentText = (value: string) => ({ prod: '生产', staging: '预发', test: '测试', dev: '开发' } as Record<string, string>)[value] || value
+const formatRate = (value: number) => Number(value || 0).toFixed(2)
+
+watch(activeTab, async tab => {
+  if (tab === 'resources') await handleResourceInstanceChange()
+  if (tab === 'diagnosis') await loadDiagnosis()
+  if (tab === 'audits') await loadAudits()
+  if (tab === 'permissions') await loadPermissions()
+})
+
+onMounted(async () => {
+  await Promise.all([loadSupportedTypes(), loadUIPermissions(), loadCredentials(), loadRoles()])
+  await loadInstances()
+  await Promise.all([loadResources(), loadDiagnosis(), loadAudits(), loadPermissions()])
+})
+</script>
+
+<style scoped>
+.mq-page {
+  padding: 24px;
+  background: #f5f7fa;
+  min-height: 100vh;
+}
+
+.page-header,
+.main-tabs,
+.search-bar,
+.table-wrapper,
+.panel,
+.message-sampler {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 24px;
+}
+
+.page-title-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.page-title-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #0f766e, #2563eb);
+  color: #ffffff;
+  font-size: 24px;
+}
+
+.page-title {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.page-subtitle {
+  margin: 0;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.header-actions,
+.search-bar,
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.black-button {
+  background: #111827;
+  border-color: #111827;
+  color: #ffffff;
+}
+
+.black-button:hover,
+.black-button:focus {
+  background: #374151;
+  border-color: #374151;
+  color: #ffffff;
+}
+
+.main-tabs {
+  padding: 0 24px 24px;
+}
+
+.search-bar,
+.workspace-toolbar {
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 16px;
+  box-shadow: none;
+  border: 1px solid #eef0f3;
+}
+
+.search-inputs {
+  display: flex;
+  flex: 1;
+  gap: 12px;
+  min-width: 0;
+}
+
+.search-input {
+  width: 320px;
+}
+
+.search-select {
+  width: 160px;
+}
+
+.instance-select {
+  width: 300px;
+}
+
+.table-wrapper {
+  padding: 16px;
+}
+
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.pagination-container {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.metric-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.metric-label {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.metric-item strong {
+  color: #111827;
+  font-size: 20px;
+}
+
+.split-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.panel-title {
+  margin-bottom: 12px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.message-sampler {
+  display: grid;
+  grid-template-columns: 420px minmax(0, 1fr);
+  gap: 20px;
+  padding: 20px;
+}
+
+.sampler-form {
+  border-right: 1px solid #eef0f3;
+  padding-right: 20px;
+}
+
+.sample-result {
+  min-width: 0;
+}
+
+.sample-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sample-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.sample-meta {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+}
+
+.sample-item pre {
+  margin: 0;
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #111827;
+  font-size: 13px;
+}
+
+.permission-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.danger {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+@media (max-width: 1200px) {
+  .page-header,
+  .search-bar,
+  .workspace-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .search-inputs {
+    flex-wrap: wrap;
+  }
+
+  .split-layout,
+  .message-sampler,
+  .metric-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sampler-form {
+    border-right: 0;
+    border-bottom: 1px solid #eef0f3;
+    padding-right: 0;
+    padding-bottom: 16px;
+  }
+}
+</style>

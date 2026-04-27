@@ -37,6 +37,7 @@ import (
 	auditserver "github.com/ydcloud-dy/opshub/internal/server/audit"
 	databaseserver "github.com/ydcloud-dy/opshub/internal/server/database"
 	identityserver "github.com/ydcloud-dy/opshub/internal/server/identity"
+	messagequeueserver "github.com/ydcloud-dy/opshub/internal/server/messagequeue"
 	mfaserver "github.com/ydcloud-dy/opshub/internal/server/mfa"
 	"github.com/ydcloud-dy/opshub/internal/server/rbac"
 	systemserver "github.com/ydcloud-dy/opshub/internal/server/system"
@@ -56,14 +57,15 @@ import (
 
 // HTTPServer HTTP服务器
 type HTTPServer struct {
-	server    *http.Server
-	conf      *conf.Config
-	svc       *service.Service
-	db        *gorm.DB
-	pluginMgr *plugin.Manager
-	uploadSrv *UploadServer
-	database  *databaseserver.HTTPServer
-	asset     *assetserver.HTTPServer
+	server       *http.Server
+	conf         *conf.Config
+	svc          *service.Service
+	db           *gorm.DB
+	pluginMgr    *plugin.Manager
+	uploadSrv    *UploadServer
+	database     *databaseserver.HTTPServer
+	messageQueue *messagequeueserver.HTTPServer
+	asset        *assetserver.HTTPServer
 }
 
 // NewHTTPServer 创建HTTP服务器
@@ -225,6 +227,11 @@ func (s *HTTPServer) registerRoutes(router *gin.Engine, jwtSecret string) {
 		databaseServer := databaseserver.NewHTTPServer(s.db, authMiddleware)
 		databaseServer.RegisterRoutes(v1)
 		s.database = databaseServer
+
+		// 注册消息队列管理路由
+		messageQueueServer := messagequeueserver.NewHTTPServer(s.db, authMiddleware)
+		messageQueueServer.RegisterRoutes(v1)
+		s.messageQueue = messageQueueServer
 
 		// 身份认证模块暂不开放，如需启用请取消下方注释
 		// if identityServer != nil {

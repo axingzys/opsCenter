@@ -119,6 +119,12 @@ const router = createRouter({
           meta: { title: '数据库管理' }
         },
         {
+          path: 'asset/message-queues',
+          name: 'AssetMessageQueues',
+          component: () => import('@/views/asset/MessageQueueManagement.vue'),
+          meta: { title: '消息队列管理' }
+        },
+        {
           path: 'asset/terminal-audit',
           name: 'AssetTerminalAudit',
           component: () => import('@/views/asset/TerminalAudit.vue'),

@@ -1,0 +1,751 @@
+package messagequeue
+
+import (
+	"strings"
+	"time"
+
+	"gorm.io/gorm"
+)
+
+const (
+	MQTypeRabbitMQ = "rabbitmq"
+	MQTypeKafka    = "kafka"
+	MQTypeRocketMQ = "rocketmq"
+	MQTypeActiveMQ = "activemq"
+	MQTypePulsar   = "pulsar"
+
+	InstanceStatusEnabled  = "enabled"
+	InstanceStatusDisabled = "disabled"
+
+	HealthStatusUnknown  = "unknown"
+	HealthStatusHealthy  = "healthy"
+	HealthStatusWarning  = "warning"
+	HealthStatusCritical = "critical"
+
+	SyncStatusRunning = "running"
+	SyncStatusSuccess = "success"
+	SyncStatusFailed  = "failed"
+
+	TriggerManual   = "manual"
+	TriggerSchedule = "schedule"
+
+	ResourceTypeBroker       = "broker"
+	ResourceTypeTenant       = "tenant"
+	ResourceTypeNamespace    = "namespace"
+	ResourceTypeVHost        = "vhost"
+	ResourceTypeExchange     = "exchange"
+	ResourceTypeQueue        = "queue"
+	ResourceTypeTopic        = "topic"
+	ResourceTypeSubscription = "subscription"
+	ResourceTypeConsumer     = "consumer"
+
+	AuditActionConnectionTest = "connection_test"
+	AuditActionMetadataSync   = "metadata_sync"
+	AuditActionMessageSample  = "message_sample"
+	AuditActionPermissionSet  = "instance_permission_upsert"
+	AuditActionPermissionDel  = "instance_permission_delete"
+
+	AuditStatusPending = "pending"
+	AuditStatusSuccess = "success"
+	AuditStatusFailed  = "failed"
+
+	RiskLevelLow      = "low"
+	RiskLevelMedium   = "medium"
+	RiskLevelHigh     = "high"
+	RiskLevelCritical = "critical"
+
+	PermissionView           uint = 1 << 0
+	PermissionDiagnose       uint = 1 << 1
+	PermissionMessageRead    uint = 1 << 2
+	PermissionMessageExport  uint = 1 << 3
+	PermissionMessageWrite   uint = 1 << 4
+	PermissionResourceManage uint = 1 << 5
+	PermissionHighRisk       uint = 1 << 6
+	PermissionAudit          uint = 1 << 7
+	PermissionManage         uint = 1 << 8
+	PermissionAll                 = PermissionView |
+		PermissionDiagnose |
+		PermissionMessageRead |
+		PermissionMessageExport |
+		PermissionMessageWrite |
+		PermissionResourceManage |
+		PermissionHighRisk |
+		PermissionAudit |
+		PermissionManage
+)
+
+type MQInstance struct {
+	gorm.Model
+	Name             string     `gorm:"type:varchar(100);not null;comment:实例名称" json:"name"`
+	MQType           string     `gorm:"column:mq_type;type:varchar(30);not null;index;comment:消息队列类型" json:"mqType"`
+	Engine           string     `gorm:"type:varchar(50);comment:具体引擎" json:"engine"`
+	Version          string     `gorm:"type:varchar(120);comment:版本" json:"version"`
+	Endpoint         string     `gorm:"type:varchar(500);not null;comment:连接地址，多个地址逗号分隔" json:"endpoint"`
+	ManagementURL    string     `gorm:"column:management_url;type:varchar(500);comment:管理API地址" json:"managementUrl"`
+	Port             int        `gorm:"type:int;default:0;comment:默认端口" json:"port"`
+	CredentialID     uint       `gorm:"column:credential_id;index;comment:凭据ID" json:"credentialId"`
+	TLSEnabled       bool       `gorm:"column:tls_enabled;default:false;comment:是否启用TLS" json:"tlsEnabled"`
+	ConnectionParams string     `gorm:"column:connection_params;type:text;comment:连接参数JSON" json:"connectionParams"`
+	Status           string     `gorm:"type:varchar(20);default:'enabled';index;comment:状态 enabled/disabled" json:"status"`
+	HealthStatus     string     `gorm:"column:health_status;type:varchar(20);default:'unknown';index;comment:健康状态" json:"healthStatus"`
+	Environment      string     `gorm:"type:varchar(50);index;comment:环境" json:"environment"`
+	BusinessSystem   string     `gorm:"column:business_system;type:varchar(100);comment:业务系统" json:"businessSystem"`
+	Owner            string     `gorm:"type:varchar(100);comment:负责人" json:"owner"`
+	Tags             string     `gorm:"type:varchar(500);comment:标签，逗号分隔" json:"tags"`
+	Remark           string     `gorm:"type:varchar(500);comment:备注" json:"remark"`
+	LastTestAt       *time.Time `gorm:"column:last_test_at;comment:最近测试时间" json:"lastTestAt,omitempty"`
+	LastSyncAt       *time.Time `gorm:"column:last_sync_at;comment:最近同步时间" json:"lastSyncAt,omitempty"`
+	LastMetricAt     *time.Time `gorm:"column:last_metric_at;comment:最近指标采集时间" json:"lastMetricAt,omitempty"`
+}
+
+func (MQInstance) TableName() string {
+	return "mq_instances"
+}
+
+type MQInstancePermission struct {
+	gorm.Model
+	RoleID      uint `gorm:"column:role_id;not null;uniqueIndex:idx_mq_instance_permission;comment:角色ID" json:"roleId"`
+	InstanceID  uint `gorm:"column:instance_id;not null;uniqueIndex:idx_mq_instance_permission;index;comment:MQ实例ID" json:"instanceId"`
+	Permissions uint `gorm:"column:permissions;type:int unsigned;not null;default:1;comment:权限位图" json:"permissions"`
+}
+
+func (MQInstancePermission) TableName() string {
+	return "mq_instance_permissions"
+}
+
+type MQBroker struct {
+	gorm.Model
+	InstanceID   uint       `gorm:"column:instance_id;not null;index:idx_mq_broker_unique,unique;comment:实例ID" json:"instanceId"`
+	BrokerName   string     `gorm:"column:broker_name;type:varchar(160);not null;index:idx_mq_broker_unique,unique;comment:Broker名称" json:"brokerName"`
+	BrokerID     string     `gorm:"column:broker_id;type:varchar(120);comment:Broker ID" json:"brokerId"`
+	Host         string     `gorm:"type:varchar(255);comment:主机" json:"host"`
+	Port         int        `gorm:"type:int;default:0;comment:端口" json:"port"`
+	Role         string     `gorm:"type:varchar(60);comment:角色" json:"role"`
+	Status       string     `gorm:"type:varchar(60);comment:状态" json:"status"`
+	Version      string     `gorm:"type:varchar(120);comment:版本" json:"version"`
+	Rack         string     `gorm:"type:varchar(120);comment:Rack" json:"rack"`
+	Zone         string     `gorm:"type:varchar(120);comment:可用区" json:"zone"`
+	MetadataJSON string     `gorm:"column:metadata_json;type:text;comment:原始元数据JSON" json:"metadataJson"`
+	LastSyncAt   *time.Time `gorm:"column:last_sync_at;comment:最近同步时间" json:"lastSyncAt,omitempty"`
+}
+
+func (MQBroker) TableName() string {
+	return "mq_brokers"
+}
+
+type MQResource struct {
+	gorm.Model
+	InstanceID     uint       `gorm:"column:instance_id;not null;index:idx_mq_resource_unique,unique;comment:实例ID" json:"instanceId"`
+	ResourceType   string     `gorm:"column:resource_type;type:varchar(40);not null;index:idx_mq_resource_unique,unique;comment:资源类型" json:"resourceType"`
+	Namespace      string     `gorm:"type:varchar(255);index:idx_mq_resource_unique,unique;comment:命名空间/vhost/tenant" json:"namespace"`
+	Name           string     `gorm:"type:varchar(255);not null;index:idx_mq_resource_unique,unique;comment:资源名称" json:"name"`
+	FullName       string     `gorm:"column:full_name;type:varchar(512);index;comment:完整名称" json:"fullName"`
+	Durable        bool       `gorm:"default:false;comment:是否持久化" json:"durable"`
+	PartitionCount int        `gorm:"column:partition_count;type:int;default:0;comment:分区数" json:"partitionCount"`
+	ReplicaCount   int        `gorm:"column:replica_count;type:int;default:0;comment:副本数" json:"replicaCount"`
+	MessageCount   int64      `gorm:"column:message_count;type:bigint;default:0;comment:消息量" json:"messageCount"`
+	Backlog        int64      `gorm:"type:bigint;default:0;comment:堆积" json:"backlog"`
+	ProducedRate   float64    `gorm:"column:produced_rate;type:double;default:0;comment:生产速率" json:"producedRate"`
+	ConsumedRate   float64    `gorm:"column:consumed_rate;type:double;default:0;comment:消费速率" json:"consumedRate"`
+	ConsumerCount  int        `gorm:"column:consumer_count;type:int;default:0;comment:消费者数" json:"consumerCount"`
+	ConfigJSON     string     `gorm:"column:config_json;type:text;comment:配置JSON" json:"configJson"`
+	MetadataJSON   string     `gorm:"column:metadata_json;type:text;comment:元数据JSON" json:"metadataJson"`
+	LastSyncAt     *time.Time `gorm:"column:last_sync_at;comment:最近同步时间" json:"lastSyncAt,omitempty"`
+}
+
+func (MQResource) TableName() string {
+	return "mq_resources"
+}
+
+type MQBinding struct {
+	gorm.Model
+	InstanceID      uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	VHost           string     `gorm:"column:vhost;type:varchar(255);index;comment:vhost" json:"vhost"`
+	Source          string     `gorm:"type:varchar(255);index;comment:源" json:"source"`
+	Destination     string     `gorm:"type:varchar(255);index;comment:目标" json:"destination"`
+	DestinationType string     `gorm:"column:destination_type;type:varchar(40);comment:目标类型" json:"destinationType"`
+	RoutingKey      string     `gorm:"column:routing_key;type:varchar(255);comment:路由键" json:"routingKey"`
+	ArgumentsJSON   string     `gorm:"column:arguments_json;type:text;comment:参数JSON" json:"argumentsJson"`
+	LastSyncAt      *time.Time `gorm:"column:last_sync_at;comment:最近同步时间" json:"lastSyncAt,omitempty"`
+}
+
+func (MQBinding) TableName() string {
+	return "mq_bindings"
+}
+
+type MQConsumerGroup struct {
+	gorm.Model
+	InstanceID          uint       `gorm:"column:instance_id;not null;index:idx_mq_consumer_group,unique;comment:实例ID" json:"instanceId"`
+	ResourceID          uint       `gorm:"column:resource_id;index;comment:资源ID" json:"resourceId"`
+	GroupName           string     `gorm:"column:group_name;type:varchar(255);not null;index:idx_mq_consumer_group,unique;comment:消费组/订阅" json:"groupName"`
+	ResourceName        string     `gorm:"column:resource_name;type:varchar(512);index:idx_mq_consumer_group,unique;comment:资源名称" json:"resourceName"`
+	Namespace           string     `gorm:"type:varchar(255);index:idx_mq_consumer_group,unique;comment:命名空间" json:"namespace"`
+	State               string     `gorm:"type:varchar(80);comment:状态" json:"state"`
+	ConsumerCount       int        `gorm:"column:consumer_count;type:int;default:0;comment:消费者数" json:"consumerCount"`
+	ActiveConsumerCount int        `gorm:"column:active_consumer_count;type:int;default:0;comment:活跃消费者数" json:"activeConsumerCount"`
+	CurrentOffset       int64      `gorm:"column:current_offset;type:bigint;default:0;comment:当前位点" json:"currentOffset"`
+	EndOffset           int64      `gorm:"column:end_offset;type:bigint;default:0;comment:结束位点" json:"endOffset"`
+	Lag                 int64      `gorm:"type:bigint;default:0;comment:Lag" json:"lag"`
+	Backlog             int64      `gorm:"type:bigint;default:0;comment:堆积" json:"backlog"`
+	LastConsumedAt      *time.Time `gorm:"column:last_consumed_at;comment:最近消费时间" json:"lastConsumedAt,omitempty"`
+	MetadataJSON        string     `gorm:"column:metadata_json;type:text;comment:元数据JSON" json:"metadataJson"`
+	LastSyncAt          *time.Time `gorm:"column:last_sync_at;comment:最近同步时间" json:"lastSyncAt,omitempty"`
+}
+
+func (MQConsumerGroup) TableName() string {
+	return "mq_consumer_groups"
+}
+
+type MQPartition struct {
+	gorm.Model
+	InstanceID    uint       `gorm:"column:instance_id;not null;index:idx_mq_partition,unique;comment:实例ID" json:"instanceId"`
+	ResourceID    uint       `gorm:"column:resource_id;index;comment:资源ID" json:"resourceId"`
+	ResourceName  string     `gorm:"column:resource_name;type:varchar(512);not null;index:idx_mq_partition,unique;comment:资源名称" json:"resourceName"`
+	PartitionID   int        `gorm:"column:partition_id;type:int;not null;index:idx_mq_partition,unique;comment:分区ID" json:"partitionId"`
+	Leader        string     `gorm:"type:varchar(255);comment:Leader" json:"leader"`
+	ReplicasJSON  string     `gorm:"column:replicas_json;type:text;comment:副本JSON" json:"replicasJson"`
+	ISRJSON       string     `gorm:"column:isr_json;type:text;comment:ISR JSON" json:"isrJson"`
+	StartOffset   int64      `gorm:"column:start_offset;type:bigint;default:0;comment:起始位点" json:"startOffset"`
+	EndOffset     int64      `gorm:"column:end_offset;type:bigint;default:0;comment:结束位点" json:"endOffset"`
+	CurrentOffset int64      `gorm:"column:current_offset;type:bigint;default:0;comment:当前位点" json:"currentOffset"`
+	Lag           int64      `gorm:"type:bigint;default:0;comment:Lag" json:"lag"`
+	Status        string     `gorm:"type:varchar(80);comment:状态" json:"status"`
+	LastSyncAt    *time.Time `gorm:"column:last_sync_at;comment:最近同步时间" json:"lastSyncAt,omitempty"`
+}
+
+func (MQPartition) TableName() string {
+	return "mq_partitions"
+}
+
+type MQSyncJob struct {
+	gorm.Model
+	InstanceID         uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	TriggerType        string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发类型" json:"triggerType"`
+	Status             string     `gorm:"type:varchar(30);default:'running';index;comment:状态" json:"status"`
+	StartedAt          *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	FinishedAt         *time.Time `gorm:"column:finished_at;comment:完成时间" json:"finishedAt,omitempty"`
+	DurationMs         int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	BrokerCount        int        `gorm:"column:broker_count;type:int;default:0;comment:Broker数" json:"brokerCount"`
+	ResourceCount      int        `gorm:"column:resource_count;type:int;default:0;comment:资源数" json:"resourceCount"`
+	ConsumerGroupCount int        `gorm:"column:consumer_group_count;type:int;default:0;comment:消费组数" json:"consumerGroupCount"`
+	PartitionCount     int        `gorm:"column:partition_count;type:int;default:0;comment:分区数" json:"partitionCount"`
+	Message            string     `gorm:"type:varchar(500);comment:消息" json:"message"`
+	OperatorID         uint       `gorm:"column:operator_id;comment:操作人ID" json:"operatorId"`
+	OperatorName       string     `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
+}
+
+func (MQSyncJob) TableName() string {
+	return "mq_sync_jobs"
+}
+
+type MQMetricSnapshot struct {
+	gorm.Model
+	InstanceID        uint      `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	ResourceID        uint      `gorm:"column:resource_id;index;comment:资源ID" json:"resourceId"`
+	ResourceType      string    `gorm:"column:resource_type;type:varchar(40);index;comment:资源类型" json:"resourceType"`
+	ResourceName      string    `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
+	BrokerCount       int       `gorm:"column:broker_count;type:int;default:0;comment:Broker数" json:"brokerCount"`
+	OnlineBrokerCount int       `gorm:"column:online_broker_count;type:int;default:0;comment:在线Broker数" json:"onlineBrokerCount"`
+	MessageCount      int64     `gorm:"column:message_count;type:bigint;default:0;comment:消息量" json:"messageCount"`
+	Backlog           int64     `gorm:"type:bigint;default:0;comment:堆积" json:"backlog"`
+	Lag               int64     `gorm:"type:bigint;default:0;comment:Lag" json:"lag"`
+	ProducedRate      float64   `gorm:"column:produced_rate;type:double;default:0;comment:生产速率" json:"producedRate"`
+	ConsumedRate      float64   `gorm:"column:consumed_rate;type:double;default:0;comment:消费速率" json:"consumedRate"`
+	ConsumerCount     int       `gorm:"column:consumer_count;type:int;default:0;comment:消费者数" json:"consumerCount"`
+	CollectedAt       time.Time `gorm:"column:collected_at;index;comment:采集时间" json:"collectedAt"`
+}
+
+func (MQMetricSnapshot) TableName() string {
+	return "mq_metric_snapshots"
+}
+
+type MQOperationAudit struct {
+	gorm.Model
+	InstanceID   uint       `gorm:"column:instance_id;index;comment:实例ID" json:"instanceId"`
+	InstanceName string     `gorm:"column:instance_name;type:varchar(100);comment:实例名称" json:"instanceName"`
+	MQType       string     `gorm:"column:mq_type;type:varchar(30);index;comment:MQ类型" json:"mqType"`
+	ResourceType string     `gorm:"column:resource_type;type:varchar(40);index;comment:资源类型" json:"resourceType"`
+	ResourceName string     `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
+	Namespace    string     `gorm:"type:varchar(255);index;comment:命名空间" json:"namespace"`
+	Action       string     `gorm:"type:varchar(80);index;comment:动作" json:"action"`
+	RiskLevel    string     `gorm:"column:risk_level;type:varchar(30);index;comment:风险等级" json:"riskLevel"`
+	Status       string     `gorm:"type:varchar(30);index;comment:状态" json:"status"`
+	RequestJSON  string     `gorm:"column:request_json;type:text;comment:请求JSON" json:"requestJson"`
+	ResultJSON   string     `gorm:"column:result_json;type:text;comment:结果JSON" json:"resultJson"`
+	Reason       string     `gorm:"type:varchar(500);comment:原因" json:"reason"`
+	OperatorID   uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
+	OperatorName string     `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
+	ClientIP     string     `gorm:"column:client_ip;type:varchar(80);comment:客户端IP" json:"clientIp"`
+	StartedAt    *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	FinishedAt   *time.Time `gorm:"column:finished_at;comment:完成时间" json:"finishedAt,omitempty"`
+	DurationMs   int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	Message      string     `gorm:"type:varchar(500);comment:消息" json:"message"`
+}
+
+func (MQOperationAudit) TableName() string {
+	return "mq_operation_audits"
+}
+
+type MQMessageAudit struct {
+	gorm.Model
+	InstanceID   uint   `gorm:"column:instance_id;index;comment:实例ID" json:"instanceId"`
+	MQType       string `gorm:"column:mq_type;type:varchar(30);index;comment:MQ类型" json:"mqType"`
+	ResourceType string `gorm:"column:resource_type;type:varchar(40);index;comment:资源类型" json:"resourceType"`
+	ResourceName string `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
+	Namespace    string `gorm:"type:varchar(255);index;comment:命名空间" json:"namespace"`
+	Action       string `gorm:"type:varchar(80);index;comment:动作" json:"action"`
+	SampleCount  int    `gorm:"column:sample_count;type:int;default:0;comment:采样条数" json:"sampleCount"`
+	PayloadBytes int    `gorm:"column:payload_bytes;type:int;default:0;comment:payload字节数" json:"payloadBytes"`
+	FilterJSON   string `gorm:"column:filter_json;type:text;comment:过滤条件JSON" json:"filterJson"`
+	Status       string `gorm:"type:varchar(30);index;comment:状态" json:"status"`
+	OperatorID   uint   `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
+	OperatorName string `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
+	ClientIP     string `gorm:"column:client_ip;type:varchar(80);comment:客户端IP" json:"clientIp"`
+	Message      string `gorm:"type:varchar(500);comment:消息" json:"message"`
+}
+
+func (MQMessageAudit) TableName() string {
+	return "mq_message_audits"
+}
+
+type ConnectionCredential struct {
+	Username   string
+	Password   string
+	PrivateKey string
+	Passphrase string
+}
+
+type Operator struct {
+	ID       uint
+	Username string
+	ClientIP string
+}
+
+type InstanceRequest struct {
+	ID               uint   `json:"id"`
+	Name             string `json:"name" binding:"required,min=2,max=100"`
+	MQType           string `json:"mqType" binding:"required"`
+	Endpoint         string `json:"endpoint" binding:"required,max=500"`
+	ManagementURL    string `json:"managementUrl" binding:"omitempty,max=500"`
+	Port             int    `json:"port" binding:"omitempty,min=0,max=65535"`
+	CredentialID     uint   `json:"credentialId"`
+	TLSEnabled       bool   `json:"tlsEnabled"`
+	ConnectionParams string `json:"connectionParams"`
+	Status           string `json:"status" binding:"omitempty,oneof=enabled disabled"`
+	Environment      string `json:"environment" binding:"omitempty,max=50"`
+	BusinessSystem   string `json:"businessSystem" binding:"omitempty,max=100"`
+	Owner            string `json:"owner" binding:"omitempty,max=100"`
+	Tags             string `json:"tags" binding:"omitempty,max=500"`
+	Remark           string `json:"remark" binding:"omitempty,max=500"`
+}
+
+type InstanceListRequest struct {
+	Page              int    `form:"page"`
+	PageSize          int    `form:"pageSize"`
+	Keyword           string `form:"keyword"`
+	MQType            string `form:"mqType"`
+	Status            string `form:"status"`
+	HealthStatus      string `form:"healthStatus"`
+	Environment       string `form:"environment"`
+	RestrictToAllowed bool   `form:"-" json:"-"`
+	AllowedIDs        []uint `form:"-" json:"-"`
+}
+
+type ResourceListRequest struct {
+	Page         int    `form:"page"`
+	PageSize     int    `form:"pageSize"`
+	Keyword      string `form:"keyword"`
+	ResourceType string `form:"resourceType"`
+	Namespace    string `form:"namespace"`
+	HasBacklog   string `form:"hasBacklog"`
+}
+
+type ConsumerGroupListRequest struct {
+	Page         int    `form:"page"`
+	PageSize     int    `form:"pageSize"`
+	Keyword      string `form:"keyword"`
+	ResourceName string `form:"resourceName"`
+	Namespace    string `form:"namespace"`
+	HasLag       string `form:"hasLag"`
+}
+
+type PartitionListRequest struct {
+	Page         int    `form:"page"`
+	PageSize     int    `form:"pageSize"`
+	ResourceName string `form:"resourceName"`
+}
+
+type AuditListRequest struct {
+	Page       int    `form:"page"`
+	PageSize   int    `form:"pageSize"`
+	Keyword    string `form:"keyword"`
+	InstanceID uint   `form:"instanceId"`
+	MQType     string `form:"mqType"`
+	Action     string `form:"action"`
+	Status     string `form:"status"`
+	RiskLevel  string `form:"riskLevel"`
+	StartTime  string `form:"startTime"`
+	EndTime    string `form:"endTime"`
+}
+
+type InstancePermissionListRequest struct {
+	Page       int    `form:"page"`
+	PageSize   int    `form:"pageSize"`
+	RoleID     uint   `form:"roleId"`
+	InstanceID uint   `form:"instanceId"`
+	Keyword    string `form:"keyword"`
+}
+
+type InstancePermissionRequest struct {
+	RoleID      uint `json:"roleId" binding:"required"`
+	InstanceID  uint `json:"instanceId" binding:"required"`
+	Permissions uint `json:"permissions" binding:"required"`
+}
+
+type MessageSampleRequest struct {
+	ResourceType string `json:"resourceType" binding:"omitempty,max=40"`
+	Namespace    string `json:"namespace" binding:"omitempty,max=255"`
+	ResourceName string `json:"resourceName" binding:"required,max=512"`
+	GroupName    string `json:"groupName" binding:"omitempty,max=255"`
+	PartitionID  *int   `json:"partitionId"`
+	Offset       *int64 `json:"offset"`
+	Key          string `json:"key" binding:"omitempty,max=255"`
+	Limit        int    `json:"limit" binding:"omitempty,min=1,max=10"`
+	MaxBytes     int    `json:"maxBytes" binding:"omitempty,min=1,max=262144"`
+}
+
+type SupportedTypeVO struct {
+	Type              string `json:"type"`
+	Name              string `json:"name"`
+	DefaultPort       int    `json:"defaultPort"`
+	DefaultManagement int    `json:"defaultManagementPort"`
+	TestEnabled       bool   `json:"testEnabled"`
+	MetadataEnabled   bool   `json:"metadataEnabled"`
+	DiagnosisEnabled  bool   `json:"diagnosisEnabled"`
+	MessageSample     bool   `json:"messageSampleEnabled"`
+	ResourceManage    bool   `json:"resourceManageEnabled"`
+	Phase             string `json:"phase"`
+}
+
+type InstanceVO struct {
+	ID               uint   `json:"id"`
+	Name             string `json:"name"`
+	MQType           string `json:"mqType"`
+	MQTypeText       string `json:"mqTypeText"`
+	Engine           string `json:"engine"`
+	Version          string `json:"version"`
+	Endpoint         string `json:"endpoint"`
+	ManagementURL    string `json:"managementUrl"`
+	Port             int    `json:"port"`
+	CredentialID     uint   `json:"credentialId"`
+	TLSEnabled       bool   `json:"tlsEnabled"`
+	ConnectionParams string `json:"connectionParams"`
+	Status           string `json:"status"`
+	StatusText       string `json:"statusText"`
+	HealthStatus     string `json:"healthStatus"`
+	HealthText       string `json:"healthText"`
+	Environment      string `json:"environment"`
+	BusinessSystem   string `json:"businessSystem"`
+	Owner            string `json:"owner"`
+	Tags             string `json:"tags"`
+	Remark           string `json:"remark"`
+	LastTestAt       string `json:"lastTestAt,omitempty"`
+	LastSyncAt       string `json:"lastSyncAt,omitempty"`
+	LastMetricAt     string `json:"lastMetricAt,omitempty"`
+	Permissions      uint   `json:"permissions"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
+type InstancePermissionVO struct {
+	ID           uint   `json:"id"`
+	RoleID       uint   `json:"roleId"`
+	RoleName     string `json:"roleName"`
+	RoleCode     string `json:"roleCode"`
+	InstanceID   uint   `json:"instanceId"`
+	InstanceName string `json:"instanceName"`
+	Permissions  uint   `json:"permissions"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+type ConnectionTestResultVO struct {
+	InstanceID      uint   `json:"instanceId"`
+	Name            string `json:"name"`
+	MQType          string `json:"mqType"`
+	Version         string `json:"version"`
+	ClusterName     string `json:"clusterName"`
+	BrokerCount     int    `json:"brokerCount"`
+	ManagementReady bool   `json:"managementReady"`
+	LatencyMs       int64  `json:"latencyMs"`
+	Message         string `json:"message"`
+	TestedAt        string `json:"testedAt"`
+}
+
+type MetadataSyncResultVO struct {
+	JobID              uint   `json:"jobId"`
+	InstanceID         uint   `json:"instanceId"`
+	Name               string `json:"name"`
+	Status             string `json:"status"`
+	Message            string `json:"message"`
+	Version            string `json:"version"`
+	DurationMs         int64  `json:"durationMs"`
+	BrokerCount        int    `json:"brokerCount"`
+	ResourceCount      int    `json:"resourceCount"`
+	ConsumerGroupCount int    `json:"consumerGroupCount"`
+	PartitionCount     int    `json:"partitionCount"`
+	SyncedAt           string `json:"syncedAt"`
+}
+
+type OverviewVO struct {
+	InstanceID          uint          `json:"instanceId"`
+	InstanceName        string        `json:"instanceName"`
+	MQType              string        `json:"mqType"`
+	HealthStatus        string        `json:"healthStatus"`
+	BrokerCount         int64         `json:"brokerCount"`
+	OnlineBrokerCount   int64         `json:"onlineBrokerCount"`
+	ResourceCount       int64         `json:"resourceCount"`
+	ConsumerGroupCount  int64         `json:"consumerGroupCount"`
+	PartitionCount      int64         `json:"partitionCount"`
+	MessageCount        int64         `json:"messageCount"`
+	Backlog             int64         `json:"backlog"`
+	Lag                 int64         `json:"lag"`
+	ProducedRate        float64       `json:"producedRate"`
+	ConsumedRate        float64       `json:"consumedRate"`
+	TopBacklogResources []*ResourceVO `json:"topBacklogResources"`
+	LastSyncAt          string        `json:"lastSyncAt,omitempty"`
+}
+
+type BrokerVO struct {
+	ID         uint   `json:"id"`
+	InstanceID uint   `json:"instanceId"`
+	BrokerName string `json:"brokerName"`
+	BrokerID   string `json:"brokerId"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Role       string `json:"role"`
+	Status     string `json:"status"`
+	Version    string `json:"version"`
+	Rack       string `json:"rack"`
+	Zone       string `json:"zone"`
+	LastSyncAt string `json:"lastSyncAt,omitempty"`
+}
+
+type ResourceVO struct {
+	ID               uint    `json:"id"`
+	InstanceID       uint    `json:"instanceId"`
+	ResourceType     string  `json:"resourceType"`
+	ResourceTypeText string  `json:"resourceTypeText"`
+	Namespace        string  `json:"namespace"`
+	Name             string  `json:"name"`
+	FullName         string  `json:"fullName"`
+	Durable          bool    `json:"durable"`
+	PartitionCount   int     `json:"partitionCount"`
+	ReplicaCount     int     `json:"replicaCount"`
+	MessageCount     int64   `json:"messageCount"`
+	Backlog          int64   `json:"backlog"`
+	ProducedRate     float64 `json:"producedRate"`
+	ConsumedRate     float64 `json:"consumedRate"`
+	ConsumerCount    int     `json:"consumerCount"`
+	LastSyncAt       string  `json:"lastSyncAt,omitempty"`
+}
+
+type BindingVO struct {
+	ID              uint   `json:"id"`
+	InstanceID      uint   `json:"instanceId"`
+	VHost           string `json:"vhost"`
+	Source          string `json:"source"`
+	Destination     string `json:"destination"`
+	DestinationType string `json:"destinationType"`
+	RoutingKey      string `json:"routingKey"`
+	LastSyncAt      string `json:"lastSyncAt,omitempty"`
+}
+
+type ConsumerGroupVO struct {
+	ID                  uint   `json:"id"`
+	InstanceID          uint   `json:"instanceId"`
+	ResourceID          uint   `json:"resourceId"`
+	GroupName           string `json:"groupName"`
+	ResourceName        string `json:"resourceName"`
+	Namespace           string `json:"namespace"`
+	State               string `json:"state"`
+	ConsumerCount       int    `json:"consumerCount"`
+	ActiveConsumerCount int    `json:"activeConsumerCount"`
+	CurrentOffset       int64  `json:"currentOffset"`
+	EndOffset           int64  `json:"endOffset"`
+	Lag                 int64  `json:"lag"`
+	Backlog             int64  `json:"backlog"`
+	LastConsumedAt      string `json:"lastConsumedAt,omitempty"`
+	LastSyncAt          string `json:"lastSyncAt,omitempty"`
+}
+
+type PartitionVO struct {
+	ID            uint   `json:"id"`
+	InstanceID    uint   `json:"instanceId"`
+	ResourceID    uint   `json:"resourceId"`
+	ResourceName  string `json:"resourceName"`
+	PartitionID   int    `json:"partitionId"`
+	Leader        string `json:"leader"`
+	StartOffset   int64  `json:"startOffset"`
+	EndOffset     int64  `json:"endOffset"`
+	CurrentOffset int64  `json:"currentOffset"`
+	Lag           int64  `json:"lag"`
+	Status        string `json:"status"`
+	LastSyncAt    string `json:"lastSyncAt,omitempty"`
+}
+
+type AuditVO struct {
+	ID           uint   `json:"id"`
+	InstanceID   uint   `json:"instanceId"`
+	InstanceName string `json:"instanceName,omitempty"`
+	MQType       string `json:"mqType"`
+	ResourceType string `json:"resourceType"`
+	ResourceName string `json:"resourceName"`
+	Namespace    string `json:"namespace"`
+	Action       string `json:"action"`
+	ActionText   string `json:"actionText"`
+	RiskLevel    string `json:"riskLevel"`
+	Status       string `json:"status"`
+	StatusText   string `json:"statusText"`
+	Reason       string `json:"reason,omitempty"`
+	OperatorID   uint   `json:"operatorId"`
+	OperatorName string `json:"operatorName"`
+	ClientIP     string `json:"clientIp"`
+	DurationMs   int64  `json:"durationMs"`
+	Message      string `json:"message"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+type MessageSampleResultVO struct {
+	InstanceID   uint              `json:"instanceId"`
+	MQType       string            `json:"mqType"`
+	ResourceName string            `json:"resourceName"`
+	Namespace    string            `json:"namespace"`
+	Samples      []MessageSampleVO `json:"samples"`
+	SampleCount  int               `json:"sampleCount"`
+	Truncated    bool              `json:"truncated"`
+	Message      string            `json:"message"`
+	SampledAt    string            `json:"sampledAt"`
+}
+
+type MessageSampleVO struct {
+	Topic       string            `json:"topic"`
+	PartitionID int               `json:"partitionId"`
+	Offset      int64             `json:"offset"`
+	Key         string            `json:"key"`
+	Timestamp   string            `json:"timestamp"`
+	Headers     map[string]string `json:"headers"`
+	Payload     string            `json:"payload"`
+	PayloadSize int               `json:"payloadSize"`
+	Truncated   bool              `json:"truncated"`
+	Encoding    string            `json:"encoding"`
+}
+
+func NormalizeType(mqType string) string {
+	return strings.ToLower(strings.TrimSpace(mqType))
+}
+
+func IsSupportedType(mqType string) bool {
+	switch NormalizeType(mqType) {
+	case MQTypeRabbitMQ, MQTypeKafka, MQTypeRocketMQ, MQTypeActiveMQ, MQTypePulsar:
+		return true
+	default:
+		return false
+	}
+}
+
+func TypeText(mqType string) string {
+	switch NormalizeType(mqType) {
+	case MQTypeRabbitMQ:
+		return "RabbitMQ"
+	case MQTypeKafka:
+		return "Kafka"
+	case MQTypeRocketMQ:
+		return "RocketMQ"
+	case MQTypeActiveMQ:
+		return "ActiveMQ"
+	case MQTypePulsar:
+		return "Pulsar"
+	default:
+		return strings.TrimSpace(mqType)
+	}
+}
+
+func DefaultPort(mqType string) int {
+	switch NormalizeType(mqType) {
+	case MQTypeRabbitMQ:
+		return 5672
+	case MQTypeKafka:
+		return 9092
+	case MQTypeRocketMQ:
+		return 9876
+	case MQTypeActiveMQ:
+		return 61616
+	case MQTypePulsar:
+		return 6650
+	default:
+		return 0
+	}
+}
+
+func DefaultManagementPort(mqType string) int {
+	switch NormalizeType(mqType) {
+	case MQTypeRabbitMQ:
+		return 15672
+	case MQTypeActiveMQ:
+		return 8161
+	case MQTypePulsar:
+		return 8080
+	default:
+		return 0
+	}
+}
+
+func StatusText(status string) string {
+	if status == InstanceStatusEnabled {
+		return "启用"
+	}
+	if status == InstanceStatusDisabled {
+		return "禁用"
+	}
+	return status
+}
+
+func HealthText(status string) string {
+	switch status {
+	case HealthStatusHealthy:
+		return "健康"
+	case HealthStatusWarning:
+		return "警告"
+	case HealthStatusCritical:
+		return "异常"
+	default:
+		return "未知"
+	}
+}
+
+func ResourceTypeText(resourceType string) string {
+	switch resourceType {
+	case ResourceTypeBroker:
+		return "Broker"
+	case ResourceTypeTenant:
+		return "租户"
+	case ResourceTypeNamespace:
+		return "命名空间"
+	case ResourceTypeVHost:
+		return "VHost"
+	case ResourceTypeExchange:
+		return "Exchange"
+	case ResourceTypeQueue:
+		return "Queue"
+	case ResourceTypeTopic:
+		return "Topic"
+	case ResourceTypeSubscription:
+		return "订阅"
+	case ResourceTypeConsumer:
+		return "消费者"
+	default:
+		return resourceType
+	}
+}

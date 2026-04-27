@@ -1793,6 +1793,7 @@ VALUES
   (27, '云账号管理', 'cloud-accounts', 2, 15, '/asset/cloud-accounts', 'asset/CloudAccounts', 'Cloudy', 5, 1, 1, NOW(), NOW()),
   (66, '虚拟化平台', 'asset_virtualization', 2, 15, '/asset/virtualization', 'asset/VirtualizationPlatforms', 'DataBoard', 6, 1, 1, NOW(), NOW()),
   (67, '数据库管理', 'asset_databases', 2, 15, '/asset/databases', 'asset/DatabaseManagement', 'DataLine', 7, 1, 1, NOW(), NOW()),
+  (68, '消息队列管理', 'asset_message_queues', 2, 15, '/asset/message-queues', 'asset/MessageQueueManagement', 'Connection', 8, 1, 1, NOW(), NOW()),
   (34, '会话审计', 'asset_terminal_audit', 2, 15, '/asset/terminal-audit', '', 'View', 8, 1, 1, NOW(), NOW()),
   (65, '权限配置', 'asset_permission', 2, 15, '/asset/permissions', 'views/asset/AssetPermission.vue', 'Lock', 9, 1, 1, NOW(), NOW()),
 
@@ -1805,11 +1806,34 @@ VALUES
   (33, '插件安装', 'plugin-install', 2, 30, '/plugin/install', 'plugin/PluginInstall', 'Upload', 2, 1, 1, NOW(), NOW()),
   (35, 'Agent管理', 'plugin-agents', 2, 30, '/plugin/agents', 'asset/Agents', 'Connection', 3, 1, 1, NOW(), NOW());
 
+-- ========== 消息队列管理按钮权限 ==========
+INSERT INTO `sys_menu` (`id`, `name`, `code`, `type`, `parent_id`, `path`, `component`, `icon`, `sort`, `visible`, `status`, `created_at`, `updated_at`)
+VALUES
+  (6801, 'MQ实例查看', 'messagequeue:instance:view', 3, 68, '', '', '', 1, 0, 1, NOW(), NOW()),
+  (6802, 'MQ实例创建', 'messagequeue:instance:create', 3, 68, '', '', '', 2, 0, 1, NOW(), NOW()),
+  (6803, 'MQ实例更新', 'messagequeue:instance:update', 3, 68, '', '', '', 3, 0, 1, NOW(), NOW()),
+  (6804, 'MQ实例删除', 'messagequeue:instance:delete', 3, 68, '', '', '', 4, 0, 1, NOW(), NOW()),
+  (6805, 'MQ实例启停', 'messagequeue:instance:status', 3, 68, '', '', '', 5, 0, 1, NOW(), NOW()),
+  (6806, 'MQ连接测试', 'messagequeue:connection:test', 3, 68, '', '', '', 6, 0, 1, NOW(), NOW()),
+  (6807, 'MQ元数据查看', 'messagequeue:metadata:view', 3, 68, '', '', '', 7, 0, 1, NOW(), NOW()),
+  (6808, 'MQ元数据同步', 'messagequeue:metadata:sync', 3, 68, '', '', '', 8, 0, 1, NOW(), NOW()),
+  (6809, 'MQ消费诊断', 'messagequeue:diagnosis:view', 3, 68, '', '', '', 9, 0, 1, NOW(), NOW()),
+  (6810, 'MQ消息查看', 'messagequeue:message:read', 3, 68, '', '', '', 10, 0, 1, NOW(), NOW()),
+  (6811, 'MQ消息导出', 'messagequeue:message:export', 3, 68, '', '', '', 11, 0, 1, NOW(), NOW()),
+  (6812, 'MQ消息写入', 'messagequeue:message:write', 3, 68, '', '', '', 12, 0, 1, NOW(), NOW()),
+  (6813, 'MQ资源管理', 'messagequeue:resource:manage', 3, 68, '', '', '', 13, 0, 1, NOW(), NOW()),
+  (6814, 'MQ高危操作', 'messagequeue:operation:high-risk', 3, 68, '', '', '', 14, 0, 1, NOW(), NOW()),
+  (6815, 'MQ审计查看', 'messagequeue:audit:view', 3, 68, '', '', '', 15, 0, 1, NOW(), NOW()),
+  (6816, 'MQ审计导出', 'messagequeue:audit:export', 3, 68, '', '', '', 16, 0, 1, NOW(), NOW()),
+  (6817, 'MQ实例权限管理', 'messagequeue:permission:manage', 3, 68, '', '', '', 17, 0, 1, NOW(), NOW());
+
 -- 为管理员角色分配所有菜单权限（不包括插件菜单，插件菜单权限在插件启用后单独分配）
 INSERT INTO `sys_role_menu` (`role_id`, `menu_id`)
 VALUES
   (1, 1), (1, 2), (1, 3), (1, 5), (1, 10), (1, 11), (1, 12), (1, 13), (1, 15), (1, 16), (1, 17), (1, 19),
-  (1, 23), (1, 24), (1, 25), (1, 27), (1, 29), (1, 30), (1, 32), (1, 33), (1, 34), (1, 35), (1, 65), (1, 66), (1, 67);
+  (1, 23), (1, 24), (1, 25), (1, 27), (1, 29), (1, 30), (1, 32), (1, 33), (1, 34), (1, 35), (1, 65), (1, 66), (1, 67), (1, 68),
+  (1, 6801), (1, 6802), (1, 6803), (1, 6804), (1, 6805), (1, 6806), (1, 6807), (1, 6808), (1, 6809),
+  (1, 6810), (1, 6811), (1, 6812), (1, 6813), (1, 6814), (1, 6815), (1, 6816), (1, 6817);
   -- 身份认证模块暂不开放，如需启用请取消注释并改为逗号连接
   -- (1, 90), (1, 91), (1, 92), (1, 93), (1, 94), (1, 95), (1, 96);
 
