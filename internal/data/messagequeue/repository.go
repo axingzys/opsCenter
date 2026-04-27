@@ -515,6 +515,8 @@ func pageParams(req any) (int, int) {
 		page, pageSize = item.Page, item.PageSize
 	case *mqbiz.JobListRequest:
 		page, pageSize = item.Page, item.PageSize
+	case *mqbiz.DLQAnalysisRequest:
+		page, pageSize = item.Page, item.PageSize
 	case *mqbiz.InstancePermissionListRequest:
 		page, pageSize = item.Page, item.PageSize
 	}

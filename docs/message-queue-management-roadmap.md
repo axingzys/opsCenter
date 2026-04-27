@@ -208,6 +208,24 @@
 6. Adapter 插件化和合约测试。
    - 建立 Adapter contract test，要求连接测试、元数据发现、指标采集、操作校验和执行结果满足统一契约。
 7. 容量预测、成本分析和自动整改建议。
+
+### 六期当前落地状态
+截至 2026-04-27，六期已完成第一轮高级消息治理 MVP：
+
+1. 新增消息采样默认 DLP 脱敏：
+   - JSON payload 会按敏感字段名递归脱敏，默认覆盖 `password`、`passwd`、`secret`、`token`、`access_token`、`refresh_token`、`authorization`、`phone`、`email`、`id_card`、`bank_card`、`private_key`、`api_key` 等字段。
+   - 文本 payload 会按常见密钥、邮箱、手机号规则脱敏。
+   - 采样响应新增 `payloadHash`、`redacted`、`sensitiveHitCount`、`sensitiveFields`，页面默认展示脱敏后的 payload。
+   - `mq_message_audits` 新增 `payload_hash`、`sensitive_hit_count`、`raw_payload_visible`、`dlp_result_json`，审计只记录摘要、命中数和规则结果，不保存完整 payload。
+2. 新增 DLQ/Retry 分析工作台：
+   - `GET /api/v1/message-queues/dlq-analysis`：按实例权限过滤，自动识别 DLQ/Retry 资源，返回 backlog、消费者数、关联原资源推断、负责人、业务系统、处理建议、近期消息审计和错误摘要。
+   - 前端新增 `DLQ治理` Tab，支持按实例、DLQ/Retry 类型、是否有积压和关键字过滤。
+3. 新增消息重放申请评估入口：
+   - `POST /api/v1/message-queues/instances/:id/messages/replay-requests`：只生成申请评估和消息审计，不执行真实重放。
+   - 返回影响范围、限速、最大消息数、审批要求和风险提示，明确 `replayExecutable=false`。
+   - 真实重放仍保留为后续审批、限速、小批量试跑和正式执行工作流，不在当前 MVP 中直接开放。
+4. 新增测试：
+   - 覆盖消息采样脱敏、DLQ 资源识别和重放申请只创建待审批审计。
    - 基于长期快照做趋势预测，输出扩分区、扩 broker、调整 retention、补告警等建议；生产自动修复默认不开放。
 
 ## 生产化优化补充清单
@@ -1121,12 +1139,16 @@ type ConnectionCredential struct {
 8. `sample_count`
 9. `payload_bytes`
 10. `filter_json`
-11. `status`
-12. `operator_id`
-13. `operator_name`
-14. `client_ip`
-15. `created_at`
-16. `message`
+11. `payload_hash`
+12. `sensitive_hit_count`
+13. `raw_payload_visible`
+14. `dlp_result_json`
+15. `status`
+16. `operator_id`
+17. `operator_name`
+18. `client_ip`
+19. `created_at`
+20. `message`
 
 ## 权限设计
 ### 菜单权限
@@ -1198,6 +1220,7 @@ type ConnectionCredential struct {
 | `GET` | `/api/v1/message-queues/jobs/:id` | 查询统一 MQ 任务详情 |
 | `GET` | `/api/v1/message-queues/dashboard` | 全局 MQ 生产治理驾驶舱 |
 | `GET` | `/api/v1/message-queues/governance-report` | 全局 MQ 治理违规清单 |
+| `GET` | `/api/v1/message-queues/dlq-analysis` | DLQ/Retry 消息治理分析工作台 |
 | `GET` | `/api/v1/message-queues/instances/:id/brokers` | broker 列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources` | 资源列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources/:resourceId` | 资源详情 |
@@ -1217,6 +1240,7 @@ type ConnectionCredential struct {
 | `POST` | `/api/v1/message-queues/instances/:id/messages/export` | 导出消息样本，二期 |
 | `POST` | `/api/v1/message-queues/instances/:id/messages/publish` | 发布测试消息，三期 |
 | `POST` | `/api/v1/message-queues/instances/:id/messages/replay` | 消息重放，三期 |
+| `POST` | `/api/v1/message-queues/instances/:id/messages/replay-requests` | 消息重放申请评估，只生成审计和影响评估，不直接执行 |
 
 ### 资源操作
 | 方法 | 路径 | 说明 |

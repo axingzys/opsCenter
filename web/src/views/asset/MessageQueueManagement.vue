@@ -98,6 +98,65 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="DLQ治理" name="dlq">
+        <div class="workspace-toolbar">
+          <el-input v-model="dlqQuery.keyword" placeholder="搜索实例、资源、负责人..." clearable class="search-input" @keyup.enter="loadDLQAnalysis" @clear="loadDLQAnalysis">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="dlqQuery.instanceId" placeholder="实例" clearable filterable class="search-select" @change="loadDLQAnalysis">
+            <el-option v-for="item in diagnosableInstances" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+          <el-select v-model="dlqQuery.kind" placeholder="类型" clearable class="search-select" @change="loadDLQAnalysis">
+            <el-option label="DLQ" value="dlq" />
+            <el-option label="Retry" value="retry" />
+          </el-select>
+          <el-select v-model="dlqQuery.hasBacklog" placeholder="积压" clearable class="search-select" @change="loadDLQAnalysis">
+            <el-option label="仅看有积压" value="true" />
+          </el-select>
+          <el-button :loading="dlqLoading" @click="loadDLQAnalysis">
+            <el-icon style="margin-right: 6px;"><Refresh /></el-icon>
+            刷新
+          </el-button>
+        </div>
+
+        <div v-if="dlqAnalysis" class="metric-grid">
+          <div class="metric-item"><span class="metric-label">DLQ</span><strong>{{ dlqAnalysis.summary?.dlqTotal || 0 }}</strong></div>
+          <div class="metric-item"><span class="metric-label">Retry</span><strong>{{ dlqAnalysis.summary?.retryTotal || 0 }}</strong></div>
+          <div class="metric-item"><span class="metric-label">Backlog</span><strong>{{ dlqAnalysis.summary?.backlogTotal || 0 }}</strong></div>
+          <div class="metric-item"><span class="metric-label">无消费者</span><strong>{{ dlqAnalysis.summary?.noConsumerTotal || 0 }}</strong></div>
+          <div class="metric-item"><span class="metric-label">可申请</span><strong>{{ dlqAnalysis.summary?.replayRequestable || 0 }}</strong></div>
+        </div>
+
+        <div class="table-wrapper">
+          <el-table :data="dlqAnalysis?.items || []" v-loading="dlqLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="级别" width="90" align="center">
+              <template #default="{ row }"><el-tag :type="severityTag(row.severity)">{{ sectionStatusText(row.severity) }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="类型" width="90" align="center">
+              <template #default="{ row }"><el-tag :type="row.kind === 'dlq' ? 'danger' : 'warning'">{{ row.kind?.toUpperCase() }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="实例" min-width="140" prop="instanceName" show-overflow-tooltip />
+            <el-table-column label="资源" min-width="210" prop="resourceName" show-overflow-tooltip />
+            <el-table-column label="关联原资源" min-width="180" prop="relatedResourceName" show-overflow-tooltip />
+            <el-table-column label="负责人" width="120" prop="owner" show-overflow-tooltip />
+            <el-table-column label="Backlog" width="110" align="right" prop="backlog" />
+            <el-table-column label="消费者" width="90" align="right" prop="consumerCount" />
+            <el-table-column label="处理状态" width="120">
+              <template #default="{ row }"><el-tag type="info">{{ dlqHandlingStatusText(row.handlingStatus) }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="建议" min-width="260" prop="suggestion" show-overflow-tooltip />
+            <el-table-column label="操作" width="130" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" :disabled="!uiPermissions.messageWrite" @click="openReplayDialog(row)">申请重放</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <div class="pagination-container">
+            <el-pagination v-model:current-page="dlqQuery.page" v-model:page-size="dlqQuery.pageSize" :page-sizes="[10, 20, 50, 100]" :total="dlqAnalysis?.total || 0" layout="total, sizes, prev, pager, next, jumper" @size-change="loadDLQAnalysis" @current-change="loadDLQAnalysis" />
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="实例管理" name="instances">
         <div class="search-bar">
           <div class="search-inputs">
@@ -460,6 +519,8 @@
                   <span>offset {{ item.offset }}</span>
                   <span>{{ item.timestamp || '-' }}</span>
                   <span v-if="item.truncated" class="danger">已截断</span>
+                  <span v-if="item.redacted" class="warning">已脱敏 {{ item.sensitiveHitCount || 0 }}</span>
+                  <span v-if="item.payloadHash" class="mono">hash {{ String(item.payloadHash).slice(0, 12) }}</span>
                 </div>
                 <pre>{{ item.payload }}</pre>
               </div>
@@ -690,6 +751,41 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="replayDialogVisible" title="消息重放申请评估" width="680px">
+      <el-form :model="replayForm" label-width="130px">
+        <el-form-item label="源实例">
+          <el-input :model-value="replayForm.instanceName" disabled />
+        </el-form-item>
+        <el-form-item label="源资源">
+          <el-input :model-value="replayForm.resourceName" disabled />
+        </el-form-item>
+        <el-form-item label="目标资源">
+          <el-input v-model="replayForm.targetResourceName" placeholder="默认使用系统推断的原始资源名" />
+        </el-form-item>
+        <el-form-item label="最大消息数">
+          <el-input-number v-model="replayForm.maxMessages" :min="1" :max="10000" />
+        </el-form-item>
+        <el-form-item label="限速 msg/s">
+          <el-input-number v-model="replayForm.rateLimitPerSecond" :min="1" :max="10000" />
+        </el-form-item>
+        <el-form-item label="申请原因">
+          <el-input v-model="replayForm.reason" type="textarea" :rows="3" placeholder="说明错误类型、影响范围、幂等确认和期望处理方式" />
+        </el-form-item>
+      </el-form>
+      <div v-if="replayPlan" class="operation-validation">
+        <div class="validation-header">
+          <el-tag type="warning">待审批</el-tag>
+          <el-tag type="info">不直接执行</el-tag>
+          <span>{{ replayPlan.message }}</span>
+        </div>
+        <el-alert v-for="item in replayPlan.warnings || []" :key="item" :title="item" type="warning" :closable="false" show-icon />
+      </div>
+      <template #footer>
+        <el-button @click="replayDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="replaySubmitting" @click="submitReplayApplication">生成评估</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="permissionDialogVisible" title="MQ实例权限" width="560px">
       <el-form :model="permissionForm" label-width="100px">
         <el-form-item label="角色">
@@ -732,6 +828,7 @@ import {
   enableMQInstance,
   executeMQResourceOperation,
   generateMQInspectionReport,
+  getMQDLQAnalysis,
   getMQGovernanceReport,
   getMQOverview,
   getMQProductionDashboard,
@@ -747,6 +844,7 @@ import {
   listMQOperationActions,
   listMQPartitions,
   listMQResources,
+  prepareMQMessageReplay,
   sampleMQMessages,
   syncMQMetadata,
   testMQInstance,
@@ -793,6 +891,14 @@ const dashboardLoading = ref(false)
 const governanceReport = ref<any>(null)
 const governanceLoading = ref(false)
 const governanceQuery = reactive<any>({ page: 1, pageSize: 20, keyword: '', instanceId: undefined, severity: '', category: '' })
+
+const dlqAnalysis = ref<any>(null)
+const dlqLoading = ref(false)
+const dlqQuery = reactive<any>({ page: 1, pageSize: 20, keyword: '', instanceId: undefined, kind: '', hasBacklog: '' })
+const replayDialogVisible = ref(false)
+const replaySubmitting = ref(false)
+const replayPlan = ref<any>(null)
+const replayForm = reactive<any>({ instanceId: 0, instanceName: '', resourceType: 'topic', namespace: '', resourceName: '', targetResourceName: '', maxMessages: 100, rateLimitPerSecond: 10, reason: '' })
 
 const selectedInstanceId = ref<number | null>(null)
 const overview = ref<any>(null)
@@ -1113,6 +1219,63 @@ const loadGovernanceReport = async () => {
 
 const refreshGovernance = async () => {
   await Promise.all([loadDashboard(), loadGovernanceReport()])
+}
+
+const loadDLQAnalysis = async () => {
+  if (!uiPermissions.diagnosisView) return
+  dlqLoading.value = true
+  try {
+    const params = { ...dlqQuery }
+    if (!params.instanceId) delete params.instanceId
+    if (!params.kind) delete params.kind
+    if (!params.hasBacklog) delete params.hasBacklog
+    dlqAnalysis.value = await getMQDLQAnalysis(params)
+  } finally {
+    dlqLoading.value = false
+  }
+}
+
+const openReplayDialog = (row: any) => {
+  replayPlan.value = null
+  Object.assign(replayForm, {
+    instanceId: row.instanceId,
+    instanceName: row.instanceName,
+    resourceType: row.resourceType || 'topic',
+    namespace: row.namespace || '',
+    resourceName: row.resourceName,
+    targetResourceName: row.relatedResourceName || '',
+    maxMessages: Math.min(Math.max(row.backlog || 100, 1), 10000),
+    rateLimitPerSecond: 10,
+    reason: ''
+  })
+  replayDialogVisible.value = true
+}
+
+const submitReplayApplication = async () => {
+  if (!replayForm.instanceId || !replayForm.resourceName) {
+    ElMessage.warning('请选择重放源资源')
+    return
+  }
+  if (!replayForm.reason?.trim()) {
+    ElMessage.warning('请填写申请原因')
+    return
+  }
+  replaySubmitting.value = true
+  try {
+    replayPlan.value = await prepareMQMessageReplay(replayForm.instanceId, {
+      resourceType: replayForm.resourceType,
+      namespace: replayForm.namespace,
+      resourceName: replayForm.resourceName,
+      targetResourceName: replayForm.targetResourceName,
+      maxMessages: replayForm.maxMessages,
+      rateLimitPerSecond: replayForm.rateLimitPerSecond,
+      reason: replayForm.reason
+    })
+    ElMessage.success('重放申请评估已生成')
+    await loadAudits()
+  } finally {
+    replaySubmitting.value = false
+  }
 }
 
 const loadTopology = async () => {
@@ -1465,6 +1628,7 @@ const governanceCategoryText = (value: string) => ({
   security: '安全',
   audit: '审计'
 } as Record<string, string>)[value] || value || '-'
+const dlqHandlingStatusText = (value: string) => ({ untriaged: '未处理', pending: '待处理', processing: '处理中', ignored: '已忽略', replay_requested: '已申请' } as Record<string, string>)[value] || value || '-'
 const formatDiffValue = (value: any) => {
   if (value === undefined || value === null || value === '') return '-'
   if (typeof value === 'object') return JSON.stringify(value)
@@ -1479,6 +1643,7 @@ const escapeRegExp = (value: string) => String(value).replace(/[.*+?^${}()|[\]\\
 
 watch(activeTab, async tab => {
   if (tab === 'governance') await refreshGovernance()
+  if (tab === 'dlq') await loadDLQAnalysis()
   if (tab === 'resources') await handleResourceInstanceChange()
   if (tab === 'diagnosis') await loadDiagnosis()
   if (tab === 'topology') await loadTopology()
@@ -1490,7 +1655,7 @@ watch(activeTab, async tab => {
 onMounted(async () => {
   await Promise.all([loadSupportedTypes(), loadUIPermissions(), loadCredentials(), loadRoles()])
   await loadInstances()
-  await Promise.all([refreshGovernance(), loadResources(), loadDiagnosis(), loadTopology(), loadAudits(), loadJobs(), loadPermissions()])
+  await Promise.all([refreshGovernance(), loadDLQAnalysis(), loadResources(), loadDiagnosis(), loadTopology(), loadAudits(), loadJobs(), loadPermissions()])
 })
 </script>
 
@@ -1871,6 +2036,11 @@ onMounted(async () => {
 
 .danger {
   color: #dc2626;
+  font-weight: 600;
+}
+
+.warning {
+  color: #d97706;
   font-weight: 600;
 }
 

@@ -57,6 +57,7 @@ const (
 	AuditActionConnectionTest = "connection_test"
 	AuditActionMetadataSync   = "metadata_sync"
 	AuditActionMessageSample  = "message_sample"
+	AuditActionMessageReplay  = "message_replay_apply"
 	AuditActionMetricSnapshot = "metric_snapshot_collect"
 	AuditActionInspectionRun  = "inspection_run"
 	AuditActionPermissionSet  = "instance_permission_upsert"
@@ -369,20 +370,24 @@ func (MQOperationAudit) TableName() string {
 
 type MQMessageAudit struct {
 	gorm.Model
-	InstanceID   uint   `gorm:"column:instance_id;index;comment:实例ID" json:"instanceId"`
-	MQType       string `gorm:"column:mq_type;type:varchar(30);index;comment:MQ类型" json:"mqType"`
-	ResourceType string `gorm:"column:resource_type;type:varchar(40);index;comment:资源类型" json:"resourceType"`
-	ResourceName string `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
-	Namespace    string `gorm:"type:varchar(255);index;comment:命名空间" json:"namespace"`
-	Action       string `gorm:"type:varchar(80);index;comment:动作" json:"action"`
-	SampleCount  int    `gorm:"column:sample_count;type:int;default:0;comment:采样条数" json:"sampleCount"`
-	PayloadBytes int    `gorm:"column:payload_bytes;type:int;default:0;comment:payload字节数" json:"payloadBytes"`
-	FilterJSON   string `gorm:"column:filter_json;type:text;comment:过滤条件JSON" json:"filterJson"`
-	Status       string `gorm:"type:varchar(30);index;comment:状态" json:"status"`
-	OperatorID   uint   `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
-	OperatorName string `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
-	ClientIP     string `gorm:"column:client_ip;type:varchar(80);comment:客户端IP" json:"clientIp"`
-	Message      string `gorm:"type:varchar(500);comment:消息" json:"message"`
+	InstanceID        uint   `gorm:"column:instance_id;index;comment:实例ID" json:"instanceId"`
+	MQType            string `gorm:"column:mq_type;type:varchar(30);index;comment:MQ类型" json:"mqType"`
+	ResourceType      string `gorm:"column:resource_type;type:varchar(40);index;comment:资源类型" json:"resourceType"`
+	ResourceName      string `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
+	Namespace         string `gorm:"type:varchar(255);index;comment:命名空间" json:"namespace"`
+	Action            string `gorm:"type:varchar(80);index;comment:动作" json:"action"`
+	SampleCount       int    `gorm:"column:sample_count;type:int;default:0;comment:采样条数" json:"sampleCount"`
+	PayloadBytes      int    `gorm:"column:payload_bytes;type:int;default:0;comment:payload字节数" json:"payloadBytes"`
+	FilterJSON        string `gorm:"column:filter_json;type:text;comment:过滤条件JSON" json:"filterJson"`
+	PayloadHash       string `gorm:"column:payload_hash;type:varchar(80);index;comment:payload摘要hash" json:"payloadHash"`
+	SensitiveHitCount int    `gorm:"column:sensitive_hit_count;type:int;default:0;comment:敏感字段命中数" json:"sensitiveHitCount"`
+	RawPayloadVisible bool   `gorm:"column:raw_payload_visible;default:false;comment:是否查看原文" json:"rawPayloadVisible"`
+	DLPResultJSON     string `gorm:"column:dlp_result_json;type:text;comment:DLP处理结果JSON" json:"dlpResultJson"`
+	Status            string `gorm:"type:varchar(30);index;comment:状态" json:"status"`
+	OperatorID        uint   `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
+	OperatorName      string `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
+	ClientIP          string `gorm:"column:client_ip;type:varchar(80);comment:客户端IP" json:"clientIp"`
+	Message           string `gorm:"type:varchar(500);comment:消息" json:"message"`
 }
 
 func (MQMessageAudit) TableName() string {
@@ -505,6 +510,17 @@ type GovernanceReportRequest struct {
 	AllowedIDs        []uint `form:"-" json:"-"`
 }
 
+type DLQAnalysisRequest struct {
+	Page              int    `form:"page"`
+	PageSize          int    `form:"pageSize"`
+	InstanceID        uint   `form:"instanceId"`
+	Keyword           string `form:"keyword"`
+	Kind              string `form:"kind"`
+	HasBacklog        string `form:"hasBacklog"`
+	RestrictToAllowed bool   `form:"-" json:"-"`
+	AllowedIDs        []uint `form:"-" json:"-"`
+}
+
 type InstancePermissionListRequest struct {
 	Page       int    `form:"page"`
 	PageSize   int    `form:"pageSize"`
@@ -529,6 +545,17 @@ type MessageSampleRequest struct {
 	Key          string `json:"key" binding:"omitempty,max=255"`
 	Limit        int    `json:"limit" binding:"omitempty,min=1,max=10"`
 	MaxBytes     int    `json:"maxBytes" binding:"omitempty,min=1,max=262144"`
+}
+
+type MessageReplayApplicationRequest struct {
+	ResourceType       string `json:"resourceType" binding:"omitempty,max=40"`
+	Namespace          string `json:"namespace" binding:"omitempty,max=255"`
+	ResourceName       string `json:"resourceName" binding:"required,max=512"`
+	TargetInstanceID   uint   `json:"targetInstanceId"`
+	TargetResourceName string `json:"targetResourceName" binding:"omitempty,max=512"`
+	MaxMessages        int    `json:"maxMessages" binding:"omitempty,min=1,max=10000"`
+	RateLimitPerSecond int    `json:"rateLimitPerSecond" binding:"omitempty,min=1,max=10000"`
+	Reason             string `json:"reason" binding:"required,max=500"`
 }
 
 type ResourceOperationRequest struct {
@@ -737,6 +764,59 @@ type GovernanceReportVO struct {
 	LifecycleRiskCount int64                    `json:"lifecycleRiskCount"`
 	Violations         []*GovernanceViolationVO `json:"violations"`
 	GeneratedAt        string                   `json:"generatedAt"`
+}
+
+type DLQAnalysisSummaryVO struct {
+	DLQTotal          int64 `json:"dlqTotal"`
+	RetryTotal        int64 `json:"retryTotal"`
+	BacklogTotal      int64 `json:"backlogTotal"`
+	NoConsumerTotal   int64 `json:"noConsumerTotal"`
+	ReplayRequestable int64 `json:"replayRequestable"`
+}
+
+type DLQAnalysisVO struct {
+	Total         int64                 `json:"total"`
+	Page          int                   `json:"page"`
+	PageSize      int                   `json:"pageSize"`
+	Summary       DLQAnalysisSummaryVO  `json:"summary"`
+	Items         []*DLQResourceIssueVO `json:"items"`
+	ReplayEnabled bool                  `json:"replayEnabled"`
+	GeneratedAt   string                `json:"generatedAt"`
+}
+
+type DLQResourceIssueVO struct {
+	InstanceID          uint                 `json:"instanceId"`
+	InstanceName        string               `json:"instanceName"`
+	MQType              string               `json:"mqType"`
+	MQTypeText          string               `json:"mqTypeText"`
+	Environment         string               `json:"environment"`
+	BusinessSystem      string               `json:"businessSystem"`
+	Owner               string               `json:"owner"`
+	ResourceID          uint                 `json:"resourceId"`
+	ResourceType        string               `json:"resourceType"`
+	Namespace           string               `json:"namespace"`
+	ResourceName        string               `json:"resourceName"`
+	FullName            string               `json:"fullName"`
+	Kind                string               `json:"kind"`
+	Severity            string               `json:"severity"`
+	MessageCount        int64                `json:"messageCount"`
+	Backlog             int64                `json:"backlog"`
+	ConsumerCount       int                  `json:"consumerCount"`
+	ProducedRate        float64              `json:"producedRate"`
+	ConsumedRate        float64              `json:"consumedRate"`
+	RelatedResourceName string               `json:"relatedResourceName"`
+	HandlingStatus      string               `json:"handlingStatus"`
+	Suggestion          string               `json:"suggestion"`
+	LastSyncAt          string               `json:"lastSyncAt,omitempty"`
+	ConsumerGroups      []*ConsumerGroupVO   `json:"consumerGroups"`
+	RecentAudits        []*AuditVO           `json:"recentAudits"`
+	ErrorSummary        []*DLQErrorSummaryVO `json:"errorSummary"`
+}
+
+type DLQErrorSummaryVO struct {
+	Type        string `json:"type"`
+	Count       int64  `json:"count"`
+	Description string `json:"description"`
 }
 
 type TopologyNodeVO struct {
@@ -960,34 +1040,67 @@ type AuditVO struct {
 	OperatorName        string `json:"operatorName"`
 	ClientIP            string `json:"clientIp"`
 	DurationMs          int64  `json:"durationMs"`
+	SampleCount         int    `json:"sampleCount,omitempty"`
+	PayloadBytes        int    `json:"payloadBytes,omitempty"`
+	PayloadHash         string `json:"payloadHash,omitempty"`
+	SensitiveHitCount   int    `json:"sensitiveHitCount,omitempty"`
+	RawPayloadVisible   bool   `json:"rawPayloadVisible,omitempty"`
 	Message             string `json:"message"`
 	CreatedAt           string `json:"createdAt"`
 	UpdatedAt           string `json:"updatedAt"`
 }
 
 type MessageSampleResultVO struct {
-	InstanceID   uint              `json:"instanceId"`
-	MQType       string            `json:"mqType"`
-	ResourceName string            `json:"resourceName"`
-	Namespace    string            `json:"namespace"`
-	Samples      []MessageSampleVO `json:"samples"`
-	SampleCount  int               `json:"sampleCount"`
-	Truncated    bool              `json:"truncated"`
-	Message      string            `json:"message"`
-	SampledAt    string            `json:"sampledAt"`
+	InstanceID        uint              `json:"instanceId"`
+	MQType            string            `json:"mqType"`
+	ResourceName      string            `json:"resourceName"`
+	Namespace         string            `json:"namespace"`
+	Samples           []MessageSampleVO `json:"samples"`
+	SampleCount       int               `json:"sampleCount"`
+	SensitiveHitCount int               `json:"sensitiveHitCount"`
+	PayloadHash       string            `json:"payloadHash"`
+	Redacted          bool              `json:"redacted"`
+	Truncated         bool              `json:"truncated"`
+	Message           string            `json:"message"`
+	SampledAt         string            `json:"sampledAt"`
 }
 
 type MessageSampleVO struct {
-	Topic       string            `json:"topic"`
-	PartitionID int               `json:"partitionId"`
-	Offset      int64             `json:"offset"`
-	Key         string            `json:"key"`
-	Timestamp   string            `json:"timestamp"`
-	Headers     map[string]string `json:"headers"`
-	Payload     string            `json:"payload"`
-	PayloadSize int               `json:"payloadSize"`
-	Truncated   bool              `json:"truncated"`
-	Encoding    string            `json:"encoding"`
+	Topic             string            `json:"topic"`
+	PartitionID       int               `json:"partitionId"`
+	Offset            int64             `json:"offset"`
+	Key               string            `json:"key"`
+	Timestamp         string            `json:"timestamp"`
+	Headers           map[string]string `json:"headers"`
+	Payload           string            `json:"payload"`
+	PayloadSize       int               `json:"payloadSize"`
+	Truncated         bool              `json:"truncated"`
+	Encoding          string            `json:"encoding"`
+	PayloadHash       string            `json:"payloadHash"`
+	Redacted          bool              `json:"redacted"`
+	SensitiveHitCount int               `json:"sensitiveHitCount"`
+	SensitiveFields   []string          `json:"sensitiveFields"`
+}
+
+type MessageReplayPlanVO struct {
+	InstanceID         uint           `json:"instanceId"`
+	InstanceName       string         `json:"instanceName"`
+	MQType             string         `json:"mqType"`
+	ResourceType       string         `json:"resourceType"`
+	Namespace          string         `json:"namespace"`
+	ResourceName       string         `json:"resourceName"`
+	TargetInstanceID   uint           `json:"targetInstanceId"`
+	TargetResourceName string         `json:"targetResourceName"`
+	MaxMessages        int            `json:"maxMessages"`
+	RateLimitPerSecond int            `json:"rateLimitPerSecond"`
+	Status             string         `json:"status"`
+	ReplayExecutable   bool           `json:"replayExecutable"`
+	RequiresApproval   bool           `json:"requiresApproval"`
+	Warnings           []string       `json:"warnings"`
+	Impact             map[string]any `json:"impact"`
+	Message            string         `json:"message"`
+	AuditID            uint           `json:"auditId"`
+	CreatedAt          string         `json:"createdAt"`
 }
 
 type HighRiskOperationConfig struct {

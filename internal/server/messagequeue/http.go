@@ -232,6 +232,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		group.GET("/jobs/:id", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetJob)
 		group.GET("/dashboard", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetProductionDashboard)
 		group.GET("/governance-report", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetGovernanceReport)
+		group.GET("/dlq-analysis", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetDLQAnalysis)
 
 		instances := group.Group("/instances")
 		{
@@ -256,6 +257,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.GET("/:id/consumer-groups", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListConsumerGroups)
 			instances.GET("/:id/partitions", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListPartitions)
 			instances.POST("/:id/messages/sample", s.authMiddleware.RequireMenuPermission(permMQMessageRead), s.service.SampleMessages)
+			instances.POST("/:id/messages/replay-requests", s.authMiddleware.RequireMenuPermission(permMQMessageWrite), s.service.PrepareMessageReplayApplication)
 			instances.GET("/:id/operations/actions", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ListOperationActions)
 			instances.POST("/:id/operations/validate", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ValidateResourceOperation)
 			instances.POST("/:id/operations", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ExecuteResourceOperation)

@@ -238,6 +238,14 @@ func applyGovernancePermissionScope(req *mqbiz.GovernanceReportRequest, scope *p
 	req.AllowedIDs = scope.allowedIDs
 }
 
+func applyDLQPermissionScope(req *mqbiz.DLQAnalysisRequest, scope *permissionScope) {
+	if req == nil || scope == nil || !scope.enforced || scope.admin {
+		return
+	}
+	req.RestrictToAllowed = true
+	req.AllowedIDs = scope.allowedIDs
+}
+
 func (s *Service) decorateInstancePermissions(c *gin.Context, list []*mqbiz.InstanceVO, scope *permissionScope) bool {
 	if len(list) == 0 {
 		return true
@@ -559,6 +567,28 @@ func (s *Service) GetGovernanceReport(c *gin.Context) {
 	response.Success(c, data)
 }
 
+func (s *Service) GetDLQAnalysis(c *gin.Context) {
+	var req mqbiz.DLQAnalysisRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.permissionScope(c, mqbiz.PermissionDiagnose)
+	if !ok {
+		return
+	}
+	if req.InstanceID > 0 && !s.ensureInstancePermission(c, req.InstanceID, mqbiz.PermissionDiagnose) {
+		return
+	}
+	applyDLQPermissionScope(&req, scope)
+	data, err := s.useCase.GetDLQAnalysis(c.Request.Context(), &req)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 func (s *Service) GetJob(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "任务ID")
 	if !ok {
@@ -774,6 +804,24 @@ func (s *Service) SampleMessages(c *gin.Context) {
 	data, err := s.useCase.SampleMessages(c.Request.Context(), id, &req, currentOperator(c))
 	if err != nil {
 		writeError(c, "消息采样失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) PrepareMessageReplayApplication(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionMessageWrite) {
+		return
+	}
+	var req mqbiz.MessageReplayApplicationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.PrepareMessageReplayApplication(c.Request.Context(), id, &req, currentOperator(c))
+	if err != nil {
+		writeError(c, "重放申请失败: ", err)
 		return
 	}
 	response.Success(c, data)

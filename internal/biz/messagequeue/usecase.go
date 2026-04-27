@@ -622,16 +622,18 @@ func (uc *UseCase) SampleMessages(ctx context.Context, instanceID uint, req *Mes
 	message := "消息采样成功"
 	sampleCount := 0
 	payloadBytes := 0
+	auditMeta := messageAuditMeta{}
 	if err != nil {
 		status = AuditStatusFailed
 		message = err.Error()
 	} else if result != nil {
+		auditMeta = applyMessageSampleDLP(result)
 		sampleCount = result.SampleCount
 		for _, item := range result.Samples {
 			payloadBytes += item.PayloadSize
 		}
 	}
-	uc.createMessageAudit(ctx, instance, req, status, sampleCount, payloadBytes, message, operator)
+	uc.createMessageAudit(ctx, instance, req, status, sampleCount, payloadBytes, message, operator, auditMeta)
 	if err != nil {
 		return nil, err
 	}
@@ -1825,25 +1827,29 @@ func (uc *UseCase) finishSyncJob(ctx context.Context, job *MQSyncJob, status, me
 	_ = uc.syncJobRepo.Update(ctx, job)
 }
 
-func (uc *UseCase) createMessageAudit(ctx context.Context, item *MQInstance, req *MessageSampleRequest, status string, sampleCount, payloadBytes int, message string, operator Operator) {
+func (uc *UseCase) createMessageAudit(ctx context.Context, item *MQInstance, req *MessageSampleRequest, status string, sampleCount, payloadBytes int, message string, operator Operator, meta messageAuditMeta) {
 	if uc.messageAuditRepo == nil || item == nil || req == nil {
 		return
 	}
 	_ = uc.messageAuditRepo.Create(ctx, &MQMessageAudit{
-		InstanceID:   item.ID,
-		MQType:       item.MQType,
-		ResourceType: req.ResourceType,
-		ResourceName: req.ResourceName,
-		Namespace:    req.Namespace,
-		Action:       AuditActionMessageSample,
-		SampleCount:  sampleCount,
-		PayloadBytes: payloadBytes,
-		FilterJSON:   mustJSON(req),
-		Status:       status,
-		OperatorID:   operator.ID,
-		OperatorName: operator.Username,
-		ClientIP:     operator.ClientIP,
-		Message:      trimText(message, 500),
+		InstanceID:        item.ID,
+		MQType:            item.MQType,
+		ResourceType:      req.ResourceType,
+		ResourceName:      req.ResourceName,
+		Namespace:         req.Namespace,
+		Action:            AuditActionMessageSample,
+		SampleCount:       sampleCount,
+		PayloadBytes:      payloadBytes,
+		FilterJSON:        mustJSON(req),
+		PayloadHash:       meta.PayloadHash,
+		SensitiveHitCount: meta.SensitiveHitCount,
+		RawPayloadVisible: false,
+		DLPResultJSON:     mustJSON(meta),
+		Status:            status,
+		OperatorID:        operator.ID,
+		OperatorName:      operator.Username,
+		ClientIP:          operator.ClientIP,
+		Message:           trimText(message, 500),
 	})
 }
 
@@ -2394,22 +2400,27 @@ func operationAuditToVO(item *MQOperationAudit) *AuditVO {
 
 func messageAuditToVO(item *MQMessageAudit) *AuditVO {
 	return &AuditVO{
-		ID:           item.ID,
-		InstanceID:   item.InstanceID,
-		MQType:       item.MQType,
-		ResourceType: item.ResourceType,
-		ResourceName: item.ResourceName,
-		Namespace:    item.Namespace,
-		Action:       item.Action,
-		ActionText:   actionText(item.Action),
-		Status:       item.Status,
-		StatusText:   auditStatusText(item.Status),
-		OperatorID:   item.OperatorID,
-		OperatorName: item.OperatorName,
-		ClientIP:     item.ClientIP,
-		Message:      item.Message,
-		CreatedAt:    item.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:    item.UpdatedAt.Format("2006-01-02 15:04:05"),
+		ID:                item.ID,
+		InstanceID:        item.InstanceID,
+		MQType:            item.MQType,
+		ResourceType:      item.ResourceType,
+		ResourceName:      item.ResourceName,
+		Namespace:         item.Namespace,
+		Action:            item.Action,
+		ActionText:        actionText(item.Action),
+		Status:            item.Status,
+		StatusText:        auditStatusText(item.Status),
+		OperatorID:        item.OperatorID,
+		OperatorName:      item.OperatorName,
+		ClientIP:          item.ClientIP,
+		SampleCount:       item.SampleCount,
+		PayloadBytes:      item.PayloadBytes,
+		PayloadHash:       item.PayloadHash,
+		SensitiveHitCount: item.SensitiveHitCount,
+		RawPayloadVisible: item.RawPayloadVisible,
+		Message:           item.Message,
+		CreatedAt:         item.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:         item.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
 }
 
@@ -2442,6 +2453,8 @@ func actionText(action string) string {
 		return "元数据同步"
 	case AuditActionMessageSample:
 		return "消息采样"
+	case AuditActionMessageReplay:
+		return "消息重放申请"
 	case AuditActionMetricSnapshot:
 		return "指标快照采集"
 	case AuditActionInspectionRun:

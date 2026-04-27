@@ -158,6 +158,15 @@ export const getMQGovernanceReport = (params?: {
   keyword?: string
 }) => request.get('/api/v1/message-queues/governance-report', { params })
 
+export const getMQDLQAnalysis = (params?: {
+  page?: number
+  pageSize?: number
+  instanceId?: number
+  keyword?: string
+  kind?: string
+  hasBacklog?: string
+}) => request.get('/api/v1/message-queues/dlq-analysis', { params })
+
 export const getMQTopology = (id: number) =>
   request.get(`/api/v1/message-queues/instances/${id}/topology`)
 
@@ -196,6 +205,17 @@ export const listMQPartitions = (id: number, params?: {
 
 export const sampleMQMessages = (id: number, data: MQMessageSamplePayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/messages/sample`, data)
+
+export const prepareMQMessageReplay = (id: number, data: {
+  resourceType?: string
+  namespace?: string
+  resourceName: string
+  targetInstanceId?: number
+  targetResourceName?: string
+  maxMessages?: number
+  rateLimitPerSecond?: number
+  reason: string
+}) => request.post(`/api/v1/message-queues/instances/${id}/messages/replay-requests`, data)
 
 export const validateMQResourceOperation = (id: number, data: MQResourceOperationPayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/operations/validate`, data)
