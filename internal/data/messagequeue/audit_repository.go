@@ -95,6 +95,7 @@ func applyOperationAuditFilter(query *gorm.DB, req *mqbiz.AuditListRequest) *gor
 	if req == nil {
 		return query
 	}
+	query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedIDs)
 	if req.InstanceID > 0 {
 		query = query.Where("instance_id = ?", req.InstanceID)
 	}
@@ -127,6 +128,7 @@ func applyMessageAuditFilter(query *gorm.DB, req *mqbiz.AuditListRequest) *gorm.
 	if req == nil {
 		return query
 	}
+	query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedIDs)
 	if req.InstanceID > 0 {
 		query = query.Where("instance_id = ?", req.InstanceID)
 	}

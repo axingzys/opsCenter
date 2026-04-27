@@ -457,16 +457,18 @@ type PartitionListRequest struct {
 }
 
 type AuditListRequest struct {
-	Page       int    `form:"page"`
-	PageSize   int    `form:"pageSize"`
-	Keyword    string `form:"keyword"`
-	InstanceID uint   `form:"instanceId"`
-	MQType     string `form:"mqType"`
-	Action     string `form:"action"`
-	Status     string `form:"status"`
-	RiskLevel  string `form:"riskLevel"`
-	StartTime  string `form:"startTime"`
-	EndTime    string `form:"endTime"`
+	Page              int    `form:"page"`
+	PageSize          int    `form:"pageSize"`
+	Keyword           string `form:"keyword"`
+	InstanceID        uint   `form:"instanceId"`
+	MQType            string `form:"mqType"`
+	Action            string `form:"action"`
+	Status            string `form:"status"`
+	RiskLevel         string `form:"riskLevel"`
+	StartTime         string `form:"startTime"`
+	EndTime           string `form:"endTime"`
+	RestrictToAllowed bool   `form:"-" json:"-"`
+	AllowedIDs        []uint `form:"-" json:"-"`
 }
 
 type MetricSnapshotListRequest struct {
@@ -488,6 +490,17 @@ type JobListRequest struct {
 	Status            string `form:"status"`
 	StartTime         string `form:"startTime"`
 	EndTime           string `form:"endTime"`
+	RestrictToAllowed bool   `form:"-" json:"-"`
+	AllowedIDs        []uint `form:"-" json:"-"`
+}
+
+type GovernanceReportRequest struct {
+	Page              int    `form:"page"`
+	PageSize          int    `form:"pageSize"`
+	InstanceID        uint   `form:"instanceId"`
+	Severity          string `form:"severity"`
+	Category          string `form:"category"`
+	Keyword           string `form:"keyword"`
 	RestrictToAllowed bool   `form:"-" json:"-"`
 	AllowedIDs        []uint `form:"-" json:"-"`
 }
@@ -637,6 +650,121 @@ type OverviewVO struct {
 	TopBacklogResources []*ResourceVO `json:"topBacklogResources"`
 	LastSyncAt          string        `json:"lastSyncAt,omitempty"`
 	LastMetricAt        string        `json:"lastMetricAt,omitempty"`
+}
+
+type CountStatVO struct {
+	Key   string `json:"key"`
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
+}
+
+type DashboardResourceVO struct {
+	InstanceID   uint   `json:"instanceId"`
+	InstanceName string `json:"instanceName"`
+	MQType       string `json:"mqType"`
+	ResourceType string `json:"resourceType"`
+	Namespace    string `json:"namespace"`
+	ResourceName string `json:"resourceName"`
+	Backlog      int64  `json:"backlog"`
+	MessageCount int64  `json:"messageCount"`
+	Consumer     int    `json:"consumerCount"`
+	LastSyncAt   string `json:"lastSyncAt,omitempty"`
+}
+
+type DashboardConsumerGroupVO struct {
+	InstanceID          uint   `json:"instanceId"`
+	InstanceName        string `json:"instanceName"`
+	MQType              string `json:"mqType"`
+	Namespace           string `json:"namespace"`
+	ResourceName        string `json:"resourceName"`
+	GroupName           string `json:"groupName"`
+	Lag                 int64  `json:"lag"`
+	Backlog             int64  `json:"backlog"`
+	ConsumerCount       int    `json:"consumerCount"`
+	ActiveConsumerCount int    `json:"activeConsumerCount"`
+	LastSyncAt          string `json:"lastSyncAt,omitempty"`
+}
+
+type ProductionDashboardVO struct {
+	InstanceTotal           int64                       `json:"instanceTotal"`
+	HealthyInstances        int64                       `json:"healthyInstances"`
+	WarningInstances        int64                       `json:"warningInstances"`
+	CriticalInstances       int64                       `json:"criticalInstances"`
+	UnknownInstances        int64                       `json:"unknownInstances"`
+	ResourceTotal           int64                       `json:"resourceTotal"`
+	ConsumerGroupTotal      int64                       `json:"consumerGroupTotal"`
+	BacklogTotal            int64                       `json:"backlogTotal"`
+	LagTotal                int64                       `json:"lagTotal"`
+	DLQResourceTotal        int64                       `json:"dlqResourceTotal"`
+	RetryResourceTotal      int64                       `json:"retryResourceTotal"`
+	NoOwnerResourceTotal    int64                       `json:"noOwnerResourceTotal"`
+	NoOwnerInstanceTotal    int64                       `json:"noOwnerInstanceTotal"`
+	NoBusinessInstanceTotal int64                       `json:"noBusinessInstanceTotal"`
+	TypeStats               []*CountStatVO              `json:"typeStats"`
+	EnvironmentStats        []*CountStatVO              `json:"environmentStats"`
+	HealthStats             []*CountStatVO              `json:"healthStats"`
+	TopBacklogResources     []*DashboardResourceVO      `json:"topBacklogResources"`
+	TopLagConsumerGroups    []*DashboardConsumerGroupVO `json:"topLagConsumerGroups"`
+	RecentHighRiskAudits    []*AuditVO                  `json:"recentHighRiskAudits"`
+	RecentFailedJobs        []*JobVO                    `json:"recentFailedJobs"`
+	AlertCandidates         []*GovernanceViolationVO    `json:"alertCandidates"`
+	GeneratedAt             string                      `json:"generatedAt"`
+}
+
+type GovernanceViolationVO struct {
+	Severity     string `json:"severity"`
+	Category     string `json:"category"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Suggestion   string `json:"suggestion"`
+	InstanceID   uint   `json:"instanceId"`
+	InstanceName string `json:"instanceName"`
+	MQType       string `json:"mqType"`
+	ResourceType string `json:"resourceType"`
+	ResourceName string `json:"resourceName"`
+	Namespace    string `json:"namespace"`
+	MetricValue  string `json:"metricValue,omitempty"`
+	CreatedAt    string `json:"createdAt,omitempty"`
+}
+
+type GovernanceReportVO struct {
+	Total              int64                    `json:"total"`
+	CriticalCount      int64                    `json:"criticalCount"`
+	WarningCount       int64                    `json:"warningCount"`
+	InfoCount          int64                    `json:"infoCount"`
+	OwnerMissingCount  int64                    `json:"ownerMissingCount"`
+	BaselineDriftCount int64                    `json:"baselineDriftCount"`
+	LifecycleRiskCount int64                    `json:"lifecycleRiskCount"`
+	Violations         []*GovernanceViolationVO `json:"violations"`
+	GeneratedAt        string                   `json:"generatedAt"`
+}
+
+type TopologyNodeVO struct {
+	ID       string         `json:"id"`
+	Label    string         `json:"label"`
+	Type     string         `json:"type"`
+	Status   string         `json:"status,omitempty"`
+	Metrics  map[string]any `json:"metrics,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type TopologyEdgeVO struct {
+	ID     string         `json:"id"`
+	From   string         `json:"from"`
+	To     string         `json:"to"`
+	Type   string         `json:"type"`
+	Label  string         `json:"label,omitempty"`
+	Metric map[string]any `json:"metric,omitempty"`
+}
+
+type TopologyVO struct {
+	InstanceID   uint              `json:"instanceId"`
+	InstanceName string            `json:"instanceName"`
+	MQType       string            `json:"mqType"`
+	Nodes        []*TopologyNodeVO `json:"nodes"`
+	Edges        []*TopologyEdgeVO `json:"edges"`
+	Warnings     []string          `json:"warnings"`
+	GeneratedAt  string            `json:"generatedAt"`
 }
 
 type MetricSnapshotVO struct {

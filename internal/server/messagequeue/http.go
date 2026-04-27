@@ -230,6 +230,8 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		group.GET("/message-audits", s.authMiddleware.RequireMenuPermission(permMQAuditView), s.service.ListMessageAudits)
 		group.GET("/jobs", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListJobs)
 		group.GET("/jobs/:id", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetJob)
+		group.GET("/dashboard", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetProductionDashboard)
+		group.GET("/governance-report", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetGovernanceReport)
 
 		instances := group.Group("/instances")
 		{
@@ -244,6 +246,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.POST("/:id/sync-metadata", s.authMiddleware.RequireMenuPermission(permMQMetadataSync), s.service.SyncMetadata)
 			instances.GET("/:id/overview", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetOverview)
 			instances.GET("/:id/capabilities", s.authMiddleware.RequireMenuPermission(permMQInstanceView), s.service.GetCapabilities)
+			instances.GET("/:id/topology", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetTopology)
 			instances.POST("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.CollectMetricSnapshot)
 			instances.GET("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListMetricSnapshots)
 			instances.POST("/:id/inspection-reports", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GenerateInspectionReport)

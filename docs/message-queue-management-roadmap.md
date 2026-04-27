@@ -151,7 +151,7 @@
    - 增加凭据健康检查：凭据过期、TLS 证书过期、Token 过期、凭据复用和最近认证失败。
 
 ### 五期当前落地状态
-截至 2026-04-27，五期已启动底座能力：
+截至 2026-04-27，五期已完成一轮生产治理闭环 MVP：
 
 1. 新增统一任务模型 `mq_jobs`，覆盖任务类型、状态、进度、阶段、耗时、结果、错误和 `correlation_id`。
 2. `sync`、`metric_collect`、`inspection` 三类动作已写入统一任务中心。
@@ -172,6 +172,23 @@
    - `GET /api/v1/message-queues/instances/:id/capabilities`：返回实例能力和操作列表。
    - `GET /api/v1/message-queues/instances/:id/operations/actions`：返回当前实例真实可用资源操作、默认参数、风险级别和禁用原因。
    - 前端资源操作弹窗优先使用后端 action schema，保留静态模板作为降级。
+9. 新增全局 MQ 生产治理驾驶舱：
+   - `GET /api/v1/message-queues/dashboard`：聚合实例健康、类型/环境分布、全局 backlog、lag、DLQ/Retry、无负责人实例、Top backlog、Top lag、近期高危操作和失败任务。
+   - 前端新增 `治理驾驶舱` Tab，展示全局指标、Top backlog、Top lag 和治理问题清单。
+10. 新增治理报告：
+   - `GET /api/v1/message-queues/governance-report`：按实例、级别、分类和关键字查询治理违规。
+   - 当前内置规则覆盖健康、容量、消费、基线、生命周期、归属、安全和审计。
+   - 基线规则先以生产 Kafka topic、RabbitMQ queue、Pulsar namespace 的可计算项为 MVP，后续再扩展为可配置规则和豁免。
+11. 新增实例资源拓扑：
+   - `GET /api/v1/message-queues/instances/:id/topology`：返回节点和关系边。
+   - 当前支持实例、broker、namespace、topic、queue、exchange、binding、consumer group/subscription 的统一拓扑表达。
+   - 前端新增 `资源拓扑` Tab，以节点和关系表展示路由、绑定和消费关系。
+12. 权限收口：
+   - 全局驾驶舱、治理报告和审计列表按对象权限过滤可见实例。
+   - 动态操作按钮和真实高危执行共享高危权限判断，禁用时返回可解释原因。
+13. 单机 compose/离线 compose 交付补齐 SSH 录屏目录：
+   - 本地 `docker-compose.yml` 保留 `./data/terminal-recordings:/app/data/terminal-recordings`。
+   - `deploy/compose/docker-compose.yml` 新增 `./runtime/terminal-recordings:/app/data/terminal-recordings` 和 `OPSHUB_TERMINAL_RECORDING_PATH=/app/data/terminal-recordings`。
 
 ## 六期规划：高级消息治理与自动化
 六期建议放置更高风险或依赖业务配合的高级能力，不应在五期底座稳定前抢先开放。
@@ -1179,6 +1196,8 @@ type ConnectionCredential struct {
 | `GET` | `/api/v1/message-queues/sync-jobs/:jobId` | 查询异步同步任务，后续增强 |
 | `GET` | `/api/v1/message-queues/jobs` | 查询统一 MQ 任务中心 |
 | `GET` | `/api/v1/message-queues/jobs/:id` | 查询统一 MQ 任务详情 |
+| `GET` | `/api/v1/message-queues/dashboard` | 全局 MQ 生产治理驾驶舱 |
+| `GET` | `/api/v1/message-queues/governance-report` | 全局 MQ 治理违规清单 |
 | `GET` | `/api/v1/message-queues/instances/:id/brokers` | broker 列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources` | 资源列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources/:resourceId` | 资源详情 |
@@ -1187,6 +1206,7 @@ type ConnectionCredential struct {
 | `GET` | `/api/v1/message-queues/instances/:id/partitions` | 分区或队列维度 |
 | `GET` | `/api/v1/message-queues/instances/:id/overview` | 实例健康概览 |
 | `GET` | `/api/v1/message-queues/instances/:id/capabilities` | 实例真实能力矩阵 |
+| `GET` | `/api/v1/message-queues/instances/:id/topology` | 实例资源拓扑 |
 | `GET` | `/api/v1/message-queues/instances/:id/lag-trend` | lag/backlog 趋势 |
 | `POST` | `/api/v1/message-queues/instances/:id/metric-snapshots` | 手动采集指标快照 |
 

@@ -284,6 +284,7 @@ backend_url() {
 
 mkdir -p \
   "${SCRIPT_DIR}/runtime/logs" \
+  "${SCRIPT_DIR}/runtime/terminal-recordings" \
   "${SCRIPT_DIR}/runtime/guacamole/recordings" \
   "${SCRIPT_DIR}/runtime/prometheus/file_sd"
 

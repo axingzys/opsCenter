@@ -19,6 +19,85 @@
     </div>
 
     <el-tabs v-model="activeTab" class="main-tabs">
+      <el-tab-pane label="治理驾驶舱" name="governance">
+        <div class="workspace-toolbar">
+          <el-input v-model="governanceQuery.keyword" placeholder="搜索实例、资源、问题..." clearable class="search-input" @keyup.enter="loadGovernanceReport" @clear="loadGovernanceReport">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="governanceQuery.instanceId" placeholder="实例" clearable filterable class="search-select" @change="loadGovernanceReport">
+            <el-option v-for="item in diagnosableInstances" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+          <el-select v-model="governanceQuery.severity" placeholder="级别" clearable class="search-select" @change="loadGovernanceReport">
+            <el-option label="严重" value="critical" />
+            <el-option label="警告" value="warning" />
+            <el-option label="提示" value="info" />
+          </el-select>
+          <el-select v-model="governanceQuery.category" placeholder="分类" clearable class="search-select" @change="loadGovernanceReport">
+            <el-option label="健康" value="health" />
+            <el-option label="容量" value="capacity" />
+            <el-option label="消费" value="consumer" />
+            <el-option label="基线" value="baseline" />
+            <el-option label="生命周期" value="lifecycle" />
+            <el-option label="归属" value="ownership" />
+            <el-option label="安全" value="security" />
+            <el-option label="审计" value="audit" />
+          </el-select>
+          <el-button :loading="dashboardLoading || governanceLoading" @click="refreshGovernance">
+            <el-icon style="margin-right: 6px;"><Refresh /></el-icon>
+            刷新
+          </el-button>
+        </div>
+
+        <div v-loading="dashboardLoading" class="metric-grid" v-if="dashboard">
+          <div class="metric-item"><span class="metric-label">实例</span><strong>{{ dashboard.instanceTotal }}</strong></div>
+          <div class="metric-item"><span class="metric-label">异常/警告</span><strong>{{ dashboard.criticalInstances }}/{{ dashboard.warningInstances }}</strong></div>
+          <div class="metric-item"><span class="metric-label">Backlog</span><strong>{{ dashboard.backlogTotal }}</strong></div>
+          <div class="metric-item"><span class="metric-label">Lag</span><strong>{{ dashboard.lagTotal }}</strong></div>
+          <div class="metric-item"><span class="metric-label">DLQ/Retry</span><strong>{{ dashboard.dlqResourceTotal }}/{{ dashboard.retryResourceTotal }}</strong></div>
+          <div class="metric-item"><span class="metric-label">无负责人</span><strong>{{ dashboard.noOwnerInstanceTotal }}</strong></div>
+        </div>
+
+        <div class="split-layout governance-panels" v-if="dashboard">
+          <div class="panel">
+            <div class="panel-title">Top Backlog</div>
+            <el-table :data="dashboard.topBacklogResources || []" size="small" class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="实例" min-width="130" prop="instanceName" show-overflow-tooltip />
+              <el-table-column label="资源" min-width="180" prop="resourceName" show-overflow-tooltip />
+              <el-table-column label="类型" width="90" prop="resourceType" />
+              <el-table-column label="Backlog" width="110" align="right" prop="backlog" />
+            </el-table>
+          </div>
+          <div class="panel">
+            <div class="panel-title">Top Lag</div>
+            <el-table :data="dashboard.topLagConsumerGroups || []" size="small" class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="实例" min-width="130" prop="instanceName" show-overflow-tooltip />
+              <el-table-column label="消费组" min-width="180" prop="groupName" show-overflow-tooltip />
+              <el-table-column label="资源" min-width="160" prop="resourceName" show-overflow-tooltip />
+              <el-table-column label="Lag" width="110" align="right" prop="lag" />
+            </el-table>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <el-table :data="governanceReport?.violations || []" v-loading="governanceLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="级别" width="90" align="center">
+              <template #default="{ row }"><el-tag :type="severityTag(row.severity)">{{ sectionStatusText(row.severity) }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="分类" width="110">
+              <template #default="{ row }">{{ governanceCategoryText(row.category) }}</template>
+            </el-table-column>
+            <el-table-column label="实例" min-width="150" prop="instanceName" show-overflow-tooltip />
+            <el-table-column label="资源" min-width="190" prop="resourceName" show-overflow-tooltip />
+            <el-table-column label="问题" min-width="180" prop="title" show-overflow-tooltip />
+            <el-table-column label="说明" min-width="260" prop="description" show-overflow-tooltip />
+            <el-table-column label="建议" min-width="260" prop="suggestion" show-overflow-tooltip />
+          </el-table>
+          <div class="pagination-container">
+            <el-pagination v-model:current-page="governanceQuery.page" v-model:page-size="governanceQuery.pageSize" :page-sizes="[10, 20, 50, 100]" :total="governanceReport?.total || 0" layout="total, sizes, prev, pager, next, jumper" @size-change="loadGovernanceReport" @current-change="loadGovernanceReport" />
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="实例管理" name="instances">
         <div class="search-bar">
           <div class="search-inputs">
@@ -287,6 +366,50 @@
               <el-table-column label="Leader" min-width="150" prop="leader" show-overflow-tooltip />
               <el-table-column label="状态" width="90" align="center">
                 <template #default="{ row }"><el-tag size="small" :type="row.status === 'online' ? 'success' : 'warning'">{{ row.status || '-' }}</el-tag></template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="资源拓扑" name="topology">
+        <div class="workspace-toolbar">
+          <el-select v-model="selectedInstanceId" placeholder="选择实例" filterable class="instance-select" @change="loadTopology">
+            <el-option v-for="item in diagnosableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+          </el-select>
+          <el-button :loading="topologyLoading" :disabled="!selectedInstanceId || !uiPermissions.diagnosisView" @click="loadTopology">
+            <el-icon style="margin-right: 6px;"><Refresh /></el-icon>
+            刷新
+          </el-button>
+          <el-tag v-if="topology" type="info">节点 {{ topology.nodes?.length || 0 }}</el-tag>
+          <el-tag v-if="topology" type="info">关系 {{ topology.edges?.length || 0 }}</el-tag>
+        </div>
+        <div v-if="topology?.warnings?.length" class="health-reasons">
+          <span v-for="item in topology.warnings" :key="item">{{ item }}</span>
+        </div>
+        <div class="split-layout">
+          <div class="panel">
+            <div class="panel-title">节点</div>
+            <el-table :data="topology?.nodes || []" v-loading="topologyLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="名称" min-width="180" prop="label" show-overflow-tooltip />
+              <el-table-column label="类型" width="120" prop="type" />
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }"><el-tag size="small" :type="healthTag(row.status)">{{ row.status || '-' }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="指标" min-width="220">
+                <template #default="{ row }">{{ formatDiffValue(row.metrics) }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <div class="panel">
+            <div class="panel-title">关系</div>
+            <el-table :data="topology?.edges || []" v-loading="topologyLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="类型" width="110" prop="type" />
+              <el-table-column label="来源" min-width="190" prop="from" show-overflow-tooltip />
+              <el-table-column label="目标" min-width="190" prop="to" show-overflow-tooltip />
+              <el-table-column label="标签" min-width="140" prop="label" show-overflow-tooltip />
+              <el-table-column label="指标" min-width="160">
+                <template #default="{ row }">{{ formatDiffValue(row.metric) }}</template>
               </el-table-column>
             </el-table>
           </div>
@@ -609,8 +732,11 @@ import {
   enableMQInstance,
   executeMQResourceOperation,
   generateMQInspectionReport,
+  getMQGovernanceReport,
   getMQOverview,
+  getMQProductionDashboard,
   getMQSupportedTypes,
+  getMQTopology,
   getMQUIPermissions,
   listMQConsumerGroups,
   listMQInstances,
@@ -662,6 +788,12 @@ const testingId = ref(0)
 const syncingId = ref(0)
 const instanceQuery = reactive({ page: 1, pageSize: 10, keyword: '', mqType: '', status: '', healthStatus: '', environment: '' })
 
+const dashboard = ref<any>(null)
+const dashboardLoading = ref(false)
+const governanceReport = ref<any>(null)
+const governanceLoading = ref(false)
+const governanceQuery = reactive<any>({ page: 1, pageSize: 20, keyword: '', instanceId: undefined, severity: '', category: '' })
+
 const selectedInstanceId = ref<number | null>(null)
 const overview = ref<any>(null)
 const resources = ref<any[]>([])
@@ -677,6 +809,8 @@ const partitionLoading = ref(false)
 const metricCollecting = ref(false)
 const inspectionLoading = ref(false)
 const inspectionReport = ref<any>(null)
+const topology = ref<any>(null)
+const topologyLoading = ref(false)
 const consumerHasLag = ref(false)
 const consumerQuery = reactive({ page: 1, pageSize: 20, keyword: '', resourceName: '', namespace: '' })
 
@@ -951,6 +1085,43 @@ const loadJobs = async () => {
     jobTotal.value = res.total || 0
   } finally {
     jobLoading.value = false
+  }
+}
+
+const loadDashboard = async () => {
+  if (!uiPermissions.diagnosisView) return
+  dashboardLoading.value = true
+  try {
+    dashboard.value = await getMQProductionDashboard()
+  } finally {
+    dashboardLoading.value = false
+  }
+}
+
+const loadGovernanceReport = async () => {
+  if (!uiPermissions.diagnosisView) return
+  governanceLoading.value = true
+  try {
+    const params = { ...governanceQuery }
+    if (!params.instanceId) delete params.instanceId
+    const data = await getMQGovernanceReport(params)
+    governanceReport.value = data
+  } finally {
+    governanceLoading.value = false
+  }
+}
+
+const refreshGovernance = async () => {
+  await Promise.all([loadDashboard(), loadGovernanceReport()])
+}
+
+const loadTopology = async () => {
+  if (!selectedInstanceId.value || !uiPermissions.diagnosisView) return
+  topologyLoading.value = true
+  try {
+    topology.value = await getMQTopology(selectedInstanceId.value)
+  } finally {
+    topologyLoading.value = false
   }
 }
 
@@ -1284,6 +1455,16 @@ const riskTag = (riskLevel: string) => riskLevel === 'critical' ? 'danger' : ris
 const riskText = (riskLevel: string) => ({ low: '低风险', medium: '中风险', high: '高风险', critical: '严重风险' } as Record<string, string>)[riskLevel] || riskLevel || '-'
 const severityTag = (status: string) => ['critical', 'danger', 'failed'].includes(String(status || '').toLowerCase()) ? 'danger' : status === 'warning' ? 'warning' : status === 'info' ? 'info' : 'success'
 const sectionStatusText = (status: string) => ({ success: '正常', healthy: '健康', warning: '警告', critical: '异常', info: '提示' } as Record<string, string>)[status] || status || '-'
+const governanceCategoryText = (value: string) => ({
+  health: '健康',
+  capacity: '容量',
+  consumer: '消费',
+  baseline: '基线',
+  lifecycle: '生命周期',
+  ownership: '归属',
+  security: '安全',
+  audit: '审计'
+} as Record<string, string>)[value] || value || '-'
 const formatDiffValue = (value: any) => {
   if (value === undefined || value === null || value === '') return '-'
   if (typeof value === 'object') return JSON.stringify(value)
@@ -1297,8 +1478,10 @@ const createIdempotencyKey = () => {
 const escapeRegExp = (value: string) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 watch(activeTab, async tab => {
+  if (tab === 'governance') await refreshGovernance()
   if (tab === 'resources') await handleResourceInstanceChange()
   if (tab === 'diagnosis') await loadDiagnosis()
+  if (tab === 'topology') await loadTopology()
   if (tab === 'jobs') await loadJobs()
   if (tab === 'audits') await loadAudits()
   if (tab === 'permissions') await loadPermissions()
@@ -1307,7 +1490,7 @@ watch(activeTab, async tab => {
 onMounted(async () => {
   await Promise.all([loadSupportedTypes(), loadUIPermissions(), loadCredentials(), loadRoles()])
   await loadInstances()
-  await Promise.all([loadResources(), loadDiagnosis(), loadAudits(), loadJobs(), loadPermissions()])
+  await Promise.all([refreshGovernance(), loadResources(), loadDiagnosis(), loadTopology(), loadAudits(), loadJobs(), loadPermissions()])
 })
 </script>
 
@@ -1473,6 +1656,10 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
+}
+
+.governance-panels {
+  margin-bottom: 16px;
 }
 
 .diagnosis-summary,

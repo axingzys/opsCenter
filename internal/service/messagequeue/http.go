@@ -222,6 +222,22 @@ func applyJobPermissionScope(req *mqbiz.JobListRequest, scope *permissionScope) 
 	req.AllowedIDs = scope.allowedIDs
 }
 
+func applyAuditPermissionScope(req *mqbiz.AuditListRequest, scope *permissionScope) {
+	if req == nil || scope == nil || !scope.enforced || scope.admin {
+		return
+	}
+	req.RestrictToAllowed = true
+	req.AllowedIDs = scope.allowedIDs
+}
+
+func applyGovernancePermissionScope(req *mqbiz.GovernanceReportRequest, scope *permissionScope) {
+	if req == nil || scope == nil || !scope.enforced || scope.admin {
+		return
+	}
+	req.RestrictToAllowed = true
+	req.AllowedIDs = scope.allowedIDs
+}
+
 func (s *Service) decorateInstancePermissions(c *gin.Context, list []*mqbiz.InstanceVO, scope *permissionScope) bool {
 	if len(list) == 0 {
 		return true
@@ -506,6 +522,43 @@ func (s *Service) ListJobs(c *gin.Context) {
 	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
 }
 
+func (s *Service) GetProductionDashboard(c *gin.Context) {
+	scope, ok := s.permissionScope(c, mqbiz.PermissionDiagnose)
+	if !ok {
+		return
+	}
+	req := &mqbiz.GovernanceReportRequest{Page: 1, PageSize: 10}
+	applyGovernancePermissionScope(req, scope)
+	data, err := s.useCase.GetProductionDashboard(c.Request.Context(), req)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) GetGovernanceReport(c *gin.Context) {
+	var req mqbiz.GovernanceReportRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.permissionScope(c, mqbiz.PermissionDiagnose)
+	if !ok {
+		return
+	}
+	if req.InstanceID > 0 && !s.ensureInstancePermission(c, req.InstanceID, mqbiz.PermissionDiagnose) {
+		return
+	}
+	applyGovernancePermissionScope(&req, scope)
+	data, err := s.useCase.GetGovernanceReport(c.Request.Context(), &req)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 func (s *Service) GetJob(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "任务ID")
 	if !ok {
@@ -621,6 +674,19 @@ func (s *Service) GetCapabilities(c *gin.Context) {
 		return
 	}
 	data, err := s.useCase.GetInstanceCapabilities(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) GetTopology(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionDiagnose) {
+		return
+	}
+	data, err := s.useCase.GetTopology(c.Request.Context(), id)
 	if err != nil {
 		writeError(c, "查询失败: ", err)
 		return
@@ -766,6 +832,14 @@ func (s *Service) ListOperationAudits(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.permissionScope(c, mqbiz.PermissionAudit)
+	if !ok {
+		return
+	}
+	if req.InstanceID > 0 && !s.ensureInstancePermission(c, req.InstanceID, mqbiz.PermissionAudit) {
+		return
+	}
+	applyAuditPermissionScope(&req, scope)
 	list, total, err := s.useCase.ListOperationAudits(c.Request.Context(), &req)
 	if err != nil {
 		writeError(c, "查询失败: ", err)
@@ -780,6 +854,14 @@ func (s *Service) ListMessageAudits(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
+	scope, ok := s.permissionScope(c, mqbiz.PermissionAudit)
+	if !ok {
+		return
+	}
+	if req.InstanceID > 0 && !s.ensureInstancePermission(c, req.InstanceID, mqbiz.PermissionAudit) {
+		return
+	}
+	applyAuditPermissionScope(&req, scope)
 	list, total, err := s.useCase.ListMessageAudits(c.Request.Context(), &req)
 	if err != nil {
 		writeError(c, "查询失败: ", err)

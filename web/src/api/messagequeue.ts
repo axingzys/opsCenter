@@ -146,6 +146,21 @@ export const listMQJobs = (params: {
 export const getMQJob = (id: number) =>
   request.get(`/api/v1/message-queues/jobs/${id}`)
 
+export const getMQProductionDashboard = () =>
+  request.get('/api/v1/message-queues/dashboard')
+
+export const getMQGovernanceReport = (params?: {
+  page?: number
+  pageSize?: number
+  instanceId?: number
+  severity?: string
+  category?: string
+  keyword?: string
+}) => request.get('/api/v1/message-queues/governance-report', { params })
+
+export const getMQTopology = (id: number) =>
+  request.get(`/api/v1/message-queues/instances/${id}/topology`)
+
 export const generateMQInspectionReport = (id: number) =>
   request.post(`/api/v1/message-queues/instances/${id}/inspection-reports`)
 

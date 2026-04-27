@@ -88,6 +88,7 @@ services:
       OPSHUB_AGENT_BINARY_NAME: ${OPSHUB_AGENT_BINARY_NAME:-opshub-agent}
       OPSHUB_AGENT_SERVICE_PREFIX: ${OPSHUB_AGENT_SERVICE_PREFIX:-opshub-agent}
       OPSHUB_AGENT_REPORT_INTERVAL_SECONDS: ${OPSHUB_AGENT_REPORT_INTERVAL_SECONDS:-60}
+      OPSHUB_TERMINAL_RECORDING_PATH: /app/data/terminal-recordings
       OPSHUB_MONITORING_PROMETHEUS_ENABLED: ${OPSHUB_MONITORING_PROMETHEUS_ENABLED:-false}
       OPSHUB_MONITORING_PROMETHEUS_BASE_URL: ${OPSHUB_MONITORING_PROMETHEUS_BASE_URL:-http://prometheus:9090}
       OPSHUB_MONITORING_PROMETHEUS_FILE_SD_DIR: /app/data/prometheus/file_sd
@@ -100,6 +101,7 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ./runtime/logs:/app/logs
+      - ./runtime/terminal-recordings:/app/data/terminal-recordings
       - ./runtime/guacamole:/var/lib/guacamole
       - ./runtime/prometheus/file_sd:/app/data/prometheus/file_sd
     healthcheck:
