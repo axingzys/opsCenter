@@ -87,6 +87,100 @@
    - 健康状态、异常标签、健康原因和最近指标时间展示。
 5. 四期单元测试覆盖指标快照采集、健康状态评估、异常标签和巡检治理项。
 
+## 五期规划：MQ 生产治理闭环
+5.5 Pro 给出的建议整体值得纳入路线图，但不建议继续优先扩大“可操作范围”。五期应把主线调整为生产治理闭环：让长耗时动作可追踪，高危动作可解释、可备份、可审计，资源具备 owner、基线、告警和生命周期状态，大集群下平台自身可分页、可限流、可恢复。
+
+### 五期 P0：优先落地底座
+1. 统一 MQ 任务中心。
+   - 将元数据同步、指标采集、巡检、操作后置刷新、导出等动作统一进入 `mq_jobs`。
+   - 任务字段包含 `job_type`、`status`、`progress_current`、`progress_total`、`current_stage`、`trigger_type`、`operator_id`、`started_at`、`finished_at`、`error_json`、`result_json`、`correlation_id`。
+   - 前端提供“任务中心”页签，展示进度、阶段、耗时、错误和链路 ID。
+   - 后续扩展取消任务、失败重试、任务日志和同实例并发限制。
+2. 元数据和指标新鲜度强校验。
+   - 最近同步超过阈值时拒绝生产资源变更。
+   - 最近指标超过阈值时拒绝 purge、delete、reset、skip 等高危操作。
+   - 操作前同步失败时进入 pending 或直接拒绝。
+   - 大集群同步 `partial_success` 时，只允许对已确认资源执行操作。
+3. 高危操作配置备份包和回滚建议。
+   - 在 before snapshot 基础上形成 `operation_backup_json`、`rollback_hint_json`、`rollback_supported`、`rollback_risk_level`。
+   - 明确“不承诺恢复消息，只辅助恢复资源配置”。
+4. 动态 capabilities/action schema。
+   - 新增实例级 `/capabilities` 和 `/operations/actions` 能力输出。
+   - 前端按实例真实权限、插件、版本和 MQ 配置启用或禁用按钮，并展示禁用原因。
+5. 消息采样 DLP 和脱敏规则真实落地。
+   - 支持字段名、JSONPath、正则脱敏规则。
+   - 新增 `messagequeue:message:raw-read`、`messagequeue:message:dlp-rule-manage`。
+   - 原文查看单独权限和强审计；审计只存 hash、大小、摘要、截断状态，不长期保存完整 payload。
+6. 大集群保护。
+   - Adapter 调用增加实例级并发限制、超时和熔断。
+   - 同步和采样增加 `max_sync_resources`、`max_sync_duration_seconds`、`max_adapter_concurrency`、`max_sample_duration_seconds`。
+   - 列表接口保持服务端分页，Top 查询只查 Top N，审计默认最近 7 天。
+7. 错误码标准化。
+   - 统一 `NETWORK_UNREACHABLE`、`AUTH_FAILED`、`PERMISSION_DENIED`、`MANAGEMENT_API_UNAVAILABLE`、`RESOURCE_NOT_FOUND`、`METADATA_STALE`、`HIGH_RISK_DISABLED`、`CONFIRM_TEXT_MISMATCH`、`ADAPTER_TIMEOUT` 等错误码。
+8. 指标表生命周期管理。
+   - `mq_metric_snapshots` 后续按时间分区，配置保留天数和降采样。
+   - 建议原始 1 分钟数据保留 7 天，5 分钟聚合保留 30 天，1 小时聚合保留 180 天。
+9. 操作链路追踪。
+   - 所有 MQ 操作日志带 `request_id`、`operation_id`、`job_id`、`instance_id`、`adapter_type`、`resource_name`、`operator_id`。
+
+### 五期 P1：生产治理能力
+1. 全局 MQ 驾驶舱。
+   - 按类型、环境、健康状态聚合实例数。
+   - 展示全局 Top backlog、Top lag consumer group、DLQ/Retry 资源数、无负责人资源、最近高危操作、最近同步失败和告警趋势。
+2. 资源拓扑图。
+   - RabbitMQ：`exchange -> binding -> queue -> consumer`。
+   - Kafka：`topic -> partition -> consumer group -> member`。
+   - Pulsar：`tenant -> namespace -> topic -> subscription -> consumer`。
+   - RocketMQ：`topic -> message queue -> consumer group`。
+   - ActiveMQ：`destination -> durable subscription / consumer`。
+3. 配置基线和漂移检测。
+   - 新增基线模板、漂移检测、违规列表、整改建议和白名单豁免。
+   - 生产 Kafka topic 示例：`replication.factor >= 3`、`min.insync.replicas >= 2`、`retention.ms >= 7d`、必须绑定 owner 和业务系统。
+4. 生命周期治理。
+   - 识别僵尸 topic/queue、空闲 consumer group、无负责人资源、长期 DLQ 堆积、retry 持续增长、命名不规范和临时资源过期。
+5. 告警规则 UI 和告警闭环。
+   - 支持 backlog、lag、broker 离线、consumer 为 0、DLQ 增长等规则模板。
+   - 支持持续时间、告警抑制、静默窗口、告警升级、恢复记录和处理备注。
+   - 建议形成“告警 -> 一键巡检 -> 排查建议 -> 处理结果”的闭环。
+6. 消费诊断增强。
+   - 增加根因标签：生产速率大于消费速率、无活跃消费者、consumer stalled、单分区热点、rebalance flapping、broker unhealthy、DLQ growing、retry storm、stale metric。
+   - 建设 Consumer Group 详情页，展示 member、client id、host、分配分区、offset、lag、最大 lag partition 和最近 rebalance。
+7. 权限和安全增强。
+   - 按禁用按钮展示缺失菜单权限、对象权限或系统开关原因。
+   - 支持临时授权/JIT 权限、维护窗口、冻结窗口和紧急绕过审计。
+   - 增加凭据健康检查：凭据过期、TLS 证书过期、Token 过期、凭据复用和最近认证失败。
+
+### 五期当前落地状态
+截至 2026-04-27，五期已启动第一批能力：
+
+1. 新增统一任务模型 `mq_jobs`，覆盖任务类型、状态、进度、阶段、耗时、结果、错误和 `correlation_id`。
+2. `sync`、`metric_collect`、`inspection` 三类动作已写入统一任务中心。
+3. 新增接口：
+   - `GET /api/v1/message-queues/jobs`：分页查询 MQ 任务。
+   - `GET /api/v1/message-queues/jobs/:id`：查询单个任务详情。
+4. 前端新增 `任务中心` Tab，可按实例、任务类型、状态和关键字筛选任务，并展示进度、阶段、耗时、消息和链路 ID。
+5. 旧 `mq_sync_jobs` 继续保留，用于兼容现有同步任务结果和历史语义；新 `mq_jobs` 作为五期统一任务中心入口。
+
+## 六期规划：高级消息治理与自动化
+六期建议放置更高风险或依赖业务配合的高级能力，不应在五期底座稳定前抢先开放。
+
+1. DLQ 分析工作台。
+   - 自动识别 DLQ/Retry 资源，展示样本、错误类型聚合、关联原始资源、负责人、处理状态和备注。
+   - 重放只做申请入口，不直接执行。
+2. 消息重放审批工作流。
+   - 流程为选择范围、脱敏预览、影响评估、选择目标、限速、审批、小批量试跑、正式执行和结果审计。
+   - 默认关闭，生产强审批，限制最大条数、目标范围和速率，不保存完整 payload。
+3. 消息 Schema 支持。
+   - JSON 格式化、Avro/Protobuf 解码、Schema Registry 对接、版本展示、Schema 校验和字段级脱敏。
+4. 审计防篡改增强。
+   - 审计 hash、hash chain、导出签名、保留策略和管理员操作审计。
+5. 跨集群配置克隆和迁移辅助。
+   - 只克隆配置和治理字段，消息迁移另行评估。
+6. Adapter 插件化和合约测试。
+   - 建立 Adapter contract test，要求连接测试、元数据发现、指标采集、操作校验和执行结果满足统一契约。
+7. 容量预测、成本分析和自动整改建议。
+   - 基于长期快照做趋势预测，输出扩分区、扩 broker、调整 retention、补告警等建议；生产自动修复默认不开放。
+
 ## 生产化优化补充清单
 以下内容为结合当前一二三期落地状态、现有代码结构和后续四期目标整理出的优化项。除上文“落地状态”明确说明的能力外，本节均表示后续建议，不代表当前已全部实现。
 
@@ -1071,6 +1165,8 @@ type ConnectionCredential struct {
 | --- | --- | --- |
 | `POST` | `/api/v1/message-queues/instances/:id/sync-metadata` | 同步元数据 |
 | `GET` | `/api/v1/message-queues/sync-jobs/:jobId` | 查询异步同步任务，后续增强 |
+| `GET` | `/api/v1/message-queues/jobs` | 查询统一 MQ 任务中心 |
+| `GET` | `/api/v1/message-queues/jobs/:id` | 查询统一 MQ 任务详情 |
 | `GET` | `/api/v1/message-queues/instances/:id/brokers` | broker 列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources` | 资源列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources/:resourceId` | 资源详情 |
@@ -1146,8 +1242,9 @@ type ConnectionCredential struct {
 2. `资源管理`
 3. `消费诊断`
 4. `消息查看`
-5. `操作审计`
-6. `实例权限`
+5. `任务中心`
+6. `操作审计`
+7. `实例权限`
 
 ### 实例管理
 列表字段：
@@ -1229,6 +1326,39 @@ type ConnectionCredential struct {
 7. payload 摘要。
 8. payload 展示。
 9. 是否截断。
+
+### 任务中心
+任务中心用于承接五期统一 job 模型，避免同步、采集、巡检、导出等长耗时动作阻塞在单个 HTTP 请求里不可见。
+
+筛选条件：
+
+1. 实例。
+2. MQ 类型。
+3. 任务类型。
+4. 状态。
+5. 操作人、阶段、消息或 `correlation_id` 关键字。
+6. 时间范围。
+
+表格字段：
+
+1. 任务类型。
+2. 实例。
+3. MQ 类型。
+4. 状态。
+5. 进度。
+6. 当前阶段。
+7. 操作人。
+8. 耗时。
+9. 消息。
+10. `correlation_id`。
+11. 创建时间。
+
+后续增强：
+
+1. 任务详情抽屉展示阶段日志、错误 JSON 和结果 JSON。
+2. 支持取消任务和失败重试。
+3. 同一实例同类任务并发限制。
+4. 从操作审计、巡检报告、告警详情跳转到关联任务。
 
 ### 操作审计
 筛选条件：

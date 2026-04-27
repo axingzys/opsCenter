@@ -21,6 +21,7 @@ type UseCase struct {
 	partitionRepo          PartitionRepo
 	metadataRepo           MetadataRepo
 	syncJobRepo            SyncJobRepo
+	jobRepo                JobRepo
 	metricSnapshotRepo     MetricSnapshotRepo
 	operationAuditRepo     OperationAuditRepo
 	messageAuditRepo       MessageAuditRepo
@@ -69,6 +70,11 @@ func NewUseCase(
 		highRiskConfigResolver: highRiskConfigResolver,
 		adapters:               adapters,
 	}
+}
+
+func (uc *UseCase) WithJobRepo(jobRepo JobRepo) *UseCase {
+	uc.jobRepo = jobRepo
+	return uc
 }
 
 func (uc *UseCase) SupportedTypes() []*SupportedTypeVO {
@@ -273,17 +279,20 @@ func (uc *UseCase) SyncMetadata(ctx context.Context, id uint, operator Operator)
 	if err := uc.syncJobRepo.Create(ctx, job); err != nil {
 		return nil, err
 	}
+	trackingJob := uc.startMQJob(ctx, item, JobTypeSync, TriggerManual, operator, 4, "拉取元数据")
 	audit := uc.startOperationAudit(ctx, item, AuditActionMetadataSync, RiskLevelLow, operator, nil)
 
 	snapshot, err := adapter.DiscoverMetadata(ctx, item, credential)
 	finishedAt := time.Now()
 	if err != nil {
 		uc.finishSyncJob(ctx, job, SyncStatusFailed, err.Error(), startedAt, finishedAt, nil)
+		uc.finishMQJob(ctx, trackingJob, JobStatusFailed, err.Error(), nil, err, 0, 4)
 		uc.finishOperationAudit(ctx, audit, AuditStatusFailed, err.Error(), nil, startedAt, finishedAt)
 		item.HealthStatus = HealthStatusCritical
 		_ = uc.instanceRepo.Update(ctx, item)
 		return nil, err
 	}
+	uc.updateMQJob(ctx, trackingJob, 1, 4, "写入元数据", "")
 	if snapshot.SyncedAt.IsZero() {
 		snapshot.SyncedAt = finishedAt
 	}
@@ -292,9 +301,11 @@ func (uc *UseCase) SyncMetadata(ctx context.Context, id uint, operator Operator)
 	}
 	if err := uc.metadataRepo.ReplaceAll(ctx, item.ID, snapshot); err != nil {
 		uc.finishSyncJob(ctx, job, SyncStatusFailed, err.Error(), startedAt, finishedAt, snapshot)
+		uc.finishMQJob(ctx, trackingJob, JobStatusFailed, err.Error(), snapshotSummary(snapshot), err, 2, 4)
 		uc.finishOperationAudit(ctx, audit, AuditStatusFailed, err.Error(), nil, startedAt, finishedAt)
 		return nil, err
 	}
+	uc.updateMQJob(ctx, trackingJob, 3, 4, "刷新实例状态", "")
 
 	item.Version = strings.TrimSpace(snapshot.Version)
 	if strings.TrimSpace(snapshot.Engine) != "" {
@@ -303,9 +314,11 @@ func (uc *UseCase) SyncMetadata(ctx context.Context, id uint, operator Operator)
 	item.HealthStatus = snapshot.HealthStatus
 	item.LastSyncAt = &finishedAt
 	if err := uc.instanceRepo.Update(ctx, item); err != nil {
+		uc.finishMQJob(ctx, trackingJob, JobStatusFailed, err.Error(), snapshotSummary(snapshot), err, 3, 4)
 		return nil, err
 	}
 	uc.finishSyncJob(ctx, job, SyncStatusSuccess, snapshot.Message, startedAt, finishedAt, snapshot)
+	uc.finishMQJob(ctx, trackingJob, JobStatusSuccess, snapshot.Message, snapshotSummary(snapshot), nil, 4, 4)
 	uc.finishOperationAudit(ctx, audit, AuditStatusSuccess, snapshot.Message, snapshotSummary(snapshot), startedAt, finishedAt)
 
 	return &MetadataSyncResultVO{
@@ -395,10 +408,17 @@ func (uc *UseCase) CollectMetricSnapshot(ctx context.Context, instanceID uint, o
 	if uc.metricSnapshotRepo == nil {
 		return nil, fmt.Errorf("MQ指标快照仓库未配置")
 	}
+	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("MQ实例不存在")
+	}
+	job := uc.startMQJob(ctx, instance, JobTypeMetricCollect, TriggerManual, operator, 3, "汇总指标")
 	overview, err := uc.buildOverview(ctx, instanceID)
 	if err != nil {
+		uc.finishMQJob(ctx, job, JobStatusFailed, err.Error(), nil, err, 0, 3)
 		return nil, err
 	}
+	uc.updateMQJob(ctx, job, 1, 3, "写入指标快照", "")
 	collectedAt := time.Now()
 	snapshot := &MQMetricSnapshot{
 		InstanceID:        overview.InstanceID,
@@ -415,12 +435,10 @@ func (uc *UseCase) CollectMetricSnapshot(ctx context.Context, instanceID uint, o
 		CollectedAt:       collectedAt,
 	}
 	if err := uc.metricSnapshotRepo.Create(ctx, snapshot); err != nil {
+		uc.finishMQJob(ctx, job, JobStatusFailed, err.Error(), nil, err, 1, 3)
 		return nil, err
 	}
-	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
-	if err != nil {
-		return nil, fmt.Errorf("MQ实例不存在")
-	}
+	uc.updateMQJob(ctx, job, 2, 3, "刷新健康状态", "")
 	instance.LastMetricAt = &collectedAt
 	overview.LastMetricAt = formatTimePtr(instance.LastMetricAt)
 	overview.HealthStatus, overview.HealthReasons, overview.AnomalyTags = evaluateMQHealth(
@@ -443,15 +461,18 @@ func (uc *UseCase) CollectMetricSnapshot(ctx context.Context, instanceID uint, o
 	overview.HealthText = HealthText(overview.HealthStatus)
 	instance.HealthStatus = overview.HealthStatus
 	if err := uc.instanceRepo.Update(ctx, instance); err != nil {
+		uc.finishMQJob(ctx, job, JobStatusFailed, err.Error(), nil, err, 2, 3)
 		return nil, err
 	}
 	audit := uc.startOperationAudit(ctx, instance, AuditActionMetricSnapshot, RiskLevelLow, operator, map[string]any{"source": "manual"})
-	uc.finishOperationAudit(ctx, audit, AuditStatusSuccess, "MQ指标快照采集成功", map[string]any{
+	result := map[string]any{
 		"snapshotId":    snapshot.ID,
 		"healthStatus":  overview.HealthStatus,
 		"anomalyTags":   overview.AnomalyTags,
 		"healthReasons": overview.HealthReasons,
-	}, collectedAt, time.Now())
+	}
+	uc.finishOperationAudit(ctx, audit, AuditStatusSuccess, "MQ指标快照采集成功", result, collectedAt, time.Now())
+	uc.finishMQJob(ctx, job, JobStatusSuccess, "MQ指标快照采集成功", result, nil, 3, 3)
 	return &MetricCollectResultVO{
 		InstanceID:    overview.InstanceID,
 		InstanceName:  overview.InstanceName,
@@ -483,16 +504,20 @@ func (uc *UseCase) ListMetricSnapshots(ctx context.Context, instanceID uint, req
 }
 
 func (uc *UseCase) GenerateInspectionReport(ctx context.Context, instanceID uint, operator Operator) (*InspectionReportVO, error) {
-	overview, err := uc.buildOverview(ctx, instanceID)
-	if err != nil {
-		return nil, err
-	}
 	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("MQ实例不存在")
 	}
+	job := uc.startMQJob(ctx, instance, JobTypeInspection, TriggerManual, operator, 4, "汇总实例概览")
+	overview, err := uc.buildOverview(ctx, instanceID)
+	if err != nil {
+		uc.finishMQJob(ctx, job, JobStatusFailed, err.Error(), nil, err, 0, 4)
+		return nil, err
+	}
+	uc.updateMQJob(ctx, job, 1, 4, "构建巡检项", "")
 	now := time.Now()
 	findings := uc.buildInspectionFindings(ctx, instance, overview)
+	uc.updateMQJob(ctx, job, 2, 4, "计算巡检评分", "")
 	sections := buildInspectionSections(instance, overview, findings)
 	score, riskLevel := calculateInspectionScore(findings)
 	report := &InspectionReportVO{
@@ -506,12 +531,15 @@ func (uc *UseCase) GenerateInspectionReport(ctx context.Context, instanceID uint
 		Findings:     findings,
 		GeneratedAt:  now.Format("2006-01-02 15:04:05"),
 	}
+	uc.updateMQJob(ctx, job, 3, 4, "写入审计记录", "")
 	audit := uc.startOperationAudit(ctx, instance, AuditActionInspectionRun, RiskLevelLow, operator, map[string]any{"source": "manual"})
-	uc.finishOperationAudit(ctx, audit, AuditStatusSuccess, "MQ巡检报告生成成功", map[string]any{
+	result := map[string]any{
 		"score":        report.Score,
 		"riskLevel":    report.RiskLevel,
 		"findingCount": len(report.Findings),
-	}, now, time.Now())
+	}
+	uc.finishOperationAudit(ctx, audit, AuditStatusSuccess, "MQ巡检报告生成成功", result, now, time.Now())
+	uc.finishMQJob(ctx, job, JobStatusSuccess, "MQ巡检报告生成成功", result, nil, 4, 4)
 	return report, nil
 }
 

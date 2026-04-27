@@ -345,6 +345,66 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="任务中心" name="jobs">
+        <div class="workspace-toolbar">
+          <el-input v-model="jobQuery.keyword" placeholder="搜索实例、阶段、操作人、链路ID..." clearable class="search-input" @keyup.enter="loadJobs" @clear="loadJobs">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="jobQuery.instanceId" placeholder="实例" clearable filterable class="search-select" @change="loadJobs">
+            <el-option v-for="item in diagnosableInstances" :key="item.id" :label="item.name" :value="item.id" />
+          </el-select>
+          <el-select v-model="jobQuery.jobType" placeholder="任务类型" clearable class="search-select" @change="loadJobs">
+            <el-option label="元数据同步" value="sync" />
+            <el-option label="指标采集" value="metric_collect" />
+            <el-option label="巡检" value="inspection" />
+            <el-option label="操作后刷新" value="operation_refresh" />
+            <el-option label="导出" value="export" />
+          </el-select>
+          <el-select v-model="jobQuery.status" placeholder="状态" clearable class="search-select" @change="loadJobs">
+            <el-option label="待执行" value="pending" />
+            <el-option label="执行中" value="running" />
+            <el-option label="成功" value="success" />
+            <el-option label="部分成功" value="partial_success" />
+            <el-option label="失败" value="failed" />
+            <el-option label="超时" value="timeout" />
+          </el-select>
+          <el-button :loading="jobLoading" @click="loadJobs">
+            <el-icon style="margin-right: 6px;"><Refresh /></el-icon>
+            刷新
+          </el-button>
+        </div>
+        <div class="table-wrapper">
+          <el-table :data="jobs" v-loading="jobLoading" stripe class="modern-table" :header-cell-style="tableHeaderStyle">
+            <el-table-column label="任务" min-width="150">
+              <template #default="{ row }">
+                <div class="name-cell">
+                  <span>{{ row.jobTypeText || row.jobType }}</span>
+                  <el-tag size="small" :type="mqTypeTag(row.mqType)">{{ row.mqTypeText || row.mqType }}</el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="实例" min-width="160" prop="instanceName" show-overflow-tooltip />
+            <el-table-column label="状态" width="110" align="center">
+              <template #default="{ row }"><el-tag :type="jobStatusTag(row.status)">{{ row.statusText || row.status }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="进度" width="160">
+              <template #default="{ row }">
+                <el-progress :percentage="row.progressPercent || 0" :status="row.status === 'failed' ? 'exception' : row.status === 'success' ? 'success' : undefined" />
+              </template>
+            </el-table-column>
+            <el-table-column label="当前阶段" min-width="170" prop="currentStage" show-overflow-tooltip />
+            <el-table-column label="操作人" width="120" prop="operatorName" />
+            <el-table-column label="耗时(ms)" width="110" align="right" prop="durationMs" />
+            <el-table-column label="消息" min-width="220" prop="message" show-overflow-tooltip />
+            <el-table-column label="链路ID" min-width="190" prop="correlationId" show-overflow-tooltip />
+            <el-table-column label="时间" width="170" prop="createdAt" />
+          </el-table>
+          <div class="pagination-container">
+            <el-pagination v-model:current-page="jobQuery.page" v-model:page-size="jobQuery.pageSize" :page-sizes="[10, 20, 50, 100]" :total="jobTotal" layout="total, sizes, prev, pager, next, jumper" @size-change="loadJobs" @current-change="loadJobs" />
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="操作审计" name="audits">
         <div class="workspace-toolbar">
           <el-input v-model="auditQuery.keyword" placeholder="搜索实例、资源、操作人、消息..." clearable class="search-input" @keyup.enter="loadAudits" @clear="loadAudits">
@@ -554,6 +614,7 @@ import {
   listMQConsumerGroups,
   listMQInstances,
   listMQInstancePermissions,
+  listMQJobs,
   listMQMessageAudits,
   listMQOperationAudits,
   listMQPartitions,
@@ -627,6 +688,11 @@ const audits = ref<any[]>([])
 const auditTotal = ref(0)
 const auditLoading = ref(false)
 const auditQuery = reactive<any>({ page: 1, pageSize: 10, keyword: '', instanceId: undefined, status: '', action: '' })
+
+const jobs = ref<any[]>([])
+const jobTotal = ref(0)
+const jobLoading = ref(false)
+const jobQuery = reactive<any>({ page: 1, pageSize: 10, keyword: '', instanceId: undefined, mqType: '', jobType: '', status: '' })
 
 const permissionRows = ref<any[]>([])
 const permissionTotal = ref(0)
@@ -826,7 +892,7 @@ const handleCollectMetrics = async () => {
   try {
     const res = await collectMQMetricSnapshot(selectedInstanceId.value)
     ElMessage.success(res.message || '指标采集完成')
-    await Promise.all([loadOverview(), loadInstances(), loadAudits()])
+    await Promise.all([loadOverview(), loadInstances(), loadAudits(), loadJobs()])
   } finally {
     metricCollecting.value = false
   }
@@ -838,7 +904,7 @@ const handleGenerateInspection = async () => {
   try {
     inspectionReport.value = await generateMQInspectionReport(selectedInstanceId.value)
     ElMessage.success('巡检完成')
-    await loadAudits()
+    await Promise.all([loadAudits(), loadJobs()])
   } finally {
     inspectionLoading.value = false
   }
@@ -854,6 +920,18 @@ const loadAudits = async () => {
     auditTotal.value = res.total || 0
   } finally {
     auditLoading.value = false
+  }
+}
+
+const loadJobs = async () => {
+  if (!uiPermissions.diagnosisView) return
+  jobLoading.value = true
+  try {
+    const res = await listMQJobs({ ...jobQuery })
+    jobs.value = res.list || []
+    jobTotal.value = res.total || 0
+  } finally {
+    jobLoading.value = false
   }
 }
 
@@ -953,7 +1031,7 @@ const handleSync = async (row: any) => {
   try {
     const res = await syncMQMetadata(row.id)
     ElMessage.success(res.message || '同步成功')
-    await Promise.all([loadInstances(), loadResources(), loadDiagnosis(), loadAudits()])
+    await Promise.all([loadInstances(), loadResources(), loadDiagnosis(), loadAudits(), loadJobs()])
   } finally {
     syncingId.value = 0
   }
@@ -1115,7 +1193,7 @@ const executeOperation = async () => {
     const res = await executeMQResourceOperation(operationForm.instanceId, payload)
     ElMessage.success(res.message || '执行成功')
     operationDialogVisible.value = false
-    await Promise.all([loadResources(), loadAudits()])
+    await Promise.all([loadResources(), loadAudits(), loadJobs()])
   } finally {
     operationSubmitting.value = false
   }
@@ -1164,6 +1242,7 @@ const hasObjectPermission = (row: any, permission: number) => !row || row.permis
 const canUse = (row: any, permission: number, uiKey: string) => !!uiPermissions[uiKey] && hasObjectPermission(row, permission)
 const mqTypeTag = (type: string) => type === 'rabbitmq' ? 'success' : type === 'kafka' ? 'warning' : type === 'pulsar' ? 'primary' : 'info'
 const healthTag = (status: string) => status === 'healthy' ? 'success' : status === 'critical' ? 'danger' : status === 'warning' ? 'warning' : 'info'
+const jobStatusTag = (status: string) => status === 'success' ? 'success' : status === 'failed' || status === 'timeout' ? 'danger' : status === 'partial_success' ? 'warning' : status === 'running' ? 'primary' : 'info'
 const environmentText = (value: string) => ({ prod: '生产', staging: '预发', test: '测试', dev: '开发' } as Record<string, string>)[value] || value
 const formatRate = (value: number) => Number(value || 0).toFixed(2)
 const isHighRisk = (riskLevel: string) => ['high', 'critical'].includes(String(riskLevel || '').toLowerCase())
@@ -1186,6 +1265,7 @@ const escapeRegExp = (value: string) => String(value).replace(/[.*+?^${}()|[\]\\
 watch(activeTab, async tab => {
   if (tab === 'resources') await handleResourceInstanceChange()
   if (tab === 'diagnosis') await loadDiagnosis()
+  if (tab === 'jobs') await loadJobs()
   if (tab === 'audits') await loadAudits()
   if (tab === 'permissions') await loadPermissions()
 })
@@ -1193,7 +1273,7 @@ watch(activeTab, async tab => {
 onMounted(async () => {
   await Promise.all([loadSupportedTypes(), loadUIPermissions(), loadCredentials(), loadRoles()])
   await loadInstances()
-  await Promise.all([loadResources(), loadDiagnosis(), loadAudits(), loadPermissions()])
+  await Promise.all([loadResources(), loadDiagnosis(), loadAudits(), loadJobs(), loadPermissions()])
 })
 </script>
 

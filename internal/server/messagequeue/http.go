@@ -70,6 +70,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		&mqbiz.MQConsumerGroup{},
 		&mqbiz.MQPartition{},
 		&mqbiz.MQSyncJob{},
+		&mqbiz.MQJob{},
 		&mqbiz.MQMetricSnapshot{},
 		&mqbiz.MQOperationAudit{},
 		&mqbiz.MQMessageAudit{},
@@ -84,6 +85,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	partitionRepo := mqdata.NewPartitionRepo(db)
 	metadataRepo := mqdata.NewMetadataRepo(db)
 	syncJobRepo := mqdata.NewSyncJobRepo(db)
+	jobRepo := mqdata.NewJobRepo(db)
 	metricSnapshotRepo := mqdata.NewMetricSnapshotRepo(db)
 	operationAuditRepo := mqdata.NewOperationAuditRepo(db)
 	messageAuditRepo := mqdata.NewMessageAuditRepo(db)
@@ -134,7 +136,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 			}, nil
 		},
 		mqbiz.NewDefaultAdapterRegistry(),
-	)
+	).WithJobRepo(jobRepo)
 
 	return &HTTPServer{
 		service:        mqservice.NewService(useCase, permissionRepo, authMiddleware.HasMenuPermission),
@@ -191,6 +193,8 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		group.DELETE("/instance-permissions/:id", s.authMiddleware.RequireMenuPermission(permMQPermissionManage), s.service.DeleteInstancePermission)
 		group.GET("/operation-audits", s.authMiddleware.RequireMenuPermission(permMQAuditView), s.service.ListOperationAudits)
 		group.GET("/message-audits", s.authMiddleware.RequireMenuPermission(permMQAuditView), s.service.ListMessageAudits)
+		group.GET("/jobs", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListJobs)
+		group.GET("/jobs/:id", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetJob)
 
 		instances := group.Group("/instances")
 		{

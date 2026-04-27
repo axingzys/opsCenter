@@ -365,6 +365,71 @@ func (r *syncJobRepo) Update(ctx context.Context, item *mqbiz.MQSyncJob) error {
 	return r.db.WithContext(ctx).Save(item).Error
 }
 
+type jobRepo struct {
+	db *gorm.DB
+}
+
+func NewJobRepo(db *gorm.DB) mqbiz.JobRepo {
+	return &jobRepo{db: db}
+}
+
+func (r *jobRepo) Create(ctx context.Context, item *mqbiz.MQJob) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *jobRepo) Update(ctx context.Context, item *mqbiz.MQJob) error {
+	return r.db.WithContext(ctx).Save(item).Error
+}
+
+func (r *jobRepo) GetByID(ctx context.Context, id uint) (*mqbiz.MQJob, error) {
+	var item mqbiz.MQJob
+	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *jobRepo) List(ctx context.Context, req *mqbiz.JobListRequest) ([]*mqbiz.MQJob, int64, error) {
+	var (
+		items []*mqbiz.MQJob
+		total int64
+	)
+	query := r.db.WithContext(ctx).Model(&mqbiz.MQJob{})
+	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedIDs)
+		if req.InstanceID > 0 {
+			query = query.Where("instance_id = ?", req.InstanceID)
+		}
+		if req.MQType != "" {
+			query = query.Where("mq_type = ?", req.MQType)
+		}
+		if req.JobType != "" {
+			query = query.Where("job_type = ?", req.JobType)
+		}
+		if req.Status != "" {
+			query = query.Where("status = ?", req.Status)
+		}
+		if kw := strings.TrimSpace(req.Keyword); kw != "" {
+			like := "%" + kw + "%"
+			query = query.Where("instance_name LIKE ? OR operator_name LIKE ? OR current_stage LIKE ? OR message LIKE ? OR correlation_id LIKE ?", like, like, like, like, like)
+		}
+		if start, ok := parseTime(req.StartTime); ok {
+			query = query.Where("created_at >= ?", start)
+		}
+		if end, ok := parseTime(req.EndTime); ok {
+			query = query.Where("created_at <= ?", end)
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := pageParams(req)
+	if err := query.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 type metricSnapshotRepo struct {
 	db *gorm.DB
 }
@@ -447,6 +512,8 @@ func pageParams(req any) (int, int) {
 	case *mqbiz.AuditListRequest:
 		page, pageSize = item.Page, item.PageSize
 	case *mqbiz.MetricSnapshotListRequest:
+		page, pageSize = item.Page, item.PageSize
+	case *mqbiz.JobListRequest:
 		page, pageSize = item.Page, item.PageSize
 	case *mqbiz.InstancePermissionListRequest:
 		page, pageSize = item.Page, item.PageSize

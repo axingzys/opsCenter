@@ -201,6 +201,39 @@ CREATE TABLE IF NOT EXISTS `mq_sync_jobs` (
   KEY `idx_mq_sync_jobs_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MQ同步任务';
 
+CREATE TABLE IF NOT EXISTS `mq_jobs` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `created_at` datetime(3) DEFAULT NULL,
+  `updated_at` datetime(3) DEFAULT NULL,
+  `deleted_at` datetime(3) DEFAULT NULL,
+  `instance_id` bigint unsigned NOT NULL COMMENT '实例ID',
+  `instance_name` varchar(100) DEFAULT NULL COMMENT '实例名称',
+  `mq_type` varchar(30) DEFAULT NULL COMMENT 'MQ类型',
+  `job_type` varchar(40) NOT NULL COMMENT '任务类型',
+  `status` varchar(30) DEFAULT 'pending' COMMENT '状态',
+  `progress_current` bigint DEFAULT 0 COMMENT '当前进度',
+  `progress_total` bigint DEFAULT 0 COMMENT '总进度',
+  `current_stage` varchar(120) DEFAULT NULL COMMENT '当前阶段',
+  `trigger_type` varchar(30) DEFAULT 'manual' COMMENT '触发类型',
+  `operator_id` bigint unsigned DEFAULT 0 COMMENT '操作人ID',
+  `operator_name` varchar(100) DEFAULT NULL COMMENT '操作人',
+  `started_at` datetime(3) DEFAULT NULL COMMENT '开始时间',
+  `finished_at` datetime(3) DEFAULT NULL COMMENT '完成时间',
+  `duration_ms` bigint DEFAULT 0 COMMENT '耗时毫秒',
+  `message` varchar(500) DEFAULT NULL COMMENT '消息',
+  `error_json` text COMMENT '错误JSON',
+  `result_json` text COMMENT '结果JSON',
+  `correlation_id` varchar(80) DEFAULT NULL COMMENT '链路ID',
+  PRIMARY KEY (`id`),
+  KEY `idx_mq_jobs_deleted_at` (`deleted_at`),
+  KEY `idx_mq_jobs_instance_id` (`instance_id`),
+  KEY `idx_mq_jobs_mq_type` (`mq_type`),
+  KEY `idx_mq_jobs_job_type` (`job_type`),
+  KEY `idx_mq_jobs_status` (`status`),
+  KEY `idx_mq_jobs_operator_id` (`operator_id`),
+  KEY `idx_mq_jobs_correlation_id` (`correlation_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MQ统一任务中心';
+
 CREATE TABLE IF NOT EXISTS `mq_metric_snapshots` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `created_at` datetime(3) DEFAULT NULL,

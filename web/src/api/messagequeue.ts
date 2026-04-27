@@ -128,6 +128,21 @@ export const listMQMetricSnapshots = (id: number, params?: {
   endTime?: string
 }) => request.get(`/api/v1/message-queues/instances/${id}/metric-snapshots`, { params })
 
+export const listMQJobs = (params: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  instanceId?: number
+  mqType?: string
+  jobType?: string
+  status?: string
+  startTime?: string
+  endTime?: string
+}) => request.get('/api/v1/message-queues/jobs', { params })
+
+export const getMQJob = (id: number) =>
+  request.get(`/api/v1/message-queues/jobs/${id}`)
+
 export const generateMQInspectionReport = (id: number) =>
   request.post(`/api/v1/message-queues/instances/${id}/inspection-reports`)
 

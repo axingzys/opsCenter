@@ -105,6 +105,40 @@ func (r *governanceMetricRepo) Latest(ctx context.Context, instanceID uint) (*MQ
 	return r.items[len(r.items)-1], nil
 }
 
+type governanceJobRepo struct {
+	items []*MQJob
+}
+
+func (r *governanceJobRepo) Create(ctx context.Context, item *MQJob) error {
+	item.ID = uint(len(r.items) + 1)
+	r.items = append(r.items, item)
+	return nil
+}
+
+func (r *governanceJobRepo) Update(ctx context.Context, item *MQJob) error {
+	for i, existing := range r.items {
+		if existing.ID == item.ID {
+			r.items[i] = item
+			return nil
+		}
+	}
+	r.items = append(r.items, item)
+	return nil
+}
+
+func (r *governanceJobRepo) GetByID(ctx context.Context, id uint) (*MQJob, error) {
+	for _, item := range r.items {
+		if item.ID == id {
+			return item, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (r *governanceJobRepo) List(ctx context.Context, req *JobListRequest) ([]*MQJob, int64, error) {
+	return r.items, int64(len(r.items)), nil
+}
+
 func TestCollectMetricSnapshotUpdatesHealthAndAnomalies(t *testing.T) {
 	now := time.Now()
 	instanceRepo := &governanceInstanceRepo{item: &MQInstance{
@@ -116,6 +150,7 @@ func TestCollectMetricSnapshotUpdatesHealthAndAnomalies(t *testing.T) {
 		LastSyncAt:   &now,
 	}}
 	metricRepo := &governanceMetricRepo{}
+	jobRepo := &governanceJobRepo{}
 	uc := NewUseCase(
 		instanceRepo,
 		nil,
@@ -141,7 +176,7 @@ func TestCollectMetricSnapshotUpdatesHealthAndAnomalies(t *testing.T) {
 		nil,
 		nil,
 		nil,
-	)
+	).WithJobRepo(jobRepo)
 
 	result, err := uc.CollectMetricSnapshot(context.Background(), 1, Operator{ID: 1, Username: "admin"})
 	if err != nil {
@@ -159,6 +194,13 @@ func TestCollectMetricSnapshotUpdatesHealthAndAnomalies(t *testing.T) {
 	if instanceRepo.item.LastMetricAt == nil {
 		t.Fatalf("expected last metric time updated")
 	}
+	if len(jobRepo.items) != 1 {
+		t.Fatalf("expected one job, got %d", len(jobRepo.items))
+	}
+	job := jobRepo.items[0]
+	if job.JobType != JobTypeMetricCollect || job.Status != JobStatusSuccess || job.ProgressCurrent != job.ProgressTotal {
+		t.Fatalf("unexpected job: %#v", job)
+	}
 }
 
 func TestGenerateInspectionReportFindsGovernanceIssues(t *testing.T) {
@@ -169,6 +211,7 @@ func TestGenerateInspectionReportFindsGovernanceIssues(t *testing.T) {
 		Status:       InstanceStatusEnabled,
 		HealthStatus: HealthStatusHealthy,
 	}}
+	jobRepo := &governanceJobRepo{}
 	uc := NewUseCase(
 		instanceRepo,
 		nil,
@@ -186,7 +229,7 @@ func TestGenerateInspectionReportFindsGovernanceIssues(t *testing.T) {
 		nil,
 		nil,
 		nil,
-	)
+	).WithJobRepo(jobRepo)
 
 	report, err := uc.GenerateInspectionReport(context.Background(), 1, Operator{ID: 1, Username: "admin"})
 	if err != nil {
@@ -203,5 +246,12 @@ func TestGenerateInspectionReportFindsGovernanceIssues(t *testing.T) {
 	}
 	if !foundOwner {
 		t.Fatalf("expected owner finding, got %#v", report.Findings)
+	}
+	if len(jobRepo.items) != 1 {
+		t.Fatalf("expected one job, got %d", len(jobRepo.items))
+	}
+	job := jobRepo.items[0]
+	if job.JobType != JobTypeInspection || job.Status != JobStatusSuccess || job.ProgressCurrent != job.ProgressTotal {
+		t.Fatalf("unexpected job: %#v", job)
 	}
 }

@@ -59,6 +59,13 @@ type SyncJobRepo interface {
 	Update(ctx context.Context, item *MQSyncJob) error
 }
 
+type JobRepo interface {
+	Create(ctx context.Context, item *MQJob) error
+	Update(ctx context.Context, item *MQJob) error
+	GetByID(ctx context.Context, id uint) (*MQJob, error)
+	List(ctx context.Context, req *JobListRequest) ([]*MQJob, int64, error)
+}
+
 type MetricSnapshotRepo interface {
 	Create(ctx context.Context, item *MQMetricSnapshot) error
 	List(ctx context.Context, instanceID uint, req *MetricSnapshotListRequest) ([]*MQMetricSnapshot, int64, error)

@@ -170,6 +170,14 @@ func applyInstancePermissionScope(req *mqbiz.InstanceListRequest, scope *permiss
 	req.AllowedIDs = scope.allowedIDs
 }
 
+func applyJobPermissionScope(req *mqbiz.JobListRequest, scope *permissionScope) {
+	if req == nil || scope == nil || !scope.enforced || scope.admin {
+		return
+	}
+	req.RestrictToAllowed = true
+	req.AllowedIDs = scope.allowedIDs
+}
+
 func (s *Service) decorateInstancePermissions(c *gin.Context, list []*mqbiz.InstanceVO, scope *permissionScope) bool {
 	if len(list) == 0 {
 		return true
@@ -430,6 +438,44 @@ func (s *Service) SyncMetadata(c *gin.Context) {
 		return
 	}
 	response.Success(c, data)
+}
+
+func (s *Service) ListJobs(c *gin.Context) {
+	var req mqbiz.JobListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.permissionScope(c, mqbiz.PermissionDiagnose)
+	if !ok {
+		return
+	}
+	if req.InstanceID > 0 && !s.ensureInstancePermission(c, req.InstanceID, mqbiz.PermissionDiagnose) {
+		return
+	}
+	applyJobPermissionScope(&req, scope)
+	list, total, err := s.useCase.ListJobs(c.Request.Context(), &req)
+	if err != nil {
+		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) GetJob(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "任务ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.GetJob(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, "获取失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, item.InstanceID, mqbiz.PermissionDiagnose) {
+		return
+	}
+	response.Success(c, item)
 }
 
 func (s *Service) ListBrokers(c *gin.Context) {

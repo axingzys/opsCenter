@@ -26,6 +26,20 @@ const (
 	SyncStatusSuccess = "success"
 	SyncStatusFailed  = "failed"
 
+	JobTypeSync             = "sync"
+	JobTypeMetricCollect    = "metric_collect"
+	JobTypeInspection       = "inspection"
+	JobTypeOperationRefresh = "operation_refresh"
+	JobTypeExport           = "export"
+
+	JobStatusPending = "pending"
+	JobStatusRunning = "running"
+	JobStatusSuccess = "success"
+	JobStatusFailed  = "failed"
+	JobStatusPartial = "partial_success"
+	JobStatusCancel  = "cancelled"
+	JobStatusTimeout = "timeout"
+
 	TriggerManual   = "manual"
 	TriggerSchedule = "schedule"
 
@@ -262,6 +276,32 @@ func (MQSyncJob) TableName() string {
 	return "mq_sync_jobs"
 }
 
+type MQJob struct {
+	gorm.Model
+	InstanceID      uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	InstanceName    string     `gorm:"column:instance_name;type:varchar(100);comment:实例名称" json:"instanceName"`
+	MQType          string     `gorm:"column:mq_type;type:varchar(30);index;comment:MQ类型" json:"mqType"`
+	JobType         string     `gorm:"column:job_type;type:varchar(40);not null;index;comment:任务类型" json:"jobType"`
+	Status          string     `gorm:"type:varchar(30);default:'pending';index;comment:状态" json:"status"`
+	ProgressCurrent int64      `gorm:"column:progress_current;type:bigint;default:0;comment:当前进度" json:"progressCurrent"`
+	ProgressTotal   int64      `gorm:"column:progress_total;type:bigint;default:0;comment:总进度" json:"progressTotal"`
+	CurrentStage    string     `gorm:"column:current_stage;type:varchar(120);comment:当前阶段" json:"currentStage"`
+	TriggerType     string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发类型" json:"triggerType"`
+	OperatorID      uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
+	OperatorName    string     `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
+	StartedAt       *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	FinishedAt      *time.Time `gorm:"column:finished_at;comment:完成时间" json:"finishedAt,omitempty"`
+	DurationMs      int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	Message         string     `gorm:"type:varchar(500);comment:消息" json:"message"`
+	ErrorJSON       string     `gorm:"column:error_json;type:text;comment:错误JSON" json:"errorJson"`
+	ResultJSON      string     `gorm:"column:result_json;type:text;comment:结果JSON" json:"resultJson"`
+	CorrelationID   string     `gorm:"column:correlation_id;type:varchar(80);index;comment:链路ID" json:"correlationId"`
+}
+
+func (MQJob) TableName() string {
+	return "mq_jobs"
+}
+
 type MQMetricSnapshot struct {
 	gorm.Model
 	InstanceID        uint      `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
@@ -430,6 +470,20 @@ type MetricSnapshotListRequest struct {
 	ResourceName string `form:"resourceName"`
 	StartTime    string `form:"startTime"`
 	EndTime      string `form:"endTime"`
+}
+
+type JobListRequest struct {
+	Page              int    `form:"page"`
+	PageSize          int    `form:"pageSize"`
+	Keyword           string `form:"keyword"`
+	InstanceID        uint   `form:"instanceId"`
+	MQType            string `form:"mqType"`
+	JobType           string `form:"jobType"`
+	Status            string `form:"status"`
+	StartTime         string `form:"startTime"`
+	EndTime           string `form:"endTime"`
+	RestrictToAllowed bool   `form:"-" json:"-"`
+	AllowedIDs        []uint `form:"-" json:"-"`
 }
 
 type InstancePermissionListRequest struct {
@@ -607,6 +661,34 @@ type MetricCollectResultVO struct {
 	Snapshot      *MetricSnapshotVO `json:"snapshot"`
 	Message       string            `json:"message"`
 	CollectedAt   string            `json:"collectedAt"`
+}
+
+type JobVO struct {
+	ID              uint   `json:"id"`
+	InstanceID      uint   `json:"instanceId"`
+	InstanceName    string `json:"instanceName"`
+	MQType          string `json:"mqType"`
+	MQTypeText      string `json:"mqTypeText"`
+	JobType         string `json:"jobType"`
+	JobTypeText     string `json:"jobTypeText"`
+	Status          string `json:"status"`
+	StatusText      string `json:"statusText"`
+	ProgressCurrent int64  `json:"progressCurrent"`
+	ProgressTotal   int64  `json:"progressTotal"`
+	ProgressPercent int    `json:"progressPercent"`
+	CurrentStage    string `json:"currentStage"`
+	TriggerType     string `json:"triggerType"`
+	OperatorID      uint   `json:"operatorId"`
+	OperatorName    string `json:"operatorName"`
+	StartedAt       string `json:"startedAt,omitempty"`
+	FinishedAt      string `json:"finishedAt,omitempty"`
+	DurationMs      int64  `json:"durationMs"`
+	Message         string `json:"message"`
+	ErrorJSON       string `json:"errorJson,omitempty"`
+	ResultJSON      string `json:"resultJson,omitempty"`
+	CorrelationID   string `json:"correlationId"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
 }
 
 type InspectionMetricVO struct {
