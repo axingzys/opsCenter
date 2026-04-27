@@ -210,7 +210,7 @@
 7. 容量预测、成本分析和自动整改建议。
 
 ### 六期当前落地状态
-截至 2026-04-27，六期已完成第一轮高级消息治理 MVP：
+截至 2026-04-27，六期已完成高级消息治理 MVP：
 
 1. 新增消息采样默认 DLP 脱敏：
    - JSON payload 会按敏感字段名递归脱敏，默认覆盖 `password`、`passwd`、`secret`、`token`、`access_token`、`refresh_token`、`authorization`、`phone`、`email`、`id_card`、`bank_card`、`private_key`、`api_key` 等字段。
@@ -230,7 +230,24 @@
 5. 新增审计防篡改基础：
    - `mq_operation_audits`、`mq_message_audits` 新增 `previous_audit_hash`、`audit_hash`。
    - 新审计记录写入时计算 hash，并串联上一条审计 hash，作为后续审计导出签名和链路校验的基础。
-   - 基于长期快照做趋势预测，输出扩分区、扩 broker、调整 retention、补告警等建议；生产自动修复默认不开放。
+6. 新增消息 Schema 检查入口：
+   - `POST /api/v1/message-queues/instances/:id/messages/schema-inspect`：对用户提供的 payload 做 JSON 格式化、字段推断、JSON Schema 基础校验、严格模式检查和字段级 DLP 脱敏预览。
+   - Schema 检查会写入消息审计，只保存 payload hash、schema hash、敏感命中数和检查结果，不保存完整 payload。
+   - 前端 `高级治理` Tab 提供 payload、Schema JSON 和严格模式输入，展示校验结果、敏感命中和审计摘要。
+7. 新增跨实例配置克隆计划：
+   - `POST /api/v1/message-queues/instances/:id/config-clone-plan`：基于已同步资源生成源资源快照、目标资源快照、建议配置、diff、风险提示和执行建议。
+   - 当前只生成计划，不执行目标集群变更，不迁移消息；生产环境或跨类型克隆自动提升风险并建议审批。
+   - 支持 Kafka topic、RabbitMQ queue/exchange、Pulsar namespace 的动作建议，后续可复用二期/三期资源操作流程做受控执行。
+8. 新增容量预测和自动整改建议：
+   - `GET /api/v1/message-queues/instances/:id/capacity-forecast?horizonHours=24`：基于 `mq_metric_snapshots` 计算 backlog/lag 增长率、预测窗口内 backlog/lag 和风险等级。
+   - 样本不足时降级使用当前元数据，并提示先连续采集指标。
+   - 返回扩消费者、排查分区热点、补告警阈值、生成巡检和维护窗口等整改建议；生产自动修复默认不开放。
+9. 新增审计链校验：
+   - `GET /api/v1/message-queues/audit-chain/verify?auditType=operation|message&limit=200`：校验最近审计记录的内容 hash 和 previous hash 连续性。
+   - 支持按实例权限过滤；过滤场景下只校验内容 hash，避免跨实例全局链被权限过滤误判。
+   - 前端 `高级治理` Tab 展示校验条数、断点数量和异常审计 ID。
+10. 新增测试：
+   - 覆盖 Schema 检查脱敏与审计、容量预测建议、配置克隆计划不执行真实变更、审计链篡改检测。
 
 ## 生产化优化补充清单
 以下内容为结合当前一二三期落地状态、现有代码结构和后续四期目标整理出的优化项。除上文“落地状态”明确说明的能力外，本节均表示后续建议，不代表当前已全部实现。

@@ -2463,12 +2463,16 @@ func actionText(action string) string {
 		return "元数据同步"
 	case AuditActionMessageSample:
 		return "消息采样"
+	case AuditActionMessageSchema:
+		return "消息 Schema 检查"
 	case AuditActionMessageReplay:
 		return "消息重放申请"
 	case AuditActionMetricSnapshot:
 		return "指标快照采集"
 	case AuditActionInspectionRun:
 		return "巡检报告生成"
+	case AuditActionConfigClone:
+		return "配置克隆计划"
 	case AuditActionPermissionSet:
 		return "实例权限保存"
 	case AuditActionPermissionDel:

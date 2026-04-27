@@ -236,6 +236,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		group.GET("/governance-report", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetGovernanceReport)
 		group.GET("/dlq-analysis", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetDLQAnalysis)
 		group.POST("/dlq-records", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.UpsertDLQRecord)
+		group.GET("/audit-chain/verify", s.authMiddleware.RequireMenuPermission(permMQAuditView), s.service.VerifyAuditChain)
 
 		instances := group.Group("/instances")
 		{
@@ -251,6 +252,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.GET("/:id/overview", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetOverview)
 			instances.GET("/:id/capabilities", s.authMiddleware.RequireMenuPermission(permMQInstanceView), s.service.GetCapabilities)
 			instances.GET("/:id/topology", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetTopology)
+			instances.GET("/:id/capacity-forecast", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GetCapacityForecast)
 			instances.POST("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.CollectMetricSnapshot)
 			instances.GET("/:id/metric-snapshots", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListMetricSnapshots)
 			instances.POST("/:id/inspection-reports", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.GenerateInspectionReport)
@@ -260,7 +262,9 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.GET("/:id/consumer-groups", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListConsumerGroups)
 			instances.GET("/:id/partitions", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListPartitions)
 			instances.POST("/:id/messages/sample", s.authMiddleware.RequireMenuPermission(permMQMessageRead), s.service.SampleMessages)
+			instances.POST("/:id/messages/schema-inspect", s.authMiddleware.RequireMenuPermission(permMQMessageRead), s.service.InspectMessageSchema)
 			instances.POST("/:id/messages/replay-requests", s.authMiddleware.RequireMenuPermission(permMQMessageWrite), s.service.PrepareMessageReplayApplication)
+			instances.POST("/:id/config-clone-plan", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.BuildConfigClonePlan)
 			instances.GET("/:id/operations/actions", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ListOperationActions)
 			instances.POST("/:id/operations/validate", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ValidateResourceOperation)
 			instances.POST("/:id/operations", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ExecuteResourceOperation)

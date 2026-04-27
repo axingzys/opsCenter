@@ -246,6 +246,14 @@ func applyDLQPermissionScope(req *mqbiz.DLQAnalysisRequest, scope *permissionSco
 	req.AllowedIDs = scope.allowedIDs
 }
 
+func applyAuditChainPermissionScope(req *mqbiz.AuditChainVerifyRequest, scope *permissionScope) {
+	if req == nil || scope == nil || !scope.enforced || scope.admin {
+		return
+	}
+	req.RestrictToAllowed = true
+	req.AllowedIDs = scope.allowedIDs
+}
+
 func (s *Service) decorateInstancePermissions(c *gin.Context, list []*mqbiz.InstanceVO, scope *permissionScope) bool {
 	if len(list) == 0 {
 		return true
@@ -605,6 +613,28 @@ func (s *Service) UpsertDLQRecord(c *gin.Context) {
 	response.Success(c, gin.H{"message": "DLQ处理记录已保存"})
 }
 
+func (s *Service) VerifyAuditChain(c *gin.Context) {
+	var req mqbiz.AuditChainVerifyRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.permissionScope(c, mqbiz.PermissionAudit)
+	if !ok {
+		return
+	}
+	if req.InstanceID > 0 && !s.ensureInstancePermission(c, req.InstanceID, mqbiz.PermissionAudit) {
+		return
+	}
+	applyAuditChainPermissionScope(&req, scope)
+	data, err := s.useCase.VerifyAuditChain(c.Request.Context(), &req)
+	if err != nil {
+		writeError(c, "校验失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 func (s *Service) GetJob(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "任务ID")
 	if !ok {
@@ -714,6 +744,24 @@ func (s *Service) GetOverview(c *gin.Context) {
 	response.Success(c, data)
 }
 
+func (s *Service) GetCapacityForecast(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionDiagnose) {
+		return
+	}
+	var req mqbiz.CapacityForecastRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.GetCapacityForecast(c.Request.Context(), id, &req)
+	if err != nil {
+		writeError(c, "预测失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 func (s *Service) GetCapabilities(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionView) {
@@ -735,6 +783,27 @@ func (s *Service) GetTopology(c *gin.Context) {
 	data, err := s.useCase.GetTopology(c.Request.Context(), id)
 	if err != nil {
 		writeError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) BuildConfigClonePlan(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionResourceManage) {
+		return
+	}
+	var req mqbiz.ConfigClonePlanRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.TargetInstanceID, mqbiz.PermissionResourceManage) {
+		return
+	}
+	data, err := s.useCase.BuildConfigClonePlan(c.Request.Context(), id, &req, currentOperator(c))
+	if err != nil {
+		writeError(c, "生成失败: ", err)
 		return
 	}
 	response.Success(c, data)
@@ -820,6 +889,24 @@ func (s *Service) SampleMessages(c *gin.Context) {
 	data, err := s.useCase.SampleMessages(c.Request.Context(), id, &req, currentOperator(c))
 	if err != nil {
 		writeError(c, "消息采样失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) InspectMessageSchema(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionMessageRead) {
+		return
+	}
+	var req mqbiz.MessageSchemaInspectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.InspectMessageSchema(c.Request.Context(), id, &req, currentOperator(c))
+	if err != nil {
+		writeError(c, "Schema检查失败: ", err)
 		return
 	}
 	response.Success(c, data)

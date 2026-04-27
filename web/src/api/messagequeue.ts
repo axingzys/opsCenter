@@ -184,6 +184,10 @@ export const upsertMQDLQRecord = (data: {
 export const getMQTopology = (id: number) =>
   request.get(`/api/v1/message-queues/instances/${id}/topology`)
 
+export const getMQCapacityForecast = (id: number, params?: {
+  horizonHours?: number
+}) => request.get(`/api/v1/message-queues/instances/${id}/capacity-forecast`, { params })
+
 export const generateMQInspectionReport = (id: number) =>
   request.post(`/api/v1/message-queues/instances/${id}/inspection-reports`)
 
@@ -220,6 +224,15 @@ export const listMQPartitions = (id: number, params?: {
 export const sampleMQMessages = (id: number, data: MQMessageSamplePayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/messages/sample`, data)
 
+export const inspectMQMessageSchema = (id: number, data: {
+  resourceType?: string
+  namespace?: string
+  resourceName?: string
+  payload: string
+  schemaJson?: string
+  strict?: boolean
+}) => request.post(`/api/v1/message-queues/instances/${id}/messages/schema-inspect`, data)
+
 export const prepareMQMessageReplay = (id: number, data: {
   resourceType?: string
   namespace?: string
@@ -230,6 +243,16 @@ export const prepareMQMessageReplay = (id: number, data: {
   rateLimitPerSecond?: number
   reason: string
 }) => request.post(`/api/v1/message-queues/instances/${id}/messages/replay-requests`, data)
+
+export const buildMQConfigClonePlan = (id: number, data: {
+  resourceType: string
+  namespace?: string
+  resourceName: string
+  targetInstanceId: number
+  targetNamespace?: string
+  targetResourceName?: string
+  includeGovernanceFields?: boolean
+}) => request.post(`/api/v1/message-queues/instances/${id}/config-clone-plan`, data)
 
 export const validateMQResourceOperation = (id: number, data: MQResourceOperationPayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/operations/validate`, data)
@@ -264,6 +287,12 @@ export const listMQMessageAudits = (params: {
   startTime?: string
   endTime?: string
 }) => request.get('/api/v1/message-queues/message-audits', { params })
+
+export const verifyMQAuditChain = (params?: {
+  auditType?: string
+  instanceId?: number
+  limit?: number
+}) => request.get('/api/v1/message-queues/audit-chain/verify', { params })
 
 export const listMQInstancePermissions = (params: {
   page?: number

@@ -158,6 +158,147 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="高级治理" name="advanced">
+        <div class="workspace-toolbar">
+          <el-select v-model="advancedInstanceId" placeholder="选择实例" filterable class="instance-select" @change="loadAdvancedGovernance">
+            <el-option v-for="item in diagnosableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+          </el-select>
+          <el-input-number v-model="capacityQuery.horizonHours" :min="1" :max="720" controls-position="right" />
+          <el-button :loading="capacityLoading" :disabled="!advancedInstanceId || !uiPermissions.diagnosisView" @click="loadCapacityForecast">
+            <el-icon style="margin-right: 6px;"><DataBoard /></el-icon>
+            容量预测
+          </el-button>
+          <el-button :loading="auditChainLoading" :disabled="!uiPermissions.auditView" @click="loadAuditChainVerify">
+            <el-icon style="margin-right: 6px;"><View /></el-icon>
+            审计链校验
+          </el-button>
+        </div>
+
+        <div v-if="capacityForecast" class="metric-grid">
+          <div class="metric-item"><span class="metric-label">预测窗口</span><strong>{{ capacityForecast.horizonHours }}h</strong></div>
+          <div class="metric-item"><span class="metric-label">当前 Backlog</span><strong>{{ capacityForecast.currentBacklog }}</strong></div>
+          <div class="metric-item"><span class="metric-label">预测 Backlog</span><strong>{{ capacityForecast.projectedBacklog }}</strong></div>
+          <div class="metric-item"><span class="metric-label">风险</span><strong>{{ riskText(capacityForecast.riskLevel) }}</strong></div>
+        </div>
+
+        <div class="split-layout advanced-layout">
+          <div class="panel">
+            <div class="panel-title">容量预测与整改建议</div>
+            <div v-if="capacityForecast" class="section-summary">{{ capacityForecast.trendMessage }}</div>
+            <el-table :data="capacityForecast?.recommendations || []" v-loading="capacityLoading" size="small" class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="级别" width="90">
+                <template #default="{ row }"><el-tag :type="severityTag(row.severity)">{{ sectionStatusText(row.severity) }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="分类" width="100" prop="category" />
+              <el-table-column label="建议" min-width="260" prop="suggestion" show-overflow-tooltip />
+              <el-table-column label="指标" min-width="120" prop="metric" show-overflow-tooltip />
+            </el-table>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">消息 Schema 检查</div>
+            <el-form :model="schemaForm" label-width="90px" class="compact-form">
+              <el-form-item label="资源">
+                <el-input v-model="schemaForm.resourceName" placeholder="可选，记录到审计" />
+              </el-form-item>
+              <el-form-item label="Payload">
+                <el-input v-model="schemaForm.payload" type="textarea" :rows="5" class="mono-textarea" placeholder='{"orderId":"A001","phone":"13800138000"}' />
+              </el-form-item>
+              <el-form-item label="Schema">
+                <el-input v-model="schemaForm.schemaJson" type="textarea" :rows="4" class="mono-textarea" placeholder='{"type":"object","required":["orderId"],"properties":{"orderId":{"type":"string"}}}' />
+              </el-form-item>
+              <el-form-item>
+                <el-checkbox v-model="schemaForm.strict">严格模式</el-checkbox>
+                <el-button type="primary" :loading="schemaInspectLoading" :disabled="!advancedInstanceId || !uiPermissions.messageRead || !schemaForm.payload" @click="handleSchemaInspect">检查</el-button>
+              </el-form-item>
+            </el-form>
+            <div v-if="schemaInspectResult" class="schema-summary">
+              <el-tag :type="schemaInspectResult.valid ? 'success' : 'danger'">{{ schemaInspectResult.valid ? '通过' : '不通过' }}</el-tag>
+              <el-tag type="info">{{ schemaInspectResult.format }}</el-tag>
+              <el-tag v-if="schemaInspectResult.sensitiveHitCount" type="warning">敏感命中 {{ schemaInspectResult.sensitiveHitCount }}</el-tag>
+              <span class="mono">hash {{ String(schemaInspectResult.payloadHash || '').slice(0, 12) }}</span>
+            </div>
+            <el-table v-if="schemaInspectResult?.issues?.length" :data="schemaInspectResult.issues" size="small" class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="级别" width="90" prop="severity" />
+              <el-table-column label="路径" width="140" prop="path" show-overflow-tooltip />
+              <el-table-column label="说明" min-width="220" prop="message" show-overflow-tooltip />
+            </el-table>
+          </div>
+        </div>
+
+        <div class="split-layout advanced-layout">
+          <div class="panel">
+            <div class="panel-title">跨实例配置克隆计划</div>
+            <el-form :model="clonePlanForm" label-width="120px" class="compact-form">
+              <el-form-item label="资源类型">
+                <el-select v-model="clonePlanForm.resourceType">
+                  <el-option label="Topic" value="topic" />
+                  <el-option label="Queue" value="queue" />
+                  <el-option label="Exchange" value="exchange" />
+                  <el-option label="Namespace" value="namespace" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="源资源">
+                <el-input v-model="clonePlanForm.resourceName" placeholder="源 topic/queue/exchange" />
+              </el-form-item>
+              <el-form-item label="源命名空间">
+                <el-input v-model="clonePlanForm.namespace" placeholder="可选" />
+              </el-form-item>
+              <el-form-item label="目标实例">
+                <el-select v-model="clonePlanForm.targetInstanceId" filterable placeholder="选择目标实例">
+                  <el-option v-for="item in resourceManageInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="目标资源">
+                <el-input v-model="clonePlanForm.targetResourceName" placeholder="默认同源资源名" />
+              </el-form-item>
+              <el-form-item>
+                <el-checkbox v-model="clonePlanForm.includeGovernanceFields">包含治理字段</el-checkbox>
+                <el-button type="primary" :loading="clonePlanLoading" :disabled="!advancedInstanceId || !clonePlanForm.resourceName || !clonePlanForm.targetInstanceId" @click="handleBuildClonePlan">生成计划</el-button>
+              </el-form-item>
+            </el-form>
+            <div v-if="clonePlan" class="operation-validation">
+              <div class="validation-header">
+                <el-tag :type="riskTag(clonePlan.riskLevel)">{{ riskText(clonePlan.riskLevel) }}</el-tag>
+                <el-tag type="info">只生成计划</el-tag>
+                <span>{{ clonePlan.message }}</span>
+              </div>
+              <el-alert v-for="item in clonePlan.warnings || []" :key="item" :title="item" type="warning" :closable="false" show-icon />
+              <el-table v-if="clonePlan.diff?.length" :data="clonePlan.diff" size="small" class="operation-diff-table">
+                <el-table-column prop="key" label="配置项" min-width="140" />
+                <el-table-column label="目标当前" min-width="160">
+                  <template #default="{ row }">{{ formatDiffValue(row.before) }}</template>
+                </el-table-column>
+                <el-table-column label="建议值" min-width="160">
+                  <template #default="{ row }">{{ formatDiffValue(row.after) }}</template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">审计防篡改校验</div>
+            <div class="workspace-toolbar compact-toolbar">
+              <el-select v-model="auditChainQuery.auditType" class="search-select" @change="loadAuditChainVerify">
+                <el-option label="操作审计" value="operation" />
+                <el-option label="消息审计" value="message" />
+              </el-select>
+              <el-input-number v-model="auditChainQuery.limit" :min="10" :max="1000" controls-position="right" />
+            </div>
+            <div v-if="auditChainVerify" class="metric-grid audit-chain-grid">
+              <div class="metric-item"><span class="metric-label">校验条数</span><strong>{{ auditChainVerify.checked }}</strong></div>
+              <div class="metric-item"><span class="metric-label">断点</span><strong>{{ auditChainVerify.brokenCount }}</strong></div>
+            </div>
+            <el-table :data="auditChainVerify?.findings || []" v-loading="auditChainLoading" size="small" class="modern-table" :header-cell-style="tableHeaderStyle">
+              <el-table-column label="审计ID" width="90" prop="auditId" />
+              <el-table-column label="级别" width="90" prop="severity" />
+              <el-table-column label="问题" min-width="240" prop="message" show-overflow-tooltip />
+            </el-table>
+            <el-empty v-if="auditChainVerify && auditChainVerify.findings?.length === 0" description="审计链校验通过" :image-size="60" />
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="实例管理" name="instances">
         <div class="search-bar">
           <div class="search-inputs">
@@ -849,6 +990,7 @@ import { getCredentials } from '@/api/host'
 import { getAllRoles } from '@/api/role'
 import {
   MQ_PERMISSION,
+  buildMQConfigClonePlan,
   collectMQMetricSnapshot,
   createMQInstance,
   deleteMQInstance,
@@ -858,6 +1000,7 @@ import {
   executeMQResourceOperation,
   generateMQInspectionReport,
   getMQDLQAnalysis,
+  getMQCapacityForecast,
   getMQGovernanceReport,
   getMQOverview,
   getMQProductionDashboard,
@@ -873,6 +1016,7 @@ import {
   listMQOperationActions,
   listMQPartitions,
   listMQResources,
+  inspectMQMessageSchema,
   prepareMQMessageReplay,
   sampleMQMessages,
   syncMQMetadata,
@@ -881,6 +1025,7 @@ import {
   upsertMQDLQRecord,
   upsertMQInstancePermission,
   validateMQResourceOperation,
+  verifyMQAuditChain,
   type MQInstancePayload,
   type MQResourceOperationPayload,
   type MQSupportedType
@@ -932,6 +1077,20 @@ const replayForm = reactive<any>({ instanceId: 0, instanceName: '', resourceType
 const dlqRecordDialogVisible = ref(false)
 const dlqRecordSubmitting = ref(false)
 const dlqRecordForm = reactive<any>({ instanceId: 0, resourceId: 0, resourceType: 'topic', namespace: '', resourceName: '', kind: '', handlingStatus: 'untriaged', owner: '', remark: '', lastBacklog: 0 })
+
+const advancedInstanceId = ref<number | null>(null)
+const capacityLoading = ref(false)
+const capacityForecast = ref<any>(null)
+const capacityQuery = reactive({ horizonHours: 24 })
+const schemaInspectLoading = ref(false)
+const schemaInspectResult = ref<any>(null)
+const schemaForm = reactive<any>({ resourceType: 'topic', namespace: '', resourceName: '', payload: '', schemaJson: '', strict: false })
+const clonePlanLoading = ref(false)
+const clonePlan = ref<any>(null)
+const clonePlanForm = reactive<any>({ resourceType: 'topic', namespace: '', resourceName: '', targetInstanceId: undefined, targetNamespace: '', targetResourceName: '', includeGovernanceFields: true })
+const auditChainLoading = ref(false)
+const auditChainVerify = ref<any>(null)
+const auditChainQuery = reactive<any>({ auditType: 'operation', limit: 200 })
 
 const selectedInstanceId = ref<number | null>(null)
 const overview = ref<any>(null)
@@ -1114,6 +1273,9 @@ const loadInstances = async () => {
     if (!sampleInstanceId.value || !sampleReadableInstances.value.some(item => item.id === sampleInstanceId.value)) {
       sampleInstanceId.value = sampleReadableInstances.value[0]?.id || null
     }
+    if (!advancedInstanceId.value || !diagnosableInstances.value.some(item => item.id === advancedInstanceId.value)) {
+      advancedInstanceId.value = diagnosableInstances.value[0]?.id || null
+    }
   } finally {
     instanceLoading.value = false
   }
@@ -1266,6 +1428,65 @@ const loadDLQAnalysis = async () => {
   } finally {
     dlqLoading.value = false
   }
+}
+
+const loadCapacityForecast = async () => {
+  if (!advancedInstanceId.value || !uiPermissions.diagnosisView) return
+  capacityLoading.value = true
+  try {
+    capacityForecast.value = await getMQCapacityForecast(advancedInstanceId.value, { ...capacityQuery })
+  } finally {
+    capacityLoading.value = false
+  }
+}
+
+const handleSchemaInspect = async () => {
+  if (!advancedInstanceId.value || !schemaForm.payload) {
+    ElMessage.warning('请选择实例并填写 payload')
+    return
+  }
+  schemaInspectLoading.value = true
+  try {
+    schemaInspectResult.value = await inspectMQMessageSchema(advancedInstanceId.value, { ...schemaForm })
+    ElMessage.success(schemaInspectResult.value?.message || 'Schema 检查完成')
+    await loadAudits()
+  } finally {
+    schemaInspectLoading.value = false
+  }
+}
+
+const handleBuildClonePlan = async () => {
+  if (!advancedInstanceId.value || !clonePlanForm.resourceName || !clonePlanForm.targetInstanceId) {
+    ElMessage.warning('请选择源实例、目标实例和资源')
+    return
+  }
+  clonePlanLoading.value = true
+  try {
+    clonePlan.value = await buildMQConfigClonePlan(advancedInstanceId.value, { ...clonePlanForm })
+    ElMessage.success('配置克隆计划已生成')
+    await loadAudits()
+  } finally {
+    clonePlanLoading.value = false
+  }
+}
+
+const loadAuditChainVerify = async () => {
+  if (!uiPermissions.auditView) return
+  auditChainLoading.value = true
+  try {
+    auditChainVerify.value = await verifyMQAuditChain({ ...auditChainQuery })
+  } finally {
+    auditChainLoading.value = false
+  }
+}
+
+const loadAdvancedGovernance = async () => {
+  schemaInspectResult.value = null
+  clonePlan.value = null
+  if (advancedInstanceId.value && !clonePlanForm.targetInstanceId) {
+    clonePlanForm.targetInstanceId = resourceManageInstances.value.find(item => item.id !== advancedInstanceId.value)?.id || resourceManageInstances.value[0]?.id
+  }
+  await Promise.all([loadCapacityForecast(), loadAuditChainVerify()])
 }
 
 const openReplayDialog = (row: any) => {
@@ -1721,6 +1942,7 @@ const escapeRegExp = (value: string) => String(value).replace(/[.*+?^${}()|[\]\\
 watch(activeTab, async tab => {
   if (tab === 'governance') await refreshGovernance()
   if (tab === 'dlq') await loadDLQAnalysis()
+  if (tab === 'advanced') await loadAdvancedGovernance()
   if (tab === 'resources') await handleResourceInstanceChange()
   if (tab === 'diagnosis') await loadDiagnosis()
   if (tab === 'topology') await loadTopology()
@@ -1732,7 +1954,7 @@ watch(activeTab, async tab => {
 onMounted(async () => {
   await Promise.all([loadSupportedTypes(), loadUIPermissions(), loadCredentials(), loadRoles()])
   await loadInstances()
-  await Promise.all([refreshGovernance(), loadDLQAnalysis(), loadResources(), loadDiagnosis(), loadTopology(), loadAudits(), loadJobs(), loadPermissions()])
+  await Promise.all([refreshGovernance(), loadDLQAnalysis(), loadAdvancedGovernance(), loadResources(), loadDiagnosis(), loadTopology(), loadAudits(), loadJobs(), loadPermissions()])
 })
 </script>
 
@@ -1902,6 +2124,35 @@ onMounted(async () => {
 
 .governance-panels {
   margin-bottom: 16px;
+}
+
+.advanced-layout {
+  margin-bottom: 16px;
+}
+
+.compact-form :deep(.el-form-item) {
+  margin-bottom: 12px;
+}
+
+.compact-toolbar {
+  justify-content: flex-start;
+  margin-bottom: 12px;
+  padding: 0;
+  border: 0;
+}
+
+.schema-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.audit-chain-grid {
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
 }
 
 .diagnosis-summary,

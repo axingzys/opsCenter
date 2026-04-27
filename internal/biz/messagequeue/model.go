@@ -57,9 +57,11 @@ const (
 	AuditActionConnectionTest = "connection_test"
 	AuditActionMetadataSync   = "metadata_sync"
 	AuditActionMessageSample  = "message_sample"
+	AuditActionMessageSchema  = "message_schema_inspect"
 	AuditActionMessageReplay  = "message_replay_apply"
 	AuditActionMetricSnapshot = "metric_snapshot_collect"
 	AuditActionInspectionRun  = "inspection_run"
+	AuditActionConfigClone    = "config_clone_plan"
 	AuditActionPermissionSet  = "instance_permission_upsert"
 	AuditActionPermissionDel  = "instance_permission_delete"
 
@@ -1145,6 +1147,145 @@ type MessageReplayPlanVO struct {
 	Message            string         `json:"message"`
 	AuditID            uint           `json:"auditId"`
 	CreatedAt          string         `json:"createdAt"`
+}
+
+type MessageSchemaInspectRequest struct {
+	ResourceType string `json:"resourceType" binding:"omitempty,max=40"`
+	Namespace    string `json:"namespace" binding:"omitempty,max=255"`
+	ResourceName string `json:"resourceName" binding:"omitempty,max=512"`
+	Payload      string `json:"payload" binding:"required,max=262144"`
+	SchemaJSON   string `json:"schemaJson" binding:"omitempty,max=262144"`
+	Strict       bool   `json:"strict"`
+}
+
+type MessageSchemaFieldVO struct {
+	Path      string `json:"path"`
+	Type      string `json:"type"`
+	Required  bool   `json:"required"`
+	Sensitive bool   `json:"sensitive"`
+	Example   string `json:"example,omitempty"`
+}
+
+type MessageSchemaValidationIssueVO struct {
+	Path     string `json:"path"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+type MessageSchemaInspectVO struct {
+	InstanceID        uint                              `json:"instanceId"`
+	InstanceName      string                            `json:"instanceName"`
+	MQType            string                            `json:"mqType"`
+	ResourceType      string                            `json:"resourceType"`
+	Namespace         string                            `json:"namespace"`
+	ResourceName      string                            `json:"resourceName"`
+	Format            string                            `json:"format"`
+	Valid             bool                              `json:"valid"`
+	Strict            bool                              `json:"strict"`
+	PayloadBytes      int                               `json:"payloadBytes"`
+	PayloadHash       string                            `json:"payloadHash"`
+	PrettyPayload     string                            `json:"prettyPayload,omitempty"`
+	InferredSchema    map[string]any                    `json:"inferredSchema,omitempty"`
+	Fields            []*MessageSchemaFieldVO           `json:"fields"`
+	Issues            []*MessageSchemaValidationIssueVO `json:"issues"`
+	SensitiveHitCount int                               `json:"sensitiveHitCount"`
+	SensitiveFields   []string                          `json:"sensitiveFields"`
+	RedactedPreview   string                            `json:"redactedPreview,omitempty"`
+	Message           string                            `json:"message"`
+	GeneratedAt       string                            `json:"generatedAt"`
+}
+
+type ConfigClonePlanRequest struct {
+	ResourceType            string `json:"resourceType" binding:"required,max=40"`
+	Namespace               string `json:"namespace" binding:"omitempty,max=255"`
+	ResourceName            string `json:"resourceName" binding:"required,max=512"`
+	TargetInstanceID        uint   `json:"targetInstanceId" binding:"required"`
+	TargetNamespace         string `json:"targetNamespace" binding:"omitempty,max=255"`
+	TargetResourceName      string `json:"targetResourceName" binding:"omitempty,max=512"`
+	IncludeGovernanceFields bool   `json:"includeGovernanceFields"`
+}
+
+type ConfigClonePlanVO struct {
+	SourceInstanceID   uint                `json:"sourceInstanceId"`
+	SourceInstanceName string              `json:"sourceInstanceName"`
+	SourceMQType       string              `json:"sourceMqType"`
+	TargetInstanceID   uint                `json:"targetInstanceId"`
+	TargetInstanceName string              `json:"targetInstanceName"`
+	TargetMQType       string              `json:"targetMqType"`
+	ResourceType       string              `json:"resourceType"`
+	Namespace          string              `json:"namespace"`
+	ResourceName       string              `json:"resourceName"`
+	TargetNamespace    string              `json:"targetNamespace"`
+	TargetResourceName string              `json:"targetResourceName"`
+	Executable         bool                `json:"executable"`
+	RequiresApproval   bool                `json:"requiresApproval"`
+	RiskLevel          string              `json:"riskLevel"`
+	Action             string              `json:"action"`
+	SourceSnapshot     map[string]any      `json:"sourceSnapshot"`
+	TargetSnapshot     map[string]any      `json:"targetSnapshot,omitempty"`
+	ProposedConfig     map[string]any      `json:"proposedConfig"`
+	Diff               []OperationDiffItem `json:"diff"`
+	Warnings           []string            `json:"warnings"`
+	Suggestions        []string            `json:"suggestions"`
+	Message            string              `json:"message"`
+	GeneratedAt        string              `json:"generatedAt"`
+}
+
+type CapacityForecastRequest struct {
+	HorizonHours int `form:"horizonHours"`
+}
+
+type CapacityRecommendationVO struct {
+	Severity   string `json:"severity"`
+	Category   string `json:"category"`
+	Title      string `json:"title"`
+	Suggestion string `json:"suggestion"`
+	Metric     string `json:"metric,omitempty"`
+}
+
+type CapacityForecastVO struct {
+	InstanceID           uint                        `json:"instanceId"`
+	InstanceName         string                      `json:"instanceName"`
+	MQType               string                      `json:"mqType"`
+	HorizonHours         int                         `json:"horizonHours"`
+	SampleCount          int                         `json:"sampleCount"`
+	CurrentBacklog       int64                       `json:"currentBacklog"`
+	CurrentLag           int64                       `json:"currentLag"`
+	BacklogGrowthPerHour float64                     `json:"backlogGrowthPerHour"`
+	LagGrowthPerHour     float64                     `json:"lagGrowthPerHour"`
+	ProjectedBacklog     int64                       `json:"projectedBacklog"`
+	ProjectedLag         int64                       `json:"projectedLag"`
+	RiskLevel            string                      `json:"riskLevel"`
+	TrendMessage         string                      `json:"trendMessage"`
+	Recommendations      []*CapacityRecommendationVO `json:"recommendations"`
+	TopBacklogResources  []*DashboardResourceVO      `json:"topBacklogResources"`
+	TopLagConsumerGroups []*DashboardConsumerGroupVO `json:"topLagConsumerGroups"`
+	GeneratedAt          string                      `json:"generatedAt"`
+}
+
+type AuditChainVerifyRequest struct {
+	AuditType         string `form:"auditType"`
+	InstanceID        uint   `form:"instanceId"`
+	Limit             int    `form:"limit"`
+	RestrictToAllowed bool   `form:"-" json:"-"`
+	AllowedIDs        []uint `form:"-" json:"-"`
+}
+
+type AuditChainFindingVO struct {
+	AuditID  uint   `json:"auditId"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+type AuditChainVerifyVO struct {
+	AuditType   string                 `json:"auditType"`
+	Checked     int                    `json:"checked"`
+	Valid       bool                   `json:"valid"`
+	BrokenCount int                    `json:"brokenCount"`
+	HeadHash    string                 `json:"headHash,omitempty"`
+	TailHash    string                 `json:"tailHash,omitempty"`
+	Findings    []*AuditChainFindingVO `json:"findings"`
+	GeneratedAt string                 `json:"generatedAt"`
 }
 
 type HighRiskOperationConfig struct {
