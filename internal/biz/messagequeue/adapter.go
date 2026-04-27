@@ -14,6 +14,11 @@ type Adapter interface {
 	SampleMessages(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *MessageSampleRequest) (*MessageSampleResultVO, error)
 }
 
+type ResourceOperationAdapter interface {
+	ValidateOperation(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error)
+	ApplyOperation(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *ResourceOperationRequest) (*ResourceOperationApplyResult, error)
+}
+
 type AdapterRegistry struct {
 	adapters map[string]Adapter
 }

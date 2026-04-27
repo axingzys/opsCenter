@@ -61,6 +61,18 @@ export interface MQMessageSamplePayload {
   maxBytes?: number
 }
 
+export interface MQResourceOperationPayload {
+  action: string
+  resourceType?: string
+  namespace?: string
+  resourceName?: string
+  reason?: string
+  confirmText?: string
+  confirmed?: boolean
+  idempotencyKey?: string
+  params?: Record<string, any>
+}
+
 export const getMQSupportedTypes = () =>
   request.get('/api/v1/message-queues/supported-types')
 
@@ -137,6 +149,12 @@ export const listMQPartitions = (id: number, params?: {
 export const sampleMQMessages = (id: number, data: MQMessageSamplePayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/messages/sample`, data)
 
+export const validateMQResourceOperation = (id: number, data: MQResourceOperationPayload) =>
+  request.post(`/api/v1/message-queues/instances/${id}/operations/validate`, data)
+
+export const executeMQResourceOperation = (id: number, data: MQResourceOperationPayload) =>
+  request.post(`/api/v1/message-queues/instances/${id}/operations`, data)
+
 export const listMQOperationAudits = (params: {
   page?: number
   pageSize?: number
@@ -175,4 +193,3 @@ export const upsertMQInstancePermission = (data: MQInstancePermissionPayload) =>
 
 export const deleteMQInstancePermission = (id: number) =>
   request.delete(`/api/v1/message-queues/instance-permissions/${id}`)
-

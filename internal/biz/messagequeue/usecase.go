@@ -5,24 +5,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
+var resourceOperationLocks sync.Map
+
 type UseCase struct {
-	instanceRepo       InstanceRepo
-	permissionRepo     PermissionRepo
-	brokerRepo         BrokerRepo
-	resourceRepo       ResourceRepo
-	bindingRepo        BindingRepo
-	consumerGroupRepo  ConsumerGroupRepo
-	partitionRepo      PartitionRepo
-	metadataRepo       MetadataRepo
-	syncJobRepo        SyncJobRepo
-	operationAuditRepo OperationAuditRepo
-	messageAuditRepo   MessageAuditRepo
-	credentialIDExists func(ctx context.Context, id uint) error
-	credentialResolver func(ctx context.Context, id uint) (*ConnectionCredential, error)
-	adapters           *AdapterRegistry
+	instanceRepo           InstanceRepo
+	permissionRepo         PermissionRepo
+	brokerRepo             BrokerRepo
+	resourceRepo           ResourceRepo
+	bindingRepo            BindingRepo
+	consumerGroupRepo      ConsumerGroupRepo
+	partitionRepo          PartitionRepo
+	metadataRepo           MetadataRepo
+	syncJobRepo            SyncJobRepo
+	operationAuditRepo     OperationAuditRepo
+	messageAuditRepo       MessageAuditRepo
+	credentialIDExists     func(ctx context.Context, id uint) error
+	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
+	highRiskConfigResolver func(ctx context.Context) (*HighRiskOperationConfig, error)
+	adapters               *AdapterRegistry
 }
 
 func NewUseCase(
@@ -39,36 +43,38 @@ func NewUseCase(
 	messageAuditRepo MessageAuditRepo,
 	credentialIDExists func(ctx context.Context, id uint) error,
 	credentialResolver func(ctx context.Context, id uint) (*ConnectionCredential, error),
+	highRiskConfigResolver func(ctx context.Context) (*HighRiskOperationConfig, error),
 	adapters *AdapterRegistry,
 ) *UseCase {
 	if adapters == nil {
 		adapters = NewDefaultAdapterRegistry()
 	}
 	return &UseCase{
-		instanceRepo:       instanceRepo,
-		permissionRepo:     permissionRepo,
-		brokerRepo:         brokerRepo,
-		resourceRepo:       resourceRepo,
-		bindingRepo:        bindingRepo,
-		consumerGroupRepo:  consumerGroupRepo,
-		partitionRepo:      partitionRepo,
-		metadataRepo:       metadataRepo,
-		syncJobRepo:        syncJobRepo,
-		operationAuditRepo: operationAuditRepo,
-		messageAuditRepo:   messageAuditRepo,
-		credentialIDExists: credentialIDExists,
-		credentialResolver: credentialResolver,
-		adapters:           adapters,
+		instanceRepo:           instanceRepo,
+		permissionRepo:         permissionRepo,
+		brokerRepo:             brokerRepo,
+		resourceRepo:           resourceRepo,
+		bindingRepo:            bindingRepo,
+		consumerGroupRepo:      consumerGroupRepo,
+		partitionRepo:          partitionRepo,
+		metadataRepo:           metadataRepo,
+		syncJobRepo:            syncJobRepo,
+		operationAuditRepo:     operationAuditRepo,
+		messageAuditRepo:       messageAuditRepo,
+		credentialIDExists:     credentialIDExists,
+		credentialResolver:     credentialResolver,
+		highRiskConfigResolver: highRiskConfigResolver,
+		adapters:               adapters,
 	}
 }
 
 func (uc *UseCase) SupportedTypes() []*SupportedTypeVO {
 	return []*SupportedTypeVO{
-		{Type: MQTypeRabbitMQ, Name: "RabbitMQ", DefaultPort: 5672, DefaultManagement: 15672, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: true, Phase: "phase1"},
-		{Type: MQTypeKafka, Name: "Kafka", DefaultPort: 9092, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: true, MessageSample: true, Phase: "phase1"},
+		{Type: MQTypeRabbitMQ, Name: "RabbitMQ", DefaultPort: 5672, DefaultManagement: 15672, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: true, ResourceManage: true, Phase: "phase2"},
+		{Type: MQTypeKafka, Name: "Kafka", DefaultPort: 9092, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: true, MessageSample: true, ResourceManage: true, Phase: "phase2"},
 		{Type: MQTypeRocketMQ, Name: "RocketMQ", DefaultPort: 9876, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: false, Phase: "phase1-basic"},
 		{Type: MQTypeActiveMQ, Name: "ActiveMQ", DefaultPort: 61616, DefaultManagement: 8161, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: true, Phase: "phase1-basic"},
-		{Type: MQTypePulsar, Name: "Pulsar", DefaultPort: 6650, DefaultManagement: 8080, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: true, Phase: "phase1"},
+		{Type: MQTypePulsar, Name: "Pulsar", DefaultPort: 6650, DefaultManagement: 8080, TestEnabled: true, MetadataEnabled: true, DiagnosisEnabled: true, ResourceManage: true, Phase: "phase2-basic"},
 	}
 }
 
@@ -467,6 +473,147 @@ func (uc *UseCase) SampleMessages(ctx context.Context, instanceID uint, req *Mes
 	return result, nil
 }
 
+func (uc *UseCase) ValidateResourceOperation(ctx context.Context, instanceID uint, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	instance, operationAdapter, credential, err := uc.resolveResourceOperationAdapter(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	normalizeResourceOperationRequest(req)
+	if req == nil || req.Action == "" {
+		return nil, fmt.Errorf("操作动作不能为空")
+	}
+	validation, err := operationAdapter.ValidateOperation(ctx, instance, credential, req)
+	if err != nil {
+		return nil, err
+	}
+	if validation == nil {
+		return nil, fmt.Errorf("操作校验结果为空")
+	}
+	fillOperationValidationDefaults(validation, instance, req)
+	if err := uc.enrichResourceOperationPlan(ctx, instance, validation, req); err != nil {
+		return nil, err
+	}
+	fillOperationValidationDefaults(validation, instance, req)
+	return validation, nil
+}
+
+func (uc *UseCase) ExecuteResourceOperation(ctx context.Context, instanceID uint, req *ResourceOperationRequest, operator Operator) (*ResourceOperationResultVO, error) {
+	instance, operationAdapter, credential, err := uc.resolveResourceOperationAdapter(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	normalizeResourceOperationRequest(req)
+	if req == nil || req.Action == "" {
+		return nil, fmt.Errorf("操作动作不能为空")
+	}
+	if !req.Confirmed {
+		return nil, fmt.Errorf("请确认操作影响后再执行")
+	}
+	validation, err := operationAdapter.ValidateOperation(ctx, instance, credential, req)
+	if err != nil {
+		return nil, err
+	}
+	fillOperationValidationDefaults(validation, instance, req)
+	if err := uc.enrichResourceOperationPlan(ctx, instance, validation, req); err != nil {
+		return nil, err
+	}
+	fillOperationValidationDefaults(validation, instance, req)
+	if !validation.Supported {
+		return nil, fmt.Errorf("%s", validation.Message)
+	}
+	if strings.EqualFold(instance.Environment, "prod") && validation.MetadataStale && !operationBoolParam(req.Params, false, "allowStaleMetadata") {
+		return nil, fmt.Errorf("生产环境 MQ 元数据已过期，请先同步后再执行资源操作")
+	}
+	if IsHighRiskLevel(validation.RiskLevel) {
+		cfg, err := uc.resolveHighRiskOperationConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !cfg.Enabled {
+			return nil, fmt.Errorf("MQ高风险操作未开启")
+		}
+		if cfg.ReasonRequired && strings.TrimSpace(req.Reason) == "" {
+			return nil, fmt.Errorf("高风险操作原因不能为空")
+		}
+	}
+	if result, ok, err := uc.idempotentResourceOperationResult(ctx, instance, validation, req); err != nil {
+		return nil, err
+	} else if ok {
+		return result, nil
+	}
+	if validation.LockKey != "" {
+		if !acquireResourceOperationLock(validation.LockKey) {
+			return nil, fmt.Errorf("资源正在执行相同操作，请稍后再试")
+		}
+		defer releaseResourceOperationLock(validation.LockKey)
+	}
+
+	startedAt := time.Now()
+	audit := uc.startResourceOperationAudit(ctx, instance, validation, req, operator)
+	applyResult, err := operationAdapter.ApplyOperation(ctx, instance, credential, req)
+	finishedAt := time.Now()
+	if err != nil {
+		uc.finishOperationAudit(ctx, audit, AuditStatusFailed, err.Error(), nil, startedAt, finishedAt)
+		return nil, err
+	}
+	if applyResult == nil {
+		applyResult = &ResourceOperationApplyResult{}
+	}
+	resourceType := firstNonEmpty(applyResult.ResourceType, validation.ResourceType)
+	namespace := firstNonEmpty(applyResult.Namespace, validation.Namespace)
+	resourceName := firstNonEmpty(applyResult.ResourceName, validation.ResourceName)
+	message := firstNonEmpty(applyResult.Message, validation.Message, "资源操作执行成功")
+	result := applyResult.Result
+	if result == nil {
+		result = map[string]any{}
+	}
+	status := AuditStatusSuccess
+	metadataRefreshStatus := ""
+	metadataRefreshError := ""
+	if metadataAdapter, ok := operationAdapter.(Adapter); ok {
+		if syncErr := uc.refreshMetadataAfterResourceOperation(ctx, instance, metadataAdapter, credential); syncErr != nil {
+			status = AuditStatusPartial
+			metadataRefreshStatus = SyncStatusFailed
+			metadataRefreshError = syncErr.Error()
+			result["metadataSyncStatus"] = SyncStatusFailed
+			result["metadataSyncError"] = syncErr.Error()
+			message = trimText(message+"；元数据同步失败: "+syncErr.Error(), 500)
+		} else {
+			metadataRefreshStatus = SyncStatusSuccess
+			result["metadataSyncStatus"] = SyncStatusSuccess
+		}
+	}
+	finishedAt = time.Now()
+	if audit != nil {
+		audit.MetadataRefreshStatus = metadataRefreshStatus
+		audit.MetadataRefreshError = trimText(metadataRefreshError, 500)
+		if len(validation.After) > 0 {
+			audit.AfterSnapshotJSON = mustJSON(validation.After)
+		}
+	}
+	uc.finishOperationAudit(ctx, audit, status, message, result, startedAt, finishedAt)
+	auditID := uint(0)
+	if audit != nil {
+		auditID = audit.ID
+	}
+	return &ResourceOperationResultVO{
+		AuditID:      auditID,
+		InstanceID:   instance.ID,
+		MQType:       instance.MQType,
+		Action:       validation.Action,
+		ActionText:   actionText(validation.Action),
+		RiskLevel:    validation.RiskLevel,
+		ResourceType: resourceType,
+		Namespace:    namespace,
+		ResourceName: resourceName,
+		Status:       status,
+		Message:      message,
+		DurationMs:   finishedAt.Sub(startedAt).Milliseconds(),
+		Result:       result,
+		ExecutedAt:   finishedAt.Format("2006-01-02 15:04:05"),
+	}, nil
+}
+
 func (uc *UseCase) ListOperationAudits(ctx context.Context, req *AuditListRequest) ([]*AuditVO, int64, error) {
 	normalizeAuditListRequest(req)
 	items, total, err := uc.operationAuditRepo.List(ctx, req)
@@ -560,6 +707,503 @@ func (uc *UseCase) resolveAdapterAndCredential(ctx context.Context, item *MQInst
 	return adapter, credential, nil
 }
 
+func (uc *UseCase) resolveResourceOperationAdapter(ctx context.Context, instanceID uint) (*MQInstance, ResourceOperationAdapter, *ConnectionCredential, error) {
+	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("MQ实例不存在")
+	}
+	if strings.TrimSpace(instance.Status) != InstanceStatusEnabled {
+		return nil, nil, nil, fmt.Errorf("MQ实例已禁用")
+	}
+	adapter, credential, err := uc.resolveAdapterAndCredential(ctx, instance)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	operationAdapter, ok := adapter.(ResourceOperationAdapter)
+	if !ok {
+		return nil, nil, nil, adapterNotSupported(instance.MQType, "资源管理")
+	}
+	return instance, operationAdapter, credential, nil
+}
+
+func (uc *UseCase) resolveHighRiskOperationConfig(ctx context.Context) (*HighRiskOperationConfig, error) {
+	cfg := &HighRiskOperationConfig{Enabled: false, ReasonRequired: true}
+	if uc.highRiskConfigResolver == nil {
+		return cfg, nil
+	}
+	resolved, err := uc.highRiskConfigResolver(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("读取MQ高风险操作配置失败: %w", err)
+	}
+	if resolved == nil {
+		return cfg, nil
+	}
+	cfg.Enabled = resolved.Enabled
+	cfg.ReasonRequired = resolved.ReasonRequired
+	return cfg, nil
+}
+
+func (uc *UseCase) refreshMetadataAfterResourceOperation(ctx context.Context, item *MQInstance, adapter Adapter, credential *ConnectionCredential) error {
+	if uc.metadataRepo == nil || item == nil || adapter == nil {
+		return nil
+	}
+	snapshot, err := adapter.DiscoverMetadata(ctx, item, credential)
+	if err != nil {
+		return err
+	}
+	if snapshot == nil {
+		return nil
+	}
+	now := time.Now()
+	if snapshot.SyncedAt.IsZero() {
+		snapshot.SyncedAt = now
+	}
+	if snapshot.HealthStatus == "" {
+		snapshot.HealthStatus = HealthStatusHealthy
+	}
+	if err := uc.metadataRepo.ReplaceAll(ctx, item.ID, snapshot); err != nil {
+		return err
+	}
+	item.Version = strings.TrimSpace(snapshot.Version)
+	if strings.TrimSpace(snapshot.Engine) != "" {
+		item.Engine = strings.TrimSpace(snapshot.Engine)
+	}
+	item.HealthStatus = snapshot.HealthStatus
+	item.LastSyncAt = &now
+	if uc.instanceRepo != nil {
+		return uc.instanceRepo.Update(ctx, item)
+	}
+	return nil
+}
+
+func (uc *UseCase) enrichResourceOperationPlan(ctx context.Context, instance *MQInstance, validation *ResourceOperationValidationVO, req *ResourceOperationRequest) error {
+	if instance == nil || validation == nil || req == nil {
+		return nil
+	}
+	validation.LockKey = buildResourceOperationLockKey(instance.ID, validation)
+	applyMetadataFreshnessWarning(instance, validation)
+
+	resource, err := uc.lookupOperationResource(ctx, instance.ID, validation)
+	if err != nil {
+		return err
+	}
+	if resource != nil {
+		validation.Before = resourceSnapshot(resource)
+	}
+	validation.After = operationDesiredSnapshot(validation)
+	validation.Diff = buildOperationDiff(validation.Before, validation.After)
+
+	applyRabbitMQImmutableGuards(validation)
+	applyDestructiveConfigRisk(validation)
+	return nil
+}
+
+func (uc *UseCase) lookupOperationResource(ctx context.Context, instanceID uint, validation *ResourceOperationValidationVO) (*MQResource, error) {
+	if uc.resourceRepo == nil || validation == nil || validation.ResourceType == "" || validation.ResourceName == "" {
+		return nil, nil
+	}
+	return uc.resourceRepo.GetByUnique(ctx, instanceID, validation.ResourceType, validation.Namespace, validation.ResourceName)
+}
+
+func applyMetadataFreshnessWarning(instance *MQInstance, validation *ResourceOperationValidationVO) {
+	if instance == nil || validation == nil {
+		return
+	}
+	const maxAge = 30 * time.Minute
+	if instance.LastSyncAt == nil || instance.LastSyncAt.IsZero() {
+		validation.MetadataStale = true
+		validation.MetadataStaleReason = "该实例尚未完成元数据同步，影响范围可能不准确"
+		validation.Warnings = appendUniqueString(validation.Warnings, validation.MetadataStaleReason)
+		return
+	}
+	if age := time.Since(*instance.LastSyncAt); age > maxAge {
+		validation.MetadataStale = true
+		validation.MetadataStaleReason = fmt.Sprintf("最近元数据同步已超过 %d 分钟，影响范围可能不准确", int(maxAge.Minutes()))
+		validation.Warnings = appendUniqueString(validation.Warnings, validation.MetadataStaleReason)
+	}
+}
+
+func resourceSnapshot(resource *MQResource) map[string]any {
+	if resource == nil {
+		return nil
+	}
+	snapshot := map[string]any{
+		"id":             resource.ID,
+		"resourceType":   resource.ResourceType,
+		"namespace":      resource.Namespace,
+		"name":           resource.Name,
+		"fullName":       resource.FullName,
+		"durable":        resource.Durable,
+		"partitionCount": resource.PartitionCount,
+		"replicaCount":   resource.ReplicaCount,
+		"messageCount":   resource.MessageCount,
+		"backlog":        resource.Backlog,
+		"consumerCount":  resource.ConsumerCount,
+		"config":         parseJSONMap(resource.ConfigJSON),
+		"lastSyncAt":     formatTimePtr(resource.LastSyncAt),
+	}
+	return snapshot
+}
+
+func operationDesiredSnapshot(validation *ResourceOperationValidationVO) map[string]any {
+	if validation == nil {
+		return nil
+	}
+	params := cloneParams(validation.NormalizedParams)
+	snapshot := map[string]any{
+		"resourceType": validation.ResourceType,
+		"namespace":    validation.Namespace,
+		"name":         validation.ResourceName,
+		"action":       validation.Action,
+	}
+	switch validation.Action {
+	case OperationActionKafkaTopicCreate:
+		snapshot["partitionCount"] = operationIntParam(params, 0, "partitions", "numPartitions")
+		snapshot["replicaCount"] = operationIntParam(params, 0, "replicationFactor")
+		snapshot["config"] = operationStringMapParam(params, "configs")
+	case OperationActionKafkaPartitionsExpand:
+		snapshot["partitionCount"] = operationIntParam(params, 0, "partitions", "count")
+	case OperationActionKafkaTopicConfigUpdate:
+		snapshot["config"] = operationStringMapParam(params, "configs")
+	case OperationActionRabbitMQQueueUpsert:
+		snapshot["durable"] = operationBoolParam(params, true, "durable")
+		snapshot["config"] = map[string]any{
+			"auto_delete": operationBoolParam(params, false, "autoDelete", "auto_delete"),
+			"arguments":   operationAnyMapParam(params, "arguments"),
+		}
+	case OperationActionRabbitMQExchangeUpsert:
+		snapshot["durable"] = operationBoolParam(params, true, "durable")
+		snapshot["config"] = map[string]any{
+			"type":        operationStringParam(params, "type"),
+			"auto_delete": operationBoolParam(params, false, "autoDelete", "auto_delete"),
+			"internal":    operationBoolParam(params, false, "internal"),
+			"arguments":   operationAnyMapParam(params, "arguments"),
+		}
+	case OperationActionPulsarRetentionUpdate:
+		snapshot["config"] = map[string]any{
+			"retentionTimeInMinutes": operationIntParam(params, 0, "retentionTimeInMinutes"),
+			"retentionSizeInMB":      operationIntParam(params, 0, "retentionSizeInMB"),
+		}
+	case OperationActionPulsarTTLUpdate:
+		snapshot["config"] = map[string]any{
+			"messageTTLInSeconds": operationIntParam(params, 0, "messageTTLInSeconds", "ttlSeconds"),
+		}
+	default:
+		snapshot["params"] = params
+	}
+	return snapshot
+}
+
+func buildOperationDiff(before, after map[string]any) []OperationDiffItem {
+	if len(after) == 0 {
+		return nil
+	}
+	diff := make([]OperationDiffItem, 0)
+	for _, key := range []string{"resourceType", "namespace", "name", "durable", "partitionCount", "replicaCount"} {
+		afterValue, ok := after[key]
+		if !ok {
+			continue
+		}
+		var beforeValue any
+		if before != nil {
+			beforeValue = before[key]
+		}
+		if fmt.Sprint(beforeValue) != fmt.Sprint(afterValue) {
+			diff = append(diff, OperationDiffItem{Key: key, Before: beforeValue, After: afterValue, Risk: RiskLevelLow})
+		}
+	}
+	afterConfig := snapshotConfig(after)
+	beforeConfig := snapshotConfig(before)
+	for key, afterValue := range afterConfig {
+		beforeValue := beforeConfig[key]
+		if fmt.Sprint(beforeValue) != fmt.Sprint(afterValue) {
+			diff = append(diff, OperationDiffItem{Key: "config." + key, Before: beforeValue, After: afterValue, Risk: configDiffRisk(key, beforeValue, afterValue)})
+		}
+	}
+	return diff
+}
+
+func applyRabbitMQImmutableGuards(validation *ResourceOperationValidationVO) {
+	if validation == nil || len(validation.Before) == 0 {
+		return
+	}
+	beforeConfig := snapshotConfig(validation.Before)
+	afterConfig := snapshotConfig(validation.After)
+	switch validation.Action {
+	case OperationActionRabbitMQQueueUpsert:
+		if snapshotBool(validation.Before["durable"]) != snapshotBool(validation.After["durable"]) {
+			markOperationUnsupported(validation, "Queue 已存在，durable 不支持通过二期 upsert 直接变更；如需变更请走高风险删除重建流程")
+			return
+		}
+		if snapshotBool(beforeConfig["auto_delete"]) != snapshotBool(afterConfig["auto_delete"]) {
+			markOperationUnsupported(validation, "Queue 已存在，auto_delete 不支持通过二期 upsert 直接变更；如需变更请走高风险删除重建流程")
+			return
+		}
+		beforeType := stringValue(beforeConfig["type"])
+		afterArguments := snapshotConfig(afterConfig["arguments"])
+		afterType := firstNonEmpty(stringValue(afterArguments["x-queue-type"]), stringValue(afterArguments["type"]))
+		if beforeType != "" && afterType != "" && beforeType != afterType {
+			markOperationUnsupported(validation, "Queue 已存在，x-queue-type 不支持直接变更；classic/quorum/stream 类型切换需要删除重建")
+			return
+		}
+	case OperationActionRabbitMQExchangeUpsert:
+		if stringValue(beforeConfig["type"]) != "" && stringValue(afterConfig["type"]) != "" && stringValue(beforeConfig["type"]) != stringValue(afterConfig["type"]) {
+			markOperationUnsupported(validation, "Exchange 已存在，type 不支持通过二期 upsert 直接变更；如需变更请走高风险删除重建流程")
+			return
+		}
+		if snapshotBool(validation.Before["durable"]) != snapshotBool(validation.After["durable"]) {
+			markOperationUnsupported(validation, "Exchange 已存在，durable 不支持通过二期 upsert 直接变更；如需变更请走高风险删除重建流程")
+			return
+		}
+		if snapshotBool(beforeConfig["auto_delete"]) != snapshotBool(afterConfig["auto_delete"]) {
+			markOperationUnsupported(validation, "Exchange 已存在，auto_delete 不支持通过二期 upsert 直接变更；如需变更请走高风险删除重建流程")
+			return
+		}
+		if snapshotBool(beforeConfig["internal"]) != snapshotBool(afterConfig["internal"]) {
+			markOperationUnsupported(validation, "Exchange 已存在，internal 不支持通过二期 upsert 直接变更；如需变更请走高风险删除重建流程")
+		}
+	}
+}
+
+func applyDestructiveConfigRisk(validation *ResourceOperationValidationVO) {
+	if validation == nil || len(validation.Before) == 0 {
+		return
+	}
+	beforeConfig := snapshotConfig(validation.Before)
+	afterConfig := snapshotConfig(validation.After)
+	switch validation.Action {
+	case OperationActionKafkaTopicConfigUpdate:
+		for key, afterValue := range afterConfig {
+			beforeValue := beforeConfig[key]
+			if configValueDecrease(key, beforeValue, afterValue) || cleanupPolicyBecomesDeleteOnly(key, beforeValue, afterValue) {
+				elevateOperationRisk(validation, fmt.Sprintf("%s 从 %s 调整为 %s 可能导致历史消息更快清理或写入行为变化，已升级为高风险", key, stringValue(beforeValue), stringValue(afterValue)))
+			}
+		}
+	case OperationActionPulsarRetentionUpdate, OperationActionPulsarTTLUpdate:
+		for key, afterValue := range afterConfig {
+			beforeValue := beforeConfig[key]
+			if configValueDecrease(key, beforeValue, afterValue) {
+				elevateOperationRisk(validation, fmt.Sprintf("%s 从 %s 调整为 %s 可能导致消息更快过期或清理，已升级为高风险", key, stringValue(beforeValue), stringValue(afterValue)))
+			}
+		}
+	}
+}
+
+func elevateOperationRisk(validation *ResourceOperationValidationVO, warning string) {
+	if validation == nil {
+		return
+	}
+	validation.RiskLevel = RiskLevelHigh
+	validation.RequiredPermission = PermissionHighRisk
+	validation.RequiresHighRiskAck = true
+	validation.Warnings = appendUniqueString(validation.Warnings, warning)
+}
+
+func markOperationUnsupported(validation *ResourceOperationValidationVO, message string) {
+	validation.Supported = false
+	validation.Message = message
+	validation.Warnings = appendUniqueString(validation.Warnings, message)
+}
+
+func configDiffRisk(key string, before, after any) string {
+	if configValueDecrease(key, before, after) || cleanupPolicyBecomesDeleteOnly(key, before, after) {
+		return RiskLevelHigh
+	}
+	switch key {
+	case "retention.ms", "retention.bytes", "cleanup.policy", "max.message.bytes", "min.insync.replicas", "messageTTLInSeconds", "retentionTimeInMinutes", "retentionSizeInMB":
+		return RiskLevelMedium
+	default:
+		return RiskLevelLow
+	}
+}
+
+func configValueDecrease(key string, before, after any) bool {
+	switch key {
+	case "retention.ms", "retention.bytes", "max.message.bytes", "retentionTimeInMinutes", "retentionSizeInMB", "messageTTLInSeconds":
+		beforeInt, beforeOK := parseConfigInt64(before)
+		afterInt, afterOK := parseConfigInt64(after)
+		return beforeOK && afterOK && beforeInt >= 0 && afterInt >= 0 && afterInt < beforeInt
+	default:
+		return false
+	}
+}
+
+func cleanupPolicyBecomesDeleteOnly(key string, before, after any) bool {
+	if key != "cleanup.policy" {
+		return false
+	}
+	beforePolicy := strings.ToLower(stringValue(before))
+	afterPolicy := strings.ToLower(stringValue(after))
+	return strings.Contains(beforePolicy, "compact") && afterPolicy == "delete"
+}
+
+func parseConfigInt64(value any) (int64, bool) {
+	text := strings.TrimSpace(stringValue(value))
+	if text == "" {
+		return 0, false
+	}
+	var number json.Number = json.Number(text)
+	parsed, err := number.Int64()
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func parseJSONMap(value string) map[string]any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return map[string]any{}
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(value), &result); err != nil {
+		return map[string]any{}
+	}
+	return result
+}
+
+func snapshotConfig(snapshot any) map[string]any {
+	if snapshot == nil {
+		return map[string]any{}
+	}
+	switch item := snapshot.(type) {
+	case map[string]any:
+		if config, ok := item["config"]; ok {
+			return snapshotConfig(config)
+		}
+		return item
+	case map[string]string:
+		result := make(map[string]any, len(item))
+		for key, value := range item {
+			result[key] = value
+		}
+		return result
+	default:
+		return map[string]any{}
+	}
+}
+
+func snapshotBool(value any) bool {
+	return boolValue(value)
+}
+
+func appendUniqueString(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return items
+	}
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
+}
+
+func buildResourceOperationLockKey(instanceID uint, validation *ResourceOperationValidationVO) string {
+	if validation == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%s:%s:%s:%s", instanceID, validation.ResourceType, validation.Namespace, validation.ResourceName, validation.Action)
+}
+
+func acquireResourceOperationLock(lockKey string) bool {
+	lockKey = strings.TrimSpace(lockKey)
+	if lockKey == "" {
+		return true
+	}
+	_, loaded := resourceOperationLocks.LoadOrStore(lockKey, time.Now())
+	return !loaded
+}
+
+func releaseResourceOperationLock(lockKey string) {
+	lockKey = strings.TrimSpace(lockKey)
+	if lockKey == "" {
+		return
+	}
+	resourceOperationLocks.Delete(lockKey)
+}
+
+func (uc *UseCase) idempotentResourceOperationResult(ctx context.Context, instance *MQInstance, validation *ResourceOperationValidationVO, req *ResourceOperationRequest) (*ResourceOperationResultVO, bool, error) {
+	if uc.operationAuditRepo == nil || instance == nil || validation == nil || req == nil || strings.TrimSpace(req.IdempotencyKey) == "" {
+		return nil, false, nil
+	}
+	existing, err := uc.operationAuditRepo.GetByIdempotencyKey(ctx, instance.ID, req.IdempotencyKey)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing == nil {
+		return nil, false, nil
+	}
+	switch existing.Status {
+	case AuditStatusPending:
+		return nil, false, fmt.Errorf("相同幂等键的操作正在执行，请稍后查询审计结果")
+	case AuditStatusSuccess, AuditStatusPartial:
+		result := map[string]any{}
+		if strings.TrimSpace(existing.ResultJSON) != "" {
+			_ = json.Unmarshal([]byte(existing.ResultJSON), &result)
+		}
+		return &ResourceOperationResultVO{
+			AuditID:      existing.ID,
+			InstanceID:   existing.InstanceID,
+			MQType:       existing.MQType,
+			Action:       existing.Action,
+			ActionText:   actionText(existing.Action),
+			RiskLevel:    existing.RiskLevel,
+			ResourceType: existing.ResourceType,
+			Namespace:    existing.Namespace,
+			ResourceName: existing.ResourceName,
+			Status:       existing.Status,
+			Message:      firstNonEmpty(existing.Message, "重复提交已返回上次操作结果"),
+			DurationMs:   existing.DurationMs,
+			Result:       result,
+			ExecutedAt:   formatTimePtr(existing.FinishedAt),
+		}, true, nil
+	default:
+		return nil, false, fmt.Errorf("相同幂等键已有失败操作记录，请更换幂等键后重试")
+	}
+}
+
+func fillOperationValidationDefaults(validation *ResourceOperationValidationVO, instance *MQInstance, req *ResourceOperationRequest) {
+	if validation == nil || instance == nil || req == nil {
+		return
+	}
+	if validation.InstanceID == 0 {
+		validation.InstanceID = instance.ID
+	}
+	if validation.MQType == "" {
+		validation.MQType = instance.MQType
+	}
+	if validation.Action == "" {
+		validation.Action = req.Action
+	}
+	if validation.ActionText == "" {
+		validation.ActionText = actionText(validation.Action)
+	}
+	if validation.RiskLevel == "" {
+		validation.RiskLevel = RiskLevelLow
+	}
+	if validation.RequiredPermission == 0 {
+		validation.RequiredPermission = PermissionResourceManage
+	}
+	if validation.ResourceType == "" {
+		validation.ResourceType = req.ResourceType
+	}
+	if validation.Namespace == "" {
+		validation.Namespace = req.Namespace
+	}
+	if validation.ResourceName == "" {
+		validation.ResourceName = req.ResourceName
+	}
+	if validation.NormalizedParams == nil {
+		validation.NormalizedParams = cloneParams(req.Params)
+	}
+	if IsHighRiskLevel(validation.RiskLevel) {
+		validation.RequiresHighRiskAck = true
+	}
+	validation.RequiresConfirm = true
+}
+
 func (uc *UseCase) toInstanceVO(item *MQInstance) *InstanceVO {
 	if item == nil {
 		return nil
@@ -611,6 +1255,52 @@ func (uc *UseCase) startOperationAudit(ctx context.Context, item *MQInstance, ac
 		OperatorName: operator.Username,
 		ClientIP:     operator.ClientIP,
 		StartedAt:    &now,
+	}
+	if err := uc.operationAuditRepo.Create(ctx, audit); err != nil {
+		return nil
+	}
+	return audit
+}
+
+func (uc *UseCase) startResourceOperationAudit(ctx context.Context, item *MQInstance, validation *ResourceOperationValidationVO, req *ResourceOperationRequest, operator Operator) *MQOperationAudit {
+	if uc.operationAuditRepo == nil || item == nil || validation == nil {
+		return nil
+	}
+	now := time.Now()
+	reason := ""
+	idempotencyKey := ""
+	confirmText := ""
+	if req != nil {
+		reason = req.Reason
+		idempotencyKey = req.IdempotencyKey
+		confirmText = req.ConfirmText
+	}
+	operationID := fmt.Sprintf("mqop-%d-%d", item.ID, time.Now().UnixNano())
+	audit := &MQOperationAudit{
+		InstanceID:         item.ID,
+		InstanceName:       item.Name,
+		MQType:             item.MQType,
+		ResourceType:       validation.ResourceType,
+		ResourceName:       validation.ResourceName,
+		Namespace:          validation.Namespace,
+		Action:             validation.Action,
+		RiskLevel:          validation.RiskLevel,
+		Status:             AuditStatusPending,
+		OperationID:        operationID,
+		IdempotencyKey:     strings.TrimSpace(idempotencyKey),
+		LockKey:            validation.LockKey,
+		ConfirmText:        strings.TrimSpace(confirmText),
+		RequestJSON:        mustJSON(req),
+		BeforeSnapshotJSON: mustJSON(validation.Before),
+		AfterSnapshotJSON:  mustJSON(validation.After),
+		DiffJSON:           mustJSON(validation.Diff),
+		WarningsJSON:       mustJSON(validation.Warnings),
+		ImpactSummaryJSON:  mustJSON(validation.Impacts),
+		Reason:             trimText(reason, 500),
+		OperatorID:         operator.ID,
+		OperatorName:       operator.Username,
+		ClientIP:           operator.ClientIP,
+		StartedAt:          &now,
 	}
 	if err := uc.operationAuditRepo.Create(ctx, audit); err != nil {
 		return nil
@@ -930,6 +1620,36 @@ func actionText(action string) string {
 		return "实例权限保存"
 	case AuditActionPermissionDel:
 		return "实例权限删除"
+	case OperationActionRabbitMQQueueUpsert:
+		return "RabbitMQ Queue 创建/更新"
+	case OperationActionRabbitMQExchangeUpsert:
+		return "RabbitMQ Exchange 创建/更新"
+	case OperationActionRabbitMQBindingUpsert:
+		return "RabbitMQ Binding 创建/更新"
+	case OperationActionRabbitMQQueuePurge:
+		return "RabbitMQ Queue 清空"
+	case OperationActionRabbitMQQueueDelete:
+		return "RabbitMQ Queue 删除"
+	case OperationActionRabbitMQExchangeDelete:
+		return "RabbitMQ Exchange 删除"
+	case OperationActionKafkaTopicCreate:
+		return "Kafka Topic 创建"
+	case OperationActionKafkaPartitionsExpand:
+		return "Kafka 分区扩容"
+	case OperationActionKafkaTopicConfigUpdate:
+		return "Kafka Topic 配置更新"
+	case OperationActionKafkaTopicDelete:
+		return "Kafka Topic 删除"
+	case OperationActionPulsarRetentionUpdate:
+		return "Pulsar Namespace Retention 更新"
+	case OperationActionPulsarTTLUpdate:
+		return "Pulsar Namespace TTL 更新"
+	case OperationActionPulsarTopicDelete:
+		return "Pulsar Topic 删除"
+	case OperationActionPulsarSubscriptionSkip:
+		return "Pulsar Subscription 跳过"
+	case OperationActionPulsarSubscriptionReset:
+		return "Pulsar Subscription Cursor 重置"
 	default:
 		return action
 	}
@@ -941,6 +1661,8 @@ func auditStatusText(status string) string {
 		return "执行中"
 	case AuditStatusSuccess:
 		return "成功"
+	case AuditStatusPartial:
+		return "部分成功"
 	case AuditStatusFailed:
 		return "失败"
 	default:
@@ -954,6 +1676,15 @@ func trimText(value string, max int) string {
 		return value[:max]
 	}
 	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func mapToJSON(value any) string {

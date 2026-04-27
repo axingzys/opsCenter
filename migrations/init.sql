@@ -1887,7 +1887,11 @@ VALUES
   ('mfa_enabled', 'false', 'bool', 'security', '是否启用MFA功能', NOW(), NOW()),
   ('mfa_enforced', 'false', 'bool', 'security', '是否强制所有用户启用MFA', NOW(), NOW()),
   ('mfa_type', 'totp', 'string', 'security', 'MFA类型(totp)', NOW(), NOW()),
-  ('mfa_skip_duration', '2592000', 'int', 'security', 'MFA记住设备时长(秒)', NOW(), NOW());
+  ('mfa_skip_duration', '2592000', 'int', 'security', 'MFA记住设备时长(秒)', NOW(), NOW()),
+  -- 消息队列配置
+  ('messageQueueHighRiskEnabled', 'false', 'bool', 'messagequeue', 'MQ高危操作总开关', NOW(), NOW()),
+  ('messageQueueOperationReasonRequired', 'true', 'bool', 'messagequeue', 'MQ高危操作是否要求填写原因', NOW(), NOW()),
+  ('messageQueueOperationMaxMetadataAgeMinutes', '30', 'int', 'messagequeue', 'MQ资源操作允许的最大元数据年龄(分钟)', NOW(), NOW());
 
 SET FOREIGN_KEY_CHECKS = 1;
 

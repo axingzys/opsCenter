@@ -199,6 +199,230 @@ func (a *KafkaAdapter) SampleMessages(ctx context.Context, instance *MQInstance,
 	}, nil
 }
 
+func (a *KafkaAdapter) ValidateOperation(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	normalizeResourceOperationRequest(req)
+	switch req.Action {
+	case OperationActionKafkaTopicCreate:
+		return a.validateTopicCreate(instance, req)
+	case OperationActionKafkaPartitionsExpand:
+		return a.validatePartitionsExpand(instance, req)
+	case OperationActionKafkaTopicConfigUpdate:
+		return a.validateTopicConfigUpdate(instance, req)
+	case OperationActionKafkaTopicDelete:
+		return a.validateTopicDelete(instance, req)
+	default:
+		return unsupportedOperationValidation(instance, req, "Kafka 不支持该资源操作"), nil
+	}
+}
+
+func (a *KafkaAdapter) ApplyOperation(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *ResourceOperationRequest) (*ResourceOperationApplyResult, error) {
+	validation, err := a.ValidateOperation(ctx, instance, credential, req)
+	if err != nil {
+		return nil, err
+	}
+	if !validation.Supported {
+		return nil, fmt.Errorf("%s", validation.Message)
+	}
+	addr, err := kafkaControllerAddr(ctx, instance)
+	if err != nil {
+		return nil, err
+	}
+	client := kafkaClient(instance, addr)
+	topic := validation.ResourceName
+	params := validation.NormalizedParams
+	switch req.Action {
+	case OperationActionKafkaTopicCreate:
+		topicConfig := kafka.TopicConfig{
+			Topic:             topic,
+			NumPartitions:     operationIntParam(params, 1, "partitions", "numPartitions"),
+			ReplicationFactor: operationIntParam(params, 1, "replicationFactor"),
+			ConfigEntries:     kafkaConfigEntries(operationStringMapParam(params, "configs")),
+		}
+		res, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{topicConfig}})
+		if err != nil {
+			return nil, err
+		}
+		if err := kafkaTopicError(res.Errors, topic); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeTopic,
+			ResourceName: topic,
+			Message:      "Kafka Topic 创建已提交",
+			Result:       map[string]any{"topic": topic, "partitions": topicConfig.NumPartitions, "replicationFactor": topicConfig.ReplicationFactor, "configs": operationStringMapParam(params, "configs")},
+		}, nil
+	case OperationActionKafkaPartitionsExpand:
+		count := operationIntParam(params, 0, "partitions", "count")
+		res, err := client.CreatePartitions(ctx, &kafka.CreatePartitionsRequest{Topics: []kafka.TopicPartitionsConfig{{Name: topic, Count: int32(count)}}})
+		if err != nil {
+			return nil, err
+		}
+		if err := kafkaTopicError(res.Errors, topic); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeTopic,
+			ResourceName: topic,
+			Message:      "Kafka Topic 分区扩容已提交",
+			Result:       map[string]any{"topic": topic, "partitions": count},
+		}, nil
+	case OperationActionKafkaTopicConfigUpdate:
+		configs := operationStringMapParam(params, "configs")
+		reqConfigs := make([]kafka.IncrementalAlterConfigsRequestConfig, 0, len(configs))
+		for key, value := range configs {
+			reqConfigs = append(reqConfigs, kafka.IncrementalAlterConfigsRequestConfig{Name: key, Value: value, ConfigOperation: kafka.ConfigOperationSet})
+		}
+		res, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
+			Resources: []kafka.IncrementalAlterConfigsRequestResource{{
+				ResourceType: kafka.ResourceTypeTopic,
+				ResourceName: topic,
+				Configs:      reqConfigs,
+			}},
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, resource := range res.Resources {
+			if resource.ResourceName == topic && resource.Error != nil {
+				return nil, resource.Error
+			}
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeTopic,
+			ResourceName: topic,
+			Message:      "Kafka Topic 配置更新已提交",
+			Result:       map[string]any{"topic": topic, "configs": configs},
+		}, nil
+	case OperationActionKafkaTopicDelete:
+		res, err := client.DeleteTopics(ctx, &kafka.DeleteTopicsRequest{Topics: []string{topic}})
+		if err != nil {
+			return nil, err
+		}
+		if err := kafkaTopicError(res.Errors, topic); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeTopic,
+			ResourceName: topic,
+			Message:      "Kafka Topic 删除已提交",
+			Result:       map[string]any{"topic": topic},
+		}, nil
+	default:
+		return nil, adapterNotSupported(instance.MQType, "资源操作")
+	}
+}
+
+func (a *KafkaAdapter) validateTopicCreate(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelLow)
+	topic := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "topic", "name"))
+	if err := ensureOperationRequired(topic, "Topic名称"); err != nil {
+		return nil, err
+	}
+	partitions := operationIntParam(req.Params, 1, "partitions", "numPartitions")
+	replicationFactor := operationIntParam(req.Params, 1, "replicationFactor")
+	if partitions <= 0 {
+		return nil, fmt.Errorf("分区数必须大于0")
+	}
+	if replicationFactor <= 0 {
+		return nil, fmt.Errorf("副本数必须大于0")
+	}
+	configs := operationStringMapParam(req.Params, "configs")
+	params := map[string]any{"partitions": partitions, "replicationFactor": replicationFactor, "configs": configs}
+	req.ResourceType = ResourceTypeTopic
+	req.ResourceName = topic
+	validation.ResourceType = ResourceTypeTopic
+	validation.ResourceName = topic
+	validation.Message = "将通过 Kafka Controller 创建 Topic"
+	validation.Impacts = []string{"Topic: " + topic, fmt.Sprintf("分区数: %d", partitions), fmt.Sprintf("副本数: %d", replicationFactor)}
+	validation.Warnings = []string{"CreateTopics 具备幂等语义，已存在 Topic 通常不会重复创建"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func (a *KafkaAdapter) validatePartitionsExpand(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelMedium)
+	topic := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "topic", "name"))
+	if err := ensureOperationRequired(topic, "Topic名称"); err != nil {
+		return nil, err
+	}
+	partitions := operationIntParam(req.Params, 0, "partitions", "count")
+	if partitions <= 0 {
+		return nil, fmt.Errorf("目标分区数必须大于0")
+	}
+	params := map[string]any{"partitions": partitions}
+	req.ResourceType = ResourceTypeTopic
+	req.ResourceName = topic
+	validation.ResourceType = ResourceTypeTopic
+	validation.ResourceName = topic
+	validation.Message = "将通过 Kafka Controller 扩展 Topic 分区"
+	validation.Impacts = []string{"Topic: " + topic, fmt.Sprintf("目标分区数: %d", partitions)}
+	validation.Warnings = []string{"Kafka 分区只能增加不能减少，扩容会影响后续消息分布"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func (a *KafkaAdapter) validateTopicConfigUpdate(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelMedium)
+	topic := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "topic", "name"))
+	if err := ensureOperationRequired(topic, "Topic名称"); err != nil {
+		return nil, err
+	}
+	configs := operationStringMapParam(req.Params, "configs")
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("Topic配置不能为空")
+	}
+	for key := range configs {
+		key = strings.TrimSpace(key)
+		if !kafkaTopicConfigUpdateAllowed(key) {
+			return nil, fmt.Errorf("Kafka Topic配置 %s 不在二期允许更新白名单内", key)
+		}
+	}
+	params := map[string]any{"configs": configs}
+	req.ResourceType = ResourceTypeTopic
+	req.ResourceName = topic
+	validation.ResourceType = ResourceTypeTopic
+	validation.ResourceName = topic
+	validation.Message = "将通过 Kafka IncrementalAlterConfigs 更新 Topic 配置"
+	validation.Impacts = []string{"Topic: " + topic, fmt.Sprintf("配置项数量: %d", len(configs))}
+	validation.Warnings = []string{"配置更新会影响 Topic 运行行为，请确认 retention、cleanup.policy 等关键参数"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func kafkaTopicConfigUpdateAllowed(key string) bool {
+	switch strings.TrimSpace(key) {
+	case "retention.ms",
+		"retention.bytes",
+		"cleanup.policy",
+		"compression.type",
+		"max.message.bytes",
+		"min.insync.replicas",
+		"segment.ms":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *KafkaAdapter) validateTopicDelete(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelHigh)
+	topic := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "topic", "name"))
+	if err := ensureOperationRequired(topic, "Topic名称"); err != nil {
+		return nil, err
+	}
+	params := map[string]any{"topic": topic}
+	req.ResourceType = ResourceTypeTopic
+	req.ResourceName = topic
+	validation.RequiredPermission = PermissionHighRisk
+	validation.ResourceType = ResourceTypeTopic
+	validation.ResourceName = topic
+	validation.Message = "将通过 Kafka Controller 删除 Topic"
+	validation.Impacts = []string{"Topic: " + topic, "Topic 删除后分区、消息和消费位点关联信息会失效"}
+	validation.Warnings = []string{"删除 Topic 依赖 broker 开启 delete.topic.enable，执行后可能异步完成"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
 func kafkaDial(ctx context.Context, instance *MQInstance) (*kafka.Conn, error) {
 	address := firstEndpoint(instance, DefaultPort(MQTypeKafka))
 	if address == "" {
@@ -213,6 +437,51 @@ func kafkaDial(ctx context.Context, instance *MQInstance) (*kafka.Conn, error) {
 		return nil, fmt.Errorf("连接Kafka失败: %w", err)
 	}
 	return conn, nil
+}
+
+func kafkaControllerAddr(ctx context.Context, instance *MQInstance) (net.Addr, error) {
+	conn, err := kafkaDial(ctx, instance)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	controller, err := conn.Controller()
+	if err != nil {
+		return nil, fmt.Errorf("读取Kafka Controller失败: %w", err)
+	}
+	if strings.TrimSpace(controller.Host) == "" || controller.Port <= 0 {
+		return kafka.TCP(firstEndpoint(instance, DefaultPort(MQTypeKafka))), nil
+	}
+	return kafka.TCP(net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port))), nil
+}
+
+func kafkaClient(instance *MQInstance, addr net.Addr) *kafka.Client {
+	client := &kafka.Client{Addr: addr, Timeout: 10 * time.Second}
+	if instance.TLSEnabled {
+		client.Transport = &kafka.Transport{
+			ClientID: "opshub-messagequeue",
+			TLS:      &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+	}
+	return client
+}
+
+func kafkaConfigEntries(configs map[string]string) []kafka.ConfigEntry {
+	entries := make([]kafka.ConfigEntry, 0, len(configs))
+	for key, value := range configs {
+		entries = append(entries, kafka.ConfigEntry{ConfigName: key, ConfigValue: value})
+	}
+	return entries
+}
+
+func kafkaTopicError(errors map[string]error, topic string) error {
+	if len(errors) == 0 {
+		return nil
+	}
+	if err := errors[topic]; err != nil {
+		return err
+	}
+	return nil
 }
 
 func kafkaBrokers(instance *MQInstance) []string {

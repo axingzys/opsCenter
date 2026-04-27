@@ -2,6 +2,7 @@ package messagequeue
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -23,6 +24,25 @@ func (r *operationAuditRepo) Create(ctx context.Context, item *mqbiz.MQOperation
 
 func (r *operationAuditRepo) Update(ctx context.Context, item *mqbiz.MQOperationAudit) error {
 	return r.db.WithContext(ctx).Save(item).Error
+}
+
+func (r *operationAuditRepo) GetByIdempotencyKey(ctx context.Context, instanceID uint, idempotencyKey string) (*mqbiz.MQOperationAudit, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+	var item mqbiz.MQOperationAudit
+	err := r.db.WithContext(ctx).
+		Where("instance_id = ? AND idempotency_key = ?", instanceID, idempotencyKey).
+		Order("id DESC").
+		First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
 }
 
 func (r *operationAuditRepo) List(ctx context.Context, req *mqbiz.AuditListRequest) ([]*mqbiz.MQOperationAudit, int64, error) {

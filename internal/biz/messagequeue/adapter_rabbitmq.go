@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -176,6 +177,312 @@ func (a *RabbitMQAdapter) DiscoverMetadata(ctx context.Context, instance *MQInst
 
 func (a *RabbitMQAdapter) SampleMessages(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *MessageSampleRequest) (*MessageSampleResultVO, error) {
 	return nil, adapterNotSupported(instance.MQType, "消息采样")
+}
+
+func (a *RabbitMQAdapter) ValidateOperation(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	normalizeResourceOperationRequest(req)
+	switch req.Action {
+	case OperationActionRabbitMQQueueUpsert:
+		return a.validateQueueUpsert(instance, req)
+	case OperationActionRabbitMQExchangeUpsert:
+		return a.validateExchangeUpsert(instance, req)
+	case OperationActionRabbitMQBindingUpsert:
+		return a.validateBindingUpsert(instance, req)
+	case OperationActionRabbitMQQueuePurge:
+		return a.validateQueuePurge(instance, req)
+	case OperationActionRabbitMQQueueDelete:
+		return a.validateQueueDelete(instance, req)
+	case OperationActionRabbitMQExchangeDelete:
+		return a.validateExchangeDelete(instance, req)
+	default:
+		return unsupportedOperationValidation(instance, req, "RabbitMQ 不支持该资源操作"), nil
+	}
+}
+
+func (a *RabbitMQAdapter) ApplyOperation(ctx context.Context, instance *MQInstance, credential *ConnectionCredential, req *ResourceOperationRequest) (*ResourceOperationApplyResult, error) {
+	validation, err := a.ValidateOperation(ctx, instance, credential, req)
+	if err != nil {
+		return nil, err
+	}
+	if !validation.Supported {
+		return nil, fmt.Errorf("%s", validation.Message)
+	}
+	baseURL := managementBaseURL(instance, DefaultManagementPort(MQTypeRabbitMQ), instance.TLSEnabled)
+	client := httpClient(instance.TLSEnabled)
+	vhost := validation.Namespace
+	name := validation.ResourceName
+	params := validation.NormalizedParams
+	switch req.Action {
+	case OperationActionRabbitMQQueueUpsert:
+		body := map[string]any{
+			"durable":     operationBoolParam(params, true, "durable"),
+			"auto_delete": operationBoolParam(params, false, "autoDelete", "auto_delete"),
+			"arguments":   operationAnyMapParam(params, "arguments"),
+		}
+		target := baseURL + "/api/queues/" + escapePath(vhost) + "/" + escapePath(name)
+		if err := doJSONRequestWithBody(ctx, client, http.MethodPut, target, credential, body, nil); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeQueue,
+			Namespace:    vhost,
+			ResourceName: name,
+			Message:      "RabbitMQ Queue 创建/更新已提交",
+			Result:       map[string]any{"vhost": vhost, "queue": name, "body": body},
+		}, nil
+	case OperationActionRabbitMQExchangeUpsert:
+		body := map[string]any{
+			"type":        operationStringParam(params, "type"),
+			"durable":     operationBoolParam(params, true, "durable"),
+			"auto_delete": operationBoolParam(params, false, "autoDelete", "auto_delete"),
+			"internal":    operationBoolParam(params, false, "internal"),
+			"arguments":   operationAnyMapParam(params, "arguments"),
+		}
+		target := baseURL + "/api/exchanges/" + escapePath(vhost) + "/" + escapePath(name)
+		if err := doJSONRequestWithBody(ctx, client, http.MethodPut, target, credential, body, nil); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeExchange,
+			Namespace:    vhost,
+			ResourceName: name,
+			Message:      "RabbitMQ Exchange 创建/更新已提交",
+			Result:       map[string]any{"vhost": vhost, "exchange": name, "body": body},
+		}, nil
+	case OperationActionRabbitMQBindingUpsert:
+		source := operationStringParam(params, "source")
+		destinationType := normalizeRabbitDestinationType(operationStringParam(params, "destinationType", "destination_type"))
+		destinationSegment := "q"
+		if destinationType == ResourceTypeExchange {
+			destinationSegment = "e"
+		}
+		body := map[string]any{
+			"routing_key": operationStringParam(params, "routingKey", "routing_key"),
+			"arguments":   operationAnyMapParam(params, "arguments"),
+		}
+		target := baseURL + "/api/bindings/" + escapePath(vhost) + "/e/" + escapePath(source) + "/" + destinationSegment + "/" + escapePath(name)
+		if err := doJSONRequestWithBody(ctx, client, http.MethodPost, target, credential, body, nil); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeBinding,
+			Namespace:    vhost,
+			ResourceName: name,
+			Message:      "RabbitMQ Binding 创建/更新已提交",
+			Result:       map[string]any{"vhost": vhost, "source": source, "destinationType": destinationType, "destination": name, "body": body},
+		}, nil
+	case OperationActionRabbitMQQueuePurge:
+		target := baseURL + "/api/queues/" + escapePath(vhost) + "/" + escapePath(name) + "/contents"
+		if err := doJSONRequest(ctx, client, http.MethodDelete, target, credential, nil); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeQueue,
+			Namespace:    vhost,
+			ResourceName: name,
+			Message:      "RabbitMQ Queue 已清空",
+			Result:       map[string]any{"vhost": vhost, "queue": name},
+		}, nil
+	case OperationActionRabbitMQQueueDelete:
+		query := url.Values{}
+		query.Set("if-unused", fmt.Sprintf("%t", operationBoolParam(params, false, "ifUnused", "if_unused")))
+		query.Set("if-empty", fmt.Sprintf("%t", operationBoolParam(params, false, "ifEmpty", "if_empty")))
+		target := baseURL + "/api/queues/" + escapePath(vhost) + "/" + escapePath(name) + "?" + query.Encode()
+		if err := doJSONRequest(ctx, client, http.MethodDelete, target, credential, nil); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeQueue,
+			Namespace:    vhost,
+			ResourceName: name,
+			Message:      "RabbitMQ Queue 已删除",
+			Result:       map[string]any{"vhost": vhost, "queue": name, "ifUnused": query.Get("if-unused"), "ifEmpty": query.Get("if-empty")},
+		}, nil
+	case OperationActionRabbitMQExchangeDelete:
+		query := url.Values{}
+		query.Set("if-unused", fmt.Sprintf("%t", operationBoolParam(params, false, "ifUnused", "if_unused")))
+		target := baseURL + "/api/exchanges/" + escapePath(vhost) + "/" + escapePath(name) + "?" + query.Encode()
+		if err := doJSONRequest(ctx, client, http.MethodDelete, target, credential, nil); err != nil {
+			return nil, err
+		}
+		return &ResourceOperationApplyResult{
+			ResourceType: ResourceTypeExchange,
+			Namespace:    vhost,
+			ResourceName: name,
+			Message:      "RabbitMQ Exchange 已删除",
+			Result:       map[string]any{"vhost": vhost, "exchange": name, "ifUnused": query.Get("if-unused")},
+		}, nil
+	default:
+		return nil, adapterNotSupported(instance.MQType, "资源操作")
+	}
+}
+
+func (a *RabbitMQAdapter) validateQueueUpsert(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelLow)
+	vhost := firstNonEmpty(req.Namespace, operationStringParam(req.Params, "vhost"), "/")
+	name := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "queue", "name"))
+	if err := ensureOperationRequired(name, "Queue名称"); err != nil {
+		return nil, err
+	}
+	params := map[string]any{
+		"durable":    operationBoolParam(req.Params, true, "durable"),
+		"autoDelete": operationBoolParam(req.Params, false, "autoDelete", "auto_delete"),
+		"arguments":  operationAnyMapParam(req.Params, "arguments"),
+	}
+	req.ResourceType = ResourceTypeQueue
+	req.Namespace = vhost
+	req.ResourceName = name
+	validation.ResourceType = ResourceTypeQueue
+	validation.Namespace = vhost
+	validation.ResourceName = name
+	validation.Message = "将通过 RabbitMQ Management API 创建或更新 Queue"
+	validation.Impacts = []string{"目标 vhost: " + vhost, "Queue: " + name}
+	validation.Warnings = []string{"如果 Queue 已存在，RabbitMQ 会校验 durable/auto_delete/arguments 是否兼容"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func (a *RabbitMQAdapter) validateExchangeUpsert(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelLow)
+	vhost := firstNonEmpty(req.Namespace, operationStringParam(req.Params, "vhost"), "/")
+	name := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "exchange", "name"))
+	exchangeType := firstNonEmpty(operationStringParam(req.Params, "type"), "direct")
+	if err := ensureOperationRequired(name, "Exchange名称"); err != nil {
+		return nil, err
+	}
+	params := map[string]any{
+		"type":       exchangeType,
+		"durable":    operationBoolParam(req.Params, true, "durable"),
+		"autoDelete": operationBoolParam(req.Params, false, "autoDelete", "auto_delete"),
+		"internal":   operationBoolParam(req.Params, false, "internal"),
+		"arguments":  operationAnyMapParam(req.Params, "arguments"),
+	}
+	req.ResourceType = ResourceTypeExchange
+	req.Namespace = vhost
+	req.ResourceName = name
+	validation.ResourceType = ResourceTypeExchange
+	validation.Namespace = vhost
+	validation.ResourceName = name
+	validation.Message = "将通过 RabbitMQ Management API 创建或更新 Exchange"
+	validation.Impacts = []string{"目标 vhost: " + vhost, "Exchange: " + name, "类型: " + exchangeType}
+	validation.Warnings = []string{"如果 Exchange 已存在，RabbitMQ 会校验 type/durable/arguments 是否兼容"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func (a *RabbitMQAdapter) validateBindingUpsert(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelMedium)
+	vhost := firstNonEmpty(req.Namespace, operationStringParam(req.Params, "vhost"), "/")
+	source := operationStringParam(req.Params, "source")
+	destinationType := normalizeRabbitDestinationType(operationStringParam(req.Params, "destinationType", "destination_type"))
+	destination := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "destination", "name"))
+	if err := ensureOperationRequired(source, "源Exchange"); err != nil {
+		return nil, err
+	}
+	if err := ensureOperationRequired(destination, "目标资源"); err != nil {
+		return nil, err
+	}
+	params := map[string]any{
+		"source":          source,
+		"destinationType": destinationType,
+		"routingKey":      operationStringParam(req.Params, "routingKey", "routing_key"),
+		"arguments":       operationAnyMapParam(req.Params, "arguments"),
+	}
+	req.ResourceType = ResourceTypeBinding
+	req.Namespace = vhost
+	req.ResourceName = destination
+	validation.ResourceType = ResourceTypeBinding
+	validation.Namespace = vhost
+	validation.ResourceName = destination
+	validation.Message = "将通过 RabbitMQ Management API 创建 Binding"
+	validation.Impacts = []string{"源 Exchange: " + source, "目标 " + destinationType + ": " + destination, "RoutingKey: " + stringValue(params["routingKey"])}
+	validation.Warnings = []string{"Binding 会改变后续消息路由关系，请确认路由键和目标资源"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func (a *RabbitMQAdapter) validateQueuePurge(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelHigh)
+	vhost := firstNonEmpty(req.Namespace, operationStringParam(req.Params, "vhost"), "/")
+	name := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "queue", "name"))
+	if err := ensureOperationRequired(name, "Queue名称"); err != nil {
+		return nil, err
+	}
+	params := map[string]any{"vhost": vhost, "queue": name}
+	req.ResourceType = ResourceTypeQueue
+	req.Namespace = vhost
+	req.ResourceName = name
+	validation.RequiredPermission = PermissionHighRisk
+	validation.ResourceType = ResourceTypeQueue
+	validation.Namespace = vhost
+	validation.ResourceName = name
+	validation.Message = "将清空 RabbitMQ Queue 中所有 ready 消息"
+	validation.Impacts = []string{"目标 vhost: " + vhost, "Queue: " + name, "清空后未消费消息不可恢复"}
+	validation.Warnings = []string{"Purge 不会删除 Queue 本身，但会丢弃当前堆积消息，请确认消费者可接受"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func (a *RabbitMQAdapter) validateQueueDelete(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelHigh)
+	vhost := firstNonEmpty(req.Namespace, operationStringParam(req.Params, "vhost"), "/")
+	name := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "queue", "name"))
+	if err := ensureOperationRequired(name, "Queue名称"); err != nil {
+		return nil, err
+	}
+	params := map[string]any{
+		"vhost":    vhost,
+		"queue":    name,
+		"ifUnused": operationBoolParam(req.Params, false, "ifUnused", "if_unused"),
+		"ifEmpty":  operationBoolParam(req.Params, false, "ifEmpty", "if_empty"),
+	}
+	req.ResourceType = ResourceTypeQueue
+	req.Namespace = vhost
+	req.ResourceName = name
+	validation.RequiredPermission = PermissionHighRisk
+	validation.ResourceType = ResourceTypeQueue
+	validation.Namespace = vhost
+	validation.ResourceName = name
+	validation.Message = "将删除 RabbitMQ Queue"
+	validation.Impacts = []string{"目标 vhost: " + vhost, "Queue: " + name, "Queue 删除后绑定关系和未消费消息会丢失"}
+	validation.Warnings = []string{"删除 Queue 会影响生产者路由和消费者订阅，请先确认业务已停用或完成迁移"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func (a *RabbitMQAdapter) validateExchangeDelete(instance *MQInstance, req *ResourceOperationRequest) (*ResourceOperationValidationVO, error) {
+	validation := newOperationValidation(instance, req, RiskLevelHigh)
+	vhost := firstNonEmpty(req.Namespace, operationStringParam(req.Params, "vhost"), "/")
+	name := firstNonEmpty(req.ResourceName, operationStringParam(req.Params, "exchange", "name"))
+	if err := ensureOperationRequired(name, "Exchange名称"); err != nil {
+		return nil, err
+	}
+	params := map[string]any{
+		"vhost":    vhost,
+		"exchange": name,
+		"ifUnused": operationBoolParam(req.Params, false, "ifUnused", "if_unused"),
+	}
+	req.ResourceType = ResourceTypeExchange
+	req.Namespace = vhost
+	req.ResourceName = name
+	validation.RequiredPermission = PermissionHighRisk
+	validation.ResourceType = ResourceTypeExchange
+	validation.Namespace = vhost
+	validation.ResourceName = name
+	validation.Message = "将删除 RabbitMQ Exchange"
+	validation.Impacts = []string{"目标 vhost: " + vhost, "Exchange: " + name, "Exchange 删除后相关路由会失效"}
+	validation.Warnings = []string{"删除 Exchange 会影响后续消息路由，请确认没有生产者继续写入"}
+	setNormalizedParams(req, validation, params)
+	return validation, nil
+}
+
+func normalizeRabbitDestinationType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "exchange", "e":
+		return ResourceTypeExchange
+	default:
+		return ResourceTypeQueue
+	}
 }
 
 func rabbitNodeStatus(node map[string]any) string {

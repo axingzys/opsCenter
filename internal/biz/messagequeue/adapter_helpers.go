@@ -1,6 +1,7 @@
 package messagequeue
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -79,9 +80,24 @@ func httpClient(tlsEnabled bool) *http.Client {
 }
 
 func doJSONRequest(ctx context.Context, client *http.Client, method, target string, credential *ConnectionCredential, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, target, nil)
+	return doJSONRequestWithBody(ctx, client, method, target, credential, nil, out)
+}
+
+func doJSONRequestWithBody(ctx context.Context, client *http.Client, method, target string, credential *ConnectionCredential, body any, out any) error {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	applyHTTPAuth(req, credential)
 	resp, err := client.Do(req)
@@ -89,17 +105,17 @@ func doJSONRequest(ctx context.Context, client *http.Client, method, target stri
 		return err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("管理接口返回 %d: %s", resp.StatusCode, trimForError(string(body)))
+		return fmt.Errorf("管理接口返回 %d: %s", resp.StatusCode, trimForError(string(respBody)))
 	}
 	if out == nil {
 		return nil
 	}
-	if err := json.Unmarshal(body, out); err != nil {
+	if err := json.Unmarshal(respBody, out); err != nil {
 		return fmt.Errorf("解析管理接口响应失败: %w", err)
 	}
 	return nil

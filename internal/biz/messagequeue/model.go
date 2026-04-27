@@ -34,6 +34,7 @@ const (
 	ResourceTypeNamespace    = "namespace"
 	ResourceTypeVHost        = "vhost"
 	ResourceTypeExchange     = "exchange"
+	ResourceTypeBinding      = "binding"
 	ResourceTypeQueue        = "queue"
 	ResourceTypeTopic        = "topic"
 	ResourceTypeSubscription = "subscription"
@@ -45,9 +46,30 @@ const (
 	AuditActionPermissionSet  = "instance_permission_upsert"
 	AuditActionPermissionDel  = "instance_permission_delete"
 
+	OperationActionRabbitMQQueueUpsert     = "rabbitmq_queue_upsert"
+	OperationActionRabbitMQExchangeUpsert  = "rabbitmq_exchange_upsert"
+	OperationActionRabbitMQBindingUpsert   = "rabbitmq_binding_upsert"
+	OperationActionRabbitMQQueuePurge      = "rabbitmq_queue_purge"
+	OperationActionRabbitMQQueueDelete     = "rabbitmq_queue_delete"
+	OperationActionRabbitMQExchangeDelete  = "rabbitmq_exchange_delete"
+	OperationActionKafkaTopicCreate        = "kafka_topic_create"
+	OperationActionKafkaPartitionsExpand   = "kafka_partitions_expand"
+	OperationActionKafkaTopicConfigUpdate  = "kafka_topic_config_update"
+	OperationActionKafkaTopicDelete        = "kafka_topic_delete"
+	OperationActionPulsarRetentionUpdate   = "pulsar_namespace_retention_update"
+	OperationActionPulsarTTLUpdate         = "pulsar_namespace_ttl_update"
+	OperationActionPulsarTopicDelete       = "pulsar_topic_delete"
+	OperationActionPulsarSubscriptionSkip  = "pulsar_subscription_skip"
+	OperationActionPulsarSubscriptionReset = "pulsar_subscription_reset"
+
+	ConfigKeyMessageQueueHighRiskEnabled         = "messageQueueHighRiskEnabled"
+	ConfigKeyMessageQueueOperationReasonRequired = "messageQueueOperationReasonRequired"
+	ConfigKeyMessageQueueOperationMaxMetadataAge = "messageQueueOperationMaxMetadataAgeMinutes"
+
 	AuditStatusPending = "pending"
 	AuditStatusSuccess = "success"
 	AuditStatusFailed  = "failed"
+	AuditStatusPartial = "partial_success"
 
 	RiskLevelLow      = "low"
 	RiskLevelMedium   = "medium"
@@ -261,25 +283,36 @@ func (MQMetricSnapshot) TableName() string {
 
 type MQOperationAudit struct {
 	gorm.Model
-	InstanceID   uint       `gorm:"column:instance_id;index;comment:实例ID" json:"instanceId"`
-	InstanceName string     `gorm:"column:instance_name;type:varchar(100);comment:实例名称" json:"instanceName"`
-	MQType       string     `gorm:"column:mq_type;type:varchar(30);index;comment:MQ类型" json:"mqType"`
-	ResourceType string     `gorm:"column:resource_type;type:varchar(40);index;comment:资源类型" json:"resourceType"`
-	ResourceName string     `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
-	Namespace    string     `gorm:"type:varchar(255);index;comment:命名空间" json:"namespace"`
-	Action       string     `gorm:"type:varchar(80);index;comment:动作" json:"action"`
-	RiskLevel    string     `gorm:"column:risk_level;type:varchar(30);index;comment:风险等级" json:"riskLevel"`
-	Status       string     `gorm:"type:varchar(30);index;comment:状态" json:"status"`
-	RequestJSON  string     `gorm:"column:request_json;type:text;comment:请求JSON" json:"requestJson"`
-	ResultJSON   string     `gorm:"column:result_json;type:text;comment:结果JSON" json:"resultJson"`
-	Reason       string     `gorm:"type:varchar(500);comment:原因" json:"reason"`
-	OperatorID   uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
-	OperatorName string     `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
-	ClientIP     string     `gorm:"column:client_ip;type:varchar(80);comment:客户端IP" json:"clientIp"`
-	StartedAt    *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
-	FinishedAt   *time.Time `gorm:"column:finished_at;comment:完成时间" json:"finishedAt,omitempty"`
-	DurationMs   int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
-	Message      string     `gorm:"type:varchar(500);comment:消息" json:"message"`
+	InstanceID            uint       `gorm:"column:instance_id;index;comment:实例ID" json:"instanceId"`
+	InstanceName          string     `gorm:"column:instance_name;type:varchar(100);comment:实例名称" json:"instanceName"`
+	MQType                string     `gorm:"column:mq_type;type:varchar(30);index;comment:MQ类型" json:"mqType"`
+	ResourceType          string     `gorm:"column:resource_type;type:varchar(40);index;comment:资源类型" json:"resourceType"`
+	ResourceName          string     `gorm:"column:resource_name;type:varchar(512);index;comment:资源名称" json:"resourceName"`
+	Namespace             string     `gorm:"type:varchar(255);index;comment:命名空间" json:"namespace"`
+	Action                string     `gorm:"type:varchar(80);index;comment:动作" json:"action"`
+	RiskLevel             string     `gorm:"column:risk_level;type:varchar(30);index;comment:风险等级" json:"riskLevel"`
+	Status                string     `gorm:"type:varchar(30);index;comment:状态" json:"status"`
+	OperationID           string     `gorm:"column:operation_id;type:varchar(80);index;comment:操作ID" json:"operationId"`
+	IdempotencyKey        string     `gorm:"column:idempotency_key;type:varchar(120);index;comment:幂等键" json:"idempotencyKey"`
+	LockKey               string     `gorm:"column:lock_key;type:varchar(255);index;comment:资源锁键" json:"lockKey"`
+	ConfirmText           string     `gorm:"column:confirm_text;type:varchar(512);comment:确认文本" json:"confirmText"`
+	RequestJSON           string     `gorm:"column:request_json;type:text;comment:请求JSON" json:"requestJson"`
+	ResultJSON            string     `gorm:"column:result_json;type:text;comment:结果JSON" json:"resultJson"`
+	BeforeSnapshotJSON    string     `gorm:"column:before_snapshot_json;type:text;comment:执行前快照" json:"beforeSnapshotJson"`
+	AfterSnapshotJSON     string     `gorm:"column:after_snapshot_json;type:text;comment:执行后快照" json:"afterSnapshotJson"`
+	DiffJSON              string     `gorm:"column:diff_json;type:text;comment:配置差异" json:"diffJson"`
+	WarningsJSON          string     `gorm:"column:warnings_json;type:text;comment:风险提示" json:"warningsJson"`
+	ImpactSummaryJSON     string     `gorm:"column:impact_summary_json;type:text;comment:影响摘要" json:"impactSummaryJson"`
+	MetadataRefreshStatus string     `gorm:"column:metadata_refresh_status;type:varchar(30);comment:后置元数据刷新状态" json:"metadataRefreshStatus"`
+	MetadataRefreshError  string     `gorm:"column:metadata_refresh_error;type:varchar(500);comment:后置元数据刷新错误" json:"metadataRefreshError"`
+	Reason                string     `gorm:"type:varchar(500);comment:原因" json:"reason"`
+	OperatorID            uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
+	OperatorName          string     `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
+	ClientIP              string     `gorm:"column:client_ip;type:varchar(80);comment:客户端IP" json:"clientIp"`
+	StartedAt             *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	FinishedAt            *time.Time `gorm:"column:finished_at;comment:完成时间" json:"finishedAt,omitempty"`
+	DurationMs            int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	Message               string     `gorm:"type:varchar(500);comment:消息" json:"message"`
 }
 
 func (MQOperationAudit) TableName() string {
@@ -412,6 +445,18 @@ type MessageSampleRequest struct {
 	Key          string `json:"key" binding:"omitempty,max=255"`
 	Limit        int    `json:"limit" binding:"omitempty,min=1,max=10"`
 	MaxBytes     int    `json:"maxBytes" binding:"omitempty,min=1,max=262144"`
+}
+
+type ResourceOperationRequest struct {
+	Action         string         `json:"action" binding:"required,max=80"`
+	ResourceType   string         `json:"resourceType" binding:"omitempty,max=40"`
+	Namespace      string         `json:"namespace" binding:"omitempty,max=255"`
+	ResourceName   string         `json:"resourceName" binding:"omitempty,max=512"`
+	Reason         string         `json:"reason" binding:"omitempty,max=500"`
+	ConfirmText    string         `json:"confirmText" binding:"omitempty,max=512"`
+	Confirmed      bool           `json:"confirmed"`
+	IdempotencyKey string         `json:"idempotencyKey" binding:"omitempty,max=120"`
+	Params         map[string]any `json:"params"`
 }
 
 type SupportedTypeVO struct {
@@ -642,6 +687,68 @@ type MessageSampleVO struct {
 	Encoding    string            `json:"encoding"`
 }
 
+type HighRiskOperationConfig struct {
+	Enabled        bool
+	ReasonRequired bool
+}
+
+type OperationDiffItem struct {
+	Key    string `json:"key"`
+	Before any    `json:"before"`
+	After  any    `json:"after"`
+	Risk   string `json:"risk"`
+}
+
+type ResourceOperationValidationVO struct {
+	InstanceID          uint                `json:"instanceId"`
+	MQType              string              `json:"mqType"`
+	Action              string              `json:"action"`
+	ActionText          string              `json:"actionText"`
+	RiskLevel           string              `json:"riskLevel"`
+	RequiredPermission  uint                `json:"requiredPermission"`
+	ResourceType        string              `json:"resourceType"`
+	Namespace           string              `json:"namespace"`
+	ResourceName        string              `json:"resourceName"`
+	Supported           bool                `json:"supported"`
+	Warnings            []string            `json:"warnings"`
+	Impacts             []string            `json:"impacts"`
+	Before              map[string]any      `json:"before,omitempty"`
+	After               map[string]any      `json:"after,omitempty"`
+	Diff                []OperationDiffItem `json:"diff,omitempty"`
+	NormalizedParams    map[string]any      `json:"normalizedParams"`
+	LockKey             string              `json:"lockKey,omitempty"`
+	MetadataStale       bool                `json:"metadataStale"`
+	MetadataStaleReason string              `json:"metadataStaleReason,omitempty"`
+	Message             string              `json:"message"`
+	RequiresConfirm     bool                `json:"requiresConfirm"`
+	RequiresHighRiskAck bool                `json:"requiresHighRiskAck"`
+}
+
+type ResourceOperationApplyResult struct {
+	ResourceType string         `json:"resourceType"`
+	Namespace    string         `json:"namespace"`
+	ResourceName string         `json:"resourceName"`
+	Message      string         `json:"message"`
+	Result       map[string]any `json:"result"`
+}
+
+type ResourceOperationResultVO struct {
+	AuditID      uint           `json:"auditId"`
+	InstanceID   uint           `json:"instanceId"`
+	MQType       string         `json:"mqType"`
+	Action       string         `json:"action"`
+	ActionText   string         `json:"actionText"`
+	RiskLevel    string         `json:"riskLevel"`
+	ResourceType string         `json:"resourceType"`
+	Namespace    string         `json:"namespace"`
+	ResourceName string         `json:"resourceName"`
+	Status       string         `json:"status"`
+	Message      string         `json:"message"`
+	DurationMs   int64          `json:"durationMs"`
+	Result       map[string]any `json:"result"`
+	ExecutedAt   string         `json:"executedAt"`
+}
+
 func NormalizeType(mqType string) string {
 	return strings.ToLower(strings.TrimSpace(mqType))
 }
@@ -737,6 +844,8 @@ func ResourceTypeText(resourceType string) string {
 		return "VHost"
 	case ResourceTypeExchange:
 		return "Exchange"
+	case ResourceTypeBinding:
+		return "Binding"
 	case ResourceTypeQueue:
 		return "Queue"
 	case ResourceTypeTopic:

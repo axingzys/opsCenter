@@ -90,15 +90,21 @@ const (
 	ConfigKeyDatabaseMaxAffectedRows            = "database_max_affected_rows"
 	ConfigKeyDatabaseDefaultBackupRetentionDays = "database_default_backup_retention_days"
 	ConfigKeyDatabaseBackupStoragePath          = "database_backup_storage_path"
+
+	// 消息队列配置
+	ConfigKeyMessageQueueHighRiskEnabled         = "messageQueueHighRiskEnabled"
+	ConfigKeyMessageQueueOperationReasonRequired = "messageQueueOperationReasonRequired"
+	ConfigKeyMessageQueueOperationMaxMetadataAge = "messageQueueOperationMaxMetadataAgeMinutes"
 )
 
 // ConfigGroup 配置分组常量
 const (
-	ConfigGroupBasic      = "basic"
-	ConfigGroupSecurity   = "security"
-	ConfigGroupLDAP       = "ldap"
-	ConfigGroupMonitoring = "monitoring"
-	ConfigGroupDatabase   = "database"
+	ConfigGroupBasic        = "basic"
+	ConfigGroupSecurity     = "security"
+	ConfigGroupLDAP         = "ldap"
+	ConfigGroupMonitoring   = "monitoring"
+	ConfigGroupDatabase     = "database"
+	ConfigGroupMessageQueue = "messagequeue"
 )
 
 // DefaultConfigs 默认配置
@@ -242,6 +248,27 @@ var DefaultConfigs = map[string]SysConfig{
 		Type:   "string",
 		Group:  ConfigGroupDatabase,
 		Remark: "数据库备份默认本地存储目录",
+	},
+	ConfigKeyMessageQueueHighRiskEnabled: {
+		Key:    ConfigKeyMessageQueueHighRiskEnabled,
+		Value:  "false",
+		Type:   "bool",
+		Group:  ConfigGroupMessageQueue,
+		Remark: "MQ高危操作总开关",
+	},
+	ConfigKeyMessageQueueOperationReasonRequired: {
+		Key:    ConfigKeyMessageQueueOperationReasonRequired,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupMessageQueue,
+		Remark: "MQ高危操作是否要求填写原因",
+	},
+	ConfigKeyMessageQueueOperationMaxMetadataAge: {
+		Key:    ConfigKeyMessageQueueOperationMaxMetadataAge,
+		Value:  "30",
+		Type:   "int",
+		Group:  ConfigGroupMessageQueue,
+		Remark: "MQ资源操作允许的最大元数据年龄(分钟)",
 	},
 }
 

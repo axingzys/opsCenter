@@ -20,6 +20,215 @@
    - Pulsar：Admin API 连接测试、tenant/namespace/topic/subscription 元数据同步。
 6. 新增环境变量控制的集成测试：`OPSHUB_MQ_INTEGRATION=1 go test ./internal/biz/messagequeue -run TestAdaptersIntegration -count=1 -v`。
 
+## 二期落地状态
+截至 2026-04-27，已落地二期“受控资源管理”能力。本期只开放低/中风险资源变更，不开放删除、清空、重置位点、跳过订阅等高风险操作。
+
+1. 新增统一资源操作接口：
+   - `POST /api/v1/message-queues/instances/:id/operations/validate`：校验动作、资源、参数、风险等级和影响范围。
+   - `POST /api/v1/message-queues/instances/:id/operations`：确认后执行资源操作，并写入 `mq_operation_audits`。
+2. 新增统一 Adapter 扩展接口：`ValidateOperation`、`ApplyOperation`，执行前复用实例配置、凭据解析、启用状态检查、菜单权限和对象级 `PermissionResourceManage`。
+3. RabbitMQ 已支持：
+   - `rabbitmq_queue_upsert`：创建或更新 queue。
+   - `rabbitmq_exchange_upsert`：创建或更新 exchange。
+   - `rabbitmq_binding_upsert`：创建 binding。
+4. Kafka 已支持：
+   - `kafka_topic_create`：创建 topic。
+   - `kafka_partitions_expand`：扩展 topic 分区。
+   - `kafka_topic_config_update`：通过 `IncrementalAlterConfigs` 更新 topic 配置项。
+5. Pulsar 已支持：
+   - `pulsar_namespace_retention_update`：更新 namespace retention。
+   - `pulsar_namespace_ttl_update`：更新 namespace message TTL。
+6. RocketMQ、ActiveMQ 二期资源变更暂不做不可验证的占位执行，当前返回明确“不支持/后续批次接入”。
+7. 前端 `资源管理` Tab 新增“资源操作”入口，按实例类型提供操作模板，支持先校验影响再确认执行，并刷新操作审计。
+
+## 三期落地状态
+截至 2026-04-27，已开始落地三期“高风险操作”能力，默认仍保持关闭，需要配置、菜单权限、对象级高危权限、二次确认和操作原因同时满足后才允许执行。
+
+1. 新增系统配置：
+   - `messageQueueHighRiskEnabled`：MQ 高危操作总开关，默认 `false`。
+   - `messageQueueOperationReasonRequired`：高危操作是否必须填写原因，默认 `true`。
+2. 新增高危执行控制：
+   - 低/中风险资源操作沿用 `messagequeue:resource:manage` 和对象级 `RESOURCE_MANAGE`。
+   - 高风险/严重风险操作额外要求 `messagequeue:operation:high-risk` 菜单权限和对象级 `HIGH_RISK`。
+   - 高危操作必须传入 `confirmed=true`，并在原因必填配置开启时填写 `reason`。
+3. RabbitMQ 已支持：
+   - `rabbitmq_queue_purge`：清空 queue。
+   - `rabbitmq_queue_delete`：删除 queue。
+   - `rabbitmq_exchange_delete`：删除 exchange。
+4. Kafka 已支持：
+   - `kafka_topic_delete`：删除 topic。
+5. Pulsar 已支持：
+   - `pulsar_topic_delete`：删除 topic。
+   - `pulsar_subscription_skip`：跳过 subscription 全部积压消息。
+   - `pulsar_subscription_reset`：按时间戳重置 subscription cursor。
+6. 高危操作执行成功后会自动触发元数据刷新，刷新状态写入本次操作结果；刷新失败不会回滚已提交的 MQ 操作，但会写入操作审计消息。
+7. 前端 `资源操作` 弹窗增加高危模板，权限不足时禁用高危选项；高危执行前会展示风险、影响范围、警告和二次确认。
+8. 集成测试已覆盖 RabbitMQ purge/delete、Kafka delete topic、Pulsar delete topic。
+
+## 生产化优化补充清单
+以下内容为结合当前一二三期落地状态、现有代码结构和后续四期目标整理出的优化项。除上文“落地状态”明确说明的能力外，本节均表示后续建议，不代表当前已全部实现。
+
+### 二期补强：受控资源管理生产化
+二期已经具备低/中风险资源操作主流程，后续重点不应继续扩大高危操作范围，而应把“能执行”补强为“可预览、可约束、可审计、可复盘”。
+
+1. 将 `operations/validate` 升级为 operation plan/diff。
+   - 返回 `before`、`after`、`diff`、`warnings`、`impact`、`risk_level`。
+   - 前端在执行前展示操作前配置、操作后配置、变更项、影响范围、当前 backlog/lag、消费者数量和最近同步时间。
+   - 执行成功后在审计中保存本次 plan 或 diff 摘要。
+2. 引入操作幂等和资源锁。
+   - 请求建议携带 `operation_id` 或 `idempotency_key`。
+   - 锁粒度建议为 `instance_id + resource_type + namespace + resource_name + action`。
+   - 防止重复点击、前端超时重试、多人同时修改同一 topic/queue。
+3. 对 retention、TTL、max-length 等配置按变更方向重新评估风险。
+   - 增大 retention/TTL 通常可视为中风险。
+   - 降低 retention/TTL/max-length 可能导致消息提前清理或丢弃，应升级为高风险或在二期直接拒绝。
+   - Kafka `cleanup.policy`、`min.insync.replicas`、`max.message.bytes` 等也应按值变化给出风险提示。
+4. Kafka topic config update 增加白名单、只读名单和高风险名单。
+   - 二期建议只开放 `retention.ms`、`retention.bytes`、`cleanup.policy`、`compression.type`、`max.message.bytes`、`min.insync.replicas`、`segment.ms` 等经过校验的配置。
+   - `unclean.leader.election.enable`、关键时间戳策略、可能破坏数据保留语义的配置默认不开放。
+5. RabbitMQ upsert 拆分为创建和安全更新语义。
+   - 已存在 queue 的 `durable`、`exclusive`、`auto_delete`、`x-queue-type` 等不可变或高风险字段不应被普通 upsert 隐式修改。
+   - 已存在 exchange 的 `type`、`durable`、`auto_delete`、`internal` 等字段不一致时，应提示需要删除重建，转入高风险流程。
+   - binding 已存在且参数一致时返回 `already_exists`，不作为失败。
+6. 增加资源模板和标准创建向导。
+   - 建议新增 `mq_resource_templates`，按 MQ 类型、资源类型、环境维护默认配置。
+   - Kafka topic 创建模板可覆盖普通业务事件、订单链路、日志采集、compact 状态表、测试环境等场景。
+   - 生产环境创建资源应要求负责人、业务系统、环境、标签和模板来源。
+7. 补充平台侧治理字段维护。
+   - 负责人、业务系统、环境、重要等级、SLA、数据敏感等级、告警联系人、成本中心、标签和备注属于低风险平台字段。
+   - 这些字段不应被同步任务覆盖，后续四期巡检、告警和容量治理会依赖这些字段。
+8. Adapter 能力矩阵改为实例级动态能力。
+   - 同一种 MQ 在不同版本、不同权限、不同插件开启状态下能力不同。
+   - 连接测试或同步后建议生成 `capabilities_json`，前端按实例真实能力展示按钮。
+   - 例如 Kafka 账号没有 delete 权限、RabbitMQ 未开启 Management Plugin、Pulsar token 无 reset 权限时，应明确返回禁用原因。
+9. 操作后置同步支持 `partial_success`。
+   - MQ 操作成功但元数据刷新失败时，不应把整体显示为完全失败。
+   - 审计应区分 MQ 操作结果和后置同步结果。
+
+### 三期收口：高危操作安全闭环
+三期已经具备高危操作开关、权限、原因、二次确认和审计。上线生产前建议补齐以下安全闭环。
+
+1. 高危操作前置快照。
+   - RabbitMQ 删除 queue 前保存 queue 参数、durable、arguments、消息数、consumer 数、binding 信息。
+   - RabbitMQ purge 前保存 ready、unacked、message、consumer 状态。
+   - Kafka 删除 topic 前保存分区数、副本数、topic config、consumer group lag。
+   - Pulsar reset/skip/delete 前保存 backlog、cursor、subscription、partition 信息。
+   - 建议审计增加 `before_snapshot_json`、`after_snapshot_json`、`impact_summary_json`。
+2. 资源名输入确认。
+   - 高危操作除 `confirmed=true` 外，前端要求手动输入资源名。
+   - 后端校验 `confirm_text == resource_name`，防止误点或误选。
+3. 审批或双人复核预留。
+   - 生产环境高危操作建议从 `validate -> execute` 演进为 `validate -> create pending operation -> approve -> execute`。
+   - 审批人不能是申请人。
+   - backlog、consumer group 数、分区数或环境达到阈值时强制审批。
+4. 高危维护窗口。
+   - 生产环境高危操作可限制在维护窗口内执行。
+   - 紧急场景允许管理员 `emergency_override`，但必须填写原因并加强审计。
+5. Kafka reset consumer group offset 作为三期缺口补齐。
+   - 建议优先支持 `timestamp` 和 `explicit` 两种模式。
+   - `earliest`、`latest`、`shift` 可在风险提示成熟后开放。
+   - validate 阶段必须展示每个 partition 的当前 offset、目标 offset、end offset、lag 和变更差值。
+6. RabbitMQ exchange delete 增加 binding 检查。
+   - 存在 binding 时风险自动提升。
+   - 默认拒绝删除，除非显式传入 `force=true` 并完成高危确认。
+7. Pulsar subscription reset/skip 增加影响提示。
+   - validate 阶段返回当前 backlog、cursor、目标时间、预计跳过数量、connected consumer 数和 active consumer 状态。
+   - 生产环境如存在在线 consumer，可要求先停消费者或走审批。
+
+### 四期前置：指标、同步和治理底座
+四期告警、巡检、DLQ 治理和容量趋势依赖稳定的数据底座，建议在三期收尾时提前补齐。
+
+1. 定时指标快照。
+   - 复用 `mq_metric_snapshots`，按 1 分钟或 5 分钟采集实例健康、broker 在线数、资源 backlog/lag、生产/消费速率。
+   - 没有稳定快照数据前，不建议直接做复杂容量预测。
+2. 健康状态算法明确化。
+   - `unknown`：从未同步、从未测试或指标超过阈值未更新。
+   - `healthy`：连接正常、broker 正常、backlog 未超过阈值。
+   - `warning`：同步过期、部分 broker 异常、backlog 增长、消费者为 0。
+   - `critical`：连接失败、全部 broker 异常、backlog 严重超阈值或消费完全停滞。
+   - 阈值应支持实例级或资源级覆盖，如 warning/critical lag、backlog、stale metric minutes。
+3. 先做异常标签，再做告警。
+   - 页面先标记无消费者、消费停滞、堆积增长、单分区热点、同步过期、Broker 离线、DLQ 增长、Retry Topic 增长、消费者频繁上下线。
+   - 四期告警规则可直接复用这些诊断标签。
+4. 元数据同步异步化。
+   - 大集群同步建议改为 `POST sync -> job_id`，再通过 `GET sync-jobs/:id` 查询进度。
+   - 状态建议支持 `pending`、`running`、`success`、`failed`、`partial_success`、`timeout`、`cancelled`。
+5. 同步失败不覆盖旧数据。
+   - 同步任务应支持分项结果：broker、resource、consumer、partition、metric。
+   - 单项失败时整体可为 `partial_success`。
+   - 未扫到的资源先标记 `is_stale`、`stale_since`、`last_seen_at`、`sync_generation`，连续多次未出现后再转为 inactive/deleted。
+6. 巡检报告 MVP。
+   - 手动触发实例巡检，检查连接、broker 在线、无消费者、backlog 超阈值、长期未消费、DLQ/retry 增长、同步过期、高危失败记录、未绑定负责人、未配置阈值等。
+7. DLQ 和 retry 识别。
+   - 资源层先统一标记 `is_dlq`、`is_retry`、`related_resource_name`。
+   - 优先展示数量、backlog、增长趋势、关联原始资源、消费者状态、负责人和业务系统。
+   - 消息重放属于更高风险工作流，不建议在四期前提前开放。
+
+### 消息数据安全补强
+消息查看和导出比普通元数据查询风险更高，建议尽快把脱敏和导出限制从“预留”补成真实能力。
+
+1. 统一脱敏规则。
+   - 系统配置建议支持 JSONPath 和正则两类规则。
+   - 默认脱敏字段包括 `password`、`passwd`、`secret`、`token`、`access_token`、`refresh_token`、`authorization`、`phone`、`email`、`id_card`、`bank_card`。
+   - 查看原文需要更高权限，并单独写审计。
+2. 消息导出默认关闭。
+   - 导出需要系统配置开启、对象级 `MESSAGE_EXPORT`、条数限制、总大小限制、强制脱敏和审计。
+   - 审计只保存导出条件、条数、大小、hash 和摘要，不保存完整 payload。
+3. 采样结果不长期保存完整 payload。
+   - 如需记录，只保存 `payload_hash`、`payload_size`、`is_truncated`、`encoding`、`sample_count`、`filter_json`。
+   - 避免 OpsHub 自身变成业务敏感数据存储点。
+
+### 大集群稳定性和索引检查
+RabbitMQ/Kafka/Pulsar 大集群场景下，资源数量和审计数量会快速增长，以下索引和查询约束应作为四期前的稳定性检查项。
+
+1. 重点索引建议：
+   - `mq_resources(instance_id, resource_type, namespace, name)`
+   - `mq_resources(instance_id, backlog)`
+   - `mq_resources(instance_id, last_sync_at)`
+   - `mq_consumer_groups(instance_id, group_name)`
+   - `mq_consumer_groups(instance_id, resource_name)`
+   - `mq_consumer_groups(instance_id, lag)`
+   - `mq_partitions(instance_id, resource_id)`
+   - `mq_partitions(instance_id, lag)`
+   - `mq_operation_audits(instance_id, action, risk_level, status, started_at)`
+   - `mq_message_audits(instance_id, action, created_at)`
+   - `mq_metric_snapshots(instance_id, collected_at)`
+2. MySQL 8 下 `lag` 属于易触发语法问题的字段名，查询、聚合、排序中应使用反引号或统一改名为非保留语义字段。
+3. 列表接口必须服务端分页，禁止前端一次性拉取大规模 topic、partition、consumer group 或审计记录。
+
+### 建议优先级
+P0：三期生产可用前优先补齐。
+
+1. 高危操作 before/after/impact 快照。
+2. 资源名输入确认。
+3. 幂等 key 和资源锁。
+4. Kafka reset offset 或明确延期。
+5. 消息采样脱敏规则。
+6. 最近同步时间校验。
+7. Kafka 配置白名单和 retention/TTL 风险重分类。
+8. 大集群分页、索引和 `lag` 字段查询检查。
+
+P1：三期收尾和四期前置。
+
+1. 审批流或审批接口预留。
+2. 高危维护窗口。
+3. 动态 capabilities/action schema。
+4. 同步任务异步化和 partial success。
+5. 定时 metric snapshots。
+6. 健康状态算法和异常标签。
+7. DLQ/retry 识别。
+8. 资源模板和平台侧治理字段。
+
+P2：四期治理增强。
+
+1. 巡检报告 MVP。
+2. 告警规则、静默和维护窗口。
+3. 容量趋势和容量预测。
+4. 死信消息分析。
+5. 消息重放审批工作流。
+6. RocketMQ、ActiveMQ 更完整资源变更能力。
+7. 审计导出和合规报表。
+
 ## 背景
 当前 OpsHub 已具备主机资产、凭据、资产分组、数据库管理、Kubernetes 管理、监控告警、审计和插件体系。消息队列在实际运维中通常承载核心业务链路，问题集中在以下方面：
 
@@ -96,11 +305,11 @@
 ### 类型能力矩阵
 | 类型 | 连接测试 | 元数据同步 | 消费诊断 | 消息采样 | 资源管理 | 高风险操作 | 一期建议 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| RabbitMQ | 支持 | 支持 vhost、exchange、queue、binding、consumer | 支持 ready、unacked、consumer | 谨慎支持 queue peek 或采样 | 二期开放 | purge、delete queue、delete exchange | 一期主力 |
-| Kafka | 支持 | 支持 broker、topic、partition、config | 支持 consumer group lag | 通过独立 reader 采样，不提交业务 offset | 二期开放 topic 配置 | delete topic、reset offset | 一期主力 |
-| RocketMQ | 支持 | 支持 cluster、broker、topic、consumer group | 支持 offset、lag、retry、DLQ 视图 | 视客户端能力分期 | 二期开放 topic/group | delete topic、reset offset | 一期只读优先 |
-| ActiveMQ | 支持 | 支持 queue、topic、consumer、connection | 支持 pending、enqueue、dequeue | 谨慎支持 browse | 二期开放 destination | purge、delete destination | 一期只读优先 |
-| Pulsar | 支持 | 支持 tenant、namespace、topic、subscription | 支持 backlog、cursor、rate | 通过 reader 采样 | 二期开放 topic/namespace | skip、reset subscription、delete topic | 一期主力 |
+| RabbitMQ | 支持 | 支持 vhost、exchange、queue、binding、consumer | 支持 ready、unacked、consumer | 谨慎支持 queue peek 或采样 | 已支持 queue/exchange/binding 创建或更新 | purge、delete queue、delete exchange | 二期主力 |
+| Kafka | 支持 | 支持 broker、topic、partition、config | 支持 consumer group lag | 通过独立 reader 采样，不提交业务 offset | 已支持 topic 创建、分区扩容、topic 配置更新 | delete topic、reset offset | 二期主力 |
+| RocketMQ | 支持 | 支持 cluster、broker、topic、consumer group | 支持 offset、lag、retry、DLQ 视图 | 视客户端能力分期 | 后续批次开放 topic/group | delete topic、reset offset | 一期只读优先 |
+| ActiveMQ | 支持 | 支持 queue、topic、consumer、connection | 支持 pending、enqueue、dequeue | 谨慎支持 browse | 后续批次开放 destination | purge、delete destination | 一期只读优先 |
+| Pulsar | 支持 | 支持 tenant、namespace、topic、subscription | 支持 backlog、cursor、rate | 通过 reader 采样 | 已支持 namespace retention/TTL 更新 | skip、reset subscription、delete topic | 二期基础 |
 
 ## 统一概念模型
 不同 MQ 产品术语差异较大，后端建议使用统一模型对齐。
@@ -733,6 +942,25 @@ type ConnectionCredential struct {
 19. `duration_ms`
 20. `message`
 
+后续增强字段建议：
+
+1. `operation_id`：一次操作的全局唯一 ID。
+2. `operation_plan_id`：validate/plan 阶段生成的计划 ID。
+3. `idempotency_key`：客户端或服务端生成的幂等键。
+4. `lock_key`：资源操作锁键。
+5. `confirm_text`：高危操作手动输入的资源名确认文本。
+6. `before_snapshot_json`：执行前资源状态快照。
+7. `after_snapshot_json`：执行后资源状态快照。
+8. `diff_json`：配置变更 diff。
+9. `warnings_json`：validate 阶段风险提示。
+10. `impact_summary_json`：影响范围摘要。
+11. `metadata_refresh_status`：后置元数据刷新状态。
+12. `metadata_refresh_error`：后置元数据刷新错误。
+13. `approval_status`：审批状态，预留。
+14. `approved_by`：审批人，预留。
+15. `approved_at`：审批时间，预留。
+16. `emergency_override`：是否紧急绕过维护窗口或审批。
+
 ### `mq_message_audits`
 用途：记录消息查看、导出、发布和重放。
 
@@ -820,6 +1048,7 @@ type ConnectionCredential struct {
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/v1/message-queues/instances/:id/sync-metadata` | 同步元数据 |
+| `GET` | `/api/v1/message-queues/sync-jobs/:jobId` | 查询异步同步任务，后续增强 |
 | `GET` | `/api/v1/message-queues/instances/:id/brokers` | broker 列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources` | 资源列表 |
 | `GET` | `/api/v1/message-queues/instances/:id/resources/:resourceId` | 资源详情 |
@@ -842,7 +1071,10 @@ type ConnectionCredential struct {
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/v1/message-queues/instances/:id/operations/validate` | 操作风险校验 |
+| `GET` | `/api/v1/message-queues/instances/:id/operations/actions` | 获取实例真实可用操作和表单 schema，后续增强 |
+| `POST` | `/api/v1/message-queues/instances/:id/operations/plan` | 生成操作 plan/diff，后续增强 |
 | `POST` | `/api/v1/message-queues/instances/:id/operations` | 执行资源操作 |
+| `POST` | `/api/v1/message-queues/operations/:operationId/approve` | 审批待执行高危操作，后续增强 |
 | `GET` | `/api/v1/message-queues/operation-audits` | 操作审计列表 |
 | `GET` | `/api/v1/message-queues/operation-audits/export` | 导出操作审计 |
 | `GET` | `/api/v1/message-queues/message-audits` | 消息审计列表 |
@@ -863,12 +1095,15 @@ type ConnectionCredential struct {
 5. 检查实例是否启用。
 6. 根据 `action` 判断风险等级。
 7. 校验系统配置是否允许该类操作。
-8. 高风险操作要求原因和二次确认。
-9. 调用 Adapter `ValidateOperation` 获取影响范围。
-10. 写入 `mq_operation_audits`，状态为 `pending`。
-11. 调用 Adapter `ApplyOperation`。
-12. 更新审计状态、结果、耗时和错误信息。
-13. 必要时触发元数据同步。
+8. 校验元数据新鲜度，生产环境可要求先同步再操作。
+9. 高风险操作要求原因、二次确认和资源名输入确认。
+10. 调用 Adapter `ValidateOperation` 或 plan 接口获取影响范围、风险提示和配置 diff。
+11. 获取幂等记录和资源锁，避免重复提交或并发修改同一资源。
+12. 写入 `mq_operation_audits`，状态为 `pending`。
+13. 如命中审批规则，进入待审批状态，审批通过后再执行。
+14. 调用 Adapter `ApplyOperation`。
+15. 更新审计状态、结果、耗时、错误信息和 before/after 快照。
+16. 必要时触发元数据同步，MQ 操作成功但同步失败时记录为 `partial_success`。
 
 ### 消息采样流程
 1. 校验登录态和权限。
@@ -876,9 +1111,10 @@ type ConnectionCredential struct {
 3. 校验采样条数和 payload 大小限制。
 4. 获取实例与凭据。
 5. 调用 Adapter 采样。
-6. 对 payload 做大小截断、编码识别和脱敏预留。
-7. 写入 `mq_message_audits`。
-8. 返回样本数据和截断标记。
+6. 对 payload 做大小截断、编码识别、二进制摘要和敏感字段脱敏。
+7. 如用户申请查看原文，额外校验权限并单独写审计。
+8. 写入 `mq_message_audits`，审计中只保存条件、条数、大小、hash 和摘要，不保存完整 payload。
+9. 返回样本数据、脱敏状态和截断标记。
 
 ## 前端设计
 ### 页面结构
@@ -995,6 +1231,8 @@ type ConnectionCredential struct {
 ## 系统配置建议
 建议在系统配置中增加消息队列管理配置：
 
+基础配置：
+
 1. `messageQueueHighRiskEnabled`：是否允许高风险 MQ 操作，默认 false。
 2. `messageQueueOperationReasonRequired`：高风险操作是否必须填写原因，默认 true。
 3. `messageQueueMessageSampleEnabled`：是否允许消息采样，默认 true。
@@ -1003,6 +1241,21 @@ type ConnectionCredential struct {
 6. `messageQueueAuditRetentionDays`：MQ 审计保留天数，默认 180。
 7. `messageQueueMetricRetentionDays`：指标快照保留天数，默认 30。
 8. `messageQueueSyncTimeoutSeconds`：同步超时，默认 60。
+
+后续增强配置：
+
+1. `messageQueueOperationMaxMetadataAgeMinutes`：资源变更允许的最大元数据年龄，默认 30。
+2. `messageQueueHighRiskAllowedTimeRanges`：生产高危操作维护窗口，例如 `[{"start":"00:00","end":"06:00"}]`。
+3. `messageQueueSensitiveRules`：消息采样脱敏规则，支持 JSONPath 和正则。
+4. `messageQueueMessageExportEnabled`：是否允许消息导出，默认 false。
+5. `messageQueueMaxExportMessages`：单次最大导出条数，默认 100。
+6. `messageQueueMaxExportBytes`：单次最大导出总字节数，默认 10485760。
+7. `messageQueueMetricCollectIntervalSeconds`：定时指标采集间隔，默认 300。
+8. `messageQueueKafkaConfigUpdateAllowList`：Kafka topic 配置更新白名单。
+9. `messageQueueKafkaConfigHighRiskKeys`：Kafka topic 配置高风险键列表。
+10. `messageQueueKafkaConfigReadonlyKeys`：Kafka topic 配置只读键列表。
+11. `messageQueueResourceLockTimeoutSeconds`：资源操作锁超时时间，默认 300。
+12. `messageQueueRequireApprovalForProdHighRisk`：生产环境高危操作是否强制审批，默认 true。
 
 ## 分期计划
 ### 一期：只读纳管和消费诊断

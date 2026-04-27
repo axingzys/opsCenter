@@ -144,6 +144,10 @@
             <el-option label="Tenant" value="tenant" />
           </el-select>
           <el-checkbox v-model="resourceHasBacklog" @change="loadResources">仅看堆积</el-checkbox>
+          <el-button type="primary" :disabled="!canOperateSelectedInstance" @click="openOperationDialog()">
+            <el-icon style="margin-right: 6px;"><Plus /></el-icon>
+            资源操作
+          </el-button>
         </div>
 
         <div class="metric-grid" v-if="overview">
@@ -240,7 +244,7 @@
           <el-form :model="sampleForm" label-width="120px" class="sampler-form">
             <el-form-item label="实例">
               <el-select v-model="sampleInstanceId" placeholder="选择实例" filterable>
-                <el-option v-for="item in messageReadableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+                <el-option v-for="item in sampleReadableInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
               </el-select>
             </el-form-item>
             <el-form-item label="资源类型">
@@ -262,7 +266,7 @@
               <el-input-number v-model="sampleForm.limit" :min="1" :max="10" />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" :loading="sampleLoading" :disabled="!uiPermissions.messageRead || !sampleInstanceId || !sampleForm.resourceName" @click="handleSampleMessages">
+              <el-button type="primary" :loading="sampleLoading" :disabled="!uiPermissions.messageRead || !sampleInstanceId || !sampleForm.resourceName || sampleReadableInstances.length === 0" @click="handleSampleMessages">
                 <el-icon style="margin-right: 6px;"><View /></el-icon>
                 采样
               </el-button>
@@ -390,6 +394,64 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="operationDialogVisible" title="MQ资源操作" width="760px">
+      <el-form :model="operationForm" label-width="120px">
+        <el-form-item label="实例">
+          <el-select v-model="operationForm.instanceId" filterable placeholder="选择实例" @change="handleOperationInstanceChange">
+            <el-option v-for="item in resourceManageInstances" :key="item.id" :label="`${item.name} (${item.mqTypeText || item.mqType})`" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="操作">
+          <el-select v-model="operationForm.action" placeholder="选择操作" @change="applyOperationTemplate">
+            <el-option v-for="item in operationOptions" :key="item.value" :label="item.displayLabel" :value="item.value" :disabled="item.disabled" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="资源名称">
+          <el-input v-model="operationForm.resourceName" placeholder="Topic、Queue、Exchange 或 Namespace" />
+        </el-form-item>
+        <el-form-item label="命名空间">
+          <el-input v-model="operationForm.namespace" placeholder="RabbitMQ vhost 或 Pulsar tenant/namespace，可选" />
+        </el-form-item>
+        <el-form-item label="操作原因">
+          <el-input v-model="operationForm.reason" type="textarea" :rows="2" placeholder="记录到操作审计，可选" />
+        </el-form-item>
+        <el-form-item label="参数JSON">
+          <el-input v-model="operationForm.paramsText" type="textarea" :rows="8" class="mono-textarea" />
+        </el-form-item>
+      </el-form>
+
+      <div v-if="operationValidation" class="operation-validation">
+        <div class="validation-header">
+          <el-tag :type="operationValidation.supported ? 'success' : 'danger'">{{ operationValidation.supported ? '支持执行' : '暂不支持' }}</el-tag>
+          <el-tag :type="riskTag(operationValidation.riskLevel)">{{ riskText(operationValidation.riskLevel) }}</el-tag>
+          <el-tag v-if="operationValidation.metadataStale" type="warning">元数据过期</el-tag>
+          <span>{{ operationValidation.message }}</span>
+        </div>
+        <div v-if="operationValidation.impacts?.length" class="validation-list">
+          <span v-for="item in operationValidation.impacts" :key="item">{{ item }}</span>
+        </div>
+        <el-table v-if="operationValidation.diff?.length" :data="operationValidation.diff" size="small" class="operation-diff-table">
+          <el-table-column prop="key" label="变更项" min-width="160" />
+          <el-table-column label="当前值" min-width="180">
+            <template #default="{ row }">{{ formatDiffValue(row.before) }}</template>
+          </el-table-column>
+          <el-table-column label="目标值" min-width="180">
+            <template #default="{ row }">{{ formatDiffValue(row.after) }}</template>
+          </el-table-column>
+          <el-table-column label="风险" width="100">
+            <template #default="{ row }"><el-tag :type="riskTag(row.risk)">{{ riskText(row.risk) }}</el-tag></template>
+          </el-table-column>
+        </el-table>
+        <el-alert v-for="item in operationValidation.warnings || []" :key="item" :title="item" type="warning" :closable="false" show-icon />
+      </div>
+
+      <template #footer>
+        <el-button @click="operationDialogVisible = false">取消</el-button>
+        <el-button :loading="operationValidating" @click="validateOperation">校验</el-button>
+        <el-button type="primary" :loading="operationSubmitting" :disabled="!operationValidation?.supported" @click="executeOperation">确认执行</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="permissionDialogVisible" title="MQ实例权限" width="560px">
       <el-form :model="permissionForm" label-width="100px">
         <el-form-item label="角色">
@@ -429,6 +491,7 @@ import {
   deleteMQInstancePermission,
   disableMQInstance,
   enableMQInstance,
+  executeMQResourceOperation,
   getMQOverview,
   getMQSupportedTypes,
   getMQUIPermissions,
@@ -444,7 +507,9 @@ import {
   testMQInstance,
   updateMQInstance,
   upsertMQInstancePermission,
+  validateMQResourceOperation,
   type MQInstancePayload,
+  type MQResourceOperationPayload,
   type MQSupportedType
 } from '@/api/messagequeue'
 
@@ -462,6 +527,12 @@ const uiPermissions = reactive<Record<string, boolean>>({
   metadataSync: false,
   diagnosisView: false,
   messageRead: false,
+  messageExport: false,
+  messageWrite: false,
+  resourceManage: false,
+  highRisk: false,
+  auditView: false,
+  auditExport: false,
   permissionManage: false
 })
 
@@ -533,6 +604,12 @@ const permissionDialogVisible = ref(false)
 const permissionSubmitting = ref(false)
 const permissionForm = reactive<any>({ id: 0, roleId: undefined, instanceId: undefined, permissionValues: [MQ_PERMISSION.VIEW, MQ_PERMISSION.DIAGNOSE] })
 
+const operationDialogVisible = ref(false)
+const operationValidating = ref(false)
+const operationSubmitting = ref(false)
+const operationValidation = ref<any>(null)
+const operationForm = reactive<any>({ instanceId: undefined, action: '', resourceType: '', namespace: '', resourceName: '', reason: '', confirmText: '', idempotencyKey: '', paramsText: '{}' })
+
 const permissionOptions = [
   { label: '查看', value: MQ_PERMISSION.VIEW },
   { label: '诊断', value: MQ_PERMISSION.DIAGNOSE },
@@ -545,10 +622,51 @@ const permissionOptions = [
   { label: '管理', value: MQ_PERMISSION.MANAGE }
 ]
 
+type OperationTemplate = { label: string; value: string; resourceType: string; params: Record<string, any>; highRisk?: boolean }
+type OperationOption = OperationTemplate & { displayLabel: string; disabled: boolean }
+
+const operationTemplateMap: Record<string, OperationTemplate[]> = {
+  rabbitmq: [
+    { label: '创建/更新 Queue', value: 'rabbitmq_queue_upsert', resourceType: 'queue', params: { durable: true, autoDelete: false, arguments: {} } },
+    { label: '创建/更新 Exchange', value: 'rabbitmq_exchange_upsert', resourceType: 'exchange', params: { type: 'direct', durable: true, autoDelete: false, internal: false, arguments: {} } },
+    { label: '创建 Binding', value: 'rabbitmq_binding_upsert', resourceType: 'binding', params: { source: 'amq.direct', destinationType: 'queue', routingKey: '', arguments: {} } },
+    { label: '清空 Queue', value: 'rabbitmq_queue_purge', resourceType: 'queue', highRisk: true, params: {} },
+    { label: '删除 Queue', value: 'rabbitmq_queue_delete', resourceType: 'queue', highRisk: true, params: { ifUnused: false, ifEmpty: false } },
+    { label: '删除 Exchange', value: 'rabbitmq_exchange_delete', resourceType: 'exchange', highRisk: true, params: { ifUnused: false } }
+  ],
+  kafka: [
+    { label: '创建 Topic', value: 'kafka_topic_create', resourceType: 'topic', params: { partitions: 1, replicationFactor: 1, configs: {} } },
+    { label: 'Topic 分区扩容', value: 'kafka_partitions_expand', resourceType: 'topic', params: { partitions: 3 } },
+    { label: '更新 Topic 配置', value: 'kafka_topic_config_update', resourceType: 'topic', params: { configs: { 'retention.ms': '604800000' } } },
+    { label: '删除 Topic', value: 'kafka_topic_delete', resourceType: 'topic', highRisk: true, params: {} }
+  ],
+  pulsar: [
+    { label: '更新 Namespace Retention', value: 'pulsar_namespace_retention_update', resourceType: 'namespace', params: { retentionTimeInMinutes: 1440, retentionSizeInMB: 1024 } },
+    { label: '更新 Namespace TTL', value: 'pulsar_namespace_ttl_update', resourceType: 'namespace', params: { messageTTLInSeconds: 86400 } },
+    { label: '删除 Topic', value: 'pulsar_topic_delete', resourceType: 'topic', highRisk: true, params: { force: false } },
+    { label: '跳过 Subscription 积压', value: 'pulsar_subscription_skip', resourceType: 'subscription', highRisk: true, params: { topic: 'persistent://public/default/topic', subscription: '' } },
+    { label: '重置 Subscription Cursor', value: 'pulsar_subscription_reset', resourceType: 'subscription', highRisk: true, params: { topic: 'persistent://public/default/topic', subscription: '', timestampMs: Date.now() } }
+  ]
+}
+
 const supportedTypeMap = computed(() => new Map(supportedTypes.value.map(item => [item.type, item])))
 const viewableInstances = computed(() => instances.value.filter(item => hasObjectPermission(item, MQ_PERMISSION.VIEW)))
 const diagnosableInstances = computed(() => instances.value.filter(item => hasObjectPermission(item, MQ_PERMISSION.DIAGNOSE)))
 const messageReadableInstances = computed(() => instances.value.filter(item => hasObjectPermission(item, MQ_PERMISSION.MESSAGE_READ)))
+const sampleReadableInstances = computed(() => messageReadableInstances.value.filter(item => supportedTypeMap.value.get(item.mqType)?.messageSampleEnabled))
+const resourceManageInstances = computed(() => instances.value.filter(item => hasObjectPermission(item, MQ_PERMISSION.RESOURCE_MANAGE)))
+const selectedResourceInstance = computed(() => instances.value.find(item => item.id === selectedInstanceId.value))
+const selectedOperationInstance = computed(() => instances.value.find(item => item.id === operationForm.instanceId))
+const selectedOperationHasHighRisk = computed(() => !!uiPermissions.highRisk && hasObjectPermission(selectedOperationInstance.value, MQ_PERMISSION.HIGH_RISK))
+const operationOptions = computed<OperationOption[]>(() => {
+  const options = operationTemplateMap[selectedOperationInstance.value?.mqType || ''] || []
+  return options.map(item => ({
+    ...item,
+    displayLabel: item.highRisk ? `${item.label}（高危）` : item.label,
+    disabled: !!item.highRisk && !selectedOperationHasHighRisk.value
+  }))
+})
+const canOperateSelectedInstance = computed(() => !!uiPermissions.resourceManage && resourceManageInstances.value.length > 0)
 
 const loadSupportedTypes = async () => {
   supportedTypes.value = await getMQSupportedTypes()
@@ -575,7 +693,9 @@ const loadInstances = async () => {
     instanceTotal.value = res.total || 0
     if (!selectedInstanceId.value && instances.value.length > 0) {
       selectedInstanceId.value = instances.value[0].id
-      sampleInstanceId.value = instances.value[0].id
+    }
+    if (!sampleInstanceId.value || !sampleReadableInstances.value.some(item => item.id === sampleInstanceId.value)) {
+      sampleInstanceId.value = sampleReadableInstances.value[0]?.id || null
     }
   } finally {
     instanceLoading.value = false
@@ -789,6 +909,129 @@ const handleSampleMessages = async () => {
   }
 }
 
+const openOperationDialog = () => {
+  const current = selectedResourceInstance.value && hasObjectPermission(selectedResourceInstance.value, MQ_PERMISSION.RESOURCE_MANAGE)
+    ? selectedResourceInstance.value
+    : resourceManageInstances.value[0]
+  Object.assign(operationForm, {
+    instanceId: current?.id,
+    action: '',
+    resourceType: '',
+    namespace: '',
+    resourceName: '',
+    reason: '',
+    confirmText: '',
+    idempotencyKey: '',
+    paramsText: '{}'
+  })
+  operationValidation.value = null
+  operationDialogVisible.value = true
+  handleOperationInstanceChange()
+}
+
+const handleOperationInstanceChange = () => {
+  const first = operationOptions.value.find(item => !item.disabled) || operationOptions.value[0]
+  operationForm.action = first?.value || ''
+  applyOperationTemplate()
+}
+
+const applyOperationTemplate = () => {
+  const option = operationOptions.value.find(item => item.value === operationForm.action)
+  operationValidation.value = null
+  operationForm.confirmText = ''
+  operationForm.idempotencyKey = ''
+  if (!option || option.disabled) {
+    if (option?.disabled) ElMessage.warning('当前实例缺少高危操作权限')
+    operationForm.resourceType = ''
+    operationForm.paramsText = '{}'
+    return
+  }
+  operationForm.resourceType = option.resourceType
+  operationForm.paramsText = JSON.stringify(option.params, null, 2)
+}
+
+const buildOperationPayload = (confirmed = false): MQResourceOperationPayload | null => {
+  if (!operationForm.instanceId || !operationForm.action) {
+    ElMessage.warning('请选择实例和操作')
+    return null
+  }
+  let params: Record<string, any> = {}
+  try {
+    params = operationForm.paramsText ? JSON.parse(operationForm.paramsText) : {}
+  } catch (error: any) {
+    ElMessage.error(`参数JSON格式错误: ${error.message || error}`)
+    return null
+  }
+  return {
+    action: operationForm.action,
+    resourceType: operationForm.resourceType,
+    namespace: operationForm.namespace,
+    resourceName: operationForm.resourceName,
+    reason: operationForm.reason,
+    confirmText: operationForm.confirmText,
+    idempotencyKey: operationForm.idempotencyKey,
+    confirmed,
+    params
+  }
+}
+
+const validateOperation = async () => {
+  const payload = buildOperationPayload(false)
+  if (!payload || !operationForm.instanceId) return
+  operationValidating.value = true
+  try {
+    const res = await validateMQResourceOperation(operationForm.instanceId, payload)
+    operationValidation.value = res
+    if (res.normalizedParams) {
+      operationForm.paramsText = JSON.stringify(res.normalizedParams, null, 2)
+    }
+    if (res.namespace) operationForm.namespace = res.namespace
+    if (res.resourceName) operationForm.resourceName = res.resourceName
+    ElMessage.success('校验完成')
+  } finally {
+    operationValidating.value = false
+  }
+}
+
+const executeOperation = async () => {
+  if (!operationValidation.value?.supported) {
+    await validateOperation()
+  }
+  if (!operationValidation.value?.supported) return
+  const highRisk = isHighRisk(operationValidation.value.riskLevel)
+  if (highRisk && !String(operationForm.reason || '').trim()) {
+    ElMessage.warning('高危操作必须填写操作原因')
+    return
+  }
+  const confirmText = highRisk
+    ? `确认执行高危操作「${operationValidation.value.actionText || operationForm.action}」？该操作会记录审计并可能造成消息或资源不可恢复。`
+    : `确认执行「${operationValidation.value.actionText || operationForm.action}」？`
+  await ElMessageBox.confirm(confirmText, highRisk ? '高危操作确认' : '操作确认', { type: highRisk ? 'error' : 'warning' })
+  if (highRisk && operationValidation.value.resourceName) {
+    const { value } = await ElMessageBox.prompt(`请输入资源名 ${operationValidation.value.resourceName} 以确认执行`, '资源名确认', {
+      inputValue: '',
+      inputPattern: new RegExp(`^${escapeRegExp(operationValidation.value.resourceName)}$`),
+      inputErrorMessage: '输入的资源名不一致',
+      type: 'error'
+    })
+    operationForm.confirmText = value
+  }
+  if (!operationForm.idempotencyKey) {
+    operationForm.idempotencyKey = createIdempotencyKey()
+  }
+  const payload = buildOperationPayload(true)
+  if (!payload || !operationForm.instanceId) return
+  operationSubmitting.value = true
+  try {
+    const res = await executeMQResourceOperation(operationForm.instanceId, payload)
+    ElMessage.success(res.message || '执行成功')
+    operationDialogVisible.value = false
+    await Promise.all([loadResources(), loadAudits()])
+  } finally {
+    operationSubmitting.value = false
+  }
+}
+
 const openPermissionDialog = (row?: any) => {
   if (row) {
     Object.assign(permissionForm, {
@@ -834,6 +1077,20 @@ const mqTypeTag = (type: string) => type === 'rabbitmq' ? 'success' : type === '
 const healthTag = (status: string) => status === 'healthy' ? 'success' : status === 'critical' ? 'danger' : status === 'warning' ? 'warning' : 'info'
 const environmentText = (value: string) => ({ prod: '生产', staging: '预发', test: '测试', dev: '开发' } as Record<string, string>)[value] || value
 const formatRate = (value: number) => Number(value || 0).toFixed(2)
+const isHighRisk = (riskLevel: string) => ['high', 'critical'].includes(String(riskLevel || '').toLowerCase())
+const riskTag = (riskLevel: string) => riskLevel === 'critical' ? 'danger' : riskLevel === 'high' ? 'danger' : riskLevel === 'medium' ? 'warning' : 'info'
+const riskText = (riskLevel: string) => ({ low: '低风险', medium: '中风险', high: '高风险', critical: '严重风险' } as Record<string, string>)[riskLevel] || riskLevel || '-'
+const formatDiffValue = (value: any) => {
+  if (value === undefined || value === null || value === '') return '-'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+const createIdempotencyKey = () => {
+  const cryptoObj = window.crypto as Crypto | undefined
+  if (cryptoObj?.randomUUID) return cryptoObj.randomUUID()
+  return `mqop-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+const escapeRegExp = (value: string) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 watch(activeTab, async tab => {
   if (tab === 'resources') await handleResourceInstanceChange()
@@ -1077,6 +1334,40 @@ onMounted(async () => {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.mono-textarea :deep(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.operation-validation {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.validation-header,
+.validation-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.validation-list span {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 13px;
+}
+
+.operation-diff-table {
+  width: 100%;
 }
 
 .danger {

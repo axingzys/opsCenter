@@ -1,6 +1,7 @@
 package messagequeue
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,13 +12,18 @@ import (
 	"github.com/ydcloud-dy/opshub/pkg/response"
 )
 
+const permMQHighRisk = "messagequeue:operation:high-risk"
+
+type MenuPermissionChecker func(ctx context.Context, userID uint, code string) (bool, error)
+
 type Service struct {
-	useCase        *mqbiz.UseCase
-	permissionRepo mqbiz.PermissionRepo
+	useCase               *mqbiz.UseCase
+	permissionRepo        mqbiz.PermissionRepo
+	menuPermissionChecker MenuPermissionChecker
 }
 
-func NewService(useCase *mqbiz.UseCase, permissionRepo mqbiz.PermissionRepo) *Service {
-	return &Service{useCase: useCase, permissionRepo: permissionRepo}
+func NewService(useCase *mqbiz.UseCase, permissionRepo mqbiz.PermissionRepo, menuPermissionChecker MenuPermissionChecker) *Service {
+	return &Service{useCase: useCase, permissionRepo: permissionRepo, menuPermissionChecker: menuPermissionChecker}
 }
 
 type permissionScope struct {
@@ -49,7 +55,10 @@ func writeError(c *gin.Context, prefix string, err error) {
 		strings.Contains(message, "不可用"),
 		strings.Contains(message, "未授权"),
 		strings.Contains(message, "已禁用"),
-		strings.Contains(message, "范围"):
+		strings.Contains(message, "范围"),
+		strings.Contains(message, "确认"),
+		strings.Contains(message, "未开启"),
+		strings.Contains(message, "参数"):
 		statusCode = http.StatusBadRequest
 	}
 	response.ErrorCode(c, statusCode, prefix+message)
@@ -119,6 +128,40 @@ func (s *Service) ensureInstancePermission(c *gin.Context, instanceID uint, requ
 	return true
 }
 
+func (s *Service) ensureHighRiskPermission(c *gin.Context, instanceID uint) bool {
+	userID := rbacservice.GetUserID(c)
+	if userID == 0 {
+		response.ErrorCode(c, http.StatusUnauthorized, "未登录")
+		return false
+	}
+	if s.menuPermissionChecker == nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "权限检查未初始化")
+		return false
+	}
+	ok, err := s.menuPermissionChecker(c.Request.Context(), userID, permMQHighRisk)
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "MQ高危菜单权限检查失败")
+		return false
+	}
+	if !ok {
+		response.ErrorCode(c, http.StatusForbidden, "权限不足：缺少MQ高危操作菜单权限")
+		return false
+	}
+	if s.permissionRepo == nil {
+		return true
+	}
+	permissions, err := s.permissionRepo.GetUserInstancePermissions(c.Request.Context(), userID, instanceID)
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "MQ实例权限检查失败")
+		return false
+	}
+	if permissions&mqbiz.PermissionHighRisk == 0 {
+		response.ErrorCode(c, http.StatusForbidden, "权限不足：无权对该MQ实例执行高危操作")
+		return false
+	}
+	return true
+}
+
 func applyInstancePermissionScope(req *mqbiz.InstanceListRequest, scope *permissionScope) {
 	if req == nil || scope == nil || !scope.enforced || scope.admin {
 		return
@@ -129,6 +172,21 @@ func applyInstancePermissionScope(req *mqbiz.InstanceListRequest, scope *permiss
 
 func (s *Service) decorateInstancePermissions(c *gin.Context, list []*mqbiz.InstanceVO, scope *permissionScope) bool {
 	if len(list) == 0 {
+		return true
+	}
+	if scope != nil && !scope.enforced && !scope.admin && s.permissionRepo != nil && scope.userID > 0 {
+		admin, err := s.permissionRepo.IsAdmin(c.Request.Context(), scope.userID)
+		if err != nil {
+			response.ErrorCode(c, http.StatusInternalServerError, "MQ实例权限检查失败")
+			return false
+		}
+		permissions := mqbiz.PermissionAll
+		if !admin {
+			permissions &^= mqbiz.PermissionHighRisk
+		}
+		for _, item := range list {
+			item.Permissions = permissions
+		}
 		return true
 	}
 	if scope == nil || !scope.enforced || scope.admin || s.permissionRepo == nil {
@@ -480,6 +538,53 @@ func (s *Service) SampleMessages(c *gin.Context) {
 	data, err := s.useCase.SampleMessages(c.Request.Context(), id, &req, currentOperator(c))
 	if err != nil {
 		writeError(c, "消息采样失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) ValidateResourceOperation(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionResourceManage) {
+		return
+	}
+	var req mqbiz.ResourceOperationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	data, err := s.useCase.ValidateResourceOperation(c.Request.Context(), id, &req)
+	if err != nil {
+		writeError(c, "校验失败: ", err)
+		return
+	}
+	if data.Supported && mqbiz.IsHighRiskLevel(data.RiskLevel) && !s.ensureHighRiskPermission(c, id) {
+		return
+	}
+	response.Success(c, data)
+}
+
+func (s *Service) ExecuteResourceOperation(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionResourceManage) {
+		return
+	}
+	var req mqbiz.ResourceOperationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	validation, err := s.useCase.ValidateResourceOperation(c.Request.Context(), id, &req)
+	if err != nil {
+		writeError(c, "校验失败: ", err)
+		return
+	}
+	if validation.Supported && mqbiz.IsHighRiskLevel(validation.RiskLevel) && !s.ensureHighRiskPermission(c, id) {
+		return
+	}
+	data, err := s.useCase.ExecuteResourceOperation(c.Request.Context(), id, &req, currentOperator(c))
+	if err != nil {
+		writeError(c, "执行失败: ", err)
 		return
 	}
 	response.Success(c, data)

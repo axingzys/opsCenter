@@ -30,6 +30,7 @@ type BrokerRepo interface {
 
 type ResourceRepo interface {
 	List(ctx context.Context, instanceID uint, req *ResourceListRequest) ([]*MQResource, int64, error)
+	GetByUnique(ctx context.Context, instanceID uint, resourceType, namespace, name string) (*MQResource, error)
 	TopBacklog(ctx context.Context, instanceID uint, limit int) ([]*MQResource, error)
 	Summary(ctx context.Context, instanceID uint) (*ResourceSummary, error)
 }
@@ -60,6 +61,7 @@ type SyncJobRepo interface {
 type OperationAuditRepo interface {
 	Create(ctx context.Context, item *MQOperationAudit) error
 	Update(ctx context.Context, item *MQOperationAudit) error
+	GetByIdempotencyKey(ctx context.Context, instanceID uint, idempotencyKey string) (*MQOperationAudit, error)
 	List(ctx context.Context, req *AuditListRequest) ([]*MQOperationAudit, int64, error)
 }
 

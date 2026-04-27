@@ -2,6 +2,7 @@ package messagequeue
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	mqbiz "github.com/ydcloud-dy/opshub/internal/biz/messagequeue"
@@ -138,6 +139,20 @@ func (r *resourceRepo) List(ctx context.Context, instanceID uint, req *mqbiz.Res
 	return items, total, nil
 }
 
+func (r *resourceRepo) GetByUnique(ctx context.Context, instanceID uint, resourceType, namespace, name string) (*mqbiz.MQResource, error) {
+	var item mqbiz.MQResource
+	err := r.db.WithContext(ctx).
+		Where("instance_id = ? AND resource_type = ? AND namespace = ? AND name = ?", instanceID, resourceType, namespace, name).
+		First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 func (r *resourceRepo) TopBacklog(ctx context.Context, instanceID uint, limit int) ([]*mqbiz.MQResource, error) {
 	if limit <= 0 {
 		limit = 10
@@ -192,7 +207,7 @@ func (r *consumerGroupRepo) List(ctx context.Context, instanceID uint, req *mqbi
 			query = query.Where("resource_name = ?", req.ResourceName)
 		}
 		if req.HasLag == "true" {
-			query = query.Where("lag > 0 OR backlog > 0")
+			query = query.Where("`lag` > 0 OR backlog > 0")
 		}
 		if kw := strings.TrimSpace(req.Keyword); kw != "" {
 			like := "%" + kw + "%"
@@ -203,7 +218,7 @@ func (r *consumerGroupRepo) List(ctx context.Context, instanceID uint, req *mqbi
 		return nil, 0, err
 	}
 	page, pageSize := pageParams(req)
-	if err := query.Order("lag DESC, backlog DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+	if err := query.Order("`lag` DESC, backlog DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
 	return items, total, nil
@@ -212,7 +227,7 @@ func (r *consumerGroupRepo) List(ctx context.Context, instanceID uint, req *mqbi
 func (r *consumerGroupRepo) Summary(ctx context.Context, instanceID uint) (*mqbiz.ConsumerGroupSummary, error) {
 	var row mqbiz.ConsumerGroupSummary
 	err := r.db.WithContext(ctx).Model(&mqbiz.MQConsumerGroup{}).
-		Select("COUNT(*) AS count, COALESCE(SUM(lag),0) AS lag, COALESCE(SUM(backlog),0) AS backlog").
+		Select("COUNT(*) AS count, COALESCE(SUM(`lag`),0) AS `lag`, COALESCE(SUM(backlog),0) AS backlog").
 		Where("instance_id = ?", instanceID).
 		Scan(&row).Error
 	return &row, err

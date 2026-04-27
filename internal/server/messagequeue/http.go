@@ -2,12 +2,15 @@ package messagequeue
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	mqbiz "github.com/ydcloud-dy/opshub/internal/biz/messagequeue"
 	assetdata "github.com/ydcloud-dy/opshub/internal/data/asset"
 	mqdata "github.com/ydcloud-dy/opshub/internal/data/messagequeue"
+	systemdata "github.com/ydcloud-dy/opshub/internal/data/system"
 	mqservice "github.com/ydcloud-dy/opshub/internal/service/messagequeue"
 	rbacservice "github.com/ydcloud-dy/opshub/internal/service/rbac"
 	"github.com/ydcloud-dy/opshub/pkg/response"
@@ -84,6 +87,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	operationAuditRepo := mqdata.NewOperationAuditRepo(db)
 	messageAuditRepo := mqdata.NewMessageAuditRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
+	configRepo := systemdata.NewConfigRepo(db)
 
 	useCase := mqbiz.NewUseCase(
 		instanceRepo,
@@ -113,12 +117,47 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 				Passphrase: credential.Passphrase,
 			}, nil
 		},
+		func(ctx context.Context) (*mqbiz.HighRiskOperationConfig, error) {
+			enabled, err := readBoolConfig(ctx, configRepo, mqbiz.ConfigKeyMessageQueueHighRiskEnabled, false)
+			if err != nil {
+				return nil, err
+			}
+			reasonRequired, err := readBoolConfig(ctx, configRepo, mqbiz.ConfigKeyMessageQueueOperationReasonRequired, true)
+			if err != nil {
+				return nil, err
+			}
+			return &mqbiz.HighRiskOperationConfig{
+				Enabled:        enabled,
+				ReasonRequired: reasonRequired,
+			}, nil
+		},
 		mqbiz.NewDefaultAdapterRegistry(),
 	)
 
 	return &HTTPServer{
-		service:        mqservice.NewService(useCase, permissionRepo),
+		service:        mqservice.NewService(useCase, permissionRepo, authMiddleware.HasMenuPermission),
 		authMiddleware: authMiddleware,
+	}
+}
+
+func readBoolConfig(ctx context.Context, repo *systemdata.ConfigRepo, key string, fallback bool) (bool, error) {
+	if repo == nil {
+		return fallback, nil
+	}
+	config, err := repo.GetByKey(ctx, key)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fallback, nil
+		}
+		return fallback, err
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Value)) {
+	case "true", "1", "yes", "on", "enabled":
+		return true, nil
+	case "false", "0", "no", "off", "disabled":
+		return false, nil
+	default:
+		return fallback, nil
 	}
 }
 
@@ -169,6 +208,8 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.GET("/:id/consumer-groups", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListConsumerGroups)
 			instances.GET("/:id/partitions", s.authMiddleware.RequireMenuPermission(permMQDiagnosisView), s.service.ListPartitions)
 			instances.POST("/:id/messages/sample", s.authMiddleware.RequireMenuPermission(permMQMessageRead), s.service.SampleMessages)
+			instances.POST("/:id/operations/validate", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ValidateResourceOperation)
+			instances.POST("/:id/operations", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ExecuteResourceOperation)
 		}
 	}
 }
