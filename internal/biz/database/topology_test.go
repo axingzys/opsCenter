@@ -45,6 +45,22 @@ func TestApplyRedisClusterSlots(t *testing.T) {
 	}
 }
 
+func TestApplyRedisClusterNodeVersions(t *testing.T) {
+	nodes := []*DatabaseTopologyNodeVO{
+		{ID: "master-a", Address: "10.0.0.1:6379@16379"},
+		{ID: "master-b", Address: "10.0.0.2:6379"},
+	}
+	applyRedisClusterNodeVersions(nodes, map[string]string{
+		"10.0.0.1:6379": "7.2.5",
+	}, "7.0.15")
+	if nodes[0].Version != "7.2.5" {
+		t.Fatalf("node version = %q, want 7.2.5", nodes[0].Version)
+	}
+	if nodes[1].Version != "7.0.15" {
+		t.Fatalf("fallback version = %q, want 7.0.15", nodes[1].Version)
+	}
+}
+
 func TestStringFromMap(t *testing.T) {
 	data := map[string]any{
 		"version": map[string]any{

@@ -172,7 +172,7 @@ func collectRedisTopology(ctx context.Context, item *DatabaseInstance, credentia
 	}
 
 	if clusterInfo, err := client.ClusterInfo(queryCtx).Result(); err == nil && strings.Contains(clusterInfo, "cluster_state:") {
-		return collectRedisClusterTopology(queryCtx, client, item, clusterInfo)
+		return collectRedisClusterTopology(queryCtx, client, item, credential, clusterInfo)
 	}
 	return collectRedisStandaloneTopology(queryCtx, client, item)
 }
@@ -201,7 +201,7 @@ func testRedisConnection(ctx context.Context, item *DatabaseInstance, credential
 	return "Redis", nil
 }
 
-func collectRedisClusterTopology(ctx context.Context, client *redis.Client, item *DatabaseInstance, clusterInfo string) (*DatabaseTopologyVO, error) {
+func collectRedisClusterTopology(ctx context.Context, client *redis.Client, item *DatabaseInstance, credential *ConnectionCredential, clusterInfo string) (*DatabaseTopologyVO, error) {
 	info := parseRedisInfo(clusterInfo)
 	nodesText, err := client.ClusterNodes(ctx).Result()
 	if err != nil {
@@ -212,6 +212,9 @@ func collectRedisClusterTopology(ctx context.Context, client *redis.Client, item
 	if err == nil {
 		applyRedisClusterSlots(nodes, nodeByAddr, slots)
 	}
+	defaultVersion := readRedisServerVersion(ctx, client)
+	nodeVersions := collectRedisClusterNodeVersions(ctx, item, credential, nodes)
+	applyRedisClusterNodeVersions(nodes, nodeVersions, defaultVersion)
 	sortTopologyNodes(nodes)
 
 	return &DatabaseTopologyVO{
@@ -274,6 +277,46 @@ func collectRedisStandaloneTopology(ctx context.Context, client *redis.Client, i
 		Nodes:   []*DatabaseTopologyNodeVO{node},
 		Message: "当前 Redis 未开启 Cluster，已返回单机 / 主从信息",
 	}, nil
+}
+
+func readRedisServerVersion(ctx context.Context, client *redis.Client) string {
+	if client == nil {
+		return ""
+	}
+	infoText, err := client.Info(ctx, "server").Result()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(parseRedisInfo(infoText)["redis_version"])
+}
+
+func collectRedisClusterNodeVersions(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, nodes []*DatabaseTopologyNodeVO) map[string]string {
+	versions := make(map[string]string)
+	for _, node := range nodes {
+		if node == nil || strings.TrimSpace(node.Address) == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(node.State)), "fail") {
+			continue
+		}
+		address := normalizeRedisClusterAddress(node.Address)
+		if address == "" {
+			continue
+		}
+		if _, ok := versions[address]; ok {
+			continue
+		}
+		nodeClient, err := openRedisNodeClientByAddr(address, item, credential, 0)
+		if err != nil {
+			continue
+		}
+		version := readRedisServerVersion(ctx, nodeClient)
+		nodeClient.Close()
+		if version != "" {
+			versions[address] = version
+		}
+	}
+	return versions
 }
 
 func openRedisClient(item *DatabaseInstance, credential *ConnectionCredential) (*redis.Client, error) {
@@ -385,6 +428,20 @@ func applyRedisClusterSlots(nodes []*DatabaseTopologyNodeVO, nodeByAddr map[stri
 		if ranges := slotRanges[node.ID]; len(ranges) > 0 {
 			node.Slots = strings.Join(ranges, " ")
 		}
+	}
+}
+
+func applyRedisClusterNodeVersions(nodes []*DatabaseTopologyNodeVO, versionsByAddr map[string]string, fallbackVersion string) {
+	fallbackVersion = strings.TrimSpace(fallbackVersion)
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		version := strings.TrimSpace(versionsByAddr[normalizeRedisClusterAddress(node.Address)])
+		if version == "" {
+			version = fallbackVersion
+		}
+		node.Version = version
 	}
 }
 
