@@ -367,6 +367,12 @@ func (uc *UseCase) executeBinlogArchiveOnce(ctx context.Context, streamID, runne
 	stream.LastError = ""
 	stream.LastArchivedAt = &finished
 	stream.LastArchiveName = fileName
+	stream.CursorFile = fileName
+	stream.CursorPos = archive.EndPos
+	stream.LastEventTime = lastEvent
+	stream.LastHeartbeatAt = &finished
+	stream.ConsecutiveFailures = 0
+	stream.ArchiveLagSeconds = 0
 	_ = uc.runnerJobRepo.Update(ctx, job)
 	_ = uc.logArchiveStreamRepo.Update(ctx, stream)
 }
@@ -532,6 +538,12 @@ func (uc *UseCase) executeBinlogArchiveCatchUp(ctx context.Context, streamID, ru
 	stream.LastError = ""
 	stream.LastArchivedAt = &finished
 	stream.LastArchiveName = selections[len(selections)-1].FileName
+	stream.CursorFile = stream.LastArchiveName
+	stream.CursorPos = firstNonZeroInt64(selections[len(selections)-1].FileSize, 0)
+	stream.LastEventTime = &finished
+	stream.LastHeartbeatAt = &finished
+	stream.ConsecutiveFailures = 0
+	stream.ArchiveLagSeconds = 0
 	_ = uc.runnerJobRepo.Update(ctx, job)
 	_ = uc.logArchiveStreamRepo.Update(ctx, stream)
 }
@@ -548,6 +560,8 @@ func (uc *UseCase) failBinlogArchiveJob(ctx context.Context, stream *DatabaseLog
 	}
 	if stream != nil {
 		stream.Status = DatabaseLogArchiveStreamStatusDegraded
+		stream.DaemonStatus = DatabaseLogArchiveDaemonStatusDegraded
+		stream.ConsecutiveFailures++
 		stream.LastError = trimText(err.Error(), 1000)
 		_ = uc.logArchiveStreamRepo.Update(ctx, stream)
 	}
@@ -564,6 +578,8 @@ func applyBinlogArchiveFailure(stream *DatabaseLogArchiveStream, job *DatabaseRu
 	}
 	if stream != nil {
 		stream.Status = DatabaseLogArchiveStreamStatusDegraded
+		stream.DaemonStatus = DatabaseLogArchiveDaemonStatusDegraded
+		stream.ConsecutiveFailures++
 		stream.LastError = trimText(runErr.Error(), 1000)
 	}
 }

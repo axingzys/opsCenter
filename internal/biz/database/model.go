@@ -103,6 +103,12 @@ const (
 	DatabaseArchiveTypeBinlog = "binlog"
 	DatabaseArchiveTypeWAL    = "wal"
 
+	DatabaseArchiveModeExternal  = "external"
+	DatabaseArchiveModeManual    = "manual_once"
+	DatabaseArchiveModeCatchUp   = "catch_up"
+	DatabaseArchiveModePolling   = "polling"
+	DatabaseArchiveModeStreaming = "streaming"
+
 	DatabaseLogArchiveStatusArchived       = "archived"
 	DatabaseLogArchiveStatusMissing        = "missing"
 	DatabaseLogArchiveStatusChecksumFailed = "checksum_failed"
@@ -110,9 +116,21 @@ const (
 
 	DatabaseLogArchiveStreamStatusPending  = "pending"
 	DatabaseLogArchiveStreamStatusRunning  = "running"
+	DatabaseLogArchiveStreamStatusPaused   = "paused"
 	DatabaseLogArchiveStreamStatusDegraded = "degraded"
 	DatabaseLogArchiveStreamStatusFailed   = "failed"
 	DatabaseLogArchiveStreamStatusDisabled = "disabled"
+
+	DatabaseLogArchiveDesiredStateRunning = "running"
+	DatabaseLogArchiveDesiredStatePaused  = "paused"
+	DatabaseLogArchiveDesiredStateStopped = "stopped"
+
+	DatabaseLogArchiveDaemonStatusStarting = "starting"
+	DatabaseLogArchiveDaemonStatusRunning  = "running"
+	DatabaseLogArchiveDaemonStatusPaused   = "paused"
+	DatabaseLogArchiveDaemonStatusDegraded = "degraded"
+	DatabaseLogArchiveDaemonStatusFailed   = "failed"
+	DatabaseLogArchiveDaemonStatusStopped  = "stopped"
 
 	DatabaseRunnerTypeSSH   = "ssh"
 	DatabaseRunnerTypeLocal = "local"
@@ -521,22 +539,39 @@ func (DatabaseBackupRecord) TableName() string {
 // DatabaseLogArchiveStream binlog/WAL 连续归档流配置
 type DatabaseLogArchiveStream struct {
 	gorm.Model
-	InstanceID       uint       `gorm:"column:instance_id;not null;index;comment:归档所属主实例ID" json:"instanceId"`
-	SourceInstanceID uint       `gorm:"column:source_instance_id;index;comment:实际日志来源实例ID" json:"sourceInstanceId"`
-	Engine           string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
-	ArchiveType      string     `gorm:"column:archive_type;type:varchar(30);not null;index;comment:binlog/wal" json:"archiveType"`
-	ArchiveMode      string     `gorm:"column:archive_mode;type:varchar(30);comment:归档模式" json:"archiveMode"`
-	ArchiveEngine    string     `gorm:"column:archive_engine;type:varchar(60);comment:归档引擎" json:"archiveEngine"`
-	StorageProfileID uint       `gorm:"column:storage_profile_id;index;comment:存储配置ID" json:"storageProfileId"`
-	SecretProfileID  uint       `gorm:"column:secret_profile_id;index;comment:密钥配置ID" json:"secretProfileId"`
-	RPOTargetSeconds int        `gorm:"column:rpo_target_seconds;type:int;default:0;comment:RPO目标秒" json:"rpoTargetSeconds"`
-	RetentionDays    int        `gorm:"column:retention_days;type:int;default:30;comment:日志保留天数" json:"retentionDays"`
-	Enabled          bool       `gorm:"default:true;comment:是否启用" json:"enabled"`
-	Status           string     `gorm:"type:varchar(30);default:'pending';index;comment:状态" json:"status"`
-	LastArchivedAt   *time.Time `gorm:"column:last_archived_at;comment:最近归档成功时间" json:"lastArchivedAt,omitempty"`
-	LastArchiveName  string     `gorm:"column:last_archive_name;type:varchar(255);comment:最近归档文件" json:"lastArchiveName"`
-	LastError        string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误" json:"lastError"`
-	ConfigJSON       string     `gorm:"column:config_json;type:text;comment:工具配置摘要，不保存明文密钥" json:"configJson"`
+	InstanceID          uint       `gorm:"column:instance_id;not null;index;comment:归档所属主实例ID" json:"instanceId"`
+	SourceInstanceID    uint       `gorm:"column:source_instance_id;index;comment:实际日志来源实例ID" json:"sourceInstanceId"`
+	Engine              string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
+	ArchiveType         string     `gorm:"column:archive_type;type:varchar(30);not null;index;comment:binlog/wal" json:"archiveType"`
+	ArchiveMode         string     `gorm:"column:archive_mode;type:varchar(30);comment:归档模式" json:"archiveMode"`
+	ArchiveEngine       string     `gorm:"column:archive_engine;type:varchar(60);comment:归档引擎" json:"archiveEngine"`
+	RunnerHostID        uint       `gorm:"column:runner_host_id;index;comment:负责归档的Runner主机ID" json:"runnerHostId"`
+	StorageProfileID    uint       `gorm:"column:storage_profile_id;index;comment:存储配置ID" json:"storageProfileId"`
+	SecretProfileID     uint       `gorm:"column:secret_profile_id;index;comment:密钥配置ID" json:"secretProfileId"`
+	RPOTargetSeconds    int        `gorm:"column:rpo_target_seconds;type:int;default:0;comment:RPO目标秒" json:"rpoTargetSeconds"`
+	RetentionDays       int        `gorm:"column:retention_days;type:int;default:30;comment:日志保留天数" json:"retentionDays"`
+	Enabled             bool       `gorm:"default:true;comment:是否启用" json:"enabled"`
+	Status              string     `gorm:"type:varchar(30);default:'pending';index;comment:状态" json:"status"`
+	DesiredState        string     `gorm:"column:desired_state;type:varchar(30);default:'stopped';comment:期望状态 running/paused/stopped" json:"desiredState"`
+	DaemonStatus        string     `gorm:"column:daemon_status;type:varchar(30);default:'stopped';index;comment:守护进程状态" json:"daemonStatus"`
+	CursorFile          string     `gorm:"column:cursor_file;type:varchar(255);comment:归档游标文件" json:"cursorFile"`
+	CursorPos           int64      `gorm:"column:cursor_pos;type:bigint;default:0;comment:归档游标position" json:"cursorPos"`
+	CursorGTIDSet       string     `gorm:"column:cursor_gtid_set;type:text;comment:归档游标GTID集合" json:"cursorGtidSet"`
+	ActiveFile          string     `gorm:"column:active_file;type:varchar(255);comment:当前活跃日志文件" json:"activeFile"`
+	LastSourceFile      string     `gorm:"column:last_source_file;type:varchar(255);comment:源库当前日志文件" json:"lastSourceFile"`
+	LastSourcePos       int64      `gorm:"column:last_source_pos;type:bigint;default:0;comment:源库当前position" json:"lastSourcePos"`
+	LastEventTime       *time.Time `gorm:"column:last_event_time;comment:最近事件时间" json:"lastEventTime,omitempty"`
+	ArchiveLagSeconds   int        `gorm:"column:archive_lag_seconds;type:int;default:0;comment:归档延迟秒" json:"archiveLagSeconds"`
+	LastHeartbeatAt     *time.Time `gorm:"column:last_heartbeat_at;comment:最近心跳时间" json:"lastHeartbeatAt,omitempty"`
+	ConsecutiveFailures int        `gorm:"column:consecutive_failures;type:int;default:0;comment:连续失败次数" json:"consecutiveFailures"`
+	LeaseOwner          string     `gorm:"column:lease_owner;type:varchar(120);comment:租约持有者" json:"leaseOwner"`
+	LeaseExpiresAt      *time.Time `gorm:"column:lease_expires_at;comment:租约过期时间" json:"leaseExpiresAt,omitempty"`
+	PausedAt            *time.Time `gorm:"column:paused_at;comment:暂停时间" json:"pausedAt,omitempty"`
+	PausedReason        string     `gorm:"column:paused_reason;type:varchar(500);comment:暂停原因" json:"pausedReason"`
+	LastArchivedAt      *time.Time `gorm:"column:last_archived_at;comment:最近归档成功时间" json:"lastArchivedAt,omitempty"`
+	LastArchiveName     string     `gorm:"column:last_archive_name;type:varchar(255);comment:最近归档文件" json:"lastArchiveName"`
+	LastError           string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误" json:"lastError"`
+	ConfigJSON          string     `gorm:"column:config_json;type:text;comment:工具配置摘要，不保存明文密钥" json:"configJson"`
 }
 
 func (DatabaseLogArchiveStream) TableName() string {

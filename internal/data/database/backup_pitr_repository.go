@@ -61,6 +61,51 @@ func (r *logArchiveStreamRepo) List(ctx context.Context, req *dbbiz.DatabaseLogA
 	return items, total, nil
 }
 
+func (r *logArchiveStreamRepo) ListRunnableForRunner(ctx context.Context, runnerHostID uint) ([]*dbbiz.DatabaseLogArchiveStream, error) {
+	var items []*dbbiz.DatabaseLogArchiveStream
+	if runnerHostID == 0 {
+		return items, nil
+	}
+	if err := r.db.WithContext(ctx).
+		Model(&dbbiz.DatabaseLogArchiveStream{}).
+		Where("runner_host_id = ?", runnerHostID).
+		Where("enabled = ?", true).
+		Where("desired_state = ?", dbbiz.DatabaseLogArchiveDesiredStateRunning).
+		Where("archive_type = ?", dbbiz.DatabaseArchiveTypeBinlog).
+		Where("archive_mode IN ?", []string{dbbiz.DatabaseArchiveModePolling, dbbiz.DatabaseArchiveModeStreaming}).
+		Where("status <> ?", dbbiz.DatabaseLogArchiveStreamStatusDisabled).
+		Order("id ASC").
+		Limit(100).
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *logArchiveStreamRepo) TryAcquireLease(ctx context.Context, streamID, runnerHostID uint, runnerID string, now, leaseExpiresAt time.Time) (bool, error) {
+	if streamID == 0 || runnerHostID == 0 || strings.TrimSpace(runnerID) == "" {
+		return false, nil
+	}
+	result := r.db.WithContext(ctx).
+		Model(&dbbiz.DatabaseLogArchiveStream{}).
+		Where("id = ? AND runner_host_id = ?", streamID, runnerHostID).
+		Where("enabled = ? AND desired_state = ?", true, dbbiz.DatabaseLogArchiveDesiredStateRunning).
+		Where("status <> ?", dbbiz.DatabaseLogArchiveStreamStatusDisabled).
+		Where("(lease_owner = '' OR lease_owner = ? OR lease_expires_at IS NULL OR lease_expires_at < ?)", runnerID, now).
+		Updates(map[string]any{
+			"lease_owner":       runnerID,
+			"lease_expires_at":  leaseExpiresAt,
+			"last_heartbeat_at": now,
+			"daemon_status":     dbbiz.DatabaseLogArchiveDaemonStatusStarting,
+			"status":            dbbiz.DatabaseLogArchiveStreamStatusPending,
+			"last_error":        "Runner Agent 已获取租约，等待归档 checkpoint",
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
 type logArchiveRepo struct {
 	db *gorm.DB
 }

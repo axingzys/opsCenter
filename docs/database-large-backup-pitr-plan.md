@@ -327,6 +327,809 @@ P2.5 验收标准：
 4. 成功后可一次登记多条 `database_log_archives`。
 5. 单元测试覆盖 catch-up 文件选择、purge 断链保护、多文件输出解析和 request_json 脱敏。
 
+### 2026-04-29 P2.6 / P2.7 外部建议复核结论
+
+外部建议的主线适合 OpsHub 当前方向：P2.6 做长期 binlog 归档，P2.7 做隔离恢复 Runner，这正好补齐 P2 第一版剩余的两个关键缺口。
+
+但实施时必须收紧以下边界：
+
+1. `mysqlbinlog --stop-never` 不能由 `opshub-api` backend 容器直接长期运行，也不应绑定在一次 HTTP 请求生命周期内。长期进程必须由 Runner Agent、系统服务或后续专用 Runner 托管，backend 只负责策略、租约、审计、状态和恢复计划。
+2. SSH Runner 可以继续用于探测、一次性归档和受控追平；如果要运行真正常驻 archiver，SSH 更适合做“安装/启动/停止/查看状态”的管理通道，而不是让 backend 用 SSH session 挂住一个永久命令。
+3. P2.6 不能只记录 `cursor_file/cursor_pos`。MySQL/MariaDB 发生主从切换、GTID 变化、purge、server_uuid 改变时，只靠文件名和 position 容易误判链路连续性，还必须记录 `server_uuid/server_id/gtid_set/binlog_format/binlog_row_image/source_role/promotion_history` 等上下文。
+4. “拉取当前活跃 binlog”必须和“已完成归档文件”区分。活跃文件可以作为 streaming spool 或 checkpoint，但不应在未 finalized 前作为可恢复链路的完整文件参与 PITR 证明。
+5. P2.7 的物理恢复顺序要严格拆开：先准备 base backup 和 incremental chain，再启动隔离实例，最后把 binlog 应用到隔离实例。不能把 `xtrabackup --prepare` 阶段和 `mysqlbinlog` 回放阶段混为一个动作。
+6. P2.7 第一版只允许恢复到隔离库或临时容器，不支持直接覆盖生产库，不自动切流，不自动回填生产数据。
+7. 生产可用性判断不应只看“任务执行成功”，还要看恢复证明、校验 SQL、checksum、日志链连续性、工具版本兼容和可恢复窗口。
+
+因此，P2.6/P2.7 的落地策略是：
+
+```text
+P2.6: 从手动 run-once/catch-up 升级为 Runner 托管的持续归档能力
+  ├─ P2.6.1 归档流运行态、游标、租约、监控和 API
+  ├─ P2.6.2 高频轮询归档，默认只归档已轮转 binlog
+  └─ P2.6.3 streaming archiver，支持低 RPO，但活跃文件必须 spool/finalize
+
+P2.7: 从恢复计划升级为可执行的隔离恢复 Runner
+  ├─ P2.7.1 restore job 模型、步骤状态和 Runner 执行框架
+  ├─ P2.7.2 物理备份链 prepare 和隔离 MySQL/MariaDB 容器启动
+  ├─ P2.7.3 binlog 回放到目标时间/GTID
+  └─ P2.7.4 校验 SQL、恢复证明、日志和清理
+```
+
+### 2026-04-29 P2.6 详细方案：长期 binlog 归档 Runner
+
+目标：让 MySQL/MariaDB binlog 归档从“手动归档一次 / 手动追平”升级为可长期运行、可观测、可审计、可恢复验证的归档链路。
+
+#### P2.6 核心原则
+
+1. backend 不长期持有数据库复制连接，不长期运行 `mysqlbinlog`。
+2. 长期归档执行体必须在 Runner 主机或 Runner Agent 上运行。
+3. backend 保存期望状态和审计记录，Runner 保存执行现场并回传心跳。
+4. 所有执行命令仍必须白名单化，不开放用户自定义 shell。
+5. 密钥只通过凭据解析和临时文件进入 Runner，不写入 `request_json/result_json/config_json`。
+6. 归档文件必须先写入临时路径，checksum 通过后再原子进入最终路径。
+7. PITR 只使用状态为 `archived/verified/finalized` 的日志文件，不使用未完成的 active spool 文件。
+8. 源库 binlog purge 不由 P2.6 自动执行；后续可以基于“已归档且超过安全窗口”提供单独建议或审批动作。
+
+#### P2.6 归档模式
+
+P2.6 支持两种模式，默认先实现安全模式，再实现低 RPO 模式。
+
+模式一：高频轮询归档，默认推荐第一版。
+
+```text
+Runner Agent / 调度器每 30-60 秒：
+  1. 连接源库读取 SHOW BINARY LOGS / SHOW MASTER STATUS
+  2. 根据 stream cursor 找出尚未归档的已轮转 binlog
+  3. 调用 mysqlbinlog/mariadb-binlog --read-from-remote-server --raw 拉取文件
+  4. 计算 SHA256、文件大小、首尾事件时间、GTID 摘要
+  5. 上传到 storage profile 指定仓库
+  6. 登记 database_log_archives
+  7. 更新 stream cursor 和 archive_lag_seconds
+```
+
+特点：
+
+1. 实现风险低，复用 P2.4/P2.5 的文件拉取和登记逻辑。
+2. 默认不拉取当前活跃 binlog，避免把未闭合文件当作完整归档。
+3. RPO 取决于 binlog rotate 频率和业务写入量，不适合强 1 分钟 RPO 的核心库。
+4. 可以作为 P2.6.2 的第一版生产能力。
+
+模式二：streaming 归档，作为增强模式。
+
+```text
+Runner Agent 常驻：
+  mysqlbinlog/mariadb-binlog
+    --read-from-remote-server
+    --raw
+    --stop-never
+    --result-file=<spool_dir>/
+```
+
+特点：
+
+1. 用于 RPO <= 1-5 分钟的核心库。
+2. 需要为每个 stream 分配唯一 replication client 标识，避免和已有复制链路冲突。
+3. 当前活跃 binlog 写入 spool 区，只更新 checkpoint，不立即登记为 finalized。
+4. 当源库 rotate 到下一文件后，Runner 对上一文件计算 checksum、补齐元数据、上传并登记为 `archived`。
+5. 如果 Runner 断开，重启时根据 checkpoint 从上次 cursor 继续，并先执行 catch-up 修补缺口。
+6. 如果发现 cursor 文件已被 purge，必须把 stream 标记为 `broken_chain` 或 `degraded`，不能静默从最新文件继续。
+
+#### P2.6 需要扩展的数据模型
+
+继续复用 `database_log_archive_streams` 作为归档流主表，新增运行态字段：
+
+| 字段 | 类型建议 | 说明 |
+| --- | --- | --- |
+| `runner_host_id` | bigint | 负责该归档流的 Runner Host |
+| `desired_state` | varchar(30) | `running / paused / stopped`，用户期望状态 |
+| `daemon_status` | varchar(30) | `starting / running / paused / degraded / failed / stopped` |
+| `cursor_file` | varchar(255) | 已确认归档或当前 checkpoint 的 binlog 文件 |
+| `cursor_pos` | bigint | 当前 checkpoint position |
+| `cursor_gtid_set` | text | 当前已覆盖 GTID 集合摘要 |
+| `active_file` | varchar(255) | streaming 模式下正在 spool 的活跃 binlog |
+| `last_source_file` | varchar(255) | 最近一次源库显示的当前 binlog |
+| `last_source_pos` | bigint | 最近一次源库当前 position |
+| `last_event_time` | datetime | 最近解析到的 binlog 事件时间 |
+| `archive_lag_seconds` | int | 归档延迟，按源库当前时间或事件时间估算 |
+| `last_heartbeat_at` | datetime | Runner 最近心跳 |
+| `consecutive_failures` | int | 连续失败次数 |
+| `lease_owner` | varchar(120) | 当前持有该 stream 的 Runner ID |
+| `lease_expires_at` | datetime | 租约过期时间，防双 Runner 同时归档 |
+| `paused_at` | datetime | 暂停时间 |
+| `paused_reason` | varchar(500) | 暂停原因 |
+
+`archive_mode` 建议规范为：
+
+```text
+external        外部系统归档，OpsHub 只登记元数据
+manual_once     手动单文件归档
+catch_up        手动批量追平
+polling         Runner 高频轮询归档
+streaming       Runner streaming 常驻归档
+```
+
+`database_log_archives` 建议补充或严格使用以下字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `file_name` | binlog 文件名 |
+| `storage_uri` | 最终归档地址 |
+| `file_size` | 文件大小 |
+| `checksum_sha256` | 文件 checksum |
+| `first_event_time / last_event_time` | 首尾事件时间 |
+| `start_pos / end_pos` | 文件位置范围 |
+| `start_gtid_set / end_gtid_set` | GTID 范围或摘要 |
+| `server_uuid / server_id` | 来源 server 标识 |
+| `previous_file_name / next_file_name` | 文件链 |
+| `status` | `archived / verified / missing / checksum_failed / expired / partial` |
+
+是否新增表：
+
+1. 第一版可以不新增 `database_log_archiver_runs`，归档循环状态先落在 stream 和 runner job。
+2. 如果要做完整运维审计，建议后续新增 `database_log_archive_events`，记录 daemon start、stop、heartbeat missed、purge gap、checksum failed、upload retry 等事件。
+
+#### P2.6 Runner Agent 行为
+
+Runner Agent 获取任务有两种实现方式：
+
+1. 后端主动下发：适合 SSH Runner 的短任务，不适合 streaming。
+2. Agent 主动拉取：适合长期 archiver。Agent 定期调用 backend 获取自己负责的 stream 列表，并续租。
+
+推荐 P2.6 使用 Agent 主动拉取模型：
+
+```text
+Agent loop:
+  1. heartbeat runner host
+  2. acquire/renew stream lease
+  3. load stream config
+  4. run polling or streaming archiver
+  5. upload archive artifacts
+  6. report checkpoint and metrics
+  7. release lease on stop/pause/failure
+```
+
+租约规则：
+
+1. 一个归档流同一时间只能被一个 Runner 持有。
+2. Runner 每 10-30 秒续租。
+3. backend 发现 `lease_expires_at < now` 后允许其他 Runner 接管。
+4. 接管前必须重新读取源库 binlog 列表并验证 cursor 是否仍存在。
+5. 如果 cursor 不存在，stream 进入 degraded，提示需要人工确认是否从备份链补洞。
+
+#### P2.6 后端接口
+
+新增或扩展接口：
+
+```text
+POST /api/v1/databases/log-archive-streams/{id}/start
+POST /api/v1/databases/log-archive-streams/{id}/pause
+POST /api/v1/databases/log-archive-streams/{id}/resume
+POST /api/v1/databases/log-archive-streams/{id}/stop
+GET  /api/v1/databases/log-archive-streams/{id}/status
+
+POST /api/v1/databases/runner-agents/{runnerId}/heartbeat
+GET  /api/v1/databases/runner-agents/{runnerId}/log-archive-streams
+POST /api/v1/databases/runner-agents/{runnerId}/log-archive-streams/{id}/checkpoint
+POST /api/v1/databases/runner-agents/{runnerId}/log-archives
+```
+
+权限建议：
+
+| 操作 | 权限 |
+| --- | --- |
+| 查看归档流状态 | `database:backup:view` |
+| 启动、暂停、恢复、停止 archiver | `database:backup:run` |
+| 修改归档流 Runner、模式、RPO、存储 | `database:backup:update` |
+| Agent 心跳和 checkpoint | Runner token 或 mTLS，不使用用户 token |
+
+#### P2.6 存储与文件布局
+
+本地或挂载存储建议：
+
+```text
+<storage_root>/mysql-binlog/
+  instance-<instance_id>/
+    stream-<stream_id>/
+      finalized/
+        binlog.000001
+        binlog.000001.sha256
+        binlog.000001.manifest.json
+      spool/
+        binlog.000002.partial
+      logs/
+        archiver-20260429.log
+```
+
+对象存储建议：
+
+```text
+s3://<bucket>/<prefix>/mysql-binlog/instance-<id>/stream-<id>/finalized/binlog.000001
+s3://<bucket>/<prefix>/mysql-binlog/instance-<id>/stream-<id>/manifest/binlog.000001.json
+```
+
+上传规则：
+
+1. 先上传到 `.tmp` 或 staging key。
+2. checksum 通过后写入最终 key。
+3. `database_log_archives` 只登记最终 key。
+4. 如果上传失败，保留本地 spool 并重试，不更新 cursor 到已归档状态。
+5. 如果数据库文件已下载但 checksum 或解析失败，登记 `checksum_failed` 或只记录 runner event，不进入可恢复链。
+
+#### P2.6 监控指标
+
+前端和后端至少展示：
+
+1. `desired_state`
+2. `daemon_status`
+3. `archive_mode`
+4. `runner_host`
+5. `cursor_file / cursor_pos`
+6. `active_file`
+7. `last_source_file / last_source_pos`
+8. `archive_lag_seconds`
+9. `last_heartbeat_at`
+10. `consecutive_failures`
+11. `last_error`
+12. 最近 10 条归档文件
+13. 最近 10 条 Runner 事件或 Job
+
+告警建议：
+
+| 条件 | 风险 |
+| --- | --- |
+| `archive_lag_seconds > rpo_target_seconds * 2` | RPO 超标 |
+| `last_heartbeat_at` 超过 2 个心跳周期 | Runner 可能失联 |
+| `cursor_file` 已不在源库 binlog 列表 | 源库可能 purge，日志链断裂 |
+| `checksum_failed` | 归档文件不可用 |
+| `consecutive_failures >= 3` | 归档流 degraded |
+| `server_uuid` 变化但无 promotion 记录 | 可能发生主从切换，需人工确认 |
+
+#### P2.6 与 PITR 的集成规则
+
+恢复计划只能使用满足以下条件的 binlog：
+
+1. `status in ('archived', 'verified')`
+2. `checksum_sha256` 存在且校验通过
+3. `first_event_time/last_event_time` 能覆盖目标时间
+4. 文件链 `previous_file_name/next_file_name` 连续
+5. GTID 模式下 `start_gtid_set/end_gtid_set` 不出现缺口
+6. source server 变化时能找到 promotion history 或人工确认记录
+
+如果目标时间落在 active spool 文件内：
+
+1. polling 模式：默认判定不可恢复到该时间点，提示等待 rotate 或手动归档当前活跃文件。
+2. streaming 模式：只有当 spool 文件已经生成可校验 manifest，并且策略允许 `partial` 参与恢复时，才可作为实验性能力使用；第一版不建议默认开启。
+
+#### P2.6 前端改造
+
+归档流列表增加：
+
+1. 运行模式：外部、手动、追平、轮询、streaming。
+2. Runner 主机。
+3. 期望状态和实际状态。
+4. 当前 cursor。
+5. 归档延迟。
+6. 最近心跳。
+7. 操作：启动、暂停、恢复、停止、追平、查看事件。
+
+归档流详情增加：
+
+1. 源库当前 binlog 列表快照。
+2. 已归档文件时间线。
+3. RPO 趋势。
+4. 断链诊断。
+5. 与恢复计划的覆盖关系。
+
+#### P2.6 验收标准
+
+1. 可以把一个 MySQL/MariaDB binlog 归档流绑定到 Runner Host。
+2. 可以启动、暂停、恢复、停止归档流。
+3. polling 模式下可以自动持续归档已轮转 binlog。
+4. Runner 失联后 stream 状态变为 degraded，并显示最近心跳和错误。
+5. cursor 文件被源库 purge 时必须拒绝继续静默归档，并提示日志链断裂。
+6. 成功归档的文件自动登记到 `database_log_archives`，并参与 PITR 恢复计划。
+7. 归档文件有 checksum、大小、首尾事件时间、position 和链路关系。
+8. request/result/config 不保存数据库密码、SSH 私钥、对象存储密钥。
+9. 单元测试覆盖 cursor 选择、租约接管、purge 断链、checksum 失败、状态流转。
+10. 集成测试覆盖至少 MySQL 8.0、MySQL 8.4、MariaDB 的轮询归档。
+
+#### 2026-04-29 P2.6.1 已落地范围
+
+本次先落地长期 binlog 归档的控制面和运行态模型，不在 backend 容器内直接运行常驻 `mysqlbinlog --stop-never`。
+
+已实现：
+
+1. `database_log_archive_streams` 扩展运行态字段：
+   - `runner_host_id`
+   - `desired_state`
+   - `daemon_status`
+   - `cursor_file / cursor_pos / cursor_gtid_set`
+   - `active_file`
+   - `last_source_file / last_source_pos`
+   - `last_event_time`
+   - `archive_lag_seconds`
+   - `last_heartbeat_at`
+   - `consecutive_failures`
+   - `lease_owner / lease_expires_at`
+   - `paused_at / paused_reason`
+2. 新增归档模式常量：
+   - `external`
+   - `manual_once`
+   - `catch_up`
+   - `polling`
+   - `streaming`
+3. 新增归档流控制接口：
+   - `GET /api/v1/databases/log-archive-streams/{id}/status`
+   - `POST /api/v1/databases/log-archive-streams/{id}/start`
+   - `POST /api/v1/databases/log-archive-streams/{id}/pause`
+   - `POST /api/v1/databases/log-archive-streams/{id}/resume`
+   - `POST /api/v1/databases/log-archive-streams/{id}/stop`
+4. 权限边界：
+   - 查看状态使用备份查看权限。
+   - 启动、暂停、恢复、停止使用备份执行权限。
+   - 仍沿用实例级 `DatabasePermissionBackup` 校验。
+5. 启动/恢复行为：
+   - 仅允许 MySQL/MariaDB binlog 归档流。
+   - 必须选择已启用 Runner Host。
+   - 写入 `desired_state=running`。
+   - 写入 `daemon_status=starting`。
+   - 保留为 `status=pending`，表示等待 Runner Agent 接管。
+6. 暂停/停止行为：
+   - 暂停写入 `desired_state=paused`、`daemon_status=paused`、`status=paused`。
+   - 停止写入 `desired_state=stopped`、`daemon_status=stopped`。
+   - 暂停和停止都会清理租约字段。
+7. 前端归档流列表增加：
+   - Runner 主机。
+   - 期望状态。
+   - 守护状态。
+   - cursor。
+   - 归档延迟和心跳。
+   - 启动、暂停、恢复、停止按钮。
+8. 前端新增启动长期归档流弹窗：
+   - 选择 Runner Host。
+   - 选择 `polling` 或 `streaming` 模式。
+   - 明确提示 P2.6.1 只保存控制面状态，等待 Runner Agent 接管。
+9. 一次性 binlog 归档和追平归档成功后会回写：
+   - `cursor_file`
+   - `cursor_pos`
+   - `last_event_time`
+   - `last_heartbeat_at`
+   - `consecutive_failures=0`
+   - `archive_lag_seconds=0`
+10. 一次性 binlog 归档或追平归档失败后会进入 `degraded`，并增加 `consecutive_failures`。
+
+P2.6.1 阶段未实现，保留给 P2.6.2+：
+
+1. Runner Agent 主动拉取 stream 列表。
+2. Agent lease acquire/renew/release。
+3. Agent checkpoint API。
+4. 常驻 polling archiver。
+5. 常驻 streaming archiver。
+6. 源库 binlog purge 断链自动诊断。
+7. long-running archiver 事件表。
+8. 对象存储 staging、checksum 后提交、spool 重试。
+
+#### 2026-04-29 P2.6.2 已落地范围
+
+本阶段落地 Runner Agent 接入面，让长期 binlog archiver 有稳定的后端协议。仍然不在 backend 容器中直接运行长期归档进程。
+
+新增公开接口：
+
+```text
+POST /api/v1/public/databases/runner-agents/{runnerId}/heartbeat
+GET  /api/v1/public/databases/runner-agents/{runnerId}/log-archive-streams
+POST /api/v1/public/databases/runner-agents/{runnerId}/log-archive-streams/{id}/checkpoint
+POST /api/v1/public/databases/runner-agents/{runnerId}/log-archives
+```
+
+鉴权规则：
+
+1. Runner Host 的 `config_json` 必须配置 `runnerAuthSha256`。
+2. Agent 请求必须带 `X-OpsHub-Runner-Auth`，或 `Authorization: Bearer <value>`。
+3. 后端只比较请求值的 SHA256，不保存明文 Runner 认证值。
+4. `runnerAuthSha256` 这个键名不包含 `token/secret/password`，可以通过现有敏感配置校验。
+5. 如果 Runner Host 没有配置 hash，公开接口拒绝访问。
+
+示例：
+
+```bash
+AUTH='a-long-random-runner-auth'
+printf '%s' "$AUTH" | sha256sum
+```
+
+把输出的 64 位 hash 写入 Runner Host：
+
+```json
+{
+  "runnerAuthSha256": "..."
+}
+```
+
+Agent 请求：
+
+```bash
+curl -H "X-OpsHub-Runner-Auth: $AUTH" \
+  http://opshub/api/v1/public/databases/runner-agents/runner-host-1/log-archive-streams
+```
+
+已实现：
+
+1. Runner Agent 心跳：
+   - 更新 `database_runner_hosts.last_heartbeat_at`。
+   - 正常心跳把 Runner Host 标记为 `online`。
+   - 失败心跳把 Runner Host 标记为 `failed` 并记录 `last_error`。
+2. Agent 主动拉取归档流：
+   - 仅返回绑定到当前 Runner Host 的流。
+   - 仅返回 `desired_state=running`、`enabled=true`、`archive_type=binlog`、`archive_mode in (polling, streaming)` 的流。
+   - 后端尝试为每个流获取或续租。
+   - 租约被其他 Runner 持有且未过期时不会返回。
+3. 租约规则：
+   - 默认租约 TTL 为 90 秒。
+   - Agent 拉取 stream 时写入 `lease_owner` 和 `lease_expires_at`。
+   - 同一 Runner 可续租。
+   - 租约为空、过期或属于同一 Runner 时允许接管。
+4. 拉取结果：
+   - 返回 stream 运行态。
+   - 返回源实例基础连接元数据：实例 ID、类型、host、port、默认库。
+   - 返回 Runner 的 work dir 和 storage mount。
+   - 不返回数据库密码、SSH 私钥、对象存储密钥。
+5. checkpoint：
+   - 更新 `daemon_status`。
+   - 更新 `cursor_file / cursor_pos / cursor_gtid_set`。
+   - 更新 `active_file`。
+   - 更新 `last_source_file / last_source_pos`。
+   - 更新 `last_event_time`。
+   - 更新 `archive_lag_seconds`。
+   - 更新 `last_heartbeat_at`。
+   - 更新并续租 `lease_expires_at`。
+   - 支持 `releaseLease=true` 释放租约。
+6. checkpoint 状态映射：
+   - `daemon_status=running` 时 stream 进入 `running`。
+   - `daemon_status=degraded` 时 stream 进入 `degraded`。
+   - `daemon_status=failed` 时 stream 进入 `failed`。
+   - `daemon_status=paused` 时 stream 进入 `paused`。
+   - 如果 `archive_lag_seconds > rpo_target_seconds * 2`，即使 daemon 上报 running，也会标记为 `degraded`。
+7. Agent 登记归档文件：
+   - Agent 通过公开接口登记已完成归档的 binlog。
+   - 仍复用 `database_log_archives` 元数据模型。
+   - 仍要求文件名、存储 URI、首尾事件时间。
+   - 登记成功后更新 stream 的最近归档、cursor 和可恢复链路元数据。
+
+本阶段仍未实现，保留给 P2.6.3+：
+
+1. 独立 Runner Agent 二进制中的常驻 polling archiver loop。
+2. `mysqlbinlog --stop-never` streaming archiver loop。
+3. Agent 侧对象存储上传、staging key、checksum 后提交。
+4. Agent 侧 spool 目录重试。
+5. 源库 binlog 列表校验和 purge 断链自动诊断。
+6. `database_log_archive_events` 事件表。
+7. 前端展示 Agent 接入命令、hash 生成和最近 Agent 事件。
+
+### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
+
+目标：把 P1/P2 已有的“恢复计划和恢复证明预生成”升级为可执行的隔离恢复流程，真正把物理备份链和 binlog 归档链恢复到一个隔离 MySQL/MariaDB 实例，并执行校验 SQL。
+
+#### P2.7 核心原则
+
+1. 第一版只允许恢复到隔离库、临时容器或隔离目录。
+2. 不支持直接覆盖生产库。
+3. 不自动切换业务连接。
+4. 不自动把数据回填生产库。
+5. 所有恢复命令由 Runner 执行，backend 不直接操作 datadir。
+6. 恢复用到的 backup、incremental、binlog、工具版本、checksum 和校验结果必须写入 proof。
+7. 恢复工作目录必须可清理、可过期、可审计。
+
+#### P2.7 需要扩展的数据模型
+
+继续复用 `database_restore_jobs`，但需要扩展为 PITR 执行任务：
+
+| 字段 | 类型建议 | 说明 |
+| --- | --- | --- |
+| `restore_plan_id` | bigint | 关联 `database_restore_plans` |
+| `runner_host_id` | bigint | 执行恢复的 Runner Host |
+| `runner_job_id` | bigint | 关联底层 Runner Job |
+| `restore_target_type` | varchar(30) | `time / gtid` |
+| `restore_target_value` | varchar(255) | 目标时间或 GTID |
+| `work_dir` | varchar(1000) | Runner 恢复工作目录 |
+| `prepared_datadir` | varchar(1000) | prepare 后 datadir |
+| `container_name` | varchar(255) | 临时容器名称 |
+| `container_image` | varchar(255) | MySQL/MariaDB 镜像 |
+| `listen_host` | varchar(255) | 隔离实例访问地址 |
+| `listen_port` | int | 隔离实例端口 |
+| `step_json` | text | 步骤状态和耗时 |
+| `validation_json` | text | 校验 SQL 结果 |
+| `proof_json` | text | 最终恢复证明 |
+| `log_path` | varchar(1000) | Runner 日志路径或 URI |
+| `artifact_uri` | varchar(1000) | proof、日志、manifest 打包地址 |
+| `expires_at` | datetime | 临时恢复库过期时间 |
+| `cleanup_status` | varchar(30) | `pending / cleaned / failed` |
+
+`database_restore_plans` 也建议补充：
+
+| 字段 | 说明 |
+| --- | --- |
+| `runner_host_id` | 推荐执行 Runner |
+| `required_tool_json` | 恢复需要的工具和版本 |
+| `required_artifact_json` | 备份和 binlog 对象清单 |
+| `estimated_restore_bytes` | 预计恢复数据量 |
+| `estimated_restore_minutes` | 粗略恢复耗时 |
+
+#### P2.7 后端接口
+
+新增接口：
+
+```text
+POST /api/v1/databases/restore-plans/{id}/run
+GET  /api/v1/databases/restore-jobs
+GET  /api/v1/databases/restore-jobs/{id}
+POST /api/v1/databases/restore-jobs/{id}/cancel
+POST /api/v1/databases/restore-jobs/{id}/cleanup
+GET  /api/v1/databases/restore-jobs/{id}/proof
+```
+
+`POST /restore-plans/{id}/run` 请求建议：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runnerHostId` | bigint | 是 | 执行恢复的 Runner |
+| `containerImage` | string | 否 | 指定 MySQL/MariaDB 镜像，默认按源库类型和版本推断 |
+| `listenPort` | int | 否 | 隔离实例端口，不填则随机分配 |
+| `expiresInHours` | int | 否 | 临时恢复库保留时间 |
+| `validationSql` | array | 否 | 额外校验 SQL，只允许只读语句 |
+| `cleanupOnFailure` | bool | 否 | 失败后是否自动清理临时目录 |
+
+权限建议：
+
+| 操作 | 权限 |
+| --- | --- |
+| 发起隔离恢复 | `database:restore:run` |
+| 查看恢复任务和 proof | `database:restore:view` |
+| 清理恢复环境 | `database:restore:run` 或更高 |
+| 下载 proof | `database:restore:view` |
+
+#### P2.7 执行步骤
+
+恢复 Runner Job 按固定步骤执行，每一步写入 `step_json`。
+
+```text
+1. lock_restore_plan
+2. validate_plan_again
+3. prepare_workdir
+4. fetch_base_backup
+5. verify_base_checksum
+6. fetch_incremental_chain
+7. verify_incremental_checksums
+8. prepare_physical_backup
+9. fetch_binlog_chain
+10. verify_binlog_chain
+11. create_isolated_datadir
+12. start_isolated_instance
+13. apply_binlog_to_target
+14. run_validation_sql
+15. generate_proof
+16. mark_success_or_failed
+```
+
+步骤说明：
+
+1. `validate_plan_again`：执行前必须重新校验恢复计划，因为备份文件、日志文件、对象存储和源库 purge 状态可能已经变化。
+2. `prepare_workdir`：在 Runner 主机创建独立目录，例如 `/var/lib/opshub/database-runner/restore/job-<id>`。
+3. `fetch_base_backup`：从 local/NFS/S3/MinIO 拉取 base backup，校验大小和 SHA256。
+4. `fetch_incremental_chain`：按 `base_record_id/parent_record_id/chain_id` 顺序拉取增量备份。
+5. `prepare_physical_backup`：按工具要求准备 datadir。
+6. `fetch_binlog_chain`：拉取恢复目标需要的 binlog 文件，校验 checksum 和连续性。
+7. `start_isolated_instance`：启动隔离 MySQL/MariaDB 实例，只暴露给 Runner 或受控网络。
+8. `apply_binlog_to_target`：用 mysqlbinlog 回放到目标时间或 GTID。
+9. `run_validation_sql`：执行默认和用户配置的只读校验 SQL。
+10. `generate_proof`：生成最终 proof_json 和 proof 文件。
+
+#### P2.7 物理备份 prepare 规则
+
+XtraBackup / mariadb-backup 的物理 prepare 必须在隔离工作目录完成。
+
+全量备份：
+
+```text
+1. 解压 full backup 到 base_dir
+2. xtrabackup/mariadb-backup --prepare --target-dir=base_dir
+3. prepared datadir = base_dir
+```
+
+全量 + 增量链：
+
+```text
+1. 解压 full backup 到 base_dir
+2. 对 full 执行 prepare apply-log-only
+3. 按顺序解压 incremental backup 到 inc_dir_1, inc_dir_2, ...
+4. 对每个增量执行 prepare --incremental-dir=inc_dir_n
+5. 最后一次 prepare 不再使用 apply-log-only，完成崩溃恢复
+6. prepared datadir = base_dir
+```
+
+注意：
+
+1. MySQL XtraBackup 和 MariaDB mariadb-backup 参数细节可能不同，Runner 必须按 `backup_engine/tool_name/tool_version` 选择命令模板。
+2. 如果备份链缺少任一增量，不能尝试跳过，恢复任务必须失败。
+3. 如果工具版本和备份元数据不兼容，恢复任务必须在 prepare 前失败。
+4. prepare 后的 datadir 不得覆盖生产路径。
+
+#### P2.7 隔离实例启动方式
+
+第一版推荐 Docker 隔离实例：
+
+```text
+docker run --rm -d
+  --name opshub-restore-<job_id>
+  -v <prepared_datadir>:/var/lib/mysql
+  -p 127.0.0.1:<random_port>:3306
+  mysql:<matched_version>
+```
+
+MariaDB 使用匹配的 `mariadb:<version>` 镜像。
+
+启动规则：
+
+1. 镜像版本必须尽量匹配源库 major/minor。
+2. 默认只绑定 `127.0.0.1` 或 Runner 内部网络。
+3. 生成临时 root 密码，只写入 Runner 临时文件和 OpsHub secret 引用，不写入 job 明文。
+4. 启动前处理 datadir ownership。
+5. 失败时保留日志，按配置决定是否清理 datadir。
+6. UI 必须显示“隔离库”，不能让用户误以为已恢复生产。
+
+如果目标环境不允许 Docker：
+
+1. P2.7 可以预留 host process 模式。
+2. host process 模式必须指定 `mysqld` 路径、独立 datadir、独立 socket、独立 port 和独立 config。
+3. host process 模式默认不开启，必须由管理员显式允许。
+
+#### P2.7 binlog 回放规则
+
+回放前置条件：
+
+1. 恢复计划已经定位 `backup_binlog_file/backup_binlog_pos` 或 `backup_gtid_set`。
+2. 所需 binlog 文件全部已归档且 checksum 通过。
+3. 文件链连续。
+4. GTID 模式下 GTID 范围连续。
+5. source server 切换有 promotion history 或人工确认。
+
+按时间恢复：
+
+```text
+mysqlbinlog
+  --start-position=<backup_binlog_pos>
+  --stop-datetime='<target_time>'
+  <binlog files...> | mysql --host=127.0.0.1 --port=<isolated_port>
+```
+
+按 GTID 恢复：
+
+```text
+mysqlbinlog
+  --include-gtids='<target_gtid_set>'
+  <binlog files...> | mysql --host=127.0.0.1 --port=<isolated_port>
+```
+
+注意：
+
+1. MySQL 和 MariaDB 的 GTID 语义不同，不能共用一套简单参数。
+2. 第一版必须优先支持按时间恢复；GTID 恢复可以作为 P2.7 后半段增强。
+3. 如果 base backup 本身已经包含某些事务，必须从备份记录的 binlog 起点开始，避免重复回放。
+4. `mysqlbinlog` 回放必须记录实际使用的文件列表、start/stop 参数、退出码和 stderr 摘要。
+
+#### P2.7 校验 SQL
+
+默认校验：
+
+```sql
+SELECT VERSION();
+SELECT @@server_uuid;
+SHOW DATABASES;
+```
+
+MySQL/MariaDB 可选校验：
+
+1. 指定库的表数量。
+2. 关键表行数。
+3. 指定业务 SQL 的只读查询结果。
+4. 恢复目标时间附近的关键数据是否存在。
+
+安全规则：
+
+1. 只允许 `SELECT / SHOW / DESC / DESCRIBE / EXPLAIN`。
+2. 禁止多语句。
+3. 单条 SQL 必须有超时。
+4. 结果只保存摘要，不保存大结果集。
+5. 校验失败不一定代表恢复失败，但 proof 必须标记 `validation_status=failed`。
+
+#### P2.7 恢复证明 proof_json
+
+proof 必须包含：
+
+1. `restoreJobId`
+2. `restorePlanId`
+3. `sourceInstanceId`
+4. `targetTime` 或 `targetGtid`
+5. `runnerHostId`
+6. `toolVersions`
+7. `baseBackup`
+8. `incrementalChain`
+9. `binlogChain`
+10. `checksumResults`
+11. `prepareSteps`
+12. `applyBinlogCommandSummary`
+13. `isolatedInstance`
+14. `validationSql`
+15. `validationResults`
+16. `startedAt / finishedAt / durationMs`
+17. `operator`
+18. `finalStatus`
+
+proof 文件建议同时保存：
+
+```text
+proof.json
+restore.log
+tool-versions.txt
+selected-artifacts.manifest.json
+validation-results.json
+```
+
+#### P2.7 前端改造
+
+恢复计划列表增加：
+
+1. `执行恢复` 按钮。
+2. 推荐 Runner。
+3. 预计恢复数据量。
+4. 预计耗时。
+5. 是否可执行。
+6. 最近一次恢复任务状态。
+
+恢复执行弹窗：
+
+1. 选择 Runner Host。
+2. 选择容器镜像或使用自动推荐。
+3. 选择临时库保留时间。
+4. 填写额外校验 SQL。
+5. 风险确认：只恢复到隔离库，不覆盖生产。
+
+恢复任务详情：
+
+1. 步骤时间线。
+2. 当前日志摘要。
+3. 已下载 artifacts。
+4. 隔离库连接信息。
+5. 校验 SQL 结果。
+6. proof 下载。
+7. 清理按钮。
+
+#### P2.7 安全边界
+
+1. 不允许选择生产实例作为直接覆盖目标。
+2. 不允许 Runner 使用生产 datadir 路径作为恢复目录。
+3. Docker 端口默认只绑定本机。
+4. 临时 root 密码必须自动生成并脱敏。
+5. 恢复任务所有命令必须来自白名单模板。
+6. 用户输入只允许出现在受控字段中，不拼接任意 shell。
+7. 恢复环境必须有过期时间和清理动作。
+8. 清理动作也必须审计。
+
+#### P2.7 验收标准
+
+1. 可以从一个预校验通过的 MySQL/MariaDB 恢复计划发起隔离恢复任务。
+2. Runner 能拉取 base backup、增量链和 binlog 链，并逐项 checksum 校验。
+3. 缺少任一备份或 binlog 时任务失败，错误信息能指向缺失对象。
+4. Runner 能 prepare 物理备份链。
+5. Runner 能启动隔离 MySQL/MariaDB 容器。
+6. Runner 能按目标时间回放 binlog。
+7. 校验 SQL 能执行并保存摘要。
+8. proof_json 包含 base backup、incremental chain、binlog chain、checksum、工具版本、校验 SQL 和最终状态。
+9. 前端能查看恢复步骤、状态、错误、隔离库连接信息和 proof。
+10. 恢复环境能手动清理，并在过期后提示清理。
+11. 单元测试覆盖计划状态判断、命令模板生成、危险路径拒绝、校验 SQL 白名单、proof 字段。
+12. 集成测试至少覆盖 MySQL 8.0 full restore、MySQL 8.0 full+incremental restore、MariaDB full restore。
+
 ## 文档定位
 
 本文是 OpsHub 数据库管理模块在“大库备份、日志归档、延迟副本、PITR 恢复演练”方向的长期改造基准。后续分期实施、表结构扩展、接口设计、前端页面、Runner 执行边界、权限和验收标准均以本文为准。
@@ -1467,6 +2270,14 @@ replica_pause_apply
 
 目标：接入 MySQL/MariaDB 大库主链路。
 
+当前拆分：
+
+1. P2 第一版：物理备份、元数据采集、恢复计划和证明预生成。
+2. P2.1-P2.2：Runner Host、Runner Job 和 SSH 白名单执行底座。
+3. P2.3-P2.5：一次性 binlog 归档和受控批量追平。
+4. P2.6：长期 binlog 归档 Runner。
+5. P2.7：隔离恢复 Runner。
+
 范围：
 
 1. Runner 支持 XtraBackup。
@@ -1487,6 +2298,12 @@ replica_pause_apply
 4. 缺 binlog 或 GTID 断链时恢复计划失败。
 5. 能恢复到指定时间点的隔离 MySQL/MariaDB 实例。
 6. 恢复证明包含 base backup、incremental chain、binlog 区间、checksum 和校验 SQL。
+
+P2 完成度判定：
+
+1. 只完成 P2 第一版到 P2.5 时，系统具备“可生成计划、可登记/归档、可证明理论可恢复”的能力。
+2. 完成 P2.6 后，系统具备“持续维护 binlog 可恢复窗口”的能力。
+3. 完成 P2.7 后，系统才具备“MySQL/MariaDB 物理备份链自动恢复到隔离库并验证”的完整闭环。
 
 ### P3：PostgreSQL 物理备份和 WAL 归档
 

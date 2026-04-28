@@ -78,6 +78,8 @@ func writeDatabaseError(c *gin.Context, prefix string, err error) {
 	switch {
 	case strings.Contains(message, "不存在"):
 		statusCode = http.StatusNotFound
+	case strings.Contains(message, "鉴权失败"):
+		statusCode = http.StatusUnauthorized
 	case strings.Contains(message, "不能为空"),
 		strings.Contains(message, "请选择"),
 		strings.Contains(message, "不支持"),
@@ -960,6 +962,75 @@ func (s *Service) CreateLogArchiveStream(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) GetLogArchiveStreamStatus(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "日志归档流ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetLogArchiveStreamInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.GetLogArchiveStreamStatus(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) StartLogArchiveStream(c *gin.Context) {
+	s.controlLogArchiveStream(c, "启动失败: ", s.useCase.StartLogArchiveStream)
+}
+
+func (s *Service) PauseLogArchiveStream(c *gin.Context) {
+	s.controlLogArchiveStream(c, "暂停失败: ", s.useCase.PauseLogArchiveStream)
+}
+
+func (s *Service) ResumeLogArchiveStream(c *gin.Context) {
+	s.controlLogArchiveStream(c, "恢复失败: ", s.useCase.ResumeLogArchiveStream)
+}
+
+func (s *Service) StopLogArchiveStream(c *gin.Context) {
+	s.controlLogArchiveStream(c, "停止失败: ", s.useCase.StopLogArchiveStream)
+}
+
+func (s *Service) controlLogArchiveStream(
+	c *gin.Context,
+	prefix string,
+	handler func(context.Context, uint, *dbbiz.DatabaseLogArchiveStreamControlRequest) (*dbbiz.DatabaseLogArchiveStreamVO, error),
+) {
+	id, ok := parseUintParam(c, "id", "日志归档流ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseLogArchiveStreamControlRequest
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+			return
+		}
+	}
+	instanceID, err := s.useCase.GetLogArchiveStreamInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, prefix, err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := handler(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, prefix, err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) ListLogArchives(c *gin.Context) {
 	var req dbbiz.DatabaseLogArchiveListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
@@ -1059,6 +1130,80 @@ func (s *Service) RunLogArchiveCatchUp(c *gin.Context) {
 		return
 	}
 	response.Success(c, item)
+}
+
+func (s *Service) RunnerAgentHeartbeat(c *gin.Context) {
+	runnerID := c.Param("runnerId")
+	var req dbbiz.DatabaseRunnerAgentHeartbeatRequest
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+			return
+		}
+	}
+	item, err := s.useCase.RunnerAgentHeartbeat(c.Request.Context(), runnerID, runnerAgentAuthHeader(c), &req)
+	if err != nil {
+		writeDatabaseError(c, "Runner Agent 心跳失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) RunnerAgentListLogArchiveStreams(c *gin.Context) {
+	runnerID := c.Param("runnerId")
+	basePath := fmt.Sprintf("/api/v1/public/databases/runner-agents/%s", runnerID)
+	item, err := s.useCase.RunnerAgentListLogArchiveStreams(c.Request.Context(), runnerID, runnerAgentAuthHeader(c), basePath)
+	if err != nil {
+		writeDatabaseError(c, "Runner Agent 拉取归档流失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) RunnerAgentCheckpointLogArchiveStream(c *gin.Context) {
+	runnerID := c.Param("runnerId")
+	id, ok := parseUintParam(c, "id", "日志归档流ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRunnerAgentCheckpointRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.RunnerAgentCheckpointLogArchiveStream(c.Request.Context(), runnerID, runnerAgentAuthHeader(c), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "Runner Agent checkpoint 失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) RunnerAgentRegisterLogArchive(c *gin.Context) {
+	runnerID := c.Param("runnerId")
+	var req dbbiz.DatabaseExternalLogArchiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.RunnerAgentRegisterLogArchive(c.Request.Context(), runnerID, runnerAgentAuthHeader(c), &req)
+	if err != nil {
+		writeDatabaseError(c, "Runner Agent 登记日志归档失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func runnerAgentAuthHeader(c *gin.Context) string {
+	value := strings.TrimSpace(c.GetHeader("X-OpsHub-Runner-Auth"))
+	if value != "" {
+		return value
+	}
+	auth := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		return strings.TrimSpace(auth[7:])
+	}
+	return ""
 }
 
 func (s *Service) ListRestorePlans(c *gin.Context) {

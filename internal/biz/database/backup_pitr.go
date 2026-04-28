@@ -100,6 +100,7 @@ type DatabaseLogArchiveStreamRequest struct {
 	ArchiveType      string `json:"archiveType" binding:"omitempty,max=30"`
 	ArchiveMode      string `json:"archiveMode" binding:"omitempty,max=30"`
 	ArchiveEngine    string `json:"archiveEngine" binding:"omitempty,max=60"`
+	RunnerHostID     uint   `json:"runnerHostId"`
 	StorageProfileID uint   `json:"storageProfileId"`
 	SecretProfileID  uint   `json:"secretProfileId"`
 	RPOTargetSeconds int    `json:"rpoTargetSeconds" binding:"omitempty,min=0,max=86400"`
@@ -108,31 +109,58 @@ type DatabaseLogArchiveStreamRequest struct {
 	ConfigJSON       string `json:"configJson" binding:"omitempty,max=4000"`
 }
 
+type DatabaseLogArchiveStreamControlRequest struct {
+	RunnerHostID uint   `json:"runnerHostId"`
+	ArchiveMode  string `json:"archiveMode" binding:"omitempty,max=30"`
+	Reason       string `json:"reason" binding:"omitempty,max=500"`
+}
+
 type DatabaseLogArchiveStreamVO struct {
-	ID                 uint   `json:"id"`
-	InstanceID         uint   `json:"instanceId"`
-	InstanceName       string `json:"instanceName"`
-	SourceInstanceID   uint   `json:"sourceInstanceId"`
-	SourceInstanceName string `json:"sourceInstanceName"`
-	Engine             string `json:"engine"`
-	EngineText         string `json:"engineText"`
-	ArchiveType        string `json:"archiveType"`
-	ArchiveTypeText    string `json:"archiveTypeText"`
-	ArchiveMode        string `json:"archiveMode"`
-	ArchiveEngine      string `json:"archiveEngine"`
-	StorageProfileID   uint   `json:"storageProfileId"`
-	SecretProfileID    uint   `json:"secretProfileId"`
-	RPOTargetSeconds   int    `json:"rpoTargetSeconds"`
-	RetentionDays      int    `json:"retentionDays"`
-	Enabled            bool   `json:"enabled"`
-	Status             string `json:"status"`
-	StatusText         string `json:"statusText"`
-	LastArchivedAt     string `json:"lastArchivedAt"`
-	LastArchiveName    string `json:"lastArchiveName"`
-	LastError          string `json:"lastError"`
-	ConfigJSON         string `json:"configJson"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
+	ID                  uint   `json:"id"`
+	InstanceID          uint   `json:"instanceId"`
+	InstanceName        string `json:"instanceName"`
+	SourceInstanceID    uint   `json:"sourceInstanceId"`
+	SourceInstanceName  string `json:"sourceInstanceName"`
+	Engine              string `json:"engine"`
+	EngineText          string `json:"engineText"`
+	ArchiveType         string `json:"archiveType"`
+	ArchiveTypeText     string `json:"archiveTypeText"`
+	ArchiveMode         string `json:"archiveMode"`
+	ArchiveModeText     string `json:"archiveModeText"`
+	ArchiveEngine       string `json:"archiveEngine"`
+	RunnerHostID        uint   `json:"runnerHostId"`
+	RunnerHostName      string `json:"runnerHostName"`
+	StorageProfileID    uint   `json:"storageProfileId"`
+	SecretProfileID     uint   `json:"secretProfileId"`
+	RPOTargetSeconds    int    `json:"rpoTargetSeconds"`
+	RetentionDays       int    `json:"retentionDays"`
+	Enabled             bool   `json:"enabled"`
+	Status              string `json:"status"`
+	StatusText          string `json:"statusText"`
+	DesiredState        string `json:"desiredState"`
+	DesiredStateText    string `json:"desiredStateText"`
+	DaemonStatus        string `json:"daemonStatus"`
+	DaemonStatusText    string `json:"daemonStatusText"`
+	CursorFile          string `json:"cursorFile"`
+	CursorPos           int64  `json:"cursorPos"`
+	CursorGTIDSet       string `json:"cursorGtidSet"`
+	ActiveFile          string `json:"activeFile"`
+	LastSourceFile      string `json:"lastSourceFile"`
+	LastSourcePos       int64  `json:"lastSourcePos"`
+	LastEventTime       string `json:"lastEventTime"`
+	ArchiveLagSeconds   int    `json:"archiveLagSeconds"`
+	LastHeartbeatAt     string `json:"lastHeartbeatAt"`
+	ConsecutiveFailures int    `json:"consecutiveFailures"`
+	LeaseOwner          string `json:"leaseOwner"`
+	LeaseExpiresAt      string `json:"leaseExpiresAt"`
+	PausedAt            string `json:"pausedAt"`
+	PausedReason        string `json:"pausedReason"`
+	LastArchivedAt      string `json:"lastArchivedAt"`
+	LastArchiveName     string `json:"lastArchiveName"`
+	LastError           string `json:"lastError"`
+	ConfigJSON          string `json:"configJson"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 type DatabaseLogArchiveListRequest struct {
@@ -442,23 +470,30 @@ func (uc *UseCase) CreateLogArchiveStream(ctx context.Context, req *DatabaseLogA
 	if err := validateBackupStorageConfigSafe(req.ConfigJSON); err != nil {
 		return nil, err
 	}
+	if _, err := uc.validateLogArchiveRunnerHost(ctx, req.RunnerHostID); err != nil {
+		return nil, err
+	}
 	status := DatabaseLogArchiveStreamStatusPending
 	if !req.Enabled {
 		status = DatabaseLogArchiveStreamStatusDisabled
 	}
+	archiveMode := normalizeArchiveMode(req.ArchiveMode)
 	item := &DatabaseLogArchiveStream{
 		InstanceID:       req.InstanceID,
 		SourceInstanceID: sourceID,
 		Engine:           engine,
 		ArchiveType:      archiveType,
-		ArchiveMode:      normalizeArchiveMode(req.ArchiveMode),
+		ArchiveMode:      archiveMode,
 		ArchiveEngine:    normalizeArchiveEngine(req.ArchiveEngine, archiveType),
+		RunnerHostID:     req.RunnerHostID,
 		StorageProfileID: req.StorageProfileID,
 		SecretProfileID:  req.SecretProfileID,
 		RPOTargetSeconds: req.RPOTargetSeconds,
 		RetentionDays:    normalizeArchiveRetentionDays(req.RetentionDays),
 		Enabled:          req.Enabled,
 		Status:           status,
+		DesiredState:     DatabaseLogArchiveDesiredStateStopped,
+		DaemonStatus:     DatabaseLogArchiveDaemonStatusStopped,
 		ConfigJSON:       trimText(strings.TrimSpace(req.ConfigJSON), 4000),
 	}
 	if err := uc.logArchiveStreamRepo.Create(ctx, item); err != nil {
@@ -561,10 +596,22 @@ func (uc *UseCase) RegisterExternalLogArchive(ctx context.Context, req *Database
 	stream.LastArchivedAt = &now
 	stream.LastArchiveName = item.FileName
 	stream.LastError = ""
+	stream.CursorFile = item.FileName
+	if item.EndPos > 0 {
+		stream.CursorPos = item.EndPos
+	}
+	if strings.TrimSpace(item.EndGTIDSet) != "" {
+		stream.CursorGTIDSet = item.EndGTIDSet
+	}
+	stream.LastEventTime = item.LastEventTime
+	stream.ArchiveLagSeconds = 0
 	if status == DatabaseLogArchiveStatusArchived {
 		stream.Status = DatabaseLogArchiveStreamStatusRunning
+		stream.ConsecutiveFailures = 0
 	} else {
 		stream.Status = DatabaseLogArchiveStreamStatusDegraded
+		stream.DaemonStatus = DatabaseLogArchiveDaemonStatusDegraded
+		stream.ConsecutiveFailures++
 		stream.LastError = LogArchiveStatusText(status)
 	}
 	_ = uc.logArchiveStreamRepo.Update(ctx, stream)
@@ -1417,31 +1464,53 @@ func (uc *UseCase) toLogArchiveStreamVO(ctx context.Context, item *DatabaseLogAr
 		return nil
 	}
 	instanceName, sourceName := uc.archiveInstanceNames(ctx, item.InstanceID, item.SourceInstanceID)
+	runnerHostName := uc.archiveRunnerHostName(ctx, item.RunnerHostID)
 	return &DatabaseLogArchiveStreamVO{
-		ID:                 item.ID,
-		InstanceID:         item.InstanceID,
-		InstanceName:       instanceName,
-		SourceInstanceID:   item.SourceInstanceID,
-		SourceInstanceName: sourceName,
-		Engine:             item.Engine,
-		EngineText:         DBTypeText(item.Engine),
-		ArchiveType:        item.ArchiveType,
-		ArchiveTypeText:    ArchiveTypeText(item.ArchiveType),
-		ArchiveMode:        item.ArchiveMode,
-		ArchiveEngine:      item.ArchiveEngine,
-		StorageProfileID:   item.StorageProfileID,
-		SecretProfileID:    item.SecretProfileID,
-		RPOTargetSeconds:   item.RPOTargetSeconds,
-		RetentionDays:      item.RetentionDays,
-		Enabled:            item.Enabled,
-		Status:             item.Status,
-		StatusText:         LogArchiveStreamStatusText(item.Status),
-		LastArchivedAt:     formatTime(item.LastArchivedAt),
-		LastArchiveName:    item.LastArchiveName,
-		LastError:          item.LastError,
-		ConfigJSON:         item.ConfigJSON,
-		CreatedAt:          item.CreatedAt.Format("2006-01-02 15:04:05"),
-		UpdatedAt:          item.UpdatedAt.Format("2006-01-02 15:04:05"),
+		ID:                  item.ID,
+		InstanceID:          item.InstanceID,
+		InstanceName:        instanceName,
+		SourceInstanceID:    item.SourceInstanceID,
+		SourceInstanceName:  sourceName,
+		Engine:              item.Engine,
+		EngineText:          DBTypeText(item.Engine),
+		ArchiveType:         item.ArchiveType,
+		ArchiveTypeText:     ArchiveTypeText(item.ArchiveType),
+		ArchiveMode:         item.ArchiveMode,
+		ArchiveModeText:     ArchiveModeText(item.ArchiveMode),
+		ArchiveEngine:       item.ArchiveEngine,
+		RunnerHostID:        item.RunnerHostID,
+		RunnerHostName:      runnerHostName,
+		StorageProfileID:    item.StorageProfileID,
+		SecretProfileID:     item.SecretProfileID,
+		RPOTargetSeconds:    item.RPOTargetSeconds,
+		RetentionDays:       item.RetentionDays,
+		Enabled:             item.Enabled,
+		Status:              item.Status,
+		StatusText:          LogArchiveStreamStatusText(item.Status),
+		DesiredState:        normalizeLogArchiveDesiredState(item.DesiredState),
+		DesiredStateText:    LogArchiveDesiredStateText(item.DesiredState),
+		DaemonStatus:        normalizeLogArchiveDaemonStatus(item.DaemonStatus),
+		DaemonStatusText:    LogArchiveDaemonStatusText(item.DaemonStatus),
+		CursorFile:          item.CursorFile,
+		CursorPos:           item.CursorPos,
+		CursorGTIDSet:       item.CursorGTIDSet,
+		ActiveFile:          item.ActiveFile,
+		LastSourceFile:      item.LastSourceFile,
+		LastSourcePos:       item.LastSourcePos,
+		LastEventTime:       formatTime(item.LastEventTime),
+		ArchiveLagSeconds:   item.ArchiveLagSeconds,
+		LastHeartbeatAt:     formatTime(item.LastHeartbeatAt),
+		ConsecutiveFailures: item.ConsecutiveFailures,
+		LeaseOwner:          item.LeaseOwner,
+		LeaseExpiresAt:      formatTime(item.LeaseExpiresAt),
+		PausedAt:            formatTime(item.PausedAt),
+		PausedReason:        item.PausedReason,
+		LastArchivedAt:      formatTime(item.LastArchivedAt),
+		LastArchiveName:     item.LastArchiveName,
+		LastError:           item.LastError,
+		ConfigJSON:          item.ConfigJSON,
+		CreatedAt:           item.CreatedAt.Format("2006-01-02 15:04:05"),
+		UpdatedAt:           item.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
 }
 
@@ -1678,10 +1747,20 @@ func archiveTypeForEngine(engine string) string {
 
 func normalizeArchiveMode(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return "external"
+	switch value {
+	case "", DatabaseArchiveModeExternal:
+		return DatabaseArchiveModeExternal
+	case DatabaseArchiveModeManual, "manual", "once", "run_once":
+		return DatabaseArchiveModeManual
+	case DatabaseArchiveModeCatchUp, "catchup":
+		return DatabaseArchiveModeCatchUp
+	case DatabaseArchiveModePolling, "poll", "high_frequency_poll", "high_frequency_polling":
+		return DatabaseArchiveModePolling
+	case DatabaseArchiveModeStreaming, "stream":
+		return DatabaseArchiveModeStreaming
+	default:
+		return trimText(value, 30)
 	}
-	return trimText(value, 30)
 }
 
 func normalizeArchiveEngine(value, archiveType string) string {
@@ -1717,6 +1796,34 @@ func normalizeStorageProfileType(value string) string {
 		return DatabaseBackupStorageLocal
 	}
 	return trimText(value, 30)
+}
+
+func normalizeLogArchiveDesiredState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case DatabaseLogArchiveDesiredStateRunning:
+		return DatabaseLogArchiveDesiredStateRunning
+	case DatabaseLogArchiveDesiredStatePaused:
+		return DatabaseLogArchiveDesiredStatePaused
+	default:
+		return DatabaseLogArchiveDesiredStateStopped
+	}
+}
+
+func normalizeLogArchiveDaemonStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case DatabaseLogArchiveDaemonStatusStarting:
+		return DatabaseLogArchiveDaemonStatusStarting
+	case DatabaseLogArchiveDaemonStatusRunning:
+		return DatabaseLogArchiveDaemonStatusRunning
+	case DatabaseLogArchiveDaemonStatusPaused:
+		return DatabaseLogArchiveDaemonStatusPaused
+	case DatabaseLogArchiveDaemonStatusDegraded:
+		return DatabaseLogArchiveDaemonStatusDegraded
+	case DatabaseLogArchiveDaemonStatusFailed:
+		return DatabaseLogArchiveDaemonStatusFailed
+	default:
+		return DatabaseLogArchiveDaemonStatusStopped
+	}
 }
 
 func normalizeSecretProfileType(value string) string {
@@ -1808,6 +1915,21 @@ func ArchiveTypeText(value string) string {
 	}
 }
 
+func ArchiveModeText(value string) string {
+	switch normalizeArchiveMode(value) {
+	case DatabaseArchiveModeManual:
+		return "手动一次"
+	case DatabaseArchiveModeCatchUp:
+		return "追平"
+	case DatabaseArchiveModePolling:
+		return "轮询"
+	case DatabaseArchiveModeStreaming:
+		return "Streaming"
+	default:
+		return "外部登记"
+	}
+}
+
 func LogArchiveStatusText(value string) string {
 	switch strings.TrimSpace(value) {
 	case DatabaseLogArchiveStatusMissing:
@@ -1825,6 +1947,8 @@ func LogArchiveStreamStatusText(value string) string {
 	switch strings.TrimSpace(value) {
 	case DatabaseLogArchiveStreamStatusRunning:
 		return "运行中"
+	case DatabaseLogArchiveStreamStatusPaused:
+		return "已暂停"
 	case DatabaseLogArchiveStreamStatusDegraded:
 		return "降级"
 	case DatabaseLogArchiveStreamStatusFailed:
@@ -1833,6 +1957,34 @@ func LogArchiveStreamStatusText(value string) string {
 		return "已禁用"
 	default:
 		return "待接入"
+	}
+}
+
+func LogArchiveDesiredStateText(value string) string {
+	switch normalizeLogArchiveDesiredState(value) {
+	case DatabaseLogArchiveDesiredStateRunning:
+		return "期望运行"
+	case DatabaseLogArchiveDesiredStatePaused:
+		return "期望暂停"
+	default:
+		return "期望停止"
+	}
+}
+
+func LogArchiveDaemonStatusText(value string) string {
+	switch normalizeLogArchiveDaemonStatus(value) {
+	case DatabaseLogArchiveDaemonStatusStarting:
+		return "启动中"
+	case DatabaseLogArchiveDaemonStatusRunning:
+		return "运行中"
+	case DatabaseLogArchiveDaemonStatusPaused:
+		return "已暂停"
+	case DatabaseLogArchiveDaemonStatusDegraded:
+		return "降级"
+	case DatabaseLogArchiveDaemonStatusFailed:
+		return "失败"
+	default:
+		return "已停止"
 	}
 }
 

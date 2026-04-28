@@ -193,12 +193,15 @@ func (s *HTTPServer) registerRoutes(router *gin.Engine, jwtSecret string) {
 	// Asset 路由
 	assetServer := assetserver.NewHTTPServer(assetGroupService, hostService, agentService, desktopService, virtualizationService, terminalManager, s.conf.Terminal, s.conf.Virtualization, s.db, authMiddleware)
 	s.asset = assetServer
+	databaseServer := databaseserver.NewHTTPServer(s.db, authMiddleware)
+	s.database = databaseServer
 
 	// API v1 - 公开接口(不需要认证)
 	public := router.Group("/api/v1/public")
 	{
 		public.GET("/example", s.svc.Example)
 		assetServer.RegisterPublicRoutes(public)
+		databaseServer.RegisterPublicRoutes(public)
 	}
 
 	// 身份认证模块暂不开放，如需启用请取消下方注释
@@ -224,9 +227,7 @@ func (s *HTTPServer) registerRoutes(router *gin.Engine, jwtSecret string) {
 		assetServer.RegisterRoutes(v1)
 
 		// 注册数据库管理路由
-		databaseServer := databaseserver.NewHTTPServer(s.db, authMiddleware)
 		databaseServer.RegisterRoutes(v1)
-		s.database = databaseServer
 
 		// 注册消息队列管理路由
 		messageQueueServer := messagequeueserver.NewHTTPServer(s.db, authMiddleware)

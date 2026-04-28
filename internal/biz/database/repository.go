@@ -112,6 +112,8 @@ type LogArchiveStreamRepo interface {
 	Update(ctx context.Context, item *DatabaseLogArchiveStream) error
 	GetByID(ctx context.Context, id uint) (*DatabaseLogArchiveStream, error)
 	List(ctx context.Context, req *DatabaseLogArchiveStreamListRequest) ([]*DatabaseLogArchiveStream, int64, error)
+	ListRunnableForRunner(ctx context.Context, runnerHostID uint) ([]*DatabaseLogArchiveStream, error)
+	TryAcquireLease(ctx context.Context, streamID, runnerHostID uint, runnerID string, now, leaseExpiresAt time.Time) (bool, error)
 }
 
 type LogArchiveRepo interface {

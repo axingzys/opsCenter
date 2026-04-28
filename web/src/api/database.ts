@@ -307,12 +307,19 @@ export interface DatabaseLogArchiveStreamPayload {
   archiveType?: string
   archiveMode?: string
   archiveEngine?: string
+  runnerHostId?: number
   storageProfileId?: number
   secretProfileId?: number
   rpoTargetSeconds?: number
   retentionDays?: number
   enabled: boolean
   configJson?: string
+}
+
+export interface DatabaseLogArchiveStreamControlPayload {
+  runnerHostId?: number
+  archiveMode?: string
+  reason?: string
 }
 
 export interface DatabaseLogArchiveStreamResult {
@@ -326,7 +333,10 @@ export interface DatabaseLogArchiveStreamResult {
   archiveType: string
   archiveTypeText: string
   archiveMode: string
+  archiveModeText: string
   archiveEngine: string
+  runnerHostId: number
+  runnerHostName: string
   storageProfileId: number
   secretProfileId: number
   rpoTargetSeconds: number
@@ -334,6 +344,24 @@ export interface DatabaseLogArchiveStreamResult {
   enabled: boolean
   status: string
   statusText: string
+  desiredState: string
+  desiredStateText: string
+  daemonStatus: string
+  daemonStatusText: string
+  cursorFile: string
+  cursorPos: number
+  cursorGtidSet: string
+  activeFile: string
+  lastSourceFile: string
+  lastSourcePos: number
+  lastEventTime: string
+  archiveLagSeconds: number
+  lastHeartbeatAt: string
+  consecutiveFailures: number
+  leaseOwner: string
+  leaseExpiresAt: string
+  pausedAt: string
+  pausedReason: string
   lastArchivedAt: string
   lastArchiveName: string
   lastError: string
@@ -861,6 +889,21 @@ export const listDatabaseLogArchiveStreams = (params?: {
 
 export const createDatabaseLogArchiveStream = (data: DatabaseLogArchiveStreamPayload) =>
   request.post('/api/v1/databases/log-archive-streams', data)
+
+export const getDatabaseLogArchiveStreamStatus = (id: number) =>
+  request.get(`/api/v1/databases/log-archive-streams/${id}/status`)
+
+export const startDatabaseLogArchiveStream = (id: number, data?: DatabaseLogArchiveStreamControlPayload) =>
+  request.post(`/api/v1/databases/log-archive-streams/${id}/start`, data || {})
+
+export const pauseDatabaseLogArchiveStream = (id: number, data?: DatabaseLogArchiveStreamControlPayload) =>
+  request.post(`/api/v1/databases/log-archive-streams/${id}/pause`, data || {})
+
+export const resumeDatabaseLogArchiveStream = (id: number, data?: DatabaseLogArchiveStreamControlPayload) =>
+  request.post(`/api/v1/databases/log-archive-streams/${id}/resume`, data || {})
+
+export const stopDatabaseLogArchiveStream = (id: number, data?: DatabaseLogArchiveStreamControlPayload) =>
+  request.post(`/api/v1/databases/log-archive-streams/${id}/stop`, data || {})
 
 export const runDatabaseLogArchiveOnce = (id: number, data: DatabaseRunLogArchiveOncePayload) =>
   request.post(`/api/v1/databases/log-archive-streams/${id}/run-once`, data)

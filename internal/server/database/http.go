@@ -282,6 +282,11 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/restore-plans", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreRun), s.service.CreateRestorePlan)
 		databases.GET("/log-archive-streams", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchiveStreams)
 		databases.POST("/log-archive-streams", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateLogArchiveStream)
+		databases.GET("/log-archive-streams/:id/status", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.GetLogArchiveStreamStatus)
+		databases.POST("/log-archive-streams/:id/start", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.StartLogArchiveStream)
+		databases.POST("/log-archive-streams/:id/pause", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.PauseLogArchiveStream)
+		databases.POST("/log-archive-streams/:id/resume", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.ResumeLogArchiveStream)
+		databases.POST("/log-archive-streams/:id/stop", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.StopLogArchiveStream)
 		databases.POST("/log-archive-streams/:id/run-once", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunLogArchiveOnce)
 		databases.POST("/log-archive-streams/:id/catch-up", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunLogArchiveCatchUp)
 		databases.GET("/log-archives", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchives)
@@ -332,5 +337,15 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.POST("/:id/query/explain", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExplain), s.service.ExplainQuery)
 			instances.POST("/:id/query/export", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExport), s.service.ExportQueryResult)
 		}
+	}
+}
+
+func (s *HTTPServer) RegisterPublicRoutes(r *gin.RouterGroup) {
+	agents := r.Group("/databases/runner-agents/:runnerId")
+	{
+		agents.POST("/heartbeat", s.service.RunnerAgentHeartbeat)
+		agents.GET("/log-archive-streams", s.service.RunnerAgentListLogArchiveStreams)
+		agents.POST("/log-archive-streams/:id/checkpoint", s.service.RunnerAgentCheckpointLogArchiveStream)
+		agents.POST("/log-archives", s.service.RunnerAgentRegisterLogArchive)
 	}
 }

@@ -1793,6 +1793,7 @@
                     <el-select v-model="logArchiveStreamQuery.status" placeholder="状态" clearable class="audit-select" @change="loadLogArchiveStreams">
                       <el-option label="待配置" value="pending" />
                       <el-option label="运行中" value="running" />
+                      <el-option label="已暂停" value="paused" />
                       <el-option label="降级" value="degraded" />
                       <el-option label="失败" value="failed" />
                       <el-option label="禁用" value="disabled" />
@@ -1814,14 +1815,33 @@
                     <template #default="{ row }">{{ row.archiveTypeText || row.archiveType || '-' }}</template>
                   </el-table-column>
                   <el-table-column label="归档引擎" min-width="140">
-                    <template #default="{ row }">{{ row.archiveEngine || row.archiveMode || '-' }}</template>
+                    <template #default="{ row }">{{ row.archiveEngine || row.archiveModeText || row.archiveMode || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="Runner" min-width="150" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.runnerHostName || (row.runnerHostId ? `#${row.runnerHostId}` : '-') }}</template>
                   </el-table-column>
                   <el-table-column label="RPO" width="90" align="right">
                     <template #default="{ row }">{{ row.rpoTargetSeconds || 0 }}s</template>
                   </el-table-column>
-                  <el-table-column label="状态" width="100" align="center">
+                  <el-table-column label="状态" width="105" align="center">
                     <template #default="{ row }">
                       <el-tag size="small" :type="logArchiveStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="期望/守护" min-width="150">
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" :type="logArchiveDesiredStateTag(row.desiredState)">{{ row.desiredStateText || row.desiredState || '-' }}</el-tag>
+                        <el-tag size="small" :type="logArchiveDaemonStatusTag(row.daemonStatus)">{{ row.daemonStatusText || row.daemonStatus || '-' }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="Cursor" min-width="190" show-overflow-tooltip>
+                    <template #default="{ row }">{{ formatLogArchiveCursor(row) }}</template>
+                  </el-table-column>
+                  <el-table-column label="延迟/心跳" min-width="170" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ formatLogArchiveLag(row) }} / {{ row.lastHeartbeatAt || '-' }}
                     </template>
                   </el-table-column>
                   <el-table-column label="最近归档" min-width="170">
@@ -1833,8 +1853,40 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="180" align="center" fixed="right">
+                  <el-table-column label="操作" width="260" align="center" fixed="right">
                     <template #default="{ row }">
+                      <el-button
+                        link
+                        type="success"
+                        :disabled="row.archiveType !== 'binlog' || !row.enabled || row.desiredState === 'running'"
+                        @click="openStartLogArchiveStreamDialog(row)"
+                      >
+                        启动
+                      </el-button>
+                      <el-button
+                        link
+                        type="warning"
+                        :disabled="!row.enabled || row.desiredState !== 'running'"
+                        @click="pauseLogArchiveStream(row)"
+                      >
+                        暂停
+                      </el-button>
+                      <el-button
+                        link
+                        type="primary"
+                        :disabled="!row.enabled || row.desiredState !== 'paused'"
+                        @click="resumeLogArchiveStream(row)"
+                      >
+                        恢复
+                      </el-button>
+                      <el-button
+                        link
+                        type="danger"
+                        :disabled="row.desiredState === 'stopped'"
+                        @click="stopLogArchiveStream(row)"
+                      >
+                        停止
+                      </el-button>
                       <el-button
                         link
                         type="primary"
@@ -3134,8 +3186,26 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
+            <el-form-item label="归档模式" prop="archiveMode">
+              <el-select v-model="logArchiveStreamForm.archiveMode" style="width: 100%;">
+                <el-option label="外部登记" value="external" />
+                <el-option label="轮询归档" value="polling" />
+                <el-option label="Streaming" value="streaming" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
             <el-form-item label="归档引擎" prop="archiveEngine">
-              <el-input v-model="logArchiveStreamForm.archiveEngine" placeholder="external / wal-g / barman / pg_receivewal" />
+              <el-input v-model="logArchiveStreamForm.archiveEngine" placeholder="external_binlog / mysqlbinlog_polling / wal-g" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Runner 主机">
+              <el-select v-model="logArchiveStreamForm.runnerHostId" placeholder="可选，启动时可再选择" clearable filterable style="width: 100%;">
+                <el-option v-for="item in runnerHostOptions" :key="item.id" :label="item.label" :value="item.id" />
+              </el-select>
             </el-form-item>
           </el-col>
         </el-row>
@@ -3161,6 +3231,41 @@
       <template #footer>
         <el-button @click="logArchiveStreamDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="logArchiveStreamSubmitting" @click="submitLogArchiveStream">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="startLogArchiveStreamDialogVisible"
+      title="启动长期归档流"
+      width="560px"
+      @close="resetStartLogArchiveStreamForm"
+    >
+      <el-alert
+        type="warning"
+        show-icon
+        :closable="false"
+        title="启动后归档流会等待 Runner Agent 通过公开接口拉取并续租；backend 不直接运行长期 mysqlbinlog 进程。"
+        class="backup-risk-alert"
+      />
+      <el-form ref="startLogArchiveStreamFormRef" :model="startLogArchiveStreamForm" :rules="startLogArchiveStreamRules" label-width="120px">
+        <el-form-item label="归档流">
+          <el-input :model-value="startLogArchiveStreamStream?.instanceName || '-'" disabled />
+        </el-form-item>
+        <el-form-item label="Runner 主机" prop="runnerHostId">
+          <el-select v-model="startLogArchiveStreamForm.runnerHostId" placeholder="请选择 Runner 主机" filterable style="width: 100%;">
+            <el-option v-for="item in runnerHostOptions" :key="item.id" :label="item.label" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="归档模式" prop="archiveMode">
+          <el-select v-model="startLogArchiveStreamForm.archiveMode" style="width: 100%;">
+            <el-option label="轮询归档" value="polling" />
+            <el-option label="Streaming" value="streaming" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="startLogArchiveStreamDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="startLogArchiveStreamSubmitting" @click="submitStartLogArchiveStream">启动</el-button>
       </template>
     </el-dialog>
 
@@ -3761,12 +3866,16 @@ import {
   listDatabaseSchemas,
   listDatabaseSlowQueries,
   listDatabaseTables,
+  pauseDatabaseLogArchiveStream,
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
+  resumeDatabaseLogArchiveStream,
   runDatabaseBackupTask,
   runDatabaseLogArchiveCatchUp,
   runDatabaseLogArchiveOnce,
   runDatabaseRestoreDryRun,
+  startDatabaseLogArchiveStream,
+  stopDatabaseLogArchiveStream,
   syncDatabaseMetadata,
   testDatabaseInstance,
   testDatabaseRunnerHost,
@@ -3785,6 +3894,7 @@ import {
   type DatabaseDDLValidateResult,
   type DatabaseExternalBackupRecordPayload,
   type DatabaseExternalLogArchivePayload,
+  type DatabaseLogArchiveStreamControlPayload,
   type DatabaseLogArchiveResult,
   type DatabaseLogArchiveStreamPayload,
   type DatabaseLogArchiveStreamResult,
@@ -3999,6 +4109,10 @@ const logArchiveStreamTotal = ref(0)
 const logArchiveStreamDialogVisible = ref(false)
 const logArchiveStreamSubmitting = ref(false)
 const logArchiveStreamFormRef = ref<FormInstance>()
+const startLogArchiveStreamDialogVisible = ref(false)
+const startLogArchiveStreamSubmitting = ref(false)
+const startLogArchiveStreamFormRef = ref<FormInstance>()
+const startLogArchiveStreamStream = ref<DatabaseLogArchiveStreamResult>()
 const logArchiveLoading = ref(false)
 const logArchives = ref<DatabaseLogArchiveResult[]>([])
 const logArchiveTotal = ref(0)
@@ -4287,12 +4401,19 @@ const logArchiveStreamForm = reactive<DatabaseLogArchiveStreamPayload>({
   archiveType: '',
   archiveMode: 'external',
   archiveEngine: 'external',
+  runnerHostId: undefined,
   storageProfileId: undefined,
   secretProfileId: undefined,
   rpoTargetSeconds: 300,
   retentionDays: 30,
   enabled: true,
   configJson: ''
+})
+
+const startLogArchiveStreamForm = reactive<DatabaseLogArchiveStreamControlPayload>({
+  runnerHostId: undefined,
+  archiveMode: 'polling',
+  reason: ''
 })
 
 const logArchiveForm = reactive<DatabaseExternalLogArchivePayload>({
@@ -4386,6 +4507,11 @@ const logArchiveStreamRules: FormRules = {
   archiveType: [{ required: true, message: '请选择归档类型', trigger: 'change' }],
   archiveMode: [{ required: true, message: '请输入归档模式', trigger: 'blur' }],
   archiveEngine: [{ required: true, message: '请输入归档引擎', trigger: 'blur' }]
+}
+
+const startLogArchiveStreamRules: FormRules = {
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
+  archiveMode: [{ required: true, message: '请选择归档模式', trigger: 'change' }]
 }
 
 const logArchiveRules: FormRules = {
@@ -5602,6 +5728,7 @@ const resetLogArchiveStreamForm = () => {
   logArchiveStreamForm.archiveType = archiveTypeForInstance(logArchiveStreamForm.instanceId)
   logArchiveStreamForm.archiveMode = 'external'
   logArchiveStreamForm.archiveEngine = 'external'
+  logArchiveStreamForm.runnerHostId = undefined
   logArchiveStreamForm.storageProfileId = undefined
   logArchiveStreamForm.secretProfileId = undefined
   logArchiveStreamForm.rpoTargetSeconds = 300
@@ -5609,6 +5736,14 @@ const resetLogArchiveStreamForm = () => {
   logArchiveStreamForm.enabled = true
   logArchiveStreamForm.configJson = ''
   logArchiveStreamFormRef.value?.clearValidate()
+}
+
+const resetStartLogArchiveStreamForm = () => {
+  startLogArchiveStreamStream.value = undefined
+  startLogArchiveStreamForm.runnerHostId = undefined
+  startLogArchiveStreamForm.archiveMode = 'polling'
+  startLogArchiveStreamForm.reason = ''
+  startLogArchiveStreamFormRef.value?.clearValidate()
 }
 
 const resetLogArchiveForm = () => {
@@ -5797,6 +5932,7 @@ const submitLogArchiveStream = async () => {
     const payload: DatabaseLogArchiveStreamPayload = {
       ...logArchiveStreamForm,
       sourceInstanceId: logArchiveStreamForm.sourceInstanceId || undefined,
+      runnerHostId: logArchiveStreamForm.runnerHostId || undefined,
       storageProfileId: logArchiveStreamForm.storageProfileId || undefined,
       secretProfileId: logArchiveStreamForm.secretProfileId || undefined,
       archiveType: logArchiveStreamForm.archiveType || archiveTypeForInstance(logArchiveStreamForm.instanceId)
@@ -5808,6 +5944,77 @@ const submitLogArchiveStream = async () => {
   } finally {
     logArchiveStreamSubmitting.value = false
   }
+}
+
+const openStartLogArchiveStreamDialog = async (row: DatabaseLogArchiveStreamResult) => {
+  if (!runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  if (!runnerHosts.value.some(item => item.enabled)) {
+    ElMessage.warning('请先配置并启用 Runner 主机')
+    return
+  }
+  resetStartLogArchiveStreamForm()
+  startLogArchiveStreamStream.value = row
+  startLogArchiveStreamForm.runnerHostId = row.runnerHostId || runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id || runnerHosts.value.find(item => item.enabled)?.id
+  startLogArchiveStreamForm.archiveMode = ['polling', 'streaming'].includes(row.archiveMode) ? row.archiveMode : 'polling'
+  startLogArchiveStreamDialogVisible.value = true
+}
+
+const submitStartLogArchiveStream = async () => {
+  if (!startLogArchiveStreamFormRef.value || !startLogArchiveStreamStream.value?.id) return
+  await startLogArchiveStreamFormRef.value.validate()
+  startLogArchiveStreamSubmitting.value = true
+  try {
+    await startDatabaseLogArchiveStream(startLogArchiveStreamStream.value.id, {
+      runnerHostId: startLogArchiveStreamForm.runnerHostId,
+      archiveMode: startLogArchiveStreamForm.archiveMode
+    })
+    startLogArchiveStreamDialogVisible.value = false
+    ElMessage.success('归档流启动指令已保存，等待 Runner Agent 接管')
+    await loadLogArchiveStreams()
+  } finally {
+    startLogArchiveStreamSubmitting.value = false
+  }
+}
+
+const pauseLogArchiveStream = async (row: DatabaseLogArchiveStreamResult) => {
+  try {
+    await ElMessageBox.confirm(`确定暂停归档流「${row.instanceName || `#${row.instanceId}`}」吗？`, '暂停归档流确认', { type: 'warning' })
+  } catch (_err) {
+    return
+  }
+  await pauseDatabaseLogArchiveStream(row.id, { reason: '手动暂停' })
+  ElMessage.success('归档流已标记暂停')
+  await loadLogArchiveStreams()
+}
+
+const resumeLogArchiveStream = async (row: DatabaseLogArchiveStreamResult) => {
+  if (!row.runnerHostId && !runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  const runnerHostId = row.runnerHostId || runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id || runnerHosts.value.find(item => item.enabled)?.id
+  if (!runnerHostId) {
+    ElMessage.warning('请先配置并启用 Runner 主机')
+    return
+  }
+  await resumeDatabaseLogArchiveStream(row.id, {
+    runnerHostId,
+    archiveMode: ['polling', 'streaming'].includes(row.archiveMode) ? row.archiveMode : 'polling'
+  })
+  ElMessage.success('归档流恢复指令已保存，等待 Runner Agent 接管')
+  await loadLogArchiveStreams()
+}
+
+const stopLogArchiveStream = async (row: DatabaseLogArchiveStreamResult) => {
+  try {
+    await ElMessageBox.confirm(`确定停止归档流「${row.instanceName || `#${row.instanceId}`}」吗？`, '停止归档流确认', { type: 'warning' })
+  } catch (_err) {
+    return
+  }
+  await stopDatabaseLogArchiveStream(row.id, { reason: '手动停止' })
+  ElMessage.success('归档流已停止')
+  await loadLogArchiveStreams()
 }
 
 const openLogArchiveDialog = async () => {
@@ -7478,11 +7685,50 @@ const logArchiveStatusTag = (status?: string) => {
     case 'warning':
       return 'warning'
     case 'disabled':
+    case 'paused':
     case 'expired':
       return 'info'
     default:
       return 'info'
   }
+}
+
+const logArchiveDesiredStateTag = (state?: string) => {
+  switch (state) {
+    case 'running':
+      return 'success'
+    case 'paused':
+      return 'warning'
+    case 'stopped':
+      return 'info'
+    default:
+      return 'info'
+  }
+}
+
+const logArchiveDaemonStatusTag = (status?: string) => {
+  switch (status) {
+    case 'running':
+      return 'success'
+    case 'starting':
+    case 'paused':
+    case 'degraded':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const formatLogArchiveCursor = (row: DatabaseLogArchiveStreamResult) => {
+  if (!row.cursorFile && !row.cursorPos) return '-'
+  return `${row.cursorFile || '-'}:${row.cursorPos || 0}`
+}
+
+const formatLogArchiveLag = (row: DatabaseLogArchiveStreamResult) => {
+  if (row.archiveLagSeconds === undefined || row.archiveLagSeconds === null) return '-'
+  return `${row.archiveLagSeconds}s`
 }
 
 const restoreValidationStatusTag = (status?: string) => {
@@ -8571,6 +8817,12 @@ onBeforeUnmount(() => {
 
 .ddl-block pre {
   max-height: 460px;
+}
+
+.pitr-state-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 @media (max-width: 900px) {
