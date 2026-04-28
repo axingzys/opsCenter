@@ -1223,7 +1223,7 @@
       <el-tab-pane label="备份任务" name="backup">
         <div class="backup-panel">
           <el-alert
-            title="当前备份任务为逻辑全量备份链路，适合小库、临时导出、迁移和恢复演练；暂不支持 PITR，不建议作为大库生产主备份方案。"
+            title="P1 已支持外部物理备份、binlog/WAL 归档登记和 PITR 恢复计划预校验。定时备份执行仍以逻辑全量为主，大库生产主链路应改造为物理备份 + 日志连续归档。"
             type="warning"
             show-icon
             :closable="false"
@@ -1457,12 +1457,17 @@
                   <el-option label="手动触发" value="manual" />
                   <el-option label="定时触发" value="schedule" />
                   <el-option label="手动重试" value="manual_retry" />
+                  <el-option label="外部登记" value="external" />
                 </el-select>
               </div>
               <div class="backup-toolbar-group">
                 <el-button @click="resetBackupRecordQuery">
                   <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
                   重置
+                </el-button>
+                <el-button type="success" plain @click="openExternalBackupDialog">
+                  <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                  登记外部备份
                 </el-button>
                 <el-button type="primary" plain :loading="backupRecordLoading" @click="loadBackupRecords">
                   刷新记录
@@ -1487,8 +1492,16 @@
               <el-table-column label="触发方式" width="110" align="center">
                 <template #default="{ row }">{{ row.triggerTypeText || row.triggerType || '-' }}</template>
               </el-table-column>
-              <el-table-column label="类型" width="140" align="center">
-                <template #default="{ row }">{{ row.backupTypeText || row.backupType || '-' }}</template>
+              <el-table-column label="链路" min-width="170">
+                <template #default="{ row }">
+                  <div class="backup-task-meta">
+                    <span>{{ row.backupMethodText || row.backupTypeText || row.backupType || '-' }}</span>
+                    <div class="backup-inline-tags">
+                      <el-tag size="small" type="info">{{ row.backupLevelText || row.backupLevel || '-' }}</el-tag>
+                      <el-tag v-if="row.backupEngine" size="small" type="primary">{{ row.backupEngine }}</el-tag>
+                    </div>
+                  </div>
+                </template>
               </el-table-column>
               <el-table-column label="状态" width="100" align="center">
                 <template #default="{ row }">
@@ -1502,6 +1515,9 @@
               </el-table-column>
               <el-table-column label="文件大小" width="120" align="right">
                 <template #default="{ row }">{{ row.fileSize ? formatBytes(row.fileSize) : '-' }}</template>
+              </el-table-column>
+              <el-table-column label="可恢复窗口" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">{{ recoverableWindowText(row) }}</template>
               </el-table-column>
               <el-table-column label="校验" width="150" align="center">
                 <template #default="{ row }">
@@ -1573,6 +1589,252 @@
                 @current-change="loadBackupRecords"
               />
             </div>
+          </div>
+
+          <div class="backup-card">
+            <div class="panel-title">
+              <span>PITR 链路与恢复计划</span>
+              <el-tag size="small" type="success">P1</el-tag>
+            </div>
+            <el-alert
+              title="P1 只登记外部备份链、日志归档文件并做恢复计划预校验，不直接执行恢复。恢复执行和工具编排按后续 P2/P3 接入。"
+              type="info"
+              show-icon
+              :closable="false"
+            />
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <el-button type="primary" plain @click="openLogArchiveStreamDialog">
+                  <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                  新增归档流
+                </el-button>
+                <el-button type="success" plain @click="openLogArchiveDialog">
+                  <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                  登记日志归档
+                </el-button>
+                <el-button type="warning" plain @click="openRestorePlanDialog">
+                  生成恢复计划
+                </el-button>
+              </div>
+              <div class="backup-toolbar-group">
+                <el-button :loading="logArchiveStreamLoading || logArchiveLoading || restorePlanLoading" @click="refreshPITRState">
+                  刷新 PITR
+                </el-button>
+              </div>
+            </div>
+
+            <el-tabs v-model="backupPitrTab" class="pitr-tabs">
+              <el-tab-pane label="归档流" name="streams">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-select v-model="logArchiveStreamQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadLogArchiveStreams">
+                      <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="item.name" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="logArchiveStreamQuery.archiveType" placeholder="类型" clearable class="audit-select" @change="loadLogArchiveStreams">
+                      <el-option label="binlog" value="binlog" />
+                      <el-option label="WAL" value="wal" />
+                    </el-select>
+                    <el-select v-model="logArchiveStreamQuery.status" placeholder="状态" clearable class="audit-select" @change="loadLogArchiveStreams">
+                      <el-option label="待配置" value="pending" />
+                      <el-option label="运行中" value="running" />
+                      <el-option label="降级" value="degraded" />
+                      <el-option label="失败" value="failed" />
+                      <el-option label="禁用" value="disabled" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetLogArchiveStreamQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="logArchiveStreamLoading" @click="loadLogArchiveStreams">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="logArchiveStreams" v-loading="logArchiveStreamLoading" stripe class="modern-table">
+                  <el-table-column label="实例" min-width="160">
+                    <template #default="{ row }">{{ row.instanceName || `#${row.instanceId}` }}</template>
+                  </el-table-column>
+                  <el-table-column label="来源" min-width="140">
+                    <template #default="{ row }">{{ row.sourceInstanceName || row.sourceInstanceId || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="日志类型" width="110" align="center">
+                    <template #default="{ row }">{{ row.archiveTypeText || row.archiveType || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="归档引擎" min-width="140">
+                    <template #default="{ row }">{{ row.archiveEngine || row.archiveMode || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="RPO" width="90" align="right">
+                    <template #default="{ row }">{{ row.rpoTargetSeconds || 0 }}s</template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="100" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="logArchiveStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最近归档" min-width="170">
+                    <template #default="{ row }">{{ row.lastArchivedAt || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="最近文件" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.lastArchiveName || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="错误" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.lastError || '-' }}</template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="logArchiveStreamQuery.page"
+                    v-model:page-size="logArchiveStreamQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="logArchiveStreamTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadLogArchiveStreams"
+                    @current-change="loadLogArchiveStreams"
+                  />
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="日志归档" name="archives">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-select v-model="logArchiveQuery.streamId" placeholder="归档流" clearable filterable class="audit-search-input" @change="loadLogArchives">
+                      <el-option v-for="item in logArchiveStreamOptions" :key="item.id" :label="item.label" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="logArchiveQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadLogArchives">
+                      <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="item.name" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="logArchiveQuery.archiveType" placeholder="类型" clearable class="audit-select" @change="loadLogArchives">
+                      <el-option label="binlog" value="binlog" />
+                      <el-option label="WAL" value="wal" />
+                    </el-select>
+                    <el-select v-model="logArchiveQuery.status" placeholder="状态" clearable class="audit-select" @change="loadLogArchives">
+                      <el-option label="已归档" value="archived" />
+                      <el-option label="缺失" value="missing" />
+                      <el-option label="校验失败" value="checksum_failed" />
+                      <el-option label="已过期" value="expired" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetLogArchiveQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="logArchiveLoading" @click="loadLogArchives">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="logArchives" v-loading="logArchiveLoading" stripe class="modern-table">
+                  <el-table-column label="时间范围" min-width="310">
+                    <template #default="{ row }">{{ row.firstEventTime || '-' }} 至 {{ row.lastEventTime || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="实例" min-width="150">
+                    <template #default="{ row }">{{ row.instanceName || `#${row.instanceId}` }}</template>
+                  </el-table-column>
+                  <el-table-column label="类型" width="100" align="center">
+                    <template #default="{ row }">{{ row.archiveTypeText || row.archiveType || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="文件" min-width="200" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.fileName || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="大小" width="110" align="right">
+                    <template #default="{ row }">{{ row.fileSize ? formatBytes(row.fileSize) : '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="110" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="logArchiveStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="存储" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.storageUri || '-' }}</template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="logArchiveQuery.page"
+                    v-model:page-size="logArchiveQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="logArchiveTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadLogArchives"
+                    @current-change="loadLogArchives"
+                  />
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="恢复计划" name="plans">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-select v-model="restorePlanQuery.sourceInstanceId" placeholder="来源实例" clearable filterable class="audit-select" @change="loadRestorePlans">
+                      <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="item.name" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="restorePlanQuery.targetInstanceId" placeholder="目标实例" clearable filterable class="audit-select" @change="loadRestorePlans">
+                      <el-option v-for="item in pitrRestoreTargetInstances" :key="item.id" :label="item.name" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="restorePlanQuery.validationStatus" placeholder="预校验" clearable class="audit-select" @change="loadRestorePlans">
+                      <el-option label="通过" value="passed" />
+                      <el-option label="警告" value="warning" />
+                      <el-option label="失败" value="failed" />
+                      <el-option label="待校验" value="pending" />
+                    </el-select>
+                    <el-select v-model="restorePlanQuery.restoreStatus" placeholder="恢复状态" clearable class="audit-select" @change="loadRestorePlans">
+                      <el-option label="已规划" value="planned" />
+                      <el-option label="执行中" value="running" />
+                      <el-option label="已恢复" value="restored" />
+                      <el-option label="已验证" value="verified" />
+                      <el-option label="失败" value="failed" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetRestorePlanQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="restorePlanLoading" @click="loadRestorePlans">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="restorePlans" v-loading="restorePlanLoading" stripe class="modern-table">
+                  <el-table-column label="创建时间" prop="createdAt" width="170" />
+                  <el-table-column label="来源实例" min-width="150">
+                    <template #default="{ row }">{{ row.sourceInstanceName || `#${row.sourceInstanceId}` }}</template>
+                  </el-table-column>
+                  <el-table-column label="目标实例" min-width="150">
+                    <template #default="{ row }">{{ row.targetInstanceName || (row.targetInstanceId ? `#${row.targetInstanceId}` : '-') }}</template>
+                  </el-table-column>
+                  <el-table-column label="目标时间" min-width="170">
+                    <template #default="{ row }">{{ row.restoreTargetValue || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="备份链" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="restoreValidationStatusTag(row.backupChainStatus)">{{ row.backupChainStatusText || row.backupChainStatus || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="日志链" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="restoreValidationStatusTag(row.logChainStatus)">{{ row.logChainStatusText || row.logChainStatus || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="存储" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="restoreValidationStatusTag(row.storageStatus)">{{ row.storageStatusText || row.storageStatus || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="工具" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="restoreValidationStatusTag(row.toolStatus)">{{ row.toolStatusText || row.toolStatus || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="预校验" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="restoreValidationStatusTag(row.validationStatus)">{{ row.validationStatusText || row.validationStatus || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="结果" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.message || '-' }}</template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="restorePlanQuery.page"
+                    v-model:page-size="restorePlanQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="restorePlanTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadRestorePlans"
+                    @current-change="loadRestorePlans"
+                  />
+                </div>
+              </el-tab-pane>
+            </el-tabs>
           </div>
 
           <div class="backup-card">
@@ -2473,6 +2735,358 @@
     </el-dialog>
 
     <el-dialog
+      v-model="externalBackupDialogVisible"
+      title="登记外部备份记录"
+      width="820px"
+      @close="resetExternalBackupForm"
+    >
+      <el-alert
+        title="用于登记 XtraBackup、mariadb-backup、Barman、WAL-G、pg_basebackup 等外部工具已经生成的备份元数据；OpsHub P1 只记录链路和做恢复预校验。"
+        type="info"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="externalBackupFormRef" :model="externalBackupForm" :rules="externalBackupRules" label-width="120px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="数据库实例" prop="instanceId">
+              <el-select v-model="externalBackupForm.instanceId" placeholder="请选择实例" filterable style="width: 100%;">
+                <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="`${item.name}（${item.dbTypeText || item.dbType}）`" :value="item.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="来源角色">
+              <el-select v-model="externalBackupForm.sourceRole" style="width: 100%;">
+                <el-option label="外部登记" value="external" />
+                <el-option label="主库" value="primary" />
+                <el-option label="实时从库" value="replica" />
+                <el-option label="延迟从库" value="delayed_replica" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="备份方法" prop="backupMethod">
+              <el-select v-model="externalBackupForm.backupMethod" style="width: 100%;">
+                <el-option label="物理备份" value="physical" />
+                <el-option label="外部引擎" value="external" />
+                <el-option label="逻辑备份" value="logical" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="备份级别" prop="backupLevel">
+              <el-select v-model="externalBackupForm.backupLevel" style="width: 100%;">
+                <el-option label="全量" value="full" />
+                <el-option label="增量" value="incremental" />
+                <el-option label="差异" value="differential" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="备份引擎" prop="backupEngine">
+              <el-input v-model="externalBackupForm.backupEngine" placeholder="xtrabackup / wal-g / external" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="链路 ID">
+              <el-input v-model="externalBackupForm.chainId" placeholder="同一全量+增量链路的稳定 ID，可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="基础记录">
+              <el-input-number v-model="externalBackupForm.baseRecordId" :min="0" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="父记录">
+              <el-input-number v-model="externalBackupForm.parentRecordId" :min="0" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="存储 URI" prop="storageUri">
+          <el-input v-model="externalBackupForm.storageUri" placeholder="s3://bucket/path/base_20260428 或 /backup/mysql/base_20260428" />
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="文件名" prop="fileName">
+              <el-input v-model="externalBackupForm.fileName" placeholder="base_20260428.tar.zst" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="文件大小">
+              <el-input-number v-model="externalBackupForm.fileSize" :min="0" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="状态">
+              <el-select v-model="externalBackupForm.status" style="width: 100%;">
+                <el-option label="成功" value="success" />
+                <el-option label="失败" value="failed" />
+                <el-option label="已过期" value="expired" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="SHA256">
+          <el-input v-model="externalBackupForm.checksumSha256" placeholder="可选，用于恢复前校验" />
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="可恢复起点" prop="recoverableFrom">
+              <el-date-picker v-model="externalBackupForm.recoverableFrom" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="选择时间" style="width: 100%;" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="可恢复终点" prop="recoverableUntil">
+              <el-date-picker v-model="externalBackupForm.recoverableUntil" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="选择时间" style="width: 100%;" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="MySQL 起点">
+              <el-input v-model="externalBackupForm.backupBinlogFile" placeholder="binlog.000123，可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="GTID 集合">
+              <el-input v-model="externalBackupForm.backupGtidSet" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="PG System ID">
+              <el-input v-model="externalBackupForm.pgSystemIdentifier" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="Timeline">
+              <el-input v-model="externalBackupForm.timelineId" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="LSN 范围">
+              <el-input v-model="externalBackupForm.startLsn" placeholder="start_lsn，可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <template #footer>
+        <el-button @click="externalBackupDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="externalBackupSubmitting" @click="submitExternalBackup">登记</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="logArchiveStreamDialogVisible"
+      title="新增日志归档流"
+      width="720px"
+      @close="resetLogArchiveStreamForm"
+    >
+      <el-form ref="logArchiveStreamFormRef" :model="logArchiveStreamForm" :rules="logArchiveStreamRules" label-width="120px">
+        <el-form-item label="数据库实例" prop="instanceId">
+          <el-select v-model="logArchiveStreamForm.instanceId" placeholder="请选择实例" filterable style="width: 100%;">
+            <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="`${item.name}（${item.dbTypeText || item.dbType}）`" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="归档类型" prop="archiveType">
+              <el-select v-model="logArchiveStreamForm.archiveType" style="width: 100%;">
+                <el-option label="MySQL/MariaDB binlog" value="binlog" />
+                <el-option label="PostgreSQL WAL" value="wal" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="归档引擎" prop="archiveEngine">
+              <el-input v-model="logArchiveStreamForm.archiveEngine" placeholder="external / wal-g / barman / pg_receivewal" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="RPO 秒">
+              <el-input-number v-model="logArchiveStreamForm.rpoTargetSeconds" :min="1" :max="86400" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="保留天数">
+              <el-input-number v-model="logArchiveStreamForm.retentionDays" :min="1" :max="3650" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="配置 JSON">
+          <el-input v-model="logArchiveStreamForm.configJson" type="textarea" :rows="3" placeholder="可选，只保存非敏感配置。密钥后续接 secret_profile。" />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-switch v-model="logArchiveStreamForm.enabled" active-text="启用" inactive-text="禁用" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="logArchiveStreamDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="logArchiveStreamSubmitting" @click="submitLogArchiveStream">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="logArchiveDialogVisible"
+      title="登记日志归档文件"
+      width="820px"
+      @close="resetLogArchiveForm"
+    >
+      <el-form ref="logArchiveFormRef" :model="logArchiveForm" :rules="logArchiveRules" label-width="120px">
+        <el-form-item label="归档流" prop="streamId">
+          <el-select v-model="logArchiveForm.streamId" placeholder="请选择归档流" filterable style="width: 100%;">
+            <el-option v-for="item in logArchiveStreamOptions" :key="item.id" :label="item.label" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="文件名" prop="fileName">
+              <el-input v-model="logArchiveForm.fileName" placeholder="binlog.000123 / 0000000100000000000000A1" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="文件大小">
+              <el-input-number v-model="logArchiveForm.fileSize" :min="0" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="状态">
+              <el-select v-model="logArchiveForm.status" style="width: 100%;">
+                <el-option label="已归档" value="archived" />
+                <el-option label="缺失" value="missing" />
+                <el-option label="校验失败" value="checksum_failed" />
+                <el-option label="已过期" value="expired" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="存储 URI" prop="storageUri">
+          <el-input v-model="logArchiveForm.storageUri" placeholder="s3://bucket/binlog/binlog.000123 或 /archive/wal/..." />
+        </el-form-item>
+        <el-form-item label="SHA256">
+          <el-input v-model="logArchiveForm.checksumSha256" placeholder="可选" />
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="起始时间" prop="firstEventTime">
+              <el-date-picker v-model="logArchiveForm.firstEventTime" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="选择时间" style="width: 100%;" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="结束时间" prop="lastEventTime">
+              <el-date-picker v-model="logArchiveForm.lastEventTime" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="选择时间" style="width: 100%;" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="Server UUID">
+              <el-input v-model="logArchiveForm.serverUuid" placeholder="MySQL 可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="起始位置">
+              <el-input-number v-model="logArchiveForm.startPos" :min="0" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="结束位置">
+              <el-input-number v-model="logArchiveForm.endPos" :min="0" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="PG System ID">
+              <el-input v-model="logArchiveForm.pgSystemIdentifier" placeholder="PostgreSQL 可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="Timeline">
+              <el-input v-model="logArchiveForm.timelineId" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="LSN 起点">
+              <el-input v-model="logArchiveForm.startLsn" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <template #footer>
+        <el-button @click="logArchiveDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="logArchiveSubmitting" @click="submitLogArchive">登记</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="restorePlanDialogVisible"
+      title="生成 PITR 恢复计划"
+      width="680px"
+      @close="resetRestorePlanForm"
+    >
+      <el-alert
+        title="恢复计划会检查备份链、日志链、存储对象和工具兼容状态。P1 不直接启动恢复库，只输出预校验结果。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="restorePlanFormRef" :model="restorePlanForm" :rules="restorePlanRules" label-width="120px">
+        <el-form-item label="来源实例" prop="sourceInstanceId">
+          <el-select v-model="restorePlanForm.sourceInstanceId" placeholder="请选择来源实例" filterable style="width: 100%;">
+            <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="`${item.name}（${item.dbTypeText || item.dbType}）`" :value="item.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="目标实例">
+          <el-select v-model="restorePlanForm.targetInstanceId" placeholder="可选，建议选择隔离恢复库" clearable filterable style="width: 100%;">
+            <el-option
+              v-for="item in pitrRestoreTargetInstances.filter(target => target.id !== restorePlanForm.sourceInstanceId)"
+              :key="item.id"
+              :label="`${item.name}（${item.dbTypeText || item.dbType}${item.environment ? ` / ${item.environment}` : ''}）`"
+              :value="item.id"
+            />
+          </el-select>
+          <div class="field-tip">目标实例必须是非生产库；P1 只记录计划，不执行恢复。</div>
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="恢复模式">
+              <el-input v-model="restorePlanForm.restoreMode" disabled />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="目标类型" prop="restoreTargetType">
+              <el-select v-model="restorePlanForm.restoreTargetType" style="width: 100%;">
+                <el-option label="按时间点" value="time" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="目标时间" prop="restoreTargetValue">
+          <el-date-picker v-model="restorePlanForm.restoreTargetValue" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="选择恢复目标时间" style="width: 100%;" />
+        </el-form-item>
+        <el-form-item label="包含目标点">
+          <el-switch v-model="restorePlanForm.restoreTargetInclusive" active-text="包含" inactive-text="不包含" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="restorePlanDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="restorePlanSubmitting" @click="submitRestorePlan">生成计划</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="restoreDialogVisible"
       title="发起恢复演练"
       width="640px"
@@ -2662,6 +3276,8 @@ import {
 import { getCredentials } from '@/api/host'
 import {
   DATABASE_PERMISSION,
+  createDatabaseLogArchiveStream,
+  createDatabaseRestorePlan,
   createDatabaseBackupTask,
   createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
@@ -2690,7 +3306,10 @@ import {
   listDatabaseBackupTasks,
   listDatabaseDiagnosisSessions,
   listDatabaseInspectionReports,
+  listDatabaseLogArchives,
+  listDatabaseLogArchiveStreams,
   listDatabaseRestoreJobs,
+  listDatabaseRestorePlans,
   getDatabaseSupportedTypes,
   getDatabaseTableDDL,
   listDatabaseColumns,
@@ -2702,6 +3321,8 @@ import {
   listDatabaseSchemas,
   listDatabaseSlowQueries,
   listDatabaseTables,
+  registerExternalDatabaseBackupRecord,
+  registerExternalDatabaseLogArchive,
   runDatabaseBackupTask,
   runDatabaseRestoreDryRun,
   syncDatabaseMetadata,
@@ -2718,12 +3339,19 @@ import {
   type DatabaseCapacityCollectResult,
   type DatabaseCapacityTrendResult,
   type DatabaseDDLValidateResult,
+  type DatabaseExternalBackupRecordPayload,
+  type DatabaseExternalLogArchivePayload,
+  type DatabaseLogArchiveResult,
+  type DatabaseLogArchiveStreamPayload,
+  type DatabaseLogArchiveStreamResult,
   type DatabaseInspectionSection,
   type DatabaseInspectionReportResult,
   type DatabaseInstancePayload,
   type DatabaseQueryPayload,
   type DatabaseRestoreDryRunPayload,
   type DatabaseRestoreJobResult,
+  type DatabaseRestorePlanPayload,
+  type DatabaseRestorePlanResult,
   type DatabaseSupportedType,
   type DatabaseTopologyResult,
   type DatabaseWriteExecuteResult,
@@ -2913,6 +3541,28 @@ const backupRecordLoading = ref(false)
 const verifyingBackupRecordId = ref(0)
 const backupRecords = ref<DatabaseBackupRecordResult[]>([])
 const backupRecordTotal = ref(0)
+const externalBackupDialogVisible = ref(false)
+const externalBackupSubmitting = ref(false)
+const externalBackupFormRef = ref<FormInstance>()
+const logArchiveStreamLoading = ref(false)
+const logArchiveStreams = ref<DatabaseLogArchiveStreamResult[]>([])
+const logArchiveStreamTotal = ref(0)
+const logArchiveStreamDialogVisible = ref(false)
+const logArchiveStreamSubmitting = ref(false)
+const logArchiveStreamFormRef = ref<FormInstance>()
+const logArchiveLoading = ref(false)
+const logArchives = ref<DatabaseLogArchiveResult[]>([])
+const logArchiveTotal = ref(0)
+const logArchiveDialogVisible = ref(false)
+const logArchiveSubmitting = ref(false)
+const logArchiveFormRef = ref<FormInstance>()
+const restorePlanLoading = ref(false)
+const restorePlans = ref<DatabaseRestorePlanResult[]>([])
+const restorePlanTotal = ref(0)
+const restorePlanDialogVisible = ref(false)
+const restorePlanSubmitting = ref(false)
+const restorePlanFormRef = ref<FormInstance>()
+const backupPitrTab = ref('streams')
 const restoreJobLoading = ref(false)
 const restoreSubmitting = ref(false)
 const restoreDialogVisible = ref(false)
@@ -3018,6 +3668,32 @@ const backupRecordQuery = reactive({
   triggerType: ''
 })
 
+const logArchiveStreamQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  instanceId: undefined as number | undefined,
+  archiveType: '',
+  status: ''
+})
+
+const logArchiveQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  streamId: undefined as number | undefined,
+  instanceId: undefined as number | undefined,
+  archiveType: '',
+  status: ''
+})
+
+const restorePlanQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  sourceInstanceId: undefined as number | undefined,
+  targetInstanceId: undefined as number | undefined,
+  validationStatus: '',
+  restoreStatus: ''
+})
+
 const restoreJobQuery = reactive({
   page: 1,
   pageSize: 10,
@@ -3074,6 +3750,93 @@ const backupTaskForm = reactive<DatabaseBackupTaskPayload & { id?: number }>({
 })
 const backupTaskFormInstanceDbType = ref('')
 
+const externalBackupForm = reactive<DatabaseExternalBackupRecordPayload>({
+  instanceId: 0,
+  sourceInstanceId: undefined,
+  sourceRole: 'external',
+  chainId: '',
+  baseRecordId: undefined,
+  parentRecordId: undefined,
+  backupMethod: 'physical',
+  backupLevel: 'full',
+  backupEngine: 'external',
+  toolName: '',
+  toolVersion: '',
+  storageProfileId: undefined,
+  storageUri: '',
+  manifestJson: '',
+  prepareStatus: '',
+  fileName: '',
+  fileSize: undefined,
+  checksumSha256: '',
+  compression: '',
+  encrypted: false,
+  recoverableFrom: '',
+  recoverableUntil: '',
+  startedAt: '',
+  finishedAt: '',
+  status: 'success',
+  verifyStatus: 'success',
+  serverUuid: '',
+  backupBinlogFile: '',
+  backupBinlogPos: undefined,
+  backupGtidSet: '',
+  pgSystemIdentifier: '',
+  timelineId: '',
+  startLsn: '',
+  endLsn: '',
+  walStart: '',
+  walEnd: ''
+})
+
+const logArchiveStreamForm = reactive<DatabaseLogArchiveStreamPayload>({
+  instanceId: 0,
+  sourceInstanceId: undefined,
+  engine: '',
+  archiveType: '',
+  archiveMode: 'external',
+  archiveEngine: 'external',
+  storageProfileId: undefined,
+  secretProfileId: undefined,
+  rpoTargetSeconds: 300,
+  retentionDays: 30,
+  enabled: true,
+  configJson: ''
+})
+
+const logArchiveForm = reactive<DatabaseExternalLogArchivePayload>({
+  streamId: 0,
+  fileName: '',
+  storageUri: '',
+  fileSize: undefined,
+  checksumSha256: '',
+  firstEventTime: '',
+  lastEventTime: '',
+  status: 'archived',
+  serverUuid: '',
+  startPos: undefined,
+  endPos: undefined,
+  startGtidSet: '',
+  endGtidSet: '',
+  previousFileName: '',
+  nextFileName: '',
+  pgSystemIdentifier: '',
+  timelineId: '',
+  startLsn: '',
+  endLsn: '',
+  segmentNo: '',
+  timelineHistoryUri: ''
+})
+
+const restorePlanForm = reactive<DatabaseRestorePlanPayload>({
+  sourceInstanceId: 0,
+  targetInstanceId: undefined,
+  restoreMode: 'isolated_restore',
+  restoreTargetType: 'time',
+  restoreTargetValue: '',
+  restoreTargetInclusive: true
+})
+
 const permissionForm = reactive({
   id: undefined as number | undefined,
   roleId: undefined as number | undefined,
@@ -3085,6 +3848,38 @@ const backupTaskRules: FormRules = {
   instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
   name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
   retentionDays: [{ required: true, message: '请输入保留天数', trigger: 'change' }]
+}
+
+const externalBackupRules: FormRules = {
+  instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
+  backupMethod: [{ required: true, message: '请选择备份方法', trigger: 'change' }],
+  backupLevel: [{ required: true, message: '请选择备份级别', trigger: 'change' }],
+  backupEngine: [{ required: true, message: '请输入备份引擎', trigger: 'blur' }],
+  storageUri: [{ required: true, message: '请输入存储 URI', trigger: 'blur' }],
+  fileName: [{ required: true, message: '请输入备份文件名', trigger: 'blur' }],
+  recoverableFrom: [{ required: true, message: '请选择可恢复起点', trigger: 'change' }],
+  recoverableUntil: [{ required: true, message: '请选择可恢复终点', trigger: 'change' }]
+}
+
+const logArchiveStreamRules: FormRules = {
+  instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
+  archiveType: [{ required: true, message: '请选择归档类型', trigger: 'change' }],
+  archiveMode: [{ required: true, message: '请输入归档模式', trigger: 'blur' }],
+  archiveEngine: [{ required: true, message: '请输入归档引擎', trigger: 'blur' }]
+}
+
+const logArchiveRules: FormRules = {
+  streamId: [{ required: true, message: '请选择归档流', trigger: 'change' }],
+  fileName: [{ required: true, message: '请输入日志文件名', trigger: 'blur' }],
+  storageUri: [{ required: true, message: '请输入存储 URI', trigger: 'blur' }],
+  firstEventTime: [{ required: true, message: '请选择起始时间', trigger: 'change' }],
+  lastEventTime: [{ required: true, message: '请选择结束时间', trigger: 'change' }]
+}
+
+const restorePlanRules: FormRules = {
+  sourceInstanceId: [{ required: true, message: '请选择来源实例', trigger: 'change' }],
+  restoreTargetType: [{ required: true, message: '请选择目标类型', trigger: 'change' }],
+  restoreTargetValue: [{ required: true, message: '请选择恢复目标时间', trigger: 'change' }]
 }
 
 const permissionRules: FormRules = {
@@ -3215,6 +4010,10 @@ const supportedBackupInstances = computed(() =>
   instances.value.filter(item => ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
+const pitrBackupInstances = computed(() =>
+  instances.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
+)
+
 const selectedBackupTaskInstance = computed(() =>
   instances.value.find(item => item.id === backupTaskForm.instanceId)
 )
@@ -3252,6 +4051,17 @@ const restoreTargetInstances = computed(() =>
     item.status === 'enabled' &&
     !isProductionEnvironment(item.environment)
   )
+)
+
+const pitrRestoreTargetInstances = computed(() =>
+  restoreTargetInstances.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType))
+)
+
+const logArchiveStreamOptions = computed(() =>
+  logArchiveStreams.value.map(item => ({
+    id: item.id,
+    label: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveTypeText || item.archiveType} / ${item.archiveEngine || item.archiveMode || 'external'}`
+  }))
 )
 
 const restoreTargetOptions = computed(() => {
@@ -3638,6 +4448,18 @@ const loadInstances = async () => {
     if (backupRecordQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupRecordQuery.instanceId)) {
       backupRecordQuery.instanceId = undefined
     }
+    if (logArchiveStreamQuery.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveStreamQuery.instanceId)) {
+      logArchiveStreamQuery.instanceId = undefined
+    }
+    if (logArchiveQuery.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveQuery.instanceId)) {
+      logArchiveQuery.instanceId = undefined
+    }
+    if (restorePlanQuery.sourceInstanceId && !instances.value.some(item => item.id === restorePlanQuery.sourceInstanceId)) {
+      restorePlanQuery.sourceInstanceId = undefined
+    }
+    if (restorePlanQuery.targetInstanceId && !instances.value.some(item => item.id === restorePlanQuery.targetInstanceId)) {
+      restorePlanQuery.targetInstanceId = undefined
+    }
     if (restoreJobQuery.sourceInstanceId && !instances.value.some(item => item.id === restoreJobQuery.sourceInstanceId)) {
       restoreJobQuery.sourceInstanceId = undefined
     }
@@ -3649,6 +4471,15 @@ const loadInstances = async () => {
     }
     if (backupTaskForm.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskForm.instanceId)) {
       backupTaskForm.instanceId = 0
+    }
+    if (externalBackupForm.instanceId && !pitrBackupInstances.value.some(item => item.id === externalBackupForm.instanceId)) {
+      externalBackupForm.instanceId = 0
+    }
+    if (logArchiveStreamForm.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveStreamForm.instanceId)) {
+      logArchiveStreamForm.instanceId = 0
+    }
+    if (restorePlanForm.sourceInstanceId && !pitrBackupInstances.value.some(item => item.id === restorePlanForm.sourceInstanceId)) {
+      restorePlanForm.sourceInstanceId = 0
     }
     if (inspectionForm.instanceId && !diagnosisInstances.value.some(item => item.id === inspectionForm.instanceId)) {
       inspectionForm.instanceId = undefined
@@ -3949,6 +4780,49 @@ const loadBackupRecords = async () => {
   }
 }
 
+const loadLogArchiveStreams = async () => {
+  logArchiveStreamLoading.value = true
+  try {
+    const res: any = await listDatabaseLogArchiveStreams(logArchiveStreamQuery)
+    logArchiveStreams.value = res.list || []
+    logArchiveStreamTotal.value = res.total || 0
+    if (res.page) logArchiveStreamQuery.page = res.page
+    if (res.pageSize) logArchiveStreamQuery.pageSize = res.pageSize
+  } finally {
+    logArchiveStreamLoading.value = false
+  }
+}
+
+const loadLogArchives = async () => {
+  logArchiveLoading.value = true
+  try {
+    const res: any = await listDatabaseLogArchives(logArchiveQuery)
+    logArchives.value = res.list || []
+    logArchiveTotal.value = res.total || 0
+    if (res.page) logArchiveQuery.page = res.page
+    if (res.pageSize) logArchiveQuery.pageSize = res.pageSize
+  } finally {
+    logArchiveLoading.value = false
+  }
+}
+
+const loadRestorePlans = async () => {
+  restorePlanLoading.value = true
+  try {
+    const res: any = await listDatabaseRestorePlans(restorePlanQuery)
+    restorePlans.value = res.list || []
+    restorePlanTotal.value = res.total || 0
+    if (res.page) restorePlanQuery.page = res.page
+    if (res.pageSize) restorePlanQuery.pageSize = res.pageSize
+  } finally {
+    restorePlanLoading.value = false
+  }
+}
+
+const refreshPITRState = async () => {
+  await Promise.all([loadLogArchiveStreams(), loadLogArchives(), loadRestorePlans()])
+}
+
 const loadRestoreJobs = async () => {
   restoreJobLoading.value = true
   try {
@@ -3996,6 +4870,109 @@ const resetRestoreForm = () => {
   restoreForm.restoreMode = 'dry_run'
   restoreForm.restoreStrategy = 'object_replace'
   restoreFormRef.value?.clearValidate()
+}
+
+const formatDateTimeInput = (date = new Date()) => {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+const archiveTypeForInstance = (instanceId?: number) => {
+  const dbType = instances.value.find(item => item.id === instanceId)?.dbType || ''
+  if (dbType === 'postgresql') return 'wal'
+  if (['mysql', 'mariadb'].includes(dbType)) return 'binlog'
+  return ''
+}
+
+const resetExternalBackupForm = () => {
+  externalBackupForm.instanceId = pitrBackupInstances.value[0]?.id || 0
+  externalBackupForm.sourceInstanceId = undefined
+  externalBackupForm.sourceRole = 'external'
+  externalBackupForm.chainId = ''
+  externalBackupForm.baseRecordId = undefined
+  externalBackupForm.parentRecordId = undefined
+  externalBackupForm.backupMethod = 'physical'
+  externalBackupForm.backupLevel = 'full'
+  externalBackupForm.backupEngine = 'external'
+  externalBackupForm.toolName = ''
+  externalBackupForm.toolVersion = ''
+  externalBackupForm.storageProfileId = undefined
+  externalBackupForm.storageUri = ''
+  externalBackupForm.manifestJson = ''
+  externalBackupForm.prepareStatus = ''
+  externalBackupForm.fileName = ''
+  externalBackupForm.fileSize = undefined
+  externalBackupForm.checksumSha256 = ''
+  externalBackupForm.compression = ''
+  externalBackupForm.encrypted = false
+  externalBackupForm.recoverableFrom = ''
+  externalBackupForm.recoverableUntil = ''
+  externalBackupForm.startedAt = ''
+  externalBackupForm.finishedAt = ''
+  externalBackupForm.status = 'success'
+  externalBackupForm.verifyStatus = 'success'
+  externalBackupForm.serverUuid = ''
+  externalBackupForm.backupBinlogFile = ''
+  externalBackupForm.backupBinlogPos = undefined
+  externalBackupForm.backupGtidSet = ''
+  externalBackupForm.pgSystemIdentifier = ''
+  externalBackupForm.timelineId = ''
+  externalBackupForm.startLsn = ''
+  externalBackupForm.endLsn = ''
+  externalBackupForm.walStart = ''
+  externalBackupForm.walEnd = ''
+  externalBackupFormRef.value?.clearValidate()
+}
+
+const resetLogArchiveStreamForm = () => {
+  logArchiveStreamForm.instanceId = pitrBackupInstances.value[0]?.id || 0
+  logArchiveStreamForm.sourceInstanceId = undefined
+  logArchiveStreamForm.engine = ''
+  logArchiveStreamForm.archiveType = archiveTypeForInstance(logArchiveStreamForm.instanceId)
+  logArchiveStreamForm.archiveMode = 'external'
+  logArchiveStreamForm.archiveEngine = 'external'
+  logArchiveStreamForm.storageProfileId = undefined
+  logArchiveStreamForm.secretProfileId = undefined
+  logArchiveStreamForm.rpoTargetSeconds = 300
+  logArchiveStreamForm.retentionDays = 30
+  logArchiveStreamForm.enabled = true
+  logArchiveStreamForm.configJson = ''
+  logArchiveStreamFormRef.value?.clearValidate()
+}
+
+const resetLogArchiveForm = () => {
+  logArchiveForm.streamId = logArchiveStreams.value[0]?.id || 0
+  logArchiveForm.fileName = ''
+  logArchiveForm.storageUri = ''
+  logArchiveForm.fileSize = undefined
+  logArchiveForm.checksumSha256 = ''
+  logArchiveForm.firstEventTime = ''
+  logArchiveForm.lastEventTime = ''
+  logArchiveForm.status = 'archived'
+  logArchiveForm.serverUuid = ''
+  logArchiveForm.startPos = undefined
+  logArchiveForm.endPos = undefined
+  logArchiveForm.startGtidSet = ''
+  logArchiveForm.endGtidSet = ''
+  logArchiveForm.previousFileName = ''
+  logArchiveForm.nextFileName = ''
+  logArchiveForm.pgSystemIdentifier = ''
+  logArchiveForm.timelineId = ''
+  logArchiveForm.startLsn = ''
+  logArchiveForm.endLsn = ''
+  logArchiveForm.segmentNo = ''
+  logArchiveForm.timelineHistoryUri = ''
+  logArchiveFormRef.value?.clearValidate()
+}
+
+const resetRestorePlanForm = () => {
+  restorePlanForm.sourceInstanceId = pitrBackupInstances.value[0]?.id || 0
+  restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== restorePlanForm.sourceInstanceId)?.id
+  restorePlanForm.restoreMode = 'isolated_restore'
+  restorePlanForm.restoreTargetType = 'time'
+  restorePlanForm.restoreTargetValue = formatDateTimeInput()
+  restorePlanForm.restoreTargetInclusive = true
+  restorePlanFormRef.value?.clearValidate()
 }
 
 const normalizeRestoreFormStrategy = () => {
@@ -4055,6 +5032,121 @@ const submitBackupTaskForm = async () => {
     await Promise.all([loadBackupTasks(), loadBackupRecords()])
   } finally {
     backupTaskSubmitting.value = false
+  }
+}
+
+const openExternalBackupDialog = () => {
+  resetExternalBackupForm()
+  externalBackupDialogVisible.value = true
+}
+
+const submitExternalBackup = async () => {
+  if (!externalBackupFormRef.value) return
+  await externalBackupFormRef.value.validate()
+  externalBackupSubmitting.value = true
+  try {
+    const payload: DatabaseExternalBackupRecordPayload = {
+      ...externalBackupForm,
+      sourceInstanceId: externalBackupForm.sourceInstanceId || undefined,
+      baseRecordId: externalBackupForm.baseRecordId || undefined,
+      parentRecordId: externalBackupForm.parentRecordId || undefined,
+      storageProfileId: externalBackupForm.storageProfileId || undefined,
+      fileSize: externalBackupForm.fileSize || undefined,
+      backupBinlogPos: externalBackupForm.backupBinlogPos || undefined,
+      status: externalBackupForm.status || 'success',
+      verifyStatus: externalBackupForm.verifyStatus || 'success'
+    }
+    await registerExternalDatabaseBackupRecord(payload)
+    externalBackupDialogVisible.value = false
+    ElMessage.success('外部备份记录已登记')
+    await Promise.all([loadBackupRecords(), loadBackupTasks()])
+  } finally {
+    externalBackupSubmitting.value = false
+  }
+}
+
+const openLogArchiveStreamDialog = () => {
+  resetLogArchiveStreamForm()
+  logArchiveStreamDialogVisible.value = true
+}
+
+const submitLogArchiveStream = async () => {
+  if (!logArchiveStreamFormRef.value) return
+  await logArchiveStreamFormRef.value.validate()
+  logArchiveStreamSubmitting.value = true
+  try {
+    const payload: DatabaseLogArchiveStreamPayload = {
+      ...logArchiveStreamForm,
+      sourceInstanceId: logArchiveStreamForm.sourceInstanceId || undefined,
+      storageProfileId: logArchiveStreamForm.storageProfileId || undefined,
+      secretProfileId: logArchiveStreamForm.secretProfileId || undefined,
+      archiveType: logArchiveStreamForm.archiveType || archiveTypeForInstance(logArchiveStreamForm.instanceId)
+    }
+    await createDatabaseLogArchiveStream(payload)
+    logArchiveStreamDialogVisible.value = false
+    ElMessage.success('日志归档流已创建')
+    await loadLogArchiveStreams()
+  } finally {
+    logArchiveStreamSubmitting.value = false
+  }
+}
+
+const openLogArchiveDialog = async () => {
+  if (!logArchiveStreams.value.length) {
+    await loadLogArchiveStreams()
+  }
+  if (!logArchiveStreams.value.length) {
+    ElMessage.warning('请先创建日志归档流')
+    return
+  }
+  resetLogArchiveForm()
+  logArchiveDialogVisible.value = true
+}
+
+const submitLogArchive = async () => {
+  if (!logArchiveFormRef.value) return
+  await logArchiveFormRef.value.validate()
+  logArchiveSubmitting.value = true
+  try {
+    const payload: DatabaseExternalLogArchivePayload = {
+      ...logArchiveForm,
+      fileSize: logArchiveForm.fileSize || undefined,
+      startPos: logArchiveForm.startPos || undefined,
+      endPos: logArchiveForm.endPos || undefined,
+      status: logArchiveForm.status || 'archived'
+    }
+    await registerExternalDatabaseLogArchive(payload)
+    logArchiveDialogVisible.value = false
+    ElMessage.success('日志归档文件已登记')
+    await Promise.all([loadLogArchives(), loadLogArchiveStreams()])
+  } finally {
+    logArchiveSubmitting.value = false
+  }
+}
+
+const openRestorePlanDialog = () => {
+  resetRestorePlanForm()
+  restorePlanDialogVisible.value = true
+}
+
+const submitRestorePlan = async () => {
+  if (!restorePlanFormRef.value) return
+  await restorePlanFormRef.value.validate()
+  restorePlanSubmitting.value = true
+  try {
+    const payload: DatabaseRestorePlanPayload = {
+      ...restorePlanForm,
+      targetInstanceId: restorePlanForm.targetInstanceId || undefined,
+      restoreMode: restorePlanForm.restoreMode || 'isolated_restore',
+      restoreTargetType: restorePlanForm.restoreTargetType || 'time',
+      restoreTargetInclusive: restorePlanForm.restoreTargetInclusive !== false
+    }
+    const res = await createDatabaseRestorePlan(payload) as DatabaseRestorePlanResult
+    restorePlanDialogVisible.value = false
+    ElMessage.success(res.message || '恢复计划预校验已生成')
+    await loadRestorePlans()
+  } finally {
+    restorePlanSubmitting.value = false
   }
 }
 
@@ -4967,6 +6059,35 @@ const resetBackupRecordQuery = () => {
   loadBackupRecords()
 }
 
+const resetLogArchiveStreamQuery = () => {
+  logArchiveStreamQuery.page = 1
+  logArchiveStreamQuery.pageSize = 10
+  logArchiveStreamQuery.instanceId = undefined
+  logArchiveStreamQuery.archiveType = ''
+  logArchiveStreamQuery.status = ''
+  loadLogArchiveStreams()
+}
+
+const resetLogArchiveQuery = () => {
+  logArchiveQuery.page = 1
+  logArchiveQuery.pageSize = 10
+  logArchiveQuery.streamId = undefined
+  logArchiveQuery.instanceId = undefined
+  logArchiveQuery.archiveType = ''
+  logArchiveQuery.status = ''
+  loadLogArchives()
+}
+
+const resetRestorePlanQuery = () => {
+  restorePlanQuery.page = 1
+  restorePlanQuery.pageSize = 10
+  restorePlanQuery.sourceInstanceId = undefined
+  restorePlanQuery.targetInstanceId = undefined
+  restorePlanQuery.validationStatus = ''
+  restorePlanQuery.restoreStatus = ''
+  loadRestorePlans()
+}
+
 const resetRestoreJobQuery = () => {
   restoreJobQuery.page = 1
   restoreJobQuery.pageSize = 10
@@ -5441,6 +6562,69 @@ const backupVerifyStatusTag = (status?: string) => {
   }
 }
 
+const logArchiveStatusTag = (status?: string) => {
+  switch (status) {
+    case 'archived':
+    case 'running':
+    case 'passed':
+    case 'success':
+      return 'success'
+    case 'missing':
+    case 'checksum_failed':
+    case 'failed':
+      return 'danger'
+    case 'degraded':
+    case 'warning':
+      return 'warning'
+    case 'disabled':
+    case 'expired':
+      return 'info'
+    default:
+      return 'info'
+  }
+}
+
+const restoreValidationStatusTag = (status?: string) => {
+  switch (status) {
+    case 'passed':
+    case 'complete':
+    case 'available':
+    case 'compatible':
+    case 'verified':
+      return 'success'
+    case 'failed':
+    case 'missing_base':
+    case 'missing_incremental':
+    case 'broken_chain':
+    case 'missing_binlog':
+    case 'missing_wal':
+    case 'timeline_gap':
+    case 'gtid_gap':
+    case 'time_range_gap':
+    case 'missing_object':
+    case 'checksum_failed':
+    case 'incompatible_version':
+    case 'missing_tool':
+    case 'permission_denied':
+      return 'danger'
+    case 'warning':
+    case 'unsupported':
+      return 'warning'
+    case 'running':
+    case 'planned':
+    case 'pending':
+    case 'queued':
+      return 'info'
+    default:
+      return 'info'
+  }
+}
+
+const recoverableWindowText = (row: DatabaseBackupRecordResult) => {
+  if (!row.recoverableFrom && !row.recoverableUntil) return '-'
+  return `${row.recoverableFrom || '-'} 至 ${row.recoverableUntil || '-'}`
+}
+
 const riskLevelTag = (riskLevel: string) => {
   switch (riskLevel) {
     case 'critical':
@@ -5569,6 +6753,22 @@ watch(
   }
 )
 
+watch(
+  () => logArchiveStreamForm.instanceId,
+  (instanceId) => {
+    logArchiveStreamForm.archiveType = archiveTypeForInstance(instanceId)
+  }
+)
+
+watch(
+  () => restorePlanForm.sourceInstanceId,
+  (sourceInstanceId) => {
+    if (restorePlanForm.targetInstanceId === sourceInstanceId) {
+      restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== sourceInstanceId)?.id
+    }
+  }
+)
+
 watch(activeTab, async (tab) => {
   if (tab === 'schemas') {
     await ensureMetadataInstance()
@@ -5583,7 +6783,14 @@ watch(activeTab, async (tab) => {
     await ensureTopologyInstance()
   }
   if (tab === 'backup') {
-    await Promise.all([loadBackupTasks(), loadBackupRecords(), loadRestoreJobs()])
+    await Promise.all([
+      loadBackupTasks(),
+      loadBackupRecords(),
+      loadLogArchiveStreams(),
+      loadLogArchives(),
+      loadRestorePlans(),
+      loadRestoreJobs()
+    ])
   }
   if (tab === 'permissions') {
     if (!canManageInstancePermissions.value) {
@@ -6296,6 +7503,22 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
+}
+
+.backup-inline-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pitr-tabs {
+  width: 100%;
+}
+
+.pitr-sub-toolbar {
+  margin-bottom: 12px;
+  padding: 12px;
 }
 
 .permission-tag-list {

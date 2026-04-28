@@ -67,11 +67,24 @@ func (uc *UseCase) CreateBackupTask(ctx context.Context, req *DatabaseBackupTask
 		InstanceID:         req.InstanceID,
 		Name:               trimText(strings.TrimSpace(req.Name), 120),
 		BackupType:         normalizeBackupType(req.BackupType),
+		BackupMethod:       normalizeBackupMethod(req.BackupMethod),
+		BackupLevel:        normalizeBackupLevel(req.BackupLevel),
+		BackupEngine:       normalizeBackupEngine(req.BackupEngine, req.BackupMethod),
+		SourceInstanceID:   normalizeBackupSourceInstanceID(req.SourceInstanceID, req.InstanceID),
+		SourceRole:         normalizeSourceRole(req.SourceRole),
+		StorageProfileID:   req.StorageProfileID,
+		SecretProfileID:    req.SecretProfileID,
+		BackupScope:        normalizeBackupScope(req.BackupScope),
+		ScopeConfig:        trimText(strings.TrimSpace(req.ScopeConfig), 4000),
+		RPOMinutes:         req.RPOMinutes,
+		RTOMinutes:         req.RTOMinutes,
 		Schedule:           strings.TrimSpace(req.Schedule),
 		StorageType:        normalizeBackupStorageType(req.StorageType),
 		StorageConfig:      trimText(strings.TrimSpace(req.StorageConfig), 2000),
 		RetentionDays:      normalizeBackupRetentionDays(req.RetentionDays, policy.DefaultRetentionDays),
 		MaxDurationMinutes: normalizeBackupMaxDurationMinutes(req.MaxDurationMinutes),
+		Compression:        normalizeBackupCompression(req.Compression, req.BackupType),
+		EncryptionEnabled:  req.EncryptionEnabled,
 		Enabled:            req.Enabled,
 		RestoreCapability:  DatabaseRestoreCapabilityLogicalRestoreOnly,
 	}
@@ -104,11 +117,24 @@ func (uc *UseCase) UpdateBackupTask(ctx context.Context, id uint, req *DatabaseB
 	item.InstanceID = req.InstanceID
 	item.Name = trimText(strings.TrimSpace(req.Name), 120)
 	item.BackupType = normalizeBackupType(req.BackupType)
+	item.BackupMethod = normalizeBackupMethod(req.BackupMethod)
+	item.BackupLevel = normalizeBackupLevel(req.BackupLevel)
+	item.BackupEngine = normalizeBackupEngine(req.BackupEngine, req.BackupMethod)
+	item.SourceInstanceID = normalizeBackupSourceInstanceID(req.SourceInstanceID, req.InstanceID)
+	item.SourceRole = normalizeSourceRole(req.SourceRole)
+	item.StorageProfileID = req.StorageProfileID
+	item.SecretProfileID = req.SecretProfileID
+	item.BackupScope = normalizeBackupScope(req.BackupScope)
+	item.ScopeConfig = trimText(strings.TrimSpace(req.ScopeConfig), 4000)
+	item.RPOMinutes = req.RPOMinutes
+	item.RTOMinutes = req.RTOMinutes
 	item.Schedule = strings.TrimSpace(req.Schedule)
 	item.StorageType = normalizeBackupStorageType(req.StorageType)
 	item.StorageConfig = trimText(strings.TrimSpace(req.StorageConfig), 2000)
 	item.RetentionDays = normalizeBackupRetentionDays(req.RetentionDays, policy.DefaultRetentionDays)
 	item.MaxDurationMinutes = normalizeBackupMaxDurationMinutes(req.MaxDurationMinutes)
+	item.Compression = normalizeBackupCompression(req.Compression, req.BackupType)
+	item.EncryptionEnabled = req.EncryptionEnabled
 	item.Enabled = req.Enabled
 	item.RestoreCapability = normalizeRestoreCapability(item.RestoreCapability)
 	uc.applyBackupTaskNextRunAt(item, time.Now())
@@ -354,6 +380,24 @@ func (uc *UseCase) validateBackupTaskRequest(ctx context.Context, req *DatabaseB
 		}
 		return fmt.Errorf("当前不支持备份类型 %s", backupType)
 	}
+	if method := normalizeBackupMethod(req.BackupMethod); method != DatabaseBackupMethodLogical {
+		return fmt.Errorf("P1 仅支持物理/外部备份记录登记，备份任务执行仍只支持逻辑备份")
+	}
+	if req.SourceInstanceID > 0 {
+		if _, err := uc.instanceRepo.GetByID(ctx, req.SourceInstanceID); err != nil {
+			return fmt.Errorf("备份来源实例不存在")
+		}
+	}
+	if req.StorageProfileID > 0 && uc.storageProfileRepo != nil {
+		if _, err := uc.storageProfileRepo.GetByID(ctx, req.StorageProfileID); err != nil {
+			return fmt.Errorf("存储配置不存在")
+		}
+	}
+	if req.SecretProfileID > 0 && uc.secretProfileRepo != nil {
+		if _, err := uc.secretProfileRepo.GetByID(ctx, req.SecretProfileID); err != nil {
+			return fmt.Errorf("密钥配置不存在")
+		}
+	}
 	storageType := normalizeBackupStorageType(req.StorageType)
 	if storageType != DatabaseBackupStorageLocal {
 		return fmt.Errorf("当前仅支持 local 本地存储")
@@ -495,6 +539,8 @@ func (uc *UseCase) finishBackupRecordSuccess(ctx context.Context, record *Databa
 	record.StartedAt = &startedAt
 	record.FinishedAt = &finishedAt
 	record.LastHeartbeatAt = &finishedAt
+	record.RecoverableFrom = &startedAt
+	record.RecoverableUntil = &finishedAt
 	record.DurationMs = durationMs
 	record.FileSize = fileSize
 	record.ChecksumSHA256 = strings.TrimSpace(checksum)
@@ -611,16 +657,32 @@ func (uc *UseCase) toBackupTaskVO(ctx context.Context, item *DatabaseBackupTask,
 		Name:                  item.Name,
 		BackupType:            item.BackupType,
 		BackupTypeText:        BackupTypeText(item.BackupType),
+		BackupMethod:          normalizeBackupMethod(item.BackupMethod),
+		BackupMethodText:      BackupMethodText(item.BackupMethod),
+		BackupLevel:           normalizeBackupLevel(item.BackupLevel),
+		BackupLevelText:       BackupLevelText(item.BackupLevel),
+		BackupEngine:          item.BackupEngine,
+		SourceInstanceID:      normalizeBackupSourceInstanceID(item.SourceInstanceID, item.InstanceID),
+		SourceRole:            normalizeSourceRole(item.SourceRole),
+		StorageProfileID:      item.StorageProfileID,
+		SecretProfileID:       item.SecretProfileID,
+		BackupScope:           normalizeBackupScope(item.BackupScope),
+		ScopeConfig:           item.ScopeConfig,
+		RPOMinutes:            item.RPOMinutes,
+		RTOMinutes:            item.RTOMinutes,
 		Schedule:              item.Schedule,
 		StorageType:           item.StorageType,
 		StorageTypeText:       BackupStorageTypeText(item.StorageType),
 		StorageConfig:         item.StorageConfig,
 		RetentionDays:         item.RetentionDays,
 		MaxDurationMinutes:    normalizeBackupMaxDurationMinutes(item.MaxDurationMinutes),
+		Compression:           normalizeBackupCompression(item.Compression, item.BackupType),
+		EncryptionEnabled:     item.EncryptionEnabled,
 		Enabled:               item.Enabled,
 		NextRunAt:             formatTime(nextRunAt),
 		LastRunAt:             formatTime(item.LastRunAt),
 		LastSuccessAt:         formatTime(item.LastSuccessAt),
+		LastRestoreTestAt:     formatTime(item.LastRestoreTestAt),
 		LastStatus:            item.LastStatus,
 		LastStatusText:        backupTaskLastStatusText(item.LastStatus),
 		LastMessage:           item.LastMessage,
@@ -650,8 +712,24 @@ func (uc *UseCase) toBackupRecordVO(item *DatabaseBackupRecord, taskName, instan
 		TriggerTypeText:       BackupTriggerTypeText(item.TriggerType),
 		BackupType:            item.BackupType,
 		BackupTypeText:        BackupTypeText(item.BackupType),
+		ChainID:               item.ChainID,
+		BaseRecordID:          item.BaseRecordID,
+		ParentRecordID:        item.ParentRecordID,
+		BackupMethod:          normalizeBackupMethod(item.BackupMethod),
+		BackupMethodText:      BackupMethodText(item.BackupMethod),
+		BackupLevel:           normalizeBackupLevel(item.BackupLevel),
+		BackupLevelText:       BackupLevelText(item.BackupLevel),
+		BackupEngine:          item.BackupEngine,
+		ToolName:              item.ToolName,
+		ToolVersion:           item.ToolVersion,
+		SourceInstanceID:      item.SourceInstanceID,
+		SourceRole:            item.SourceRole,
+		StorageProfileID:      item.StorageProfileID,
 		StorageType:           item.StorageType,
 		StorageTypeText:       BackupStorageTypeText(item.StorageType),
+		StorageURI:            item.StorageURI,
+		ManifestJSON:          item.ManifestJSON,
+		PrepareStatus:         item.PrepareStatus,
 		Status:                item.Status,
 		StatusText:            BackupStatusText(item.Status),
 		FileName:              item.FileName,
@@ -670,6 +748,8 @@ func (uc *UseCase) toBackupRecordVO(item *DatabaseBackupRecord, taskName, instan
 		StartedAt:             formatTime(item.StartedAt),
 		LastHeartbeatAt:       formatTime(item.LastHeartbeatAt),
 		FinishedAt:            formatTime(item.FinishedAt),
+		RecoverableFrom:       formatTime(item.RecoverableFrom),
+		RecoverableUntil:      formatTime(item.RecoverableUntil),
 		DurationMs:            item.DurationMs,
 		Message:               buildBackupRecordMessage(item),
 		CreatedAt:             item.CreatedAt.Format("2006-01-02 15:04:05"),
@@ -780,6 +860,32 @@ func normalizeBackupStorageType(storageType string) string {
 		return DatabaseBackupStorageLocal
 	}
 	return storageType
+}
+
+func normalizeBackupSourceInstanceID(sourceInstanceID, fallbackInstanceID uint) uint {
+	if sourceInstanceID > 0 {
+		return sourceInstanceID
+	}
+	return fallbackInstanceID
+}
+
+func normalizeBackupScope(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "database"
+	}
+	return trimText(value, 30)
+}
+
+func normalizeBackupCompression(value, backupType string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value != "" {
+		return trimText(value, 30)
+	}
+	if normalizeBackupType(backupType) == DatabaseBackupTypeLogicalCustom {
+		return "none"
+	}
+	return "gzip"
 }
 
 func detectBackupCompression(fileName string) string {
@@ -928,6 +1034,9 @@ func isBackupRecordStale(record *DatabaseBackupRecord, task *DatabaseBackupTask,
 }
 
 func backupTaskStrategyText(task *DatabaseBackupTask) string {
+	if task != nil && normalizeBackupMethod(task.BackupMethod) != DatabaseBackupMethodLogical {
+		return fmt.Sprintf("%s%s，P1 仅支持登记和预校验", BackupMethodText(task.BackupMethod), BackupLevelText(task.BackupLevel))
+	}
 	if task != nil && normalizeBackupType(task.BackupType) == DatabaseBackupTypeLogicalCustom {
 		return "逻辑全量（PostgreSQL Custom），不支持 PITR"
 	}

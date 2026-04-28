@@ -195,6 +195,21 @@ func (r *backupRecordRepo) ListExpiredSuccessByTask(ctx context.Context, taskID 
 	return items, nil
 }
 
+func (r *backupRecordRepo) ListSuccessfulForRestore(ctx context.Context, instanceID uint, targetTime *time.Time) ([]*dbbiz.DatabaseBackupRecord, error) {
+	var items []*dbbiz.DatabaseBackupRecord
+	query := r.db.WithContext(ctx).
+		Model(&dbbiz.DatabaseBackupRecord{}).
+		Where("instance_id = ?", instanceID).
+		Where("status = ?", dbbiz.DatabaseBackupStatusSuccess)
+	if targetTime != nil {
+		query = query.Where("(finished_at IS NULL OR finished_at <= ?) AND (recoverable_from IS NULL OR recoverable_from <= ?)", targetTime, targetTime)
+	}
+	if err := query.Order("finished_at DESC, id DESC").Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 type restoreJobRepo struct {
 	db *gorm.DB
 }

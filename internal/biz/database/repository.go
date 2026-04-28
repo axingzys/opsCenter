@@ -83,6 +83,7 @@ type BackupRecordRepo interface {
 	GetByID(ctx context.Context, id uint) (*DatabaseBackupRecord, error)
 	List(ctx context.Context, req *DatabaseBackupRecordListRequest) ([]*DatabaseBackupRecord, int64, error)
 	ListExpiredSuccessByTask(ctx context.Context, taskID uint, before time.Time) ([]*DatabaseBackupRecord, error)
+	ListSuccessfulForRestore(ctx context.Context, instanceID uint, targetTime *time.Time) ([]*DatabaseBackupRecord, error)
 }
 
 type RestoreJobRepo interface {
@@ -104,4 +105,44 @@ type InspectionReportRepo interface {
 	Update(ctx context.Context, item *DatabaseInspectionReport) error
 	GetByID(ctx context.Context, id uint) (*DatabaseInspectionReport, error)
 	List(ctx context.Context, req *DatabaseInspectionReportListRequest) ([]*DatabaseInspectionReport, int64, error)
+}
+
+type LogArchiveStreamRepo interface {
+	Create(ctx context.Context, item *DatabaseLogArchiveStream) error
+	Update(ctx context.Context, item *DatabaseLogArchiveStream) error
+	GetByID(ctx context.Context, id uint) (*DatabaseLogArchiveStream, error)
+	List(ctx context.Context, req *DatabaseLogArchiveStreamListRequest) ([]*DatabaseLogArchiveStream, int64, error)
+}
+
+type LogArchiveRepo interface {
+	Create(ctx context.Context, item *DatabaseLogArchive) error
+	GetByID(ctx context.Context, id uint) (*DatabaseLogArchive, error)
+	List(ctx context.Context, req *DatabaseLogArchiveListRequest) ([]*DatabaseLogArchive, int64, error)
+	ListCoveringTimeRange(ctx context.Context, instanceID uint, archiveType string, startTime, endTime time.Time) ([]*DatabaseLogArchive, error)
+}
+
+type RestorePlanRepo interface {
+	Create(ctx context.Context, item *DatabaseRestorePlan) error
+	Update(ctx context.Context, item *DatabaseRestorePlan) error
+	GetByID(ctx context.Context, id uint) (*DatabaseRestorePlan, error)
+	List(ctx context.Context, req *DatabaseRestorePlanListRequest) ([]*DatabaseRestorePlan, int64, error)
+}
+
+type StorageProfileRepo interface {
+	Create(ctx context.Context, item *DatabaseStorageProfile) error
+	GetByID(ctx context.Context, id uint) (*DatabaseStorageProfile, error)
+	List(ctx context.Context, req *DatabaseStorageProfileListRequest) ([]*DatabaseStorageProfile, int64, error)
+}
+
+type SecretProfileRepo interface {
+	Create(ctx context.Context, item *DatabaseSecretProfile) error
+	GetByID(ctx context.Context, id uint) (*DatabaseSecretProfile, error)
+	List(ctx context.Context, req *DatabaseSecretProfileListRequest) ([]*DatabaseSecretProfile, int64, error)
+}
+
+type RunnerJobRepo interface {
+	Create(ctx context.Context, item *DatabaseRunnerJob) error
+	Update(ctx context.Context, item *DatabaseRunnerJob) error
+	GetByID(ctx context.Context, id uint) (*DatabaseRunnerJob, error)
+	List(ctx context.Context, req *DatabaseRunnerJobListRequest) ([]*DatabaseRunnerJob, int64, error)
 }

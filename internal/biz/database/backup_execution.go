@@ -111,20 +111,28 @@ func (uc *UseCase) prepareBackupTaskRun(ctx context.Context, id uint, operator Q
 	}
 
 	record := &DatabaseBackupRecord{
-		TaskID:          task.ID,
-		InstanceID:      task.InstanceID,
-		TriggerType:     normalizeBackupTriggerType(triggerType),
-		BackupType:      task.BackupType,
-		StorageType:     task.StorageType,
-		Status:          DatabaseBackupStatusQueued,
-		FilePath:        outputPath,
-		FileName:        fileName,
-		Compression:     detectBackupCompression(fileName),
-		ExpiresAt:       &expiresAt,
-		VerifyStatus:    DatabaseBackupVerifyStatusPending,
-		StartedAt:       &startedAt,
-		LastHeartbeatAt: &startedAt,
-		ErrorMessage:    trimText(backupQueuedMessage, 500),
+		TaskID:           task.ID,
+		InstanceID:       task.InstanceID,
+		TriggerType:      normalizeBackupTriggerType(triggerType),
+		BackupType:       task.BackupType,
+		ChainID:          fmt.Sprintf("logical-%d-%d", task.ID, startedAt.Unix()),
+		BackupMethod:     normalizeBackupMethod(task.BackupMethod),
+		BackupLevel:      normalizeBackupLevel(task.BackupLevel),
+		BackupEngine:     backupEngineForSpec(task, spec),
+		ToolName:         backupToolNameForSpec(spec),
+		SourceInstanceID: normalizeBackupSourceInstanceID(task.SourceInstanceID, task.InstanceID),
+		SourceRole:       normalizeSourceRole(task.SourceRole),
+		StorageProfileID: task.StorageProfileID,
+		StorageType:      task.StorageType,
+		Status:           DatabaseBackupStatusQueued,
+		FilePath:         outputPath,
+		FileName:         fileName,
+		Compression:      detectBackupCompression(fileName),
+		ExpiresAt:        &expiresAt,
+		VerifyStatus:     DatabaseBackupVerifyStatusPending,
+		StartedAt:        &startedAt,
+		LastHeartbeatAt:  &startedAt,
+		ErrorMessage:     trimText(backupQueuedMessage, 500),
 	}
 	if err := uc.backupRecordRepo.Create(ctx, record); err != nil {
 		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, 0, "创建备份记录失败: "+err.Error())
@@ -405,7 +413,7 @@ func scheduledBackupOperator() QueryOperator {
 
 func normalizeBackupTriggerType(triggerType string) string {
 	switch strings.TrimSpace(triggerType) {
-	case DatabaseBackupTriggerSchedule, DatabaseBackupTriggerManualRetry:
+	case DatabaseBackupTriggerSchedule, DatabaseBackupTriggerManualRetry, DatabaseBackupTriggerExternal:
 		return triggerType
 	default:
 		return DatabaseBackupTriggerManual
@@ -414,6 +422,35 @@ func normalizeBackupTriggerType(triggerType string) string {
 
 func isBackupTaskRunningError(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "备份任务正在执行中") || strings.Contains(err.Error(), "数据库实例已有备份任务正在执行中"))
+}
+
+func backupEngineForSpec(task *DatabaseBackupTask, spec *backupCommandSpec) string {
+	if task != nil && strings.TrimSpace(task.BackupEngine) != "" {
+		return strings.TrimSpace(task.BackupEngine)
+	}
+	if spec == nil {
+		return "logical"
+	}
+	if len(spec.Commands) > 0 {
+		return strings.TrimSpace(spec.Commands[0])
+	}
+	if spec.Runner != nil {
+		return "opshub_runner"
+	}
+	return "logical"
+}
+
+func backupToolNameForSpec(spec *backupCommandSpec) string {
+	if spec == nil {
+		return ""
+	}
+	if len(spec.Commands) > 0 {
+		return strings.TrimSpace(spec.Commands[0])
+	}
+	if spec.Runner != nil {
+		return "opshub_runner"
+	}
+	return ""
 }
 
 func buildBackupCleanupMessage(cleanedCount int) string {

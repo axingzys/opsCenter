@@ -103,6 +103,12 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	restoreJobRepo := dbdata.NewRestoreJobRepo(db)
 	capacitySnapshotRepo := dbdata.NewCapacitySnapshotRepo(db)
 	inspectionReportRepo := dbdata.NewInspectionReportRepo(db)
+	logArchiveStreamRepo := dbdata.NewLogArchiveStreamRepo(db)
+	logArchiveRepo := dbdata.NewLogArchiveRepo(db)
+	restorePlanRepo := dbdata.NewRestorePlanRepo(db)
+	storageProfileRepo := dbdata.NewStorageProfileRepo(db)
+	secretProfileRepo := dbdata.NewSecretProfileRepo(db)
+	runnerJobRepo := dbdata.NewRunnerJobRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
 	configRepo := systemdata.NewConfigRepo(db)
 	loginAttemptRepo := systemdata.NewLoginAttemptRepo(db)
@@ -164,6 +170,14 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 				StoragePath:          cfg.BackupStoragePath,
 			}, nil
 		},
+	)
+	useCase.SetBackupGovernanceRepos(
+		logArchiveStreamRepo,
+		logArchiveRepo,
+		restorePlanRepo,
+		storageProfileRepo,
+		secretProfileRepo,
+		runnerJobRepo,
 	)
 
 	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
@@ -255,10 +269,21 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.DELETE("/backup-tasks/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBackupTask)
 		databases.POST("/backup-tasks/:id/run", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupTask)
 		databases.GET("/backup-records", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupRecords)
+		databases.POST("/backup-records/external", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.RegisterExternalBackupRecord)
 		databases.GET("/backup-records/:id/download", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDownload), s.service.DownloadBackupRecord)
 		databases.POST("/backup-records/:id/verify", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.VerifyBackupRecord)
 		databases.POST("/backup-records/:id/restore-dry-run", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreRun), s.service.RunRestoreDryRun)
 		databases.GET("/restore-jobs", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreView), s.service.ListRestoreJobs)
+		databases.GET("/restore-plans", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreView), s.service.ListRestorePlans)
+		databases.POST("/restore-plans", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreRun), s.service.CreateRestorePlan)
+		databases.GET("/log-archive-streams", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchiveStreams)
+		databases.POST("/log-archive-streams", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateLogArchiveStream)
+		databases.GET("/log-archives", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchives)
+		databases.POST("/log-archives/external", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.RegisterExternalLogArchive)
+		databases.GET("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListStorageProfiles)
+		databases.POST("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateStorageProfile)
+		databases.GET("/secret-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListSecretProfiles)
+		databases.POST("/secret-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateSecretProfile)
 		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
 		databases.POST("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionRun), s.service.GenerateInspectionReport)
 		databases.GET("/inspection-reports/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.GetInspectionReport)

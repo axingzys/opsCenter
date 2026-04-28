@@ -53,6 +53,12 @@ type UseCase struct {
 	restoreJobRepo         RestoreJobRepo
 	capacitySnapshotRepo   CapacitySnapshotRepo
 	inspectionReportRepo   InspectionReportRepo
+	logArchiveStreamRepo   LogArchiveStreamRepo
+	logArchiveRepo         LogArchiveRepo
+	restorePlanRepo        RestorePlanRepo
+	storageProfileRepo     StorageProfileRepo
+	secretProfileRepo      SecretProfileRepo
+	runnerJobRepo          RunnerJobRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
 	writePolicyResolver    func(ctx context.Context) (*DatabaseWritePolicy, error)
@@ -109,6 +115,25 @@ func NewUseCase(
 		restoreRunningTargets:  make(map[string]struct{}),
 		startedAt:              time.Now(),
 	}
+}
+
+func (uc *UseCase) SetBackupGovernanceRepos(
+	logArchiveStreamRepo LogArchiveStreamRepo,
+	logArchiveRepo LogArchiveRepo,
+	restorePlanRepo RestorePlanRepo,
+	storageProfileRepo StorageProfileRepo,
+	secretProfileRepo SecretProfileRepo,
+	runnerJobRepo RunnerJobRepo,
+) {
+	if uc == nil {
+		return
+	}
+	uc.logArchiveStreamRepo = logArchiveStreamRepo
+	uc.logArchiveRepo = logArchiveRepo
+	uc.restorePlanRepo = restorePlanRepo
+	uc.storageProfileRepo = storageProfileRepo
+	uc.secretProfileRepo = secretProfileRepo
+	uc.runnerJobRepo = runnerJobRepo
 }
 
 type DatabaseInstanceRequest struct {
@@ -244,11 +269,24 @@ type DatabaseBackupTaskRequest struct {
 	InstanceID         uint   `json:"instanceId" binding:"required"`
 	Name               string `json:"name" binding:"required,min=2,max=120"`
 	BackupType         string `json:"backupType" binding:"omitempty,max=30"`
+	BackupMethod       string `json:"backupMethod" binding:"omitempty,max=30"`
+	BackupLevel        string `json:"backupLevel" binding:"omitempty,max=30"`
+	BackupEngine       string `json:"backupEngine" binding:"omitempty,max=60"`
+	SourceInstanceID   uint   `json:"sourceInstanceId"`
+	SourceRole         string `json:"sourceRole" binding:"omitempty,max=30"`
+	StorageProfileID   uint   `json:"storageProfileId"`
+	SecretProfileID    uint   `json:"secretProfileId"`
+	BackupScope        string `json:"backupScope" binding:"omitempty,max=30"`
+	ScopeConfig        string `json:"scopeConfig" binding:"omitempty,max=4000"`
+	RPOMinutes         int    `json:"rpoMinutes" binding:"omitempty,min=0,max=10080"`
+	RTOMinutes         int    `json:"rtoMinutes" binding:"omitempty,min=0,max=10080"`
 	Schedule           string `json:"schedule" binding:"omitempty,max=120"`
 	StorageType        string `json:"storageType" binding:"omitempty,max=30"`
 	StorageConfig      string `json:"storageConfig" binding:"omitempty,max=2000"`
 	RetentionDays      int    `json:"retentionDays" binding:"omitempty,min=1,max=3650"`
 	MaxDurationMinutes int    `json:"maxDurationMinutes" binding:"omitempty,min=1,max=10080"`
+	Compression        string `json:"compression" binding:"omitempty,max=30"`
+	EncryptionEnabled  bool   `json:"encryptionEnabled"`
 	Enabled            bool   `json:"enabled"`
 }
 
@@ -490,16 +528,32 @@ type DatabaseBackupTaskVO struct {
 	Name                      string `json:"name"`
 	BackupType                string `json:"backupType"`
 	BackupTypeText            string `json:"backupTypeText"`
+	BackupMethod              string `json:"backupMethod"`
+	BackupMethodText          string `json:"backupMethodText"`
+	BackupLevel               string `json:"backupLevel"`
+	BackupLevelText           string `json:"backupLevelText"`
+	BackupEngine              string `json:"backupEngine"`
+	SourceInstanceID          uint   `json:"sourceInstanceId"`
+	SourceRole                string `json:"sourceRole"`
+	StorageProfileID          uint   `json:"storageProfileId"`
+	SecretProfileID           uint   `json:"secretProfileId"`
+	BackupScope               string `json:"backupScope"`
+	ScopeConfig               string `json:"scopeConfig"`
+	RPOMinutes                int    `json:"rpoMinutes"`
+	RTOMinutes                int    `json:"rtoMinutes"`
 	Schedule                  string `json:"schedule"`
 	StorageType               string `json:"storageType"`
 	StorageTypeText           string `json:"storageTypeText"`
 	StorageConfig             string `json:"storageConfig"`
 	RetentionDays             int    `json:"retentionDays"`
 	MaxDurationMinutes        int    `json:"maxDurationMinutes"`
+	Compression               string `json:"compression"`
+	EncryptionEnabled         bool   `json:"encryptionEnabled"`
 	Enabled                   bool   `json:"enabled"`
 	NextRunAt                 string `json:"nextRunAt"`
 	LastRunAt                 string `json:"lastRunAt"`
 	LastSuccessAt             string `json:"lastSuccessAt"`
+	LastRestoreTestAt         string `json:"lastRestoreTestAt"`
 	LastStatus                string `json:"lastStatus"`
 	LastStatusText            string `json:"lastStatusText"`
 	LastMessage               string `json:"lastMessage"`
@@ -526,8 +580,24 @@ type DatabaseBackupRecordVO struct {
 	TriggerTypeText       string `json:"triggerTypeText"`
 	BackupType            string `json:"backupType"`
 	BackupTypeText        string `json:"backupTypeText"`
+	ChainID               string `json:"chainId"`
+	BaseRecordID          uint   `json:"baseRecordId"`
+	ParentRecordID        uint   `json:"parentRecordId"`
+	BackupMethod          string `json:"backupMethod"`
+	BackupMethodText      string `json:"backupMethodText"`
+	BackupLevel           string `json:"backupLevel"`
+	BackupLevelText       string `json:"backupLevelText"`
+	BackupEngine          string `json:"backupEngine"`
+	ToolName              string `json:"toolName"`
+	ToolVersion           string `json:"toolVersion"`
+	SourceInstanceID      uint   `json:"sourceInstanceId"`
+	SourceRole            string `json:"sourceRole"`
+	StorageProfileID      uint   `json:"storageProfileId"`
 	StorageType           string `json:"storageType"`
 	StorageTypeText       string `json:"storageTypeText"`
+	StorageURI            string `json:"storageUri"`
+	ManifestJSON          string `json:"manifestJson"`
+	PrepareStatus         string `json:"prepareStatus"`
 	Status                string `json:"status"`
 	StatusText            string `json:"statusText"`
 	FileName              string `json:"fileName"`
@@ -546,6 +616,8 @@ type DatabaseBackupRecordVO struct {
 	StartedAt             string `json:"startedAt"`
 	LastHeartbeatAt       string `json:"lastHeartbeatAt"`
 	FinishedAt            string `json:"finishedAt"`
+	RecoverableFrom       string `json:"recoverableFrom"`
+	RecoverableUntil      string `json:"recoverableUntil"`
 	DurationMs            int64  `json:"durationMs"`
 	Message               string `json:"message"`
 	CreatedAt             string `json:"createdAt"`
@@ -1905,6 +1977,10 @@ func BackupTypeText(backupType string) string {
 		return "逻辑备份"
 	case DatabaseBackupTypeLogicalCustom:
 		return "逻辑备份（Custom）"
+	case DatabaseBackupTypePhysical:
+		return "物理备份"
+	case DatabaseBackupTypeExternal:
+		return "外部备份"
 	default:
 		return strings.TrimSpace(backupType)
 	}
@@ -1914,6 +1990,8 @@ func BackupStorageTypeText(storageType string) string {
 	switch strings.TrimSpace(storageType) {
 	case DatabaseBackupStorageLocal:
 		return "本地存储"
+	case DatabaseBackupStorageExternal:
+		return "外部存储"
 	default:
 		return strings.TrimSpace(storageType)
 	}
@@ -1948,6 +2026,8 @@ func BackupTriggerTypeText(triggerType string) string {
 		return "定时触发"
 	case DatabaseBackupTriggerManualRetry:
 		return "手动重试"
+	case DatabaseBackupTriggerExternal:
+		return "外部登记"
 	default:
 		return strings.TrimSpace(triggerType)
 	}

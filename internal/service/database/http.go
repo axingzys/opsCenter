@@ -229,6 +229,15 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseRestoreJobListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseLogArchiveStreamListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseLogArchiveListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseRestorePlanListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseInspectionReportListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
@@ -760,6 +769,202 @@ func (s *Service) ListBackupRecords(c *gin.Context) {
 		"page":     req.Page,
 		"pageSize": req.PageSize,
 	})
+}
+
+func (s *Service) RegisterExternalBackupRecord(c *gin.Context) {
+	var req dbbiz.DatabaseExternalBackupRecordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.RegisterExternalBackupRecord(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "登记失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListStorageProfiles(c *gin.Context) {
+	var req dbbiz.DatabaseStorageProfileListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListStorageProfiles(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) CreateStorageProfile(c *gin.Context) {
+	var req dbbiz.DatabaseStorageProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.CreateStorageProfile(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListSecretProfiles(c *gin.Context) {
+	var req dbbiz.DatabaseSecretProfileListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListSecretProfiles(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) CreateSecretProfile(c *gin.Context) {
+	var req dbbiz.DatabaseSecretProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.CreateSecretProfile(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListLogArchiveStreams(c *gin.Context) {
+	var req dbbiz.DatabaseLogArchiveStreamListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListLogArchiveStreams(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) CreateLogArchiveStream(c *gin.Context) {
+	var req dbbiz.DatabaseLogArchiveStreamRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if req.SourceInstanceID > 0 && req.SourceInstanceID != req.InstanceID && !s.ensureInstancePermission(c, req.SourceInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.CreateLogArchiveStream(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListLogArchives(c *gin.Context) {
+	var req dbbiz.DatabaseLogArchiveListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListLogArchives(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) RegisterExternalLogArchive(c *gin.Context) {
+	var req dbbiz.DatabaseExternalLogArchiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	instanceID, err := s.useCase.GetLogArchiveStreamInstanceID(c.Request.Context(), req.StreamID)
+	if err != nil {
+		writeDatabaseError(c, "登记失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.RegisterExternalLogArchive(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "登记失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListRestorePlans(c *gin.Context) {
+	var req dbbiz.DatabaseRestorePlanListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionRestore)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListRestorePlans(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) CreateRestorePlan(c *gin.Context) {
+	var req dbbiz.DatabaseRestorePlanRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.SourceInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if req.TargetInstanceID > 0 && !s.ensureInstancePermission(c, req.TargetInstanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
+	item, err := s.useCase.CreateRestorePlan(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "生成失败: ", err)
+		return
+	}
+	response.Success(c, item)
 }
 
 // DownloadBackupRecord 下载备份文件

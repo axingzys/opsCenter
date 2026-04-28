@@ -48,6 +48,10 @@ func (r *testBackupRecordRepo) ListExpiredSuccessByTask(_ context.Context, taskI
 	return result, nil
 }
 
+func (r *testBackupRecordRepo) ListSuccessfulForRestore(context.Context, uint, *time.Time) ([]*DatabaseBackupRecord, error) {
+	return nil, nil
+}
+
 func TestCleanupExpiredBackupFilesByTask(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "expired.sql.gz")

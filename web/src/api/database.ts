@@ -134,11 +134,24 @@ export interface DatabaseBackupTaskPayload {
   instanceId: number
   name: string
   backupType?: string
+  backupMethod?: string
+  backupLevel?: string
+  backupEngine?: string
+  sourceInstanceId?: number
+  sourceRole?: string
+  storageProfileId?: number
+  secretProfileId?: number
+  backupScope?: string
+  scopeConfig?: string
+  rpoMinutes?: number
+  rtoMinutes?: number
   schedule?: string
   storageType?: string
   storageConfig?: string
   retentionDays?: number
   maxDurationMinutes?: number
+  compression?: string
+  encryptionEnabled?: boolean
   enabled: boolean
 }
 
@@ -151,16 +164,32 @@ export interface DatabaseBackupTaskResult {
   name: string
   backupType: string
   backupTypeText: string
+  backupMethod: string
+  backupMethodText: string
+  backupLevel: string
+  backupLevelText: string
+  backupEngine: string
+  sourceInstanceId: number
+  sourceRole: string
+  storageProfileId: number
+  secretProfileId: number
+  backupScope: string
+  scopeConfig: string
+  rpoMinutes: number
+  rtoMinutes: number
   schedule: string
   storageType: string
   storageTypeText: string
   storageConfig?: string
   retentionDays: number
   maxDurationMinutes: number
+  compression?: string
+  encryptionEnabled?: boolean
   enabled: boolean
   nextRunAt: string
   lastRunAt: string
   lastSuccessAt: string
+  lastRestoreTestAt: string
   lastStatus: string
   lastStatusText: string
   lastMessage: string
@@ -187,8 +216,24 @@ export interface DatabaseBackupRecordResult {
   triggerTypeText: string
   backupType: string
   backupTypeText: string
+  chainId?: string
+  baseRecordId?: number
+  parentRecordId?: number
+  backupMethod?: string
+  backupMethodText?: string
+  backupLevel?: string
+  backupLevelText?: string
+  backupEngine?: string
+  toolName?: string
+  toolVersion?: string
+  sourceInstanceId?: number
+  sourceRole?: string
+  storageProfileId?: number
   storageType: string
   storageTypeText: string
+  storageUri?: string
+  manifestJson?: string
+  prepareStatus?: string
   status: string
   statusText: string
   fileName: string
@@ -207,6 +252,182 @@ export interface DatabaseBackupRecordResult {
   startedAt: string
   lastHeartbeatAt?: string
   finishedAt: string
+  recoverableFrom?: string
+  recoverableUntil?: string
+  durationMs: number
+  message: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseExternalBackupRecordPayload {
+  taskId?: number
+  instanceId: number
+  sourceInstanceId?: number
+  sourceRole?: string
+  chainId?: string
+  baseRecordId?: number
+  parentRecordId?: number
+  backupMethod?: string
+  backupLevel?: string
+  backupEngine?: string
+  toolName?: string
+  toolVersion?: string
+  storageProfileId?: number
+  storageUri: string
+  manifestJson?: string
+  prepareStatus?: string
+  fileName: string
+  fileSize?: number
+  checksumSha256?: string
+  compression?: string
+  encrypted?: boolean
+  recoverableFrom?: string
+  recoverableUntil?: string
+  startedAt?: string
+  finishedAt?: string
+  status?: string
+  verifyStatus?: string
+  serverUuid?: string
+  backupBinlogFile?: string
+  backupBinlogPos?: number
+  backupGtidSet?: string
+  pgSystemIdentifier?: string
+  timelineId?: string
+  startLsn?: string
+  endLsn?: string
+  walStart?: string
+  walEnd?: string
+}
+
+export interface DatabaseLogArchiveStreamPayload {
+  instanceId: number
+  sourceInstanceId?: number
+  engine?: string
+  archiveType?: string
+  archiveMode?: string
+  archiveEngine?: string
+  storageProfileId?: number
+  secretProfileId?: number
+  rpoTargetSeconds?: number
+  retentionDays?: number
+  enabled: boolean
+  configJson?: string
+}
+
+export interface DatabaseLogArchiveStreamResult {
+  id: number
+  instanceId: number
+  instanceName: string
+  sourceInstanceId: number
+  sourceInstanceName: string
+  engine: string
+  engineText: string
+  archiveType: string
+  archiveTypeText: string
+  archiveMode: string
+  archiveEngine: string
+  storageProfileId: number
+  secretProfileId: number
+  rpoTargetSeconds: number
+  retentionDays: number
+  enabled: boolean
+  status: string
+  statusText: string
+  lastArchivedAt: string
+  lastArchiveName: string
+  lastError: string
+  configJson: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseExternalLogArchivePayload {
+  streamId: number
+  fileName: string
+  storageUri: string
+  fileSize?: number
+  checksumSha256?: string
+  firstEventTime: string
+  lastEventTime: string
+  status?: string
+  serverUuid?: string
+  startPos?: number
+  endPos?: number
+  startGtidSet?: string
+  endGtidSet?: string
+  previousFileName?: string
+  nextFileName?: string
+  pgSystemIdentifier?: string
+  timelineId?: string
+  startLsn?: string
+  endLsn?: string
+  segmentNo?: string
+  timelineHistoryUri?: string
+}
+
+export interface DatabaseLogArchiveResult {
+  id: number
+  streamId: number
+  instanceId: number
+  instanceName: string
+  sourceInstanceId: number
+  sourceInstanceName: string
+  engine: string
+  engineText: string
+  archiveType: string
+  archiveTypeText: string
+  fileName: string
+  storageUri: string
+  fileSize: number
+  checksumSha256?: string
+  firstEventTime: string
+  lastEventTime: string
+  status: string
+  statusText: string
+  archivedAt: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseRestorePlanPayload {
+  sourceInstanceId: number
+  targetInstanceId?: number
+  restoreMode?: string
+  restoreTargetType?: string
+  restoreTargetValue: string
+  restoreTargetInclusive?: boolean
+}
+
+export interface DatabaseRestorePlanResult {
+  id: number
+  sourceInstanceId: number
+  sourceInstanceName: string
+  targetInstanceId: number
+  targetInstanceName: string
+  restoreMode: string
+  restoreModeText: string
+  restoreTargetType: string
+  restoreTargetValue: string
+  restoreTargetInclusive: boolean
+  selectedBaseRecordId: number
+  selectedBackupRecordIds: string
+  selectedLogArchiveIds: string
+  backupChainStatus: string
+  backupChainStatusText: string
+  logChainStatus: string
+  logChainStatusText: string
+  storageStatus: string
+  storageStatusText: string
+  toolStatus: string
+  toolStatusText: string
+  validationStatus: string
+  validationStatusText: string
+  restoreStatus: string
+  restoreStatusText: string
+  planJson: string
+  proofJson: string
+  operatorName: string
   durationMs: number
   message: string
   createdAt: string
@@ -526,6 +747,9 @@ export const listDatabaseBackupRecords = (params?: {
   dateTo?: string
 }) => request.get('/api/v1/databases/backup-records', { params })
 
+export const registerExternalDatabaseBackupRecord = (data: DatabaseExternalBackupRecordPayload) =>
+  request.post('/api/v1/databases/backup-records/external', data)
+
 export const downloadDatabaseBackupRecord = (id: number) =>
   request.get(`/api/v1/databases/backup-records/${id}/download`, { responseType: 'blob' })
 
@@ -543,6 +767,41 @@ export const listDatabaseRestoreJobs = (params?: {
   targetInstanceId?: number
   status?: string
 }) => request.get('/api/v1/databases/restore-jobs', { params })
+
+export const listDatabaseLogArchiveStreams = (params?: {
+  page?: number
+  pageSize?: number
+  instanceId?: number
+  archiveType?: string
+  status?: string
+}) => request.get('/api/v1/databases/log-archive-streams', { params })
+
+export const createDatabaseLogArchiveStream = (data: DatabaseLogArchiveStreamPayload) =>
+  request.post('/api/v1/databases/log-archive-streams', data)
+
+export const listDatabaseLogArchives = (params?: {
+  page?: number
+  pageSize?: number
+  streamId?: number
+  instanceId?: number
+  archiveType?: string
+  status?: string
+}) => request.get('/api/v1/databases/log-archives', { params })
+
+export const registerExternalDatabaseLogArchive = (data: DatabaseExternalLogArchivePayload) =>
+  request.post('/api/v1/databases/log-archives/external', data)
+
+export const listDatabaseRestorePlans = (params?: {
+  page?: number
+  pageSize?: number
+  sourceInstanceId?: number
+  targetInstanceId?: number
+  validationStatus?: string
+  restoreStatus?: string
+}) => request.get('/api/v1/databases/restore-plans', { params })
+
+export const createDatabaseRestorePlan = (data: DatabaseRestorePlanPayload) =>
+  request.post('/api/v1/databases/restore-plans', data)
 
 export const listDatabaseInspectionReports = (params?: {
   page?: number
