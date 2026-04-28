@@ -1833,7 +1833,7 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="120" align="center" fixed="right">
+                  <el-table-column label="操作" width="180" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button
                         link
@@ -1842,6 +1842,14 @@
                         @click="openRunLogArchiveOnceDialog(row)"
                       >
                         归档一次
+                      </el-button>
+                      <el-button
+                        link
+                        type="warning"
+                        :disabled="row.archiveType !== 'binlog' || !row.enabled"
+                        @click="openRunLogArchiveCatchUpDialog(row)"
+                      >
+                        追平
                       </el-button>
                     </template>
                   </el-table-column>
@@ -3291,6 +3299,61 @@
     </el-dialog>
 
     <el-dialog
+      v-model="runLogArchiveCatchUpDialogVisible"
+      title="binlog 追平归档"
+      width="640px"
+      @close="resetRunLogArchiveCatchUpForm"
+    >
+      <el-alert
+        title="追平归档会按归档流最近文件向后拉取多份已轮转 binlog；默认不包含当前活跃 binlog，也不会常驻运行或修改源库保留策略。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form
+        ref="runLogArchiveCatchUpFormRef"
+        :model="runLogArchiveCatchUpForm"
+        :rules="runLogArchiveCatchUpRules"
+        label-width="120px"
+      >
+        <el-form-item label="归档流">
+          <el-input
+            :model-value="runLogArchiveCatchUpStream ? `${runLogArchiveCatchUpStream.instanceName || `#${runLogArchiveCatchUpStream.instanceId}`} / ${runLogArchiveCatchUpStream.archiveTypeText || runLogArchiveCatchUpStream.archiveType}` : '-'"
+            disabled
+          />
+        </el-form-item>
+        <el-form-item label="Runner 主机" prop="runnerHostId">
+          <el-select v-model="runLogArchiveCatchUpForm.runnerHostId" placeholder="请选择 Runner" filterable style="width: 100%;">
+            <el-option
+              v-for="item in runnerHosts.filter(host => host.enabled)"
+              :key="item.id"
+              :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="最大文件数" prop="maxFiles">
+              <el-input-number v-model="runLogArchiveCatchUpForm.maxFiles" :min="1" :max="20" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="包含活跃文件">
+              <el-switch v-model="runLogArchiveCatchUpForm.includeCurrent" active-text="包含" inactive-text="不包含" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <div class="field-tip">如果归档流最近文件已经被源库 purge，后端会拒绝追平，以避免静默断链。</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="runLogArchiveCatchUpDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="runLogArchiveCatchUpSubmitting" @click="submitRunLogArchiveCatchUp">下发追平任务</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="restorePlanDialogVisible"
       title="生成 PITR 恢复计划"
       width="680px"
@@ -3649,12 +3712,12 @@ import {
 } from '@element-plus/icons-vue'
 import { getCredentials } from '@/api/host'
 import {
-	  DATABASE_PERMISSION,
-	  createDatabaseLogArchiveStream,
-	  createDatabaseRestorePlan,
-	  createDatabaseRunnerHost,
-	  createDatabaseBackupTask,
-	  createDatabaseInstance,
+  DATABASE_PERMISSION,
+  createDatabaseLogArchiveStream,
+  createDatabaseRestorePlan,
+  createDatabaseRunnerHost,
+  createDatabaseBackupTask,
+  createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
@@ -3683,10 +3746,10 @@ import {
   listDatabaseInspectionReports,
   listDatabaseLogArchives,
   listDatabaseLogArchiveStreams,
-	  listDatabaseRestoreJobs,
-	  listDatabaseRestorePlans,
-	  listDatabaseRunnerHosts,
-	  listDatabaseRunnerJobs,
+  listDatabaseRestoreJobs,
+  listDatabaseRestorePlans,
+  listDatabaseRunnerHosts,
+  listDatabaseRunnerJobs,
   getDatabaseSupportedTypes,
   getDatabaseTableDDL,
   listDatabaseColumns,
@@ -3701,14 +3764,15 @@ import {
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
   runDatabaseBackupTask,
-	  runDatabaseLogArchiveOnce,
-	  runDatabaseRestoreDryRun,
-	  syncDatabaseMetadata,
-	  testDatabaseInstance,
-	  testDatabaseRunnerHost,
-	  updateDatabaseBackupTask,
-	  updateDatabaseInstance,
-	  updateDatabaseRunnerHost,
+  runDatabaseLogArchiveCatchUp,
+  runDatabaseLogArchiveOnce,
+  runDatabaseRestoreDryRun,
+  syncDatabaseMetadata,
+  testDatabaseInstance,
+  testDatabaseRunnerHost,
+  updateDatabaseBackupTask,
+  updateDatabaseInstance,
+  updateDatabaseRunnerHost,
   upsertDatabaseInstancePermission,
   validateDatabaseDDLQuery,
   verifyDatabaseBackupRecord,
@@ -3732,10 +3796,11 @@ import {
   type DatabaseRestoreJobResult,
   type DatabaseRestorePlanPayload,
   type DatabaseRestorePlanResult,
+  type DatabaseRunLogArchiveCatchUpPayload,
   type DatabaseRunLogArchiveOncePayload,
   type DatabaseRunnerHostPayload,
-	  type DatabaseRunnerHostResult,
-	  type DatabaseRunnerJobResult,
+  type DatabaseRunnerHostResult,
+  type DatabaseRunnerJobResult,
   type DatabaseSupportedType,
   type DatabaseTopologyResult,
   type DatabaseWriteExecuteResult,
@@ -3944,6 +4009,10 @@ const runLogArchiveOnceDialogVisible = ref(false)
 const runLogArchiveOnceSubmitting = ref(false)
 const runLogArchiveOnceFormRef = ref<FormInstance>()
 const runLogArchiveOnceStream = ref<DatabaseLogArchiveStreamResult>()
+const runLogArchiveCatchUpDialogVisible = ref(false)
+const runLogArchiveCatchUpSubmitting = ref(false)
+const runLogArchiveCatchUpFormRef = ref<FormInstance>()
+const runLogArchiveCatchUpStream = ref<DatabaseLogArchiveStreamResult>()
 const restorePlanLoading = ref(false)
 const restorePlans = ref<DatabaseRestorePlanResult[]>([])
 const restorePlanTotal = ref(0)
@@ -4255,6 +4324,12 @@ const runLogArchiveOnceForm = reactive<DatabaseRunLogArchiveOncePayload>({
   fileName: ''
 })
 
+const runLogArchiveCatchUpForm = reactive<DatabaseRunLogArchiveCatchUpPayload>({
+  runnerHostId: 0,
+  maxFiles: 5,
+  includeCurrent: false
+})
+
 const restorePlanForm = reactive<DatabaseRestorePlanPayload>({
   sourceInstanceId: 0,
   targetInstanceId: undefined,
@@ -4323,6 +4398,11 @@ const logArchiveRules: FormRules = {
 
 const runLogArchiveOnceRules: FormRules = {
   runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }]
+}
+
+const runLogArchiveCatchUpRules: FormRules = {
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
+  maxFiles: [{ required: true, message: '请输入最大文件数', trigger: 'change' }]
 }
 
 const restorePlanRules: FormRules = {
@@ -5563,6 +5643,14 @@ const resetRunLogArchiveOnceForm = () => {
   runLogArchiveOnceFormRef.value?.clearValidate()
 }
 
+const resetRunLogArchiveCatchUpForm = () => {
+  runLogArchiveCatchUpStream.value = undefined
+  runLogArchiveCatchUpForm.runnerHostId = runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id || runnerHosts.value.find(item => item.enabled)?.id || 0
+  runLogArchiveCatchUpForm.maxFiles = 5
+  runLogArchiveCatchUpForm.includeCurrent = false
+  runLogArchiveCatchUpFormRef.value?.clearValidate()
+}
+
 const resetRestorePlanForm = () => {
   restorePlanForm.sourceInstanceId = pitrBackupInstances.value[0]?.id || 0
   restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== restorePlanForm.sourceInstanceId)?.id
@@ -5797,6 +5885,52 @@ const submitRunLogArchiveOnce = async () => {
     }, 3000)
   } finally {
     runLogArchiveOnceSubmitting.value = false
+  }
+}
+
+const openRunLogArchiveCatchUpDialog = async (row: DatabaseLogArchiveStreamResult) => {
+  if (!runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  if (!runnerHosts.value.some(item => item.enabled)) {
+    ElMessage.warning('请先配置并启用 Runner 主机')
+    return
+  }
+  resetRunLogArchiveCatchUpForm()
+  runLogArchiveCatchUpStream.value = row
+  runLogArchiveCatchUpDialogVisible.value = true
+}
+
+const submitRunLogArchiveCatchUp = async () => {
+  if (!runLogArchiveCatchUpFormRef.value || !runLogArchiveCatchUpStream.value?.id) return
+  await runLogArchiveCatchUpFormRef.value.validate()
+  try {
+    await ElMessageBox.confirm(
+      `确定通过 Runner 追平归档流「${runLogArchiveCatchUpStream.value.instanceName || `#${runLogArchiveCatchUpStream.value.instanceId}`}」的 binlog 吗？默认不会拉取当前活跃 binlog。`,
+      'binlog 追平归档确认',
+      { type: 'warning' }
+    )
+  } catch (_err) {
+    return
+  }
+  runLogArchiveCatchUpSubmitting.value = true
+  try {
+    const payload: DatabaseRunLogArchiveCatchUpPayload = {
+      runnerHostId: runLogArchiveCatchUpForm.runnerHostId,
+      maxFiles: runLogArchiveCatchUpForm.maxFiles || 5,
+      includeCurrent: !!runLogArchiveCatchUpForm.includeCurrent
+    }
+    await runDatabaseLogArchiveCatchUp(runLogArchiveCatchUpStream.value.id, payload)
+    runLogArchiveCatchUpDialogVisible.value = false
+    ElMessage.success('binlog 追平归档任务已下发')
+    await Promise.all([loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives()])
+    window.setTimeout(() => {
+      loadRunnerJobs()
+      loadLogArchiveStreams()
+      loadLogArchives()
+    }, 3000)
+  } finally {
+    runLogArchiveCatchUpSubmitting.value = false
   }
 }
 
@@ -7417,6 +7551,12 @@ const runnerJobOutputSummary = (row: DatabaseRunnerJobResult) => {
   if (!row?.resultJson) return '-'
   try {
     const parsed = JSON.parse(row.resultJson)
+    if (Array.isArray(parsed.binlogs) && parsed.binlogs.length) {
+      const first = parsed.binlogs[0]
+      const last = parsed.binlogs[parsed.binlogs.length - 1]
+      const range = last?.fileName && last.fileName !== first?.fileName ? `${first?.fileName || '-'} - ${last.fileName}` : first?.fileName || '-'
+      return `${parsed.binlogs.length} 个文件 / ${range}`
+    }
     if (parsed.binlog?.fileName) {
       const parts = [parsed.binlog.fileName]
       if (parsed.binlog.fileSize) parts.push(formatBytes(Number(parsed.binlog.fileSize)))

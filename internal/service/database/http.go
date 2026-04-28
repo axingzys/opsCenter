@@ -1031,6 +1031,36 @@ func (s *Service) RunLogArchiveOnce(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) RunLogArchiveCatchUp(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "日志归档流ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRunLogArchiveCatchUpRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	instanceID, err := s.useCase.GetLogArchiveStreamInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "追平归档失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.RunLogArchiveCatchUp(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "追平归档失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) ListRestorePlans(c *gin.Context) {
 	var req dbbiz.DatabaseRestorePlanListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {

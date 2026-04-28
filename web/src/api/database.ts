@@ -395,6 +395,12 @@ export interface DatabaseRunLogArchiveOncePayload {
   fileName?: string
 }
 
+export interface DatabaseRunLogArchiveCatchUpPayload {
+  runnerHostId: number
+  maxFiles?: number
+  includeCurrent?: boolean
+}
+
 export interface DatabaseRestorePlanPayload {
   sourceInstanceId: number
   targetInstanceId?: number
@@ -858,6 +864,9 @@ export const createDatabaseLogArchiveStream = (data: DatabaseLogArchiveStreamPay
 
 export const runDatabaseLogArchiveOnce = (id: number, data: DatabaseRunLogArchiveOncePayload) =>
   request.post(`/api/v1/databases/log-archive-streams/${id}/run-once`, data)
+
+export const runDatabaseLogArchiveCatchUp = (id: number, data: DatabaseRunLogArchiveCatchUpPayload) =>
+  request.post(`/api/v1/databases/log-archive-streams/${id}/catch-up`, data)
 
 export const listDatabaseLogArchives = (params?: {
   page?: number

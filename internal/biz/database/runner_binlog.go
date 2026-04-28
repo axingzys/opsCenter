@@ -16,6 +16,12 @@ type DatabaseRunLogArchiveOnceRequest struct {
 	FileName     string `json:"fileName" binding:"omitempty,max=255"`
 }
 
+type DatabaseRunLogArchiveCatchUpRequest struct {
+	RunnerHostID   uint `json:"runnerHostId" binding:"required"`
+	MaxFiles       int  `json:"maxFiles" binding:"omitempty,min=1,max=20"`
+	IncludeCurrent bool `json:"includeCurrent"`
+}
+
 type mysqlBinaryLogFile struct {
 	Name string
 	Size int64
@@ -37,6 +43,7 @@ type mysqlBinlogArchiveScriptInput struct {
 	DBUser           string
 	DBPassword       string
 	BinlogFile       string
+	BinlogFiles      []string
 }
 
 type mysqlBinlogArchiveOutput struct {
@@ -52,17 +59,18 @@ type mysqlBinlogArchiveOutput struct {
 }
 
 type runnerBinlogArchiveResult struct {
-	RunnerHostID   uint                     `json:"runnerHostId"`
-	RunnerID       string                   `json:"runnerId"`
-	StreamID       uint                     `json:"streamId"`
-	SourceInstance uint                     `json:"sourceInstanceId"`
-	Binlog         mysqlBinlogArchiveOutput `json:"binlog"`
-	Stdout         string                   `json:"stdout"`
-	Stderr         string                   `json:"stderr"`
-	ExitCode       int                      `json:"exitCode"`
-	StartedAt      string                   `json:"startedAt"`
-	FinishedAt     string                   `json:"finishedAt"`
-	DurationMs     int64                    `json:"durationMs"`
+	RunnerHostID   uint                       `json:"runnerHostId"`
+	RunnerID       string                     `json:"runnerId"`
+	StreamID       uint                       `json:"streamId"`
+	SourceInstance uint                       `json:"sourceInstanceId"`
+	Binlog         mysqlBinlogArchiveOutput   `json:"binlog"`
+	Binlogs        []mysqlBinlogArchiveOutput `json:"binlogs,omitempty"`
+	Stdout         string                     `json:"stdout"`
+	Stderr         string                     `json:"stderr"`
+	ExitCode       int                        `json:"exitCode"`
+	StartedAt      string                     `json:"startedAt"`
+	FinishedAt     string                     `json:"finishedAt"`
+	DurationMs     int64                      `json:"durationMs"`
 }
 
 func (uc *UseCase) RunLogArchiveOnce(ctx context.Context, streamID uint, req *DatabaseRunLogArchiveOnceRequest, operator QueryOperator) (*DatabaseRunnerJobVO, error) {
@@ -139,6 +147,89 @@ func (uc *UseCase) RunLogArchiveOnce(ctx context.Context, streamID uint, req *Da
 		return nil, err
 	}
 	go uc.executeBinlogArchiveOnce(context.Background(), stream.ID, host.ID, job.ID, selection.FileName, selection.FileSize, selection.Previous, selection.Next)
+	return uc.toRunnerJobVO(ctx, job), nil
+}
+
+func (uc *UseCase) RunLogArchiveCatchUp(ctx context.Context, streamID uint, req *DatabaseRunLogArchiveCatchUpRequest, operator QueryOperator) (*DatabaseRunnerJobVO, error) {
+	if uc.logArchiveStreamRepo == nil || uc.runnerHostRepo == nil || uc.runnerJobRepo == nil {
+		return nil, fmt.Errorf("日志归档 Runner 仓库未配置")
+	}
+	if streamID == 0 {
+		return nil, fmt.Errorf("日志归档流ID不能为空")
+	}
+	if req == nil || req.RunnerHostID == 0 {
+		return nil, fmt.Errorf("请选择 Runner 主机")
+	}
+	if req.MaxFiles <= 0 {
+		req.MaxFiles = 5
+	}
+	if req.MaxFiles > 20 {
+		req.MaxFiles = 20
+	}
+	stream, err := uc.logArchiveStreamRepo.GetByID(ctx, streamID)
+	if err != nil {
+		return nil, fmt.Errorf("日志归档流不存在")
+	}
+	if !stream.Enabled || stream.Status == DatabaseLogArchiveStreamStatusDisabled {
+		return nil, fmt.Errorf("日志归档流已禁用")
+	}
+	if normalizeArchiveType(stream.ArchiveType) != DatabaseArchiveTypeBinlog {
+		return nil, fmt.Errorf("当前仅支持 MySQL/MariaDB binlog 追平归档")
+	}
+	sourceInstanceID := stream.SourceInstanceID
+	if sourceInstanceID == 0 {
+		sourceInstanceID = stream.InstanceID
+	}
+	instance, err := uc.instanceRepo.GetByID(ctx, sourceInstanceID)
+	if err != nil {
+		return nil, fmt.Errorf("日志来源实例不存在")
+	}
+	dbType := normalizeDBType(instance.DBType)
+	if dbType != DBTypeMySQL && dbType != DBTypeMariaDB {
+		return nil, fmt.Errorf("%s 暂不支持 binlog 归档 Runner", DBTypeText(instance.DBType))
+	}
+	host, err := uc.runnerHostRepo.GetByID(ctx, req.RunnerHostID)
+	if err != nil {
+		return nil, fmt.Errorf("Runner 主机不存在")
+	}
+	if !host.Enabled || host.Status == DatabaseRunnerHostStatusDisabled {
+		return nil, fmt.Errorf("Runner 主机已禁用")
+	}
+	if host.RunnerType != DatabaseRunnerTypeSSH {
+		return nil, fmt.Errorf("当前仅支持 SSH Runner 执行 binlog 归档")
+	}
+	if uc.credentialResolver == nil {
+		return nil, fmt.Errorf("连接凭据解析器未配置")
+	}
+	dbCredential, err := uc.credentialResolver(ctx, instance.CredentialID)
+	if err != nil {
+		return nil, fmt.Errorf("解析数据库凭据失败: %w", err)
+	}
+	logs, err := listMySQLBinaryLogs(ctx, instance, dbCredential)
+	if err != nil {
+		return nil, err
+	}
+	selections, err := selectMySQLBinlogsForCatchUp(logs, stream.LastArchiveName, req.MaxFiles, req.IncludeCurrent)
+	if err != nil {
+		return nil, err
+	}
+	job := &DatabaseRunnerJob{
+		JobType:          DatabaseRunnerJobTypeBinlogArchive,
+		RunnerHostID:     host.ID,
+		RunnerID:         runnerIDForHost(host),
+		SourceInstanceID: sourceInstanceID,
+		Status:           DatabaseRunnerJobStatusQueued,
+		AllowedCommand:   DatabaseRunnerAllowedCommandBinlogArchiveCatchUp,
+		CommandSummary:   fmt.Sprintf("追平归档 binlog: %d 个文件", len(selections)),
+		WorkDir:          host.WorkDir,
+		OperatorID:       operator.ID,
+		OperatorName:     trimText(operator.Username, 120),
+		RequestJSON:      binlogArchiveCatchUpRequestJSON(stream, host, selections, req, operator),
+	}
+	if err := uc.runnerJobRepo.Create(ctx, job); err != nil {
+		return nil, err
+	}
+	go uc.executeBinlogArchiveCatchUp(context.Background(), stream.ID, host.ID, job.ID, selections)
 	return uc.toRunnerJobVO(ctx, job), nil
 }
 
@@ -280,6 +371,171 @@ func (uc *UseCase) executeBinlogArchiveOnce(ctx context.Context, streamID, runne
 	_ = uc.logArchiveStreamRepo.Update(ctx, stream)
 }
 
+func (uc *UseCase) executeBinlogArchiveCatchUp(ctx context.Context, streamID, runnerHostID, jobID uint, selections []mysqlBinlogArchiveSelection) {
+	if uc.logArchiveStreamRepo == nil || uc.logArchiveRepo == nil || uc.runnerHostRepo == nil || uc.runnerJobRepo == nil {
+		return
+	}
+	stream, streamErr := uc.logArchiveStreamRepo.GetByID(ctx, streamID)
+	host, hostErr := uc.runnerHostRepo.GetByID(ctx, runnerHostID)
+	job, jobErr := uc.runnerJobRepo.GetByID(ctx, jobID)
+	if streamErr != nil || hostErr != nil || jobErr != nil || stream == nil || host == nil || job == nil {
+		return
+	}
+	if len(selections) == 0 {
+		uc.failBinlogArchiveJob(ctx, stream, job, fmt.Errorf("没有需要归档的 binlog 文件"))
+		return
+	}
+	sourceInstanceID := stream.SourceInstanceID
+	if sourceInstanceID == 0 {
+		sourceInstanceID = stream.InstanceID
+	}
+	instance, err := uc.instanceRepo.GetByID(ctx, sourceInstanceID)
+	if err != nil {
+		uc.failBinlogArchiveJob(ctx, stream, job, fmt.Errorf("日志来源实例不存在"))
+		return
+	}
+	dbCredential, err := uc.credentialResolver(ctx, instance.CredentialID)
+	if err != nil {
+		uc.failBinlogArchiveJob(ctx, stream, job, fmt.Errorf("解析数据库凭据失败: %w", err))
+		return
+	}
+	runnerCredential, err := uc.credentialResolver(ctx, host.CredentialID)
+	if err != nil {
+		uc.failBinlogArchiveJob(ctx, stream, job, fmt.Errorf("解析 Runner 凭据失败: %w", err))
+		return
+	}
+	started := time.Now()
+	job.Status = DatabaseRunnerJobStatusRunning
+	job.StartedAt = &started
+	job.HeartbeatAt = &started
+	_ = uc.runnerJobRepo.Update(ctx, job)
+
+	fileNames := make([]string, 0, len(selections))
+	selectionByFile := map[string]mysqlBinlogArchiveSelection{}
+	for _, selection := range selections {
+		fileNames = append(fileNames, selection.FileName)
+		selectionByFile[selection.FileName] = selection
+	}
+	script, err := buildMySQLBinlogArchiveOnceScript(mysqlBinlogArchiveScriptInput{
+		WorkDir:          host.WorkDir,
+		StorageMountPath: host.StorageMountPath,
+		StreamID:         stream.ID,
+		DBHost:           instance.Host,
+		DBPort:           instance.Port,
+		DBUser:           dbCredential.Username,
+		DBPassword:       dbCredential.Password,
+		BinlogFiles:      fileNames,
+	})
+	if err != nil {
+		finished := time.Now()
+		applyBinlogArchiveFailure(stream, job, started, finished, 1, err)
+		_ = uc.runnerJobRepo.Update(ctx, job)
+		_ = uc.logArchiveStreamRepo.Update(ctx, stream)
+		return
+	}
+	stdout, stderr, exitCode, runErr := executeSSHRunnerScript(ctx, host.Host, host.Port, runnerCredential, script, time.Duration(normalizeRunnerTimeoutMinutes(host.TimeoutMinutes))*time.Minute)
+	finished := time.Now()
+	outputs := parseMySQLBinlogArchiveOutputs(stdout, started, finished)
+	for idx := range outputs {
+		if outputs[idx].StoragePath != "" {
+			outputs[idx].StorageURI = fmt.Sprintf("runner://runner-host-%d%s", host.ID, outputs[idx].StoragePath)
+		}
+	}
+	result := runnerBinlogArchiveResult{
+		RunnerHostID:   host.ID,
+		RunnerID:       runnerIDForHost(host),
+		StreamID:       stream.ID,
+		SourceInstance: sourceInstanceID,
+		Binlogs:        outputs,
+		Stdout:         trimText(stdout, maxRunnerOutputLength),
+		Stderr:         trimText(stderr, maxRunnerOutputLength),
+		ExitCode:       exitCode,
+		StartedAt:      started.Format("2006-01-02 15:04:05"),
+		FinishedAt:     finished.Format("2006-01-02 15:04:05"),
+		DurationMs:     finished.Sub(started).Milliseconds(),
+	}
+	if len(outputs) > 0 {
+		result.Binlog = outputs[0]
+	}
+	resultJSON, _ := json.Marshal(result)
+	job.ResultJSON = trimText(string(resultJSON), maxRunnerJSONLength)
+	job.ExitCode = exitCode
+	job.FinishedAt = &finished
+	job.DurationMs = result.DurationMs
+	job.HeartbeatAt = &finished
+	if runErr != nil {
+		applyBinlogArchiveFailure(stream, job, started, finished, exitCode, runErr)
+		_ = uc.runnerJobRepo.Update(ctx, job)
+		_ = uc.logArchiveStreamRepo.Update(ctx, stream)
+		return
+	}
+	if len(outputs) != len(selections) {
+		applyBinlogArchiveFailure(stream, job, started, finished, 1, fmt.Errorf("Runner 输出归档文件数量不匹配"))
+		_ = uc.runnerJobRepo.Update(ctx, job)
+		_ = uc.logArchiveStreamRepo.Update(ctx, stream)
+		return
+	}
+	for _, output := range outputs {
+		selection, ok := selectionByFile[output.FileName]
+		if !ok {
+			applyBinlogArchiveFailure(stream, job, started, finished, 1, fmt.Errorf("Runner 输出了未请求的 binlog 文件: %s", output.FileName))
+			_ = uc.runnerJobRepo.Update(ctx, job)
+			_ = uc.logArchiveStreamRepo.Update(ctx, stream)
+			return
+		}
+		if output.FileSize == 0 {
+			output.FileSize = selection.FileSize
+		}
+		firstEvent := parseMySQLBinlogEventTime(output.FirstEventLine)
+		lastEvent := parseMySQLBinlogEventTime(output.LastEventLine)
+		if firstEvent == nil {
+			firstEvent = &started
+		}
+		if lastEvent == nil {
+			lastEvent = &finished
+		}
+		if lastEvent.Before(*firstEvent) {
+			lastEvent = firstEvent
+		}
+		archive := &DatabaseLogArchive{
+			StreamID:         stream.ID,
+			InstanceID:       stream.InstanceID,
+			SourceInstanceID: sourceInstanceID,
+			Engine:           stream.Engine,
+			ArchiveType:      DatabaseArchiveTypeBinlog,
+			FileName:         output.FileName,
+			StorageURI:       output.StorageURI,
+			FileSize:         output.FileSize,
+			ChecksumSHA256:   output.ChecksumSHA256,
+			FirstEventTime:   firstEvent,
+			LastEventTime:    lastEvent,
+			Status:           DatabaseLogArchiveStatusArchived,
+			ArchivedAt:       &finished,
+			StartPos:         4,
+			EndPos:           firstNonZeroInt64(selection.FileSize, output.FileSize),
+			PreviousFileName: selection.Previous,
+			NextFileName:     selection.Next,
+		}
+		if archive.StorageURI == "" {
+			archive.StorageURI = fmt.Sprintf("runner://runner-host-%d/binlog/stream-%d/%s", host.ID, stream.ID, output.FileName)
+		}
+		if err := uc.logArchiveRepo.Create(ctx, archive); err != nil {
+			applyBinlogArchiveFailure(stream, job, started, finished, 1, fmt.Errorf("登记日志归档失败: %w", err))
+			_ = uc.runnerJobRepo.Update(ctx, job)
+			_ = uc.logArchiveStreamRepo.Update(ctx, stream)
+			return
+		}
+	}
+	job.Status = DatabaseRunnerJobStatusSuccess
+	job.ErrorMessage = ""
+	stream.Status = DatabaseLogArchiveStreamStatusRunning
+	stream.LastError = ""
+	stream.LastArchivedAt = &finished
+	stream.LastArchiveName = selections[len(selections)-1].FileName
+	_ = uc.runnerJobRepo.Update(ctx, job)
+	_ = uc.logArchiveStreamRepo.Update(ctx, stream)
+}
+
 func (uc *UseCase) failBinlogArchiveJob(ctx context.Context, stream *DatabaseLogArchiveStream, job *DatabaseRunnerJob, err error) {
 	now := time.Now()
 	if job != nil {
@@ -411,9 +667,74 @@ func selectMySQLBinlogForArchive(logs []mysqlBinaryLogFile, requestedFile, lastA
 	return selection, nil
 }
 
+func selectMySQLBinlogsForCatchUp(logs []mysqlBinaryLogFile, lastArchived string, maxFiles int, includeCurrent bool) ([]mysqlBinlogArchiveSelection, error) {
+	if len(logs) == 0 {
+		return nil, fmt.Errorf("源库没有可归档的 binlog 文件")
+	}
+	if maxFiles <= 0 {
+		maxFiles = 5
+	}
+	if maxFiles > 20 {
+		maxFiles = 20
+	}
+	start := 0
+	if lastArchived = strings.TrimSpace(lastArchived); lastArchived != "" {
+		start = -1
+		for i, item := range logs {
+			if item.Name == lastArchived {
+				start = i + 1
+				break
+			}
+		}
+		if start < 0 {
+			return nil, fmt.Errorf("归档流最近文件 %s 已不在源库 binlog 列表中，可能已经 purge，需人工确认日志链", lastArchived)
+		}
+	}
+	end := len(logs)
+	if !includeCurrent {
+		end = len(logs) - 1
+	}
+	if start >= end {
+		if includeCurrent {
+			return nil, fmt.Errorf("没有需要追平的 binlog 文件")
+		}
+		return nil, fmt.Errorf("没有需要追平的已轮转 binlog 文件；如需归档当前活跃文件请显式开启 includeCurrent")
+	}
+	if end-start > maxFiles {
+		end = start + maxFiles
+	}
+	result := make([]mysqlBinlogArchiveSelection, 0, end-start)
+	for i := start; i < end; i++ {
+		selection := mysqlBinlogArchiveSelection{
+			FileName: logs[i].Name,
+			FileSize: logs[i].Size,
+		}
+		if i > 0 {
+			selection.Previous = logs[i-1].Name
+		}
+		if i+1 < len(logs) {
+			selection.Next = logs[i+1].Name
+		}
+		result = append(result, selection)
+	}
+	return result, nil
+}
+
 func buildMySQLBinlogArchiveOnceScript(input mysqlBinlogArchiveScriptInput) (string, error) {
-	if strings.TrimSpace(input.BinlogFile) == "" || !isSafeRunnerFileName(input.BinlogFile) {
-		return "", fmt.Errorf("binlog 文件名不合法")
+	files := append([]string{}, input.BinlogFiles...)
+	if len(files) == 0 && strings.TrimSpace(input.BinlogFile) != "" {
+		files = append(files, strings.TrimSpace(input.BinlogFile))
+	}
+	if len(files) == 0 {
+		return "", fmt.Errorf("binlog 文件名不能为空")
+	}
+	fileArgs := make([]string, 0, len(files))
+	for _, file := range files {
+		file = strings.TrimSpace(file)
+		if file == "" || !isSafeRunnerFileName(file) {
+			return "", fmt.Errorf("binlog 文件名不合法")
+		}
+		fileArgs = append(fileArgs, shellSingleQuote(file))
 	}
 	if strings.TrimSpace(input.DBHost) == "" || input.DBPort <= 0 {
 		return "", fmt.Errorf("数据库连接地址不完整")
@@ -453,24 +774,80 @@ func buildMySQLBinlogArchiveOnceScript(input mysqlBinlogArchiveScriptInput) (str
 		`chmod 600 "$DEFAULTS_FILE"`,
 		`MYSQLBINLOG="$(command -v mysqlbinlog || command -v mariadb-binlog || true)"`,
 		`if [ -z "$MYSQLBINLOG" ]; then echo "mysqlbinlog/mariadb-binlog not found" >&2; exit 127; fi`,
-		`"$MYSQLBINLOG" --defaults-extra-file="$DEFAULTS_FILE" --read-from-remote-server --raw --result-file="$DEST_DIR/" "$BINLOG_FILE"`,
-		`OUT_FILE="$DEST_DIR/$BINLOG_FILE"`,
-		`test -s "$OUT_FILE"`,
-		`SHA256="$(sha256sum "$OUT_FILE" | awk '{print $1}')"`,
-		`SIZE="$(wc -c < "$OUT_FILE" | tr -d ' ')"`,
-		`FIRST_LINE="$("$MYSQLBINLOG" --base64-output=decode-rows "$OUT_FILE" 2>/dev/null | grep -E '^#[0-9]{6}[[:space:]]+[0-9]{1,2}:[0-9]{2}:[0-9]{2}[[:space:]]+server id' | head -n 1 || true)"`,
-		`LAST_LINE="$("$MYSQLBINLOG" --base64-output=decode-rows "$OUT_FILE" 2>/dev/null | grep -E '^#[0-9]{6}[[:space:]]+[0-9]{1,2}:[0-9]{2}:[0-9]{2}[[:space:]]+server id' | tail -n 1 || true)"`,
-		`printf 'OPSHUB_BINLOG_FILE=%s\n' "$BINLOG_FILE"`,
-		`printf 'OPSHUB_STORAGE_PATH=%s\n' "$OUT_FILE"`,
-		`printf 'OPSHUB_FILE_SIZE=%s\n' "$SIZE"`,
-		`printf 'OPSHUB_SHA256=%s\n' "$SHA256"`,
-		`printf 'OPSHUB_FIRST_EVENT_LINE=%s\n' "$FIRST_LINE"`,
-		`printf 'OPSHUB_LAST_EVENT_LINE=%s\n' "$LAST_LINE"`,
+		"for BINLOG_FILE in " + strings.Join(fileArgs, " ") + "; do",
+		`  "$MYSQLBINLOG" --defaults-extra-file="$DEFAULTS_FILE" --read-from-remote-server --raw --result-file="$DEST_DIR/" "$BINLOG_FILE"`,
+		`  OUT_FILE="$DEST_DIR/$BINLOG_FILE"`,
+		`  test -s "$OUT_FILE"`,
+		`  SHA256="$(sha256sum "$OUT_FILE" | awk '{print $1}')"`,
+		`  SIZE="$(wc -c < "$OUT_FILE" | tr -d ' ')"`,
+		`  FIRST_LINE="$("$MYSQLBINLOG" --base64-output=decode-rows "$OUT_FILE" 2>/dev/null | grep -E '^#[0-9]{6}[[:space:]]+[0-9]{1,2}:[0-9]{2}:[0-9]{2}[[:space:]]+server id' | head -n 1 || true)"`,
+		`  LAST_LINE="$("$MYSQLBINLOG" --base64-output=decode-rows "$OUT_FILE" 2>/dev/null | grep -E '^#[0-9]{6}[[:space:]]+[0-9]{1,2}:[0-9]{2}:[0-9]{2}[[:space:]]+server id' | tail -n 1 || true)"`,
+		`  printf 'OPSHUB_BINLOG_BEGIN=%s\n' "$BINLOG_FILE"`,
+		`  printf 'OPSHUB_BINLOG_FILE=%s\n' "$BINLOG_FILE"`,
+		`  printf 'OPSHUB_STORAGE_PATH=%s\n' "$OUT_FILE"`,
+		`  printf 'OPSHUB_FILE_SIZE=%s\n' "$SIZE"`,
+		`  printf 'OPSHUB_SHA256=%s\n' "$SHA256"`,
+		`  printf 'OPSHUB_FIRST_EVENT_LINE=%s\n' "$FIRST_LINE"`,
+		`  printf 'OPSHUB_LAST_EVENT_LINE=%s\n' "$LAST_LINE"`,
+		`  printf 'OPSHUB_BINLOG_END=%s\n' "$BINLOG_FILE"`,
+		"done",
 	}, "\n"), nil
 }
 
 func parseMySQLBinlogArchiveOutput(stdout string, started, finished time.Time) mysqlBinlogArchiveOutput {
-	values := parseRunnerKeyValueOutput(stdout)
+	outputs := parseMySQLBinlogArchiveOutputs(stdout, started, finished)
+	if len(outputs) > 0 {
+		return outputs[0]
+	}
+	return mysqlBinlogArchiveOutput{
+		FirstEventTime: started.Format("2006-01-02 15:04:05"),
+		LastEventTime:  finished.Format("2006-01-02 15:04:05"),
+	}
+}
+
+func parseMySQLBinlogArchiveOutputs(stdout string, started, finished time.Time) []mysqlBinlogArchiveOutput {
+	blocks := make([]map[string]string, 0)
+	current := map[string]string{}
+	inBlock := false
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimRight(line, "\r")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		switch key {
+		case "OPSHUB_BINLOG_BEGIN":
+			current = map[string]string{"OPSHUB_BINLOG_FILE": value}
+			inBlock = true
+		case "OPSHUB_BINLOG_END":
+			if inBlock {
+				blocks = append(blocks, current)
+				current = map[string]string{}
+				inBlock = false
+			}
+		default:
+			if strings.HasPrefix(key, "OPSHUB_") {
+				if inBlock {
+					current[key] = value
+				} else {
+					current[key] = value
+				}
+			}
+		}
+	}
+	if len(blocks) == 0 && len(current) > 0 {
+		blocks = append(blocks, current)
+	}
+	outputs := make([]mysqlBinlogArchiveOutput, 0, len(blocks))
+	for _, values := range blocks {
+		outputs = append(outputs, mysqlBinlogArchiveOutputFromValues(values, started, finished))
+	}
+	return outputs
+}
+
+func mysqlBinlogArchiveOutputFromValues(values map[string]string, started, finished time.Time) mysqlBinlogArchiveOutput {
 	output := mysqlBinlogArchiveOutput{
 		FileName:       values["OPSHUB_BINLOG_FILE"],
 		StoragePath:    values["OPSHUB_STORAGE_PATH"],
@@ -538,6 +915,27 @@ func binlogArchiveRequestJSON(stream *DatabaseLogArchiveStream, host *DatabaseRu
 		"previousFile":   selection.Previous,
 		"nextFile":       selection.Next,
 		"allowedCommand": DatabaseRunnerAllowedCommandBinlogArchiveOnce,
+		"operatorId":     operator.ID,
+		"operatorName":   operator.Username,
+	}
+	data, _ := json.Marshal(payload)
+	return trimText(string(data), maxRunnerJSONLength)
+}
+
+func binlogArchiveCatchUpRequestJSON(stream *DatabaseLogArchiveStream, host *DatabaseRunnerHost, selections []mysqlBinlogArchiveSelection, req *DatabaseRunLogArchiveCatchUpRequest, operator QueryOperator) string {
+	files := make([]string, 0, len(selections))
+	for _, selection := range selections {
+		files = append(files, selection.FileName)
+	}
+	payload := map[string]any{
+		"streamId":       stream.ID,
+		"runnerHostId":   host.ID,
+		"runnerType":     host.RunnerType,
+		"fileCount":      len(files),
+		"files":          files,
+		"maxFiles":       req.MaxFiles,
+		"includeCurrent": req.IncludeCurrent,
+		"allowedCommand": DatabaseRunnerAllowedCommandBinlogArchiveCatchUp,
 		"operatorId":     operator.ID,
 		"operatorName":   operator.Username,
 	}

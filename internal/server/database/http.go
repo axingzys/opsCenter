@@ -283,6 +283,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.GET("/log-archive-streams", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchiveStreams)
 		databases.POST("/log-archive-streams", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateLogArchiveStream)
 		databases.POST("/log-archive-streams/:id/run-once", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunLogArchiveOnce)
+		databases.POST("/log-archive-streams/:id/catch-up", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunLogArchiveCatchUp)
 		databases.GET("/log-archives", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchives)
 		databases.POST("/log-archives/external", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.RegisterExternalLogArchive)
 		databases.GET("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListStorageProfiles)

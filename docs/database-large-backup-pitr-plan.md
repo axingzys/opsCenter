@@ -267,6 +267,66 @@ P2.4 验收标准：
 4. 生成恢复计划时可以利用新登记的真实 binlog 文件元数据参与日志链校验。
 5. 单元测试覆盖 binlog 文件选择、事件时间解析、脚本安全约束和 request_json 脱敏。
 
+本次 P2.3 + P2.4 已落地内容：
+
+1. 新增 `POST /api/v1/databases/log-archive-streams/{id}/run-once`。
+2. 支持 SSH Runner 使用 `mysqlbinlog` / `mariadb-binlog` 拉取指定或自动选择的一份 binlog。
+3. Runner 归档成功后自动登记 `database_log_archives`，并更新归档流最近文件、最近归档时间和状态。
+4. 前端归档流列表新增“归档一次”入口，Runner 任务列表展示 binlog 文件、大小和 SHA256 摘要。
+5. 保持安全边界：不开放任意 shell，不在 Job JSON 中保存数据库密码，不使用 `MYSQL_PWD`，不把密码放入远端进程参数，不常驻 `--stop-never`。
+
+### 2026-04-29 P2.5 实施边界
+
+P2.4 只能一次拉取一个 binlog 文件，适合作为验证闭环，但实际归档链经常需要把多个已轮转文件追平。本阶段新增“受控批量 catch-up 归档”，仍不是长期守护进程。
+
+新增后端接口：
+
+```text
+POST /api/v1/databases/log-archive-streams/{id}/catch-up
+```
+
+请求参数：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runnerHostId` | bigint | 是 | 执行归档的 Runner Host |
+| `maxFiles` | int | 否 | 单次最多归档文件数，默认 5，最大 20 |
+| `includeCurrent` | bool | 否 | 是否允许归档当前活跃 binlog，默认 false |
+
+选择规则：
+
+1. 先从源库读取 `SHOW BINARY LOGS` / `SHOW MASTER LOGS`。
+2. 如果归档流已有 `last_archive_name`：
+   - 若该文件仍在源库列表中，从它的下一份开始归档。
+   - 若该文件已不在源库列表中，判定源库可能已经 purge，直接失败，避免静默断链。
+3. 如果归档流没有 `last_archive_name`，从源库当前可见列表第一份开始归档。
+4. 默认 `includeCurrent=false`，即不拉取最后一份当前活跃 binlog；只有用户显式开启才会包含当前活跃文件。
+5. 每次最多归档 `maxFiles` 份，防止单个 HTTP 触发过长任务。
+
+执行规则：
+
+1. 一个 catch-up 请求创建一个 `database_runner_jobs`，`job_type=binlog_archive`，`allowed_command=mysqlbinlog_archive_catch_up`。
+2. 后端生成固定白名单脚本，脚本内循环拉取多个 binlog 文件。
+3. 任何一个文件拉取失败，整个 Runner Job 标记失败，归档流标记 degraded。
+4. 所有文件成功后，逐个登记 `database_log_archives`，并将归档流 `last_archive_name` 更新为最后成功文件。
+5. `result_json` 同时保留 `binlog` 首文件摘要和 `binlogs` 批量摘要，方便前端快速显示。
+
+安全边界：
+
+1. 仍不实现后台常驻 `mysqlbinlog --stop-never`。
+2. 仍不自动 purge 源库 binlog。
+3. 仍不修改源库复制配置。
+4. 仍不碰恢复目标 datadir。
+5. 密码仍只进入 Runner 临时 option file，脚本退出后删除，不进入 Job JSON 和命令摘要。
+
+P2.5 验收标准：
+
+1. 页面可以对 binlog 归档流发起“追平归档”。
+2. 默认只拉取已轮转 binlog，不拉取当前活跃 binlog。
+3. 如果 `last_archive_name` 已被源库 purge，任务拒绝执行并提示断链风险。
+4. 成功后可一次登记多条 `database_log_archives`。
+5. 单元测试覆盖 catch-up 文件选择、purge 断链保护、多文件输出解析和 request_json 脱敏。
+
 ## 文档定位
 
 本文是 OpsHub 数据库管理模块在“大库备份、日志归档、延迟副本、PITR 恢复演练”方向的长期改造基准。后续分期实施、表结构扩展、接口设计、前端页面、Runner 执行边界、权限和验收标准均以本文为准。
