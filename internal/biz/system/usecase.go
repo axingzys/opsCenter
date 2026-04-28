@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -99,11 +100,17 @@ func (uc *ConfigUseCase) GetAllConfig(ctx context.Context) (*AllConfig, error) {
 		},
 		Database: DatabaseConfig{
 			WriteEnabled:               getBoolValue(configMap, ConfigKeyDatabaseWriteEnabled, false),
+			WriteExplainEnabled:        getBoolValue(configMap, ConfigKeyDatabaseWriteExplainEnabled, false),
+			DDLEnabled:                 getBoolValue(configMap, ConfigKeyDatabaseDDLEnabled, false),
+			DDLHighRiskRequiresConfirm: getBoolValue(configMap, ConfigKeyDatabaseDDLHighRiskRequiresConfirm, true),
+			DDLReasonRequired:          getBoolValue(configMap, ConfigKeyDatabaseDDLReasonRequired, true),
+			DDLRequireBackupHint:       getBoolValue(configMap, ConfigKeyDatabaseDDLRequireBackupHint, true),
 			HighRiskRequiresConfirm:    getBoolValue(configMap, ConfigKeyDatabaseHighRiskRequiresConfirm, true),
 			OperationReasonRequired:    getBoolValue(configMap, ConfigKeyDatabaseOperationReasonRequired, true),
 			MaxAffectedRows:            getIntValue(configMap, ConfigKeyDatabaseMaxAffectedRows, 1000),
 			DefaultBackupRetentionDays: getIntValue(configMap, ConfigKeyDatabaseDefaultBackupRetentionDays, 7),
 			BackupStoragePath:          getStringValue(configMap, ConfigKeyDatabaseBackupStoragePath, "./data/database-backups"),
+			InstancePermissionMode:     normalizeDatabaseInstancePermissionMode(getStringValue(configMap, ConfigKeyDatabaseInstancePermissionMode, "compat")),
 		},
 		LDAP: ldapConfig,
 	}
@@ -142,11 +149,17 @@ func (uc *ConfigUseCase) GetDatabaseConfig(ctx context.Context) (*DatabaseConfig
 
 	return &DatabaseConfig{
 		WriteEnabled:               getBoolValue(configMap, ConfigKeyDatabaseWriteEnabled, false),
+		WriteExplainEnabled:        getBoolValue(configMap, ConfigKeyDatabaseWriteExplainEnabled, false),
+		DDLEnabled:                 getBoolValue(configMap, ConfigKeyDatabaseDDLEnabled, false),
+		DDLHighRiskRequiresConfirm: getBoolValue(configMap, ConfigKeyDatabaseDDLHighRiskRequiresConfirm, true),
+		DDLReasonRequired:          getBoolValue(configMap, ConfigKeyDatabaseDDLReasonRequired, true),
+		DDLRequireBackupHint:       getBoolValue(configMap, ConfigKeyDatabaseDDLRequireBackupHint, true),
 		HighRiskRequiresConfirm:    getBoolValue(configMap, ConfigKeyDatabaseHighRiskRequiresConfirm, true),
 		OperationReasonRequired:    getBoolValue(configMap, ConfigKeyDatabaseOperationReasonRequired, true),
 		MaxAffectedRows:            getIntValue(configMap, ConfigKeyDatabaseMaxAffectedRows, 1000),
 		DefaultBackupRetentionDays: getIntValue(configMap, ConfigKeyDatabaseDefaultBackupRetentionDays, 7),
 		BackupStoragePath:          getStringValue(configMap, ConfigKeyDatabaseBackupStoragePath, "./data/database-backups"),
+		InstancePermissionMode:     normalizeDatabaseInstancePermissionMode(getStringValue(configMap, ConfigKeyDatabaseInstancePermissionMode, "compat")),
 	}, nil
 }
 
@@ -234,13 +247,28 @@ func (uc *ConfigUseCase) SaveMonitoringConfig(ctx context.Context, config *Monit
 func (uc *ConfigUseCase) SaveDatabaseConfig(ctx context.Context, config *DatabaseConfig) error {
 	configs := map[string]string{
 		ConfigKeyDatabaseWriteEnabled:               strconv.FormatBool(config.WriteEnabled),
+		ConfigKeyDatabaseWriteExplainEnabled:        strconv.FormatBool(config.WriteExplainEnabled),
+		ConfigKeyDatabaseDDLEnabled:                 strconv.FormatBool(config.DDLEnabled),
+		ConfigKeyDatabaseDDLHighRiskRequiresConfirm: strconv.FormatBool(config.DDLHighRiskRequiresConfirm),
+		ConfigKeyDatabaseDDLReasonRequired:          strconv.FormatBool(config.DDLReasonRequired),
+		ConfigKeyDatabaseDDLRequireBackupHint:       strconv.FormatBool(config.DDLRequireBackupHint),
 		ConfigKeyDatabaseHighRiskRequiresConfirm:    strconv.FormatBool(config.HighRiskRequiresConfirm),
 		ConfigKeyDatabaseOperationReasonRequired:    strconv.FormatBool(config.OperationReasonRequired),
 		ConfigKeyDatabaseMaxAffectedRows:            strconv.Itoa(config.MaxAffectedRows),
 		ConfigKeyDatabaseDefaultBackupRetentionDays: strconv.Itoa(config.DefaultBackupRetentionDays),
 		ConfigKeyDatabaseBackupStoragePath:          config.BackupStoragePath,
+		ConfigKeyDatabaseInstancePermissionMode:     normalizeDatabaseInstancePermissionMode(config.InstancePermissionMode),
 	}
 	return uc.configRepo.BatchSaveOrUpdate(ctx, configs)
+}
+
+func normalizeDatabaseInstancePermissionMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "whitelist":
+		return "whitelist"
+	default:
+		return "compat"
+	}
 }
 
 // GetConfigByKey 根据Key获取配置值

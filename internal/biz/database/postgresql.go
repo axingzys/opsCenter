@@ -77,68 +77,32 @@ func executePostgreSQLQuery(ctx context.Context, item *DatabaseInstance, credent
 	if err := db.PingContext(queryCtx); err != nil {
 		return nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
+
+	tx, err := db.BeginTx(queryCtx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("开启只读事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
 	if strings.TrimSpace(schemaName) != "" {
-		if _, err := db.ExecContext(queryCtx, "SET search_path TO "+quotePostgreSQLIdentifier(schemaName)+", public"); err != nil {
+		if _, err := tx.ExecContext(queryCtx, "SET LOCAL search_path TO "+quotePostgreSQLIdentifier(schemaName)+", public"); err != nil {
 			return nil, fmt.Errorf("设置 Schema 失败: %w", err)
 		}
 	}
 
-	rows, err := db.QueryContext(queryCtx, sqlText)
+	rows, err := tx.QueryContext(queryCtx, sqlText)
 	if err != nil {
 		return nil, fmt.Errorf("执行查询失败: %w", err)
 	}
-	defer rows.Close()
-
-	columns, err := rows.Columns()
+	result, err := readSQLQueryResult(rows, sqlType, sqlText, limit)
+	closeErr := rows.Close()
 	if err != nil {
-		return nil, fmt.Errorf("读取结果列失败: %w", err)
+		return nil, err
 	}
-	columnTypes := make([]string, 0, len(columns))
-	if types, err := rows.ColumnTypes(); err == nil {
-		for _, item := range types {
-			columnTypes = append(columnTypes, item.DatabaseTypeName())
-		}
+	if closeErr != nil {
+		return nil, fmt.Errorf("关闭查询结果失败: %w", closeErr)
 	}
-	for len(columnTypes) < len(columns) {
-		columnTypes = append(columnTypes, "")
-	}
-
-	resultRows := make([]map[string]any, 0, limit)
-	truncated := false
-	for rows.Next() {
-		if len(resultRows) >= limit {
-			truncated = true
-			break
-		}
-		values := make([]any, len(columns))
-		dest := make([]any, len(columns))
-		for i := range values {
-			dest[i] = &values[i]
-		}
-		if err := rows.Scan(dest...); err != nil {
-			return nil, fmt.Errorf("读取结果行失败: %w", err)
-		}
-		row := make(map[string]any, len(columns))
-		for i, column := range columns {
-			row[column] = normalizeSQLValue(values[i])
-		}
-		resultRows = append(resultRows, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("遍历查询结果失败: %w", err)
-	}
-
-	return &DatabaseQueryResultVO{
-		SQLType:      sqlType,
-		ExecutedSQL:  sqlText,
-		Columns:      columns,
-		ColumnTypes:  columnTypes,
-		Rows:         resultRows,
-		RowsReturned: len(resultRows),
-		Limit:        limit,
-		Truncated:    truncated,
-		Message:      "查询成功",
-	}, nil
+	return result, nil
 }
 
 func openPostgreSQLDB(item *DatabaseInstance, credential *ConnectionCredential) (*sql.DB, error) {

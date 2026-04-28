@@ -35,7 +35,7 @@ func (uc *UseCase) FormatQuerySQL(ctx context.Context, instanceID uint, req *Dat
 		return nil, fmt.Errorf("数据库实例不存在")
 	}
 	if normalizeDBType(instance.DBType) == DBTypeRedis {
-		return formatRedisCommand(req.SQLText, normalizeQueryLimit(50))
+		return formatRedisCommand(req.SQLText, normalizeQueryLimit(50, false))
 	}
 
 	safety := AnalyzeReadOnlySQLRaw(req.SQLText)
@@ -66,6 +66,34 @@ func (uc *UseCase) ExplainQuery(ctx context.Context, instanceID uint, req *Datab
 	}
 
 	return uc.runAuditedQuery(ctx, item, schemaName, DatabaseAuditActionExplain, safety.SQLText, safety.SQLType, safety.SQLText, 500, timeout, operator)
+}
+
+func (uc *UseCase) ExplainWriteQuery(ctx context.Context, instanceID uint, req *DatabaseQueryRequest, operator QueryOperator) (*DatabaseQueryResultVO, error) {
+	if req == nil {
+		return nil, fmt.Errorf("请求不能为空")
+	}
+	item, err := uc.getEnabledQueryInstance(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := uc.resolveWritePolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := normalizeQueryTimeout(req.TimeoutSeconds)
+	schemaName := resolveQuerySchemaName(item, req.SchemaName)
+	safety := AnalyzeWriteExplainSQLByDB(item.DBType, req.SQLText, policy)
+	auditSQLText := strings.TrimSpace(req.SQLText)
+	if strings.TrimSpace(safety.SQLText) != "" {
+		auditSQLText = safety.SQLText
+	}
+	if !safety.Allowed {
+		uc.recordDeniedQuery(ctx, item, schemaName, DatabaseAuditActionWriteExplain, auditSQLText, safety.SQLType, safety.Message, operator)
+		return nil, errors.New(safety.Message)
+	}
+
+	return uc.runAuditedQuery(ctx, item, schemaName, DatabaseAuditActionWriteExplain, auditSQLText, safety.SQLType, safety.SQLText, 500, timeout, operator)
 }
 
 func (uc *UseCase) ExportQuery(ctx context.Context, instanceID uint, req *DatabaseQueryRequest, operator QueryOperator) (*DatabaseQueryResultVO, error) {

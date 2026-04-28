@@ -1,6 +1,9 @@
 package database
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSupportsBackupTask(t *testing.T) {
 	tests := []struct {
@@ -67,5 +70,42 @@ func TestIsValidBackupSchedule(t *testing.T) {
 				t.Fatalf("isValidBackupSchedule(%q) = %v, want %v", tt.schedule, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeBackupMaxDurationMinutes(t *testing.T) {
+	if got := normalizeBackupMaxDurationMinutes(0); got != defaultBackupMaxDurationMinutes {
+		t.Fatalf("normalizeBackupMaxDurationMinutes(0) = %d, want %d", got, defaultBackupMaxDurationMinutes)
+	}
+	if got := normalizeBackupMaxDurationMinutes(30); got != 30 {
+		t.Fatalf("normalizeBackupMaxDurationMinutes(30) = %d, want 30", got)
+	}
+	if got := normalizeBackupMaxDurationMinutes(maxBackupMaxDurationMinutes + 1); got != maxBackupMaxDurationMinutes {
+		t.Fatalf("normalizeBackupMaxDurationMinutes(over max) = %d, want %d", got, maxBackupMaxDurationMinutes)
+	}
+}
+
+func TestValidateBackupStorageConfigSafeRejectsSecrets(t *testing.T) {
+	if err := validateBackupStorageConfigSafe(`{"path":"/data/backups"}`); err != nil {
+		t.Fatalf("validateBackupStorageConfigSafe(non-secret) error = %v", err)
+	}
+	err := validateBackupStorageConfigSafe(`{"access_key":"AKIA..."}`)
+	if err == nil {
+		t.Fatalf("expected storage config with access_key to be rejected")
+	}
+	if !strings.Contains(err.Error(), "不允许保存密码") {
+		t.Fatalf("unexpected storage config error: %v", err)
+	}
+}
+
+func TestRestoreCapabilityTextAndPITRStatus(t *testing.T) {
+	if got := normalizeRestoreCapability(""); got != DatabaseRestoreCapabilityLogicalRestoreOnly {
+		t.Fatalf("normalizeRestoreCapability(empty) = %q", got)
+	}
+	if got := RestoreCapabilityText(DatabaseRestoreCapabilityPITRVerified); got != "PITR 已演练" {
+		t.Fatalf("RestoreCapabilityText(pitr_verified) = %q", got)
+	}
+	if got := PITRStatusText(DatabaseRestoreCapabilityLogicalRestoreOnly); got != "不支持 PITR" {
+		t.Fatalf("PITRStatusText(logical) = %q", got)
 	}
 }

@@ -364,28 +364,6 @@ func trimBackupCommandError(output string, runErr error) string {
 	return runErr.Error()
 }
 
-func classifyBackupFailureMessage(message string) string {
-	message = strings.TrimSpace(message)
-	if message == "" {
-		return "备份失败：未知错误"
-	}
-	lower := strings.ToLower(message)
-	switch {
-	case strings.Contains(lower, "未安装备份客户端命令"):
-		return "备份失败：备份客户端命令缺失，" + message
-	case strings.Contains(lower, "凭据") || strings.Contains(lower, "password") || strings.Contains(lower, "authentication"):
-		return "备份失败：凭据或认证异常，" + message
-	case strings.Contains(lower, "permission denied") || strings.Contains(lower, "access denied"):
-		return "备份失败：文件或数据库权限不足，" + message
-	case strings.Contains(lower, "no space") || strings.Contains(lower, "disk") || strings.Contains(lower, "空间"):
-		return "备份失败：磁盘空间或存储异常，" + message
-	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "timeout") || strings.Contains(lower, "network"):
-		return "备份失败：网络或连接异常，" + message
-	default:
-		return "备份失败：" + message
-	}
-}
-
 func safeBackupFilenamePart(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -428,6 +406,8 @@ func buildBackupRecordMessage(item *DatabaseBackupRecord) string {
 		return "备份任务等待执行"
 	case DatabaseBackupStatusFailed:
 		return "逻辑备份失败"
+	case DatabaseBackupStatusExpired:
+		return buildBackupPrunedMessage(item.FileName)
 	default:
 		return ""
 	}

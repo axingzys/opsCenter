@@ -38,7 +38,10 @@ export const DATABASE_PERMISSION = {
   DIAGNOSIS: 64,
   TOPOLOGY: 128,
   MANAGE: 256,
-  ALL: 511
+  QUERY_UNLIMITED: 512,
+  WRITE_EXPLAIN: 1024,
+  DDL: 2048,
+  ALL: 4095
 } as const
 
 export interface DatabaseInstancePermissionPayload {
@@ -52,6 +55,7 @@ export interface DatabaseQueryPayload {
   sqlText: string
   limit?: number
   timeoutSeconds?: number
+  unlimitedRows?: boolean
 }
 
 export interface DatabaseQueryFormatPayload {
@@ -79,6 +83,22 @@ export interface DatabaseWriteValidateResult {
   message: string
 }
 
+export interface DatabaseDDLValidateResult {
+  instanceId: number
+  instanceName: string
+  dbType: string
+  dbTypeText: string
+  schemaName: string
+  sqlType: string
+  riskLevel: string
+  riskLevelText: string
+  allowed: boolean
+  confirmRequired: boolean
+  reasonRequired: boolean
+  backupRequired: boolean
+  message: string
+}
+
 export interface DatabaseWriteExecutePayload {
   schemaName?: string
   sqlText: string
@@ -89,6 +109,7 @@ export interface DatabaseWriteExecutePayload {
 
 export interface DatabaseWriteExecuteResult {
   auditId: number
+  auditAction?: string
   instanceId: number
   instanceName: string
   dbType: string
@@ -117,6 +138,7 @@ export interface DatabaseBackupTaskPayload {
   storageType?: string
   storageConfig?: string
   retentionDays?: number
+  maxDurationMinutes?: number
   enabled: boolean
 }
 
@@ -134,11 +156,23 @@ export interface DatabaseBackupTaskResult {
   storageTypeText: string
   storageConfig?: string
   retentionDays: number
+  maxDurationMinutes: number
   enabled: boolean
+  nextRunAt: string
   lastRunAt: string
+  lastSuccessAt: string
   lastStatus: string
   lastStatusText: string
   lastMessage: string
+  restoreCapability: string
+  restoreCapabilityText: string
+  pitrSupported: boolean
+  pitrStatusText: string
+  strategyText: string
+  instanceCapacitySizeBytes: number
+  instanceCapacitySizeText: string
+  largeDataWarning: boolean
+  largeDataWarningText: string
   createdAt: string
   updatedAt: string
 }
@@ -160,7 +194,18 @@ export interface DatabaseBackupRecordResult {
   fileName: string
   fileSize: number
   checksumSha256?: string
+  encrypted?: boolean
+  compression?: string
+  expiresAt?: string
+  verifiedAt?: string
+  verifyStatus?: string
+  verifyStatusText?: string
+  verifyMessage?: string
+  restoreTestedAt?: string
+  restoreTestStatus?: string
+  restoreTestStatusText?: string
   startedAt: string
+  lastHeartbeatAt?: string
   finishedAt: string
   durationMs: number
   message: string
@@ -484,6 +529,9 @@ export const listDatabaseBackupRecords = (params?: {
 export const downloadDatabaseBackupRecord = (id: number) =>
   request.get(`/api/v1/databases/backup-records/${id}/download`, { responseType: 'blob' })
 
+export const verifyDatabaseBackupRecord = (id: number) =>
+  request.post(`/api/v1/databases/backup-records/${id}/verify`)
+
 export const runDatabaseRestoreDryRun = (id: number, data: DatabaseRestoreDryRunPayload) =>
   request.post(`/api/v1/databases/backup-records/${id}/restore-dry-run`, data)
 
@@ -582,11 +630,20 @@ export const validateDatabaseWriteQuery = (id: number, data: DatabaseWriteValida
 export const executeDatabaseWriteQuery = (id: number, data: DatabaseWriteExecutePayload) =>
   request.post(`/api/v1/databases/instances/${id}/query/write`, data)
 
+export const validateDatabaseDDLQuery = (id: number, data: DatabaseWriteValidatePayload) =>
+  request.post(`/api/v1/databases/instances/${id}/query/ddl/validate`, data)
+
+export const executeDatabaseDDLQuery = (id: number, data: DatabaseWriteExecutePayload) =>
+  request.post(`/api/v1/databases/instances/${id}/query/ddl`, data)
+
 export const executeDatabaseQuery = (id: number, data: DatabaseQueryPayload) =>
   request.post(`/api/v1/databases/instances/${id}/query`, data)
 
 export const explainDatabaseQuery = (id: number, data: DatabaseQueryPayload) =>
   request.post(`/api/v1/databases/instances/${id}/query/explain`, data)
+
+export const explainDatabaseWriteQuery = (id: number, data: DatabaseQueryPayload) =>
+  request.post(`/api/v1/databases/instances/${id}/query/write/explain`, data)
 
 export const exportDatabaseQueryResult = (id: number, data: DatabaseQueryPayload) =>
   request.post(`/api/v1/databases/instances/${id}/query/export`, data, {

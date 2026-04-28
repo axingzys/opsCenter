@@ -21,10 +21,15 @@ func readSQLQueryResult(rows *sql.Rows, sqlType, sqlText string, limit int) (*Da
 		columnTypes = append(columnTypes, "")
 	}
 
-	resultRows := make([]map[string]any, 0, limit)
+	initialCapacity := limit
+	if initialCapacity <= 0 || initialCapacity > 500 {
+		initialCapacity = 500
+	}
+	resultRows := make([]map[string]any, 0, initialCapacity)
 	truncated := false
+	totalPreviewBytes := estimateQueryResultHeaderBytes(columns)
 	for rows.Next() {
-		if len(resultRows) >= limit {
+		if limit > 0 && len(resultRows) >= limit {
 			truncated = true
 			break
 		}
@@ -40,6 +45,14 @@ func readSQLQueryResult(rows *sql.Rows, sqlType, sqlText string, limit int) (*Da
 		row := make(map[string]any, len(columns))
 		for i, column := range columns {
 			row[column] = normalizeSQLValue(values[i])
+		}
+		if limit <= 0 {
+			rowBytes := estimateQuerySafeRowBytes(columns, row, queryPreviewCellMaxRunes)
+			if totalPreviewBytes+rowBytes > queryPreviewTotalMaxBytes {
+				truncated = true
+				break
+			}
+			totalPreviewBytes += rowBytes
 		}
 		resultRows = append(resultRows, row)
 	}

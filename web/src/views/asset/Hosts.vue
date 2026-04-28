@@ -12,9 +12,13 @@
         </div>
       </div>
       <div class="header-actions">
+        <el-button @click="handleOpenConnectionWorkspace" class="terminal-button">
+          <el-icon style="margin-right: 6px;"><Connection /></el-icon>
+          连接工作台
+        </el-button>
         <el-button @click="handleOpenTerminal" class="terminal-button">
           <el-icon style="margin-right: 6px;"><Monitor /></el-icon>
-          终端
+          SSH终端
         </el-button>
         <el-dropdown
           v-if="userHasEditPermission"
@@ -242,6 +246,36 @@
               </template>
             </el-table-column>
 
+            <el-table-column label="连接能力" min-width="170">
+              <template #default="{ row }">
+                <div class="capability-cell">
+                  <el-tag size="small" :type="getOSTypeTagType(row.osType)">
+                    {{ getOSTypeText(row.osType) }}
+                  </el-tag>
+                  <el-tag v-if="isSSHCapableHost(row)" size="small" type="info">
+                    SSH终端
+                  </el-tag>
+                  <el-tag
+                    v-if="row.osType === 'windows' && row.desktopEnabled"
+                    size="small"
+                    type="success"
+                  >
+                    RDP桌面
+                  </el-tag>
+                  <el-tag
+                    v-if="row.osType === 'windows'"
+                    size="small"
+                    :type="getManagementModeTagType(row.managementMode)"
+                  >
+                    {{ row.managementModeText || getManagementModeText(row.managementMode) }}
+                  </el-tag>
+                  <el-tag size="small" :type="getCollectStatusTagType(row.collectStatus)">
+                    {{ row.collectStatusText || getCollectStatusText(row.collectStatus) }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+
             <el-table-column label="CPU" min-width="100" align="center">
               <template #default="{ row }">
                 <div class="resource-cell">
@@ -356,7 +390,7 @@
                   </el-tooltip>
                   <el-tooltip content="文件管理" placement="top">
                     <el-button
-                      v-if="hasHostPermission(row.id, PERMISSION.FILE)"
+                      v-if="hasHostPermission(row.id, PERMISSION.FILE) && canUseFileManager(row)"
                       link
                       class="action-btn action-files"
                       @click="handleFileManager(row)"
@@ -1907,6 +1941,74 @@ const getCollectStatusLabel = (status?: string) => {
   }
 }
 
+const getCollectStatusText = (status?: string) => {
+  switch (status) {
+    case 'online':
+      return '采集在线'
+    case 'offline':
+      return '采集离线'
+    case 'not_configured':
+      return '未配置采集'
+    default:
+      return '采集未知'
+  }
+}
+
+const getCollectStatusTagType = (status?: string) => {
+  switch (status) {
+    case 'online':
+      return 'success'
+    case 'offline':
+      return 'danger'
+    case 'not_configured':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+const getManagementModeText = (mode?: string) => {
+  switch (mode) {
+    case 'agent':
+      return 'Agent'
+    case 'winrm':
+      return 'WinRM'
+    case 'none':
+      return '仅桌面'
+    default:
+      return 'SSH'
+  }
+}
+
+const getManagementModeTagType = (mode?: string) => {
+  switch (mode) {
+    case 'agent':
+      return 'success'
+    case 'winrm':
+      return 'warning'
+    case 'none':
+      return 'info'
+    default:
+      return 'primary'
+  }
+}
+
+const getOSTypeText = (osType?: string) => {
+  return osType === 'windows' ? 'Windows' : 'Linux'
+}
+
+const getOSTypeTagType = (osType?: string) => {
+  return osType === 'windows' ? 'warning' : 'success'
+}
+
+const isSSHCapableHost = (host: any) => {
+  return host?.osType !== 'windows' || host?.managementMode === 'ssh'
+}
+
+const canUseFileManager = (host: any) => {
+  return host?.osType !== 'windows' || (host?.managementMode === 'agent' && host?.collectStatus === 'online')
+}
+
 const resetHostInventory = () => {
   Object.assign(hostInventory, createEmptyHostInventory())
 }
@@ -2179,6 +2281,10 @@ const enabledCloudAccounts = computed(() => {
 const handleHostDblClick = async (data: any) => {
   // 如果是主机节点，跳转到终端页面
   if (data.type === 'host' || data.ip) {
+    if (!isSSHCapableHost(data)) {
+      ElMessage.warning('该主机不支持 SSH 终端，请使用远程桌面或切换为 SSH 兼容模式')
+      return
+    }
     // 将主机信息存储到 sessionStorage
     const dblClickHosts = JSON.parse(sessionStorage.getItem('dblClickHosts') || '[]')
     dblClickHosts.push(data)
@@ -2206,7 +2312,7 @@ const loadTerminalHostList = async (groupId?: number) => {
       params.groupId = groupId
     }
     const res = await getHostList(params)
-    terminalHostList.value = res.list || []
+    terminalHostList.value = (res.list || []).filter(isSSHCapableHost)
   } catch (error) {
     terminalHostList.value = []
   }
@@ -2366,9 +2472,13 @@ const switchToHostsView = async () => {
 }
 
 const handleOpenTerminal = () => {
-  // 打开新标签页到终端页面
+  // 打开新标签页到 SSH 终端页面
   const url = window.location.origin + '/terminal'
   window.open(url, '_blank')
+}
+
+const handleOpenConnectionWorkspace = () => {
+  router.push('/asset/connections')
 }
 
 // 搜索
@@ -3159,19 +3269,10 @@ const handleGroupDialogClose = () => {
   groupFormRef.value?.resetFields()
 }
 
-// 格式化字节数
-
 // 检查用户对主机的权限
 const hasHostPermission = (hostId: number, permission: number): boolean => {
   const userPermissions = hostPermissions.value.get(hostId) || 0
   return hasPermission(userPermissions, permission)
-}
-const formatBytes = (bytes: number): string => {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
 // 格式化字节数（紧凑格式，不换行）
@@ -4302,6 +4403,24 @@ onMounted(async () => {
 }
 
 .config-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capability-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.capability-cell :deep(.el-tag) {
+  max-width: 92px;
+}
+
+.capability-cell :deep(.el-tag__content) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

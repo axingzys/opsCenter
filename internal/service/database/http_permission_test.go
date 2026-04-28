@@ -40,6 +40,9 @@ func (r *fakeDatabasePermissionRepo) GetUserInstancePermissions(_ context.Contex
 	if r.err != nil {
 		return 0, r.err
 	}
+	if r.admin {
+		return dbbiz.DatabasePermissionAll, nil
+	}
 	return r.permissions[instanceID], nil
 }
 
@@ -145,6 +148,70 @@ func TestEnsureInstancePermissionAllowsLegacyWhenNoRules(t *testing.T) {
 
 	if !service.ensureInstancePermission(c, 42, dbbiz.DatabasePermissionWrite) {
 		t.Fatalf("expected legacy no-rule mode to allow instance operation, response=%s", recorder.Body.String())
+	}
+}
+
+func TestAllowUnlimitedQueryRowsRequiresAdminOrExplicitPermission(t *testing.T) {
+	c, _ := newPermissionTestContext()
+	service := NewService(nil, &fakeDatabasePermissionRepo{hasRules: false})
+	if service.allowUnlimitedQueryRows(c, 42) {
+		t.Fatal("expected no-rule non-admin user to be denied unlimited query rows")
+	}
+
+	c, _ = newPermissionTestContext()
+	service = NewService(nil, &fakeDatabasePermissionRepo{hasRules: false, admin: true})
+	if !service.allowUnlimitedQueryRows(c, 42) {
+		t.Fatal("expected admin to be allowed unlimited query rows")
+	}
+
+	c, _ = newPermissionTestContext()
+	service = NewService(nil, &fakeDatabasePermissionRepo{
+		hasRules: true,
+		permissions: map[uint]uint{
+			42: dbbiz.DatabasePermissionQuery | dbbiz.DatabasePermissionQueryUnlimited,
+		},
+	})
+	if !service.allowUnlimitedQueryRows(c, 42) {
+		t.Fatal("expected explicit unlimited query permission to allow unlimited query rows")
+	}
+}
+
+func TestAllowWriteExplainQueryRequiresAdminOrExplicitPermission(t *testing.T) {
+	c, _ := newPermissionTestContext()
+	service := NewService(nil, &fakeDatabasePermissionRepo{hasRules: false})
+	if service.allowWriteExplainQuery(c, 42) {
+		t.Fatal("expected no-rule non-admin user to be denied write explain")
+	}
+
+	c, _ = newPermissionTestContext()
+	service = NewService(nil, &fakeDatabasePermissionRepo{hasRules: false, admin: true})
+	if !service.allowWriteExplainQuery(c, 42) {
+		t.Fatal("expected admin to be allowed write explain")
+	}
+
+	c, _ = newPermissionTestContext()
+	service = NewService(nil, &fakeDatabasePermissionRepo{
+		hasRules: true,
+		permissions: map[uint]uint{
+			42: dbbiz.DatabasePermissionQuery | dbbiz.DatabasePermissionWriteExplain,
+		},
+	})
+	if !service.allowWriteExplainQuery(c, 42) {
+		t.Fatal("expected explicit write explain permission to allow write explain")
+	}
+}
+
+func TestEnsureInstancePermissionWhitelistModeRejectsNoRules(t *testing.T) {
+	c, recorder := newPermissionTestContext()
+	service := NewService(nil, &fakeDatabasePermissionRepo{hasRules: false}, func(context.Context) (string, error) {
+		return "whitelist", nil
+	})
+
+	if service.ensureInstancePermission(c, 42, dbbiz.DatabasePermissionWrite) {
+		t.Fatal("expected whitelist no-rule mode to reject instance operation")
+	}
+	if !strings.Contains(recorder.Body.String(), "权限不足") {
+		t.Fatalf("expected permission error response, got %s", recorder.Body.String())
 	}
 }
 

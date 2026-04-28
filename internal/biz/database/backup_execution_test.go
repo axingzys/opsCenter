@@ -95,6 +95,9 @@ func TestCleanupExpiredBackupFilesByTask(t *testing.T) {
 	if recordRepo.updated[0].FilePath != "" {
 		t.Fatalf("expected pruned record file path empty, got %q", recordRepo.updated[0].FilePath)
 	}
+	if recordRepo.updated[0].Status != DatabaseBackupStatusExpired {
+		t.Fatalf("expected pruned record status expired, got %q", recordRepo.updated[0].Status)
+	}
 	if recordRepo.updated[0].ErrorMessage == "" {
 		t.Fatalf("expected pruned record message")
 	}
@@ -157,6 +160,21 @@ func TestReconcileStaleBackupRecordsKeepsCurrentRun(t *testing.T) {
 
 	if len(recordRepo.updated) != 0 {
 		t.Fatalf("expected current running record to stay untouched, got %d updates", len(recordRepo.updated))
+	}
+}
+
+func TestIsBackupRecordStaleByHeartbeatTimeout(t *testing.T) {
+	startedAt := time.Now().Add(-10 * time.Minute)
+	lastHeartbeatAt := time.Now().Add(-backupHeartbeatTimeout - time.Second)
+	record := &DatabaseBackupRecord{
+		Status:          DatabaseBackupStatusRunning,
+		StartedAt:       &startedAt,
+		LastHeartbeatAt: &lastHeartbeatAt,
+	}
+	task := &DatabaseBackupTask{MaxDurationMinutes: defaultBackupMaxDurationMinutes}
+
+	if !isBackupRecordStale(record, task, time.Now().Add(-time.Hour), time.Now()) {
+		t.Fatalf("expected running record with stale heartbeat to be stale")
 	}
 }
 

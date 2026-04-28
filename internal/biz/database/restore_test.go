@@ -2,6 +2,7 @@ package database
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -127,4 +128,27 @@ func TestRestoreRunLock(t *testing.T) {
 		t.Fatalf("expected restore lock to be reusable after release, got %v", err)
 	}
 	uc.releaseRestoreRun(key)
+}
+
+func TestBuildDeniedRestoreDryRunAuditText(t *testing.T) {
+	record := &DatabaseBackupRecord{
+		FileName: "prod.sql.gz",
+	}
+	record.ID = 11
+	text := buildDeniedRestoreDryRunAuditText(record, &DatabaseRestoreDryRunRequest{
+		TargetInstanceID: 22,
+		RestoreMode:      "dry_run",
+		RestoreStrategy:  DatabaseRestoreStrategyDatabaseClean,
+	})
+	for _, expected := range []string{
+		"RESTORE DRY RUN DENIED",
+		"BACKUP RECORD #11",
+		"FILE prod.sql.gz",
+		"TARGET INSTANCE #22",
+		"清空目标库后导入",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected audit text %q to contain %q", text, expected)
+		}
+	}
 }

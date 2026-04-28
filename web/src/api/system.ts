@@ -48,11 +48,17 @@ export interface MonitoringConfig {
 
 export interface DatabaseConfig {
   writeEnabled: boolean
+  writeExplainEnabled: boolean
+  ddlEnabled: boolean
+  ddlHighRiskRequiresConfirm: boolean
+  ddlReasonRequired: boolean
+  ddlRequireBackupHint: boolean
   highRiskRequiresConfirm: boolean
   operationReasonRequired: boolean
   maxAffectedRows: number
   defaultBackupRetentionDays: number
   backupStoragePath: string
+  instancePermissionMode: 'compat' | 'whitelist'
 }
 
 export const getMonitoringConfig = () => {

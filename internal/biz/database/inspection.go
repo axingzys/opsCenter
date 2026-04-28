@@ -281,18 +281,19 @@ func (uc *UseCase) buildSecurityInspectionSection(ctx context.Context, instance 
 	highRisk := uc.countAudits(ctx, &DatabaseQueryAuditListRequest{InstanceID: instance.ID, RiskLevel: DatabaseQueryRiskHigh, StartTime: since})
 	criticalRisk := uc.countAudits(ctx, &DatabaseQueryAuditListRequest{InstanceID: instance.ID, RiskLevel: DatabaseQueryRiskCritical, StartTime: since})
 	denied := uc.countAudits(ctx, &DatabaseQueryAuditListRequest{InstanceID: instance.ID, Status: DatabaseQueryStatusDenied, StartTime: since})
-	failedWrites := uc.countAudits(ctx, &DatabaseQueryAuditListRequest{InstanceID: instance.ID, Action: DatabaseAuditActionChangeExecute, Status: DatabaseQueryStatusFailed, StartTime: since})
+	failedWrites := uc.countAudits(ctx, &DatabaseQueryAuditListRequest{InstanceID: instance.ID, Action: DatabaseAuditActionChangeExecute, Status: DatabaseQueryStatusFailed, StartTime: since}) +
+		uc.countAudits(ctx, &DatabaseQueryAuditListRequest{InstanceID: instance.ID, Action: DatabaseAuditActionDDLExecute, Status: DatabaseQueryStatusFailed, StartTime: since})
 	section.Metrics = []*DatabaseInspectionMetricVO{
 		{Key: "high_risk", Label: "高风险 SQL", Value: fmt.Sprintf("%d", highRisk+criticalRisk), Status: countStatus(highRisk + criticalRisk)},
 		{Key: "denied", Label: "拦截次数", Value: fmt.Sprintf("%d", denied), Status: countStatus(denied)},
-		{Key: "failed_writes", Label: "写操作失败", Value: fmt.Sprintf("%d", failedWrites), Status: countStatus(failedWrites)},
+		{Key: "failed_writes", Label: "变更失败", Value: fmt.Sprintf("%d", failedWrites), Status: countStatus(failedWrites)},
 	}
 	if criticalRisk > 0 {
 		findings = append(findings, inspectionFinding("critical", "security", "存在严重风险 SQL", fmt.Sprintf("近 7 天严重风险 SQL %d 次", criticalRisk), "audit", "critical"))
 		section.Status = "danger"
 		section.Summary = "存在严重风险 SQL"
 	} else if highRisk > 0 || denied > 0 || failedWrites > 0 {
-		findings = append(findings, inspectionFinding("warning", "security", "存在 SQL 风险事件", fmt.Sprintf("近 7 天高风险 %d 次、拦截 %d 次、写失败 %d 次", highRisk, denied, failedWrites), "audit", "risk"))
+		findings = append(findings, inspectionFinding("warning", "security", "存在 SQL 风险事件", fmt.Sprintf("近 7 天高风险 %d 次、拦截 %d 次、变更失败 %d 次", highRisk, denied, failedWrites), "audit", "risk"))
 		section.Status = "warning"
 		section.Summary = "存在 SQL 风险事件"
 	}
@@ -308,6 +309,7 @@ func (uc *UseCase) buildBackupInspectionSection(ctx context.Context, instance *D
 	since := time.Now().Add(-7 * 24 * time.Hour).Format("2006-01-02 15:04:05")
 	latestSuccess, _ := uc.latestBackupRecord(ctx, instance.ID, DatabaseBackupStatusSuccess)
 	failedCount := uc.countBackupRecords(ctx, &DatabaseBackupRecordListRequest{InstanceID: instance.ID, Status: DatabaseBackupStatusFailed, DateFrom: since})
+	backupStrategyText, pitrStatusText, pitrMetricStatus := uc.backupRecoverabilitySummary(ctx, instance.ID)
 	lastSuccessText := "-"
 	if latestSuccess != nil {
 		lastSuccessText = formatTime(latestSuccess.FinishedAt)
@@ -316,7 +318,9 @@ func (uc *UseCase) buildBackupInspectionSection(ctx context.Context, instance *D
 		}
 	}
 	section.Metrics = []*DatabaseInspectionMetricVO{
+		{Key: "strategy", Label: "当前策略", Value: backupStrategyText, Status: "info"},
 		{Key: "last_success", Label: "最近成功备份", Value: lastSuccessText, Status: backupSuccessStatus(latestSuccess)},
+		{Key: "pitr", Label: "PITR", Value: pitrStatusText, Status: pitrMetricStatus},
 		{Key: "failed_7d", Label: "近 7 天失败", Value: fmt.Sprintf("%d", failedCount), Status: countStatus(failedCount)},
 	}
 	if latestSuccess == nil {
@@ -331,6 +335,9 @@ func (uc *UseCase) buildBackupInspectionSection(ctx context.Context, instance *D
 	if failedCount > 0 {
 		findings = append(findings, inspectionFinding("warning", "backup", "存在备份失败", fmt.Sprintf("近 7 天备份失败 %d 次", failedCount), "backup_record", "failed"))
 		section.Status = "warning"
+	}
+	if pitrMetricStatus != "success" {
+		findings = append(findings, inspectionFinding("info", "backup", "PITR 未启用", "当前仅检查逻辑备份成功记录，不代表支持按时间点恢复", "instance", fmt.Sprint(instance.ID)))
 	}
 	return section, findings
 }
@@ -832,6 +839,49 @@ func isBackupStale(record *DatabaseBackupRecord, maxAge time.Duration) bool {
 		t = *record.FinishedAt
 	}
 	return time.Since(t) > maxAge
+}
+
+func (uc *UseCase) backupRecoverabilitySummary(ctx context.Context, instanceID uint) (string, string, string) {
+	if uc.backupTaskRepo == nil || instanceID == 0 {
+		return "未配置备份任务", "不支持 PITR", "warning"
+	}
+	tasks, _, err := uc.backupTaskRepo.List(ctx, &DatabaseBackupTaskListRequest{
+		Page:       1,
+		PageSize:   100,
+		InstanceID: instanceID,
+	})
+	if err != nil || len(tasks) == 0 {
+		return "未配置备份任务", "不支持 PITR", "warning"
+	}
+	hasEnabled := false
+	hasPITR := false
+	hasPITRVerified := false
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		if task.Enabled {
+			hasEnabled = true
+		}
+		switch normalizeRestoreCapability(task.RestoreCapability) {
+		case DatabaseRestoreCapabilityPITRCapable:
+			hasPITR = true
+		case DatabaseRestoreCapabilityPITRVerified:
+			hasPITR = true
+			hasPITRVerified = true
+		}
+	}
+	strategy := "逻辑备份"
+	if !hasEnabled {
+		strategy = "逻辑备份（未启用）"
+	}
+	if hasPITRVerified {
+		return strategy, "支持 PITR，已演练", "success"
+	}
+	if hasPITR {
+		return strategy, "支持 PITR，待演练", "warning"
+	}
+	return strategy, "不支持 PITR", "info"
 }
 
 func isDiagnosableType(dbType string) bool {

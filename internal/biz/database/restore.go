@@ -62,38 +62,52 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 	}
 
 	if err := validateRestoreDryRunRecord(record); err != nil {
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
 		return nil, err
 	}
 	restoreFilePath, err := uc.secureBackupFilePath(ctx, record.FilePath)
 	if err != nil {
-		return nil, fmt.Errorf("备份文件路径无效: %w", err)
+		wrappedErr := fmt.Errorf("备份文件路径无效: %w", err)
+		uc.markBackupRecordVerifyResult(ctx, record, DatabaseBackupVerifyStatusFailed, wrappedErr.Error())
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, wrappedErr.Error())
+		return nil, wrappedErr
 	}
 	if _, err := uc.verifyBackupRecordFile(ctx, record, restoreFilePath); err != nil {
+		uc.markBackupRecordVerifyResult(ctx, record, DatabaseBackupVerifyStatusFailed, err.Error())
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
 		return nil, err
 	}
+	uc.markBackupRecordVerifyResult(ctx, record, DatabaseBackupVerifyStatusSuccess, "恢复演练前 checksum 校验通过")
 	if err := validateRestoreDryRunTarget(source, target); err != nil {
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
 		return nil, err
 	}
 
 	credential, err := uc.credentialResolver(ctx, target.CredentialID)
 	if err != nil {
-		return nil, fmt.Errorf("目标实例凭据不存在")
+		wrappedErr := fmt.Errorf("目标实例凭据不存在")
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, wrappedErr.Error())
+		return nil, wrappedErr
 	}
 	databaseName, err := resolveRestoreDatabaseName(target, credential)
 	if err != nil {
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
 		return nil, err
 	}
 
 	strategy := normalizeRestoreStrategy(req.RestoreStrategy)
 	if err := validateRestoreStrategy(target.DBType, record.BackupType, strategy); err != nil {
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
 		return nil, err
 	}
 	spec, err := buildRestoreCommandSpec(target, credential, databaseName, record.BackupType, strategy)
 	if err != nil {
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
 		return nil, err
 	}
 	restoreLockKey := buildRestoreRunKey(target.ID, databaseName)
 	if err := uc.acquireRestoreRun(restoreLockKey); err != nil {
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
 		return nil, err
 	}
 	releaseRestoreLock := true
@@ -106,7 +120,9 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 	startedAt := time.Now()
 	mode := normalizeRestoreMode(req.RestoreMode)
 	if mode != DatabaseRestoreModeDryRun {
-		return nil, fmt.Errorf("当前仅支持 dry_run 恢复演练")
+		err := fmt.Errorf("当前仅支持 dry_run 恢复演练")
+		uc.recordDeniedRestoreDryRunAudit(ctx, source, target, record, req, operator, err.Error())
+		return nil, err
 	}
 	job := &DatabaseRestoreJob{
 		BackupRecordID:   record.ID,
@@ -156,6 +172,7 @@ func (uc *UseCase) executeRestoreDryRunJob(job *DatabaseRestoreJob, audit *Datab
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer updateCancel()
 	uc.finishRestoreJob(updateCtx, job, status, startedAt, finishedAt, message)
+	uc.markBackupRecordRestoreTestResult(updateCtx, record, status)
 	uc.finishRestoreAudit(updateCtx, audit, restoreAuditStatus(status), finishedAt.Sub(startedAt).Milliseconds(), message)
 }
 
@@ -281,6 +298,52 @@ func (uc *UseCase) startRestoreAudit(ctx context.Context, target *DatabaseInstan
 	return audit, nil
 }
 
+func (uc *UseCase) recordDeniedRestoreDryRunAudit(ctx context.Context, source, target *DatabaseInstance, record *DatabaseBackupRecord, req *DatabaseRestoreDryRunRequest, operator QueryOperator, message string) {
+	if uc.auditRepo == nil {
+		return
+	}
+	auditInstance := target
+	if auditInstance == nil {
+		auditInstance = source
+	}
+	if auditInstance == nil {
+		return
+	}
+	sqlText := buildDeniedRestoreDryRunAuditText(record, req)
+	_ = uc.auditRepo.Create(ctx, &DatabaseQueryAudit{
+		InstanceID:     auditInstance.ID,
+		SchemaName:     resolveBackupSchemaName(auditInstance, strings.TrimSpace(auditInstance.DefaultDatabase)),
+		OperatorID:     operator.ID,
+		OperatorName:   trimText(operator.Username, 100),
+		AuditAction:    DatabaseAuditActionRestoreDryRun,
+		SQLText:        trimText(sqlText, 20000),
+		SQLFingerprint: sqlFingerprint(sqlText),
+		SQLType:        "RESTORE",
+		RiskLevel:      DatabaseQueryRiskHigh,
+		Status:         DatabaseQueryStatusDenied,
+		ErrorMessage:   trimText(message, 500),
+		ClientIP:       trimText(operator.ClientIP, 64),
+	})
+}
+
+func buildDeniedRestoreDryRunAuditText(record *DatabaseBackupRecord, req *DatabaseRestoreDryRunRequest) string {
+	recordID := uint(0)
+	fileName := ""
+	if record != nil {
+		recordID = record.ID
+		fileName = strings.TrimSpace(record.FileName)
+	}
+	targetID := uint(0)
+	mode := DatabaseRestoreModeDryRun
+	strategy := DatabaseRestoreStrategyObjectReplace
+	if req != nil {
+		targetID = req.TargetInstanceID
+		mode = normalizeRestoreMode(req.RestoreMode)
+		strategy = normalizeRestoreStrategy(req.RestoreStrategy)
+	}
+	return fmt.Sprintf("RESTORE DRY RUN DENIED BACKUP RECORD #%d FILE %s TARGET INSTANCE #%d MODE %s STRATEGY %s", recordID, fileName, targetID, mode, RestoreStrategyText(strategy))
+}
+
 func (uc *UseCase) finishRestoreAudit(ctx context.Context, audit *DatabaseQueryAudit, status string, durationMs int64, message string) {
 	if uc.auditRepo == nil || audit == nil || audit.ID == 0 {
 		return
@@ -303,6 +366,16 @@ func (uc *UseCase) finishRestoreJob(ctx context.Context, job *DatabaseRestoreJob
 	job.DurationMs = finishedAt.Sub(startedAt).Milliseconds()
 	job.ErrorMessage = trimText(message, 500)
 	_ = uc.restoreJobRepo.Update(ctx, job)
+}
+
+func (uc *UseCase) markBackupRecordRestoreTestResult(ctx context.Context, record *DatabaseBackupRecord, status string) {
+	if uc.backupRecordRepo == nil || record == nil || record.ID == 0 {
+		return
+	}
+	now := time.Now()
+	record.RestoreTestedAt = &now
+	record.RestoreTestStatus = status
+	_ = uc.backupRecordRepo.Update(ctx, record)
 }
 
 func (uc *UseCase) loadRestoreJobInstanceMeta(ctx context.Context, items []*DatabaseRestoreJob) (map[uint]string, map[uint]string, map[uint]string) {

@@ -85,11 +85,17 @@ const (
 
 	// 数据库配置
 	ConfigKeyDatabaseWriteEnabled               = "database_write_enabled"
+	ConfigKeyDatabaseWriteExplainEnabled        = "database_write_explain_enabled"
+	ConfigKeyDatabaseDDLEnabled                 = "database_ddl_enabled"
+	ConfigKeyDatabaseDDLHighRiskRequiresConfirm = "database_ddl_high_risk_requires_confirm"
+	ConfigKeyDatabaseDDLReasonRequired          = "database_ddl_reason_required"
+	ConfigKeyDatabaseDDLRequireBackupHint       = "database_ddl_require_backup_hint"
 	ConfigKeyDatabaseHighRiskRequiresConfirm    = "database_high_risk_requires_confirm"
 	ConfigKeyDatabaseOperationReasonRequired    = "database_operation_reason_required"
 	ConfigKeyDatabaseMaxAffectedRows            = "database_max_affected_rows"
 	ConfigKeyDatabaseDefaultBackupRetentionDays = "database_default_backup_retention_days"
 	ConfigKeyDatabaseBackupStoragePath          = "database_backup_storage_path"
+	ConfigKeyDatabaseInstancePermissionMode     = "database_instance_permission_mode"
 
 	// 消息队列配置
 	ConfigKeyMessageQueueHighRiskEnabled         = "messageQueueHighRiskEnabled"
@@ -214,6 +220,41 @@ var DefaultConfigs = map[string]SysConfig{
 		Group:  ConfigGroupDatabase,
 		Remark: "数据库写操作总开关",
 	},
+	ConfigKeyDatabaseWriteExplainEnabled: {
+		Key:    ConfigKeyDatabaseWriteExplainEnabled,
+		Value:  "false",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库写 SQL 执行计划开关",
+	},
+	ConfigKeyDatabaseDDLEnabled: {
+		Key:    ConfigKeyDatabaseDDLEnabled,
+		Value:  "false",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库 DDL 结构变更开关",
+	},
+	ConfigKeyDatabaseDDLHighRiskRequiresConfirm: {
+		Key:    ConfigKeyDatabaseDDLHighRiskRequiresConfirm,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库 DDL 结构变更是否要求二次确认",
+	},
+	ConfigKeyDatabaseDDLReasonRequired: {
+		Key:    ConfigKeyDatabaseDDLReasonRequired,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库 DDL 结构变更是否要求填写原因",
+	},
+	ConfigKeyDatabaseDDLRequireBackupHint: {
+		Key:    ConfigKeyDatabaseDDLRequireBackupHint,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库 DDL 结构变更是否提示备份",
+	},
 	ConfigKeyDatabaseHighRiskRequiresConfirm: {
 		Key:    ConfigKeyDatabaseHighRiskRequiresConfirm,
 		Value:  "true",
@@ -248,6 +289,13 @@ var DefaultConfigs = map[string]SysConfig{
 		Type:   "string",
 		Group:  ConfigGroupDatabase,
 		Remark: "数据库备份默认本地存储目录",
+	},
+	ConfigKeyDatabaseInstancePermissionMode: {
+		Key:    ConfigKeyDatabaseInstancePermissionMode,
+		Value:  "compat",
+		Type:   "string",
+		Group:  ConfigGroupDatabase,
+		Remark: "数据库实例对象权限模式：compat兼容模式，whitelist白名单模式",
 	},
 	ConfigKeyMessageQueueHighRiskEnabled: {
 		Key:    ConfigKeyMessageQueueHighRiskEnabled,
@@ -303,11 +351,17 @@ type MonitoringConfig struct {
 // DatabaseConfig 数据库配置响应结构
 type DatabaseConfig struct {
 	WriteEnabled               bool   `json:"writeEnabled"`
+	WriteExplainEnabled        bool   `json:"writeExplainEnabled"`
+	DDLEnabled                 bool   `json:"ddlEnabled"`
+	DDLHighRiskRequiresConfirm bool   `json:"ddlHighRiskRequiresConfirm"`
+	DDLReasonRequired          bool   `json:"ddlReasonRequired"`
+	DDLRequireBackupHint       bool   `json:"ddlRequireBackupHint"`
 	HighRiskRequiresConfirm    bool   `json:"highRiskRequiresConfirm"`
 	OperationReasonRequired    bool   `json:"operationReasonRequired"`
 	MaxAffectedRows            int    `json:"maxAffectedRows"`
 	DefaultBackupRetentionDays int    `json:"defaultBackupRetentionDays"`
 	BackupStoragePath          string `json:"backupStoragePath"`
+	InstancePermissionMode     string `json:"instancePermissionMode"`
 }
 
 // LDAPConfig LDAP配置结构

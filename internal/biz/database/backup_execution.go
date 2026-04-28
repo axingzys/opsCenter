@@ -11,7 +11,11 @@ import (
 const backupCleanupFailedMessage = "保留策略清理失败"
 
 func (uc *UseCase) RunScheduledBackupTask(ctx context.Context, id uint) (*DatabaseBackupRunVO, error) {
-	return uc.runBackupTask(ctx, id, scheduledBackupOperator(), DatabaseBackupTriggerSchedule)
+	run, err := uc.prepareBackupTaskRun(ctx, id, scheduledBackupOperator(), DatabaseBackupTriggerSchedule)
+	if err != nil {
+		return nil, err
+	}
+	return uc.executePreparedBackupRun(ctx, run)
 }
 
 func (uc *UseCase) ListEnabledBackupTasks(ctx context.Context) ([]*DatabaseBackupTask, error) {
@@ -28,7 +32,19 @@ func (uc *UseCase) ListAllBackupTasks(ctx context.Context) ([]*DatabaseBackupTas
 	return uc.backupTaskRepo.ListAll(ctx)
 }
 
-func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOperator, triggerType string) (*DatabaseBackupRunVO, error) {
+type preparedBackupRun struct {
+	task         *DatabaseBackupTask
+	instance     *DatabaseInstance
+	spec         *backupCommandSpec
+	audit        *DatabaseQueryAudit
+	record       *DatabaseBackupRecord
+	databaseName string
+	outputPath   string
+	fileName     string
+	startedAt    time.Time
+}
+
+func (uc *UseCase) prepareBackupTaskRun(ctx context.Context, id uint, operator QueryOperator, triggerType string) (*preparedBackupRun, error) {
 	if uc.backupTaskRepo == nil || uc.backupRecordRepo == nil {
 		return nil, fmt.Errorf("备份任务仓库未配置")
 	}
@@ -37,15 +53,19 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.acquireBackupTaskRun(task.ID); err != nil {
-		return nil, err
-	}
-	defer uc.releaseBackupTaskRun(task.ID)
-
 	instance, err := uc.instanceRepo.GetByID(ctx, task.InstanceID)
 	if err != nil {
 		return nil, fmt.Errorf("数据库实例不存在")
 	}
+	if err := uc.acquireBackupTaskRun(task.ID, task.InstanceID); err != nil {
+		return nil, err
+	}
+	releaseOnError := true
+	defer func() {
+		if releaseOnError {
+			uc.releaseBackupTaskRun(task.ID, task.InstanceID)
+		}
+	}()
 	if !supportsBackupTask(instance.DBType) {
 		return nil, fmt.Errorf("%s 逻辑备份将在后续批次接入", DBTypeText(instance.DBType))
 	}
@@ -83,6 +103,7 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 	}
 
 	startedAt := time.Now()
+	expiresAt := startedAt.AddDate(0, 0, normalizeBackupRetentionDays(task.RetentionDays, policy.DefaultRetentionDays))
 	outputPath, fileName, err := buildBackupOutputPath(storageRoot, instance, task, databaseName, startedAt, spec.FileExt)
 	if err != nil {
 		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, 0, err.Error())
@@ -90,16 +111,20 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 	}
 
 	record := &DatabaseBackupRecord{
-		TaskID:       task.ID,
-		InstanceID:   task.InstanceID,
-		TriggerType:  normalizeBackupTriggerType(triggerType),
-		BackupType:   task.BackupType,
-		StorageType:  task.StorageType,
-		Status:       DatabaseBackupStatusQueued,
-		FilePath:     outputPath,
-		FileName:     fileName,
-		StartedAt:    &startedAt,
-		ErrorMessage: trimText("备份任务已进入执行队列", 500),
+		TaskID:          task.ID,
+		InstanceID:      task.InstanceID,
+		TriggerType:     normalizeBackupTriggerType(triggerType),
+		BackupType:      task.BackupType,
+		StorageType:     task.StorageType,
+		Status:          DatabaseBackupStatusQueued,
+		FilePath:        outputPath,
+		FileName:        fileName,
+		Compression:     detectBackupCompression(fileName),
+		ExpiresAt:       &expiresAt,
+		VerifyStatus:    DatabaseBackupVerifyStatusPending,
+		StartedAt:       &startedAt,
+		LastHeartbeatAt: &startedAt,
+		ErrorMessage:    trimText(backupQueuedMessage, 500),
 	}
 	if err := uc.backupRecordRepo.Create(ctx, record); err != nil {
 		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, 0, "创建备份记录失败: "+err.Error())
@@ -108,35 +133,63 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 
 	task.LastRunAt = &startedAt
 	task.LastStatus = DatabaseBackupStatusQueued
-	task.LastMessage = trimText("备份任务已进入执行队列", 500)
+	task.LastMessage = trimText(backupQueuedMessage, 500)
+	task.RestoreCapability = normalizeRestoreCapability(task.RestoreCapability)
+	uc.applyBackupTaskNextRunAt(task, startedAt)
 	if err := uc.backupTaskRepo.Update(ctx, task); err != nil {
 		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, time.Now(), "更新备份任务状态失败: "+err.Error())
 		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, 0, "更新备份任务状态失败: "+err.Error())
 		return nil, err
 	}
 
+	releaseOnError = false
+	return &preparedBackupRun{
+		task:         task,
+		instance:     instance,
+		spec:         spec,
+		audit:        audit,
+		record:       record,
+		databaseName: databaseName,
+		outputPath:   outputPath,
+		fileName:     fileName,
+		startedAt:    startedAt,
+	}, nil
+}
+
+func (uc *UseCase) executePreparedBackupRun(ctx context.Context, run *preparedBackupRun) (*DatabaseBackupRunVO, error) {
+	if run == nil || run.task == nil || run.record == nil || run.spec == nil {
+		return nil, fmt.Errorf("备份任务执行上下文无效")
+	}
+	defer uc.releaseBackupTaskRun(run.task.ID, run.task.InstanceID)
+
+	task := run.task
+	record := run.record
+	startedAt := run.startedAt
+
 	uc.markBackupRecordStatus(ctx, record, DatabaseBackupStatusRunning, backupRunningMessage)
 	uc.markBackupTaskStatus(ctx, task, DatabaseBackupStatusRunning, backupRunningMessage)
-	fileSize, err := runBackupCommand(ctx, spec, outputPath)
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(normalizeBackupMaxDurationMinutes(task.MaxDurationMinutes))*time.Minute)
+	defer cancel()
+	stopHeartbeat := uc.startBackupRecordHeartbeat(runCtx, record)
+	fileSize, err := runBackupCommand(runCtx, run.spec, run.outputPath)
 	finishedAt := time.Now()
+	stopHeartbeat()
 	durationMs := finishedAt.Sub(startedAt).Milliseconds()
 	if err != nil {
-		failureMessage := classifyBackupFailureMessage(err.Error())
-		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, finishedAt, failureMessage)
-		uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusFailed, failureMessage)
-		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, durationMs, failureMessage)
-		return nil, fmt.Errorf("%s", failureMessage)
+		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, finishedAt, err.Error())
+		uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusFailed, err.Error())
+		uc.finishBackupAudit(ctx, run.audit, DatabaseQueryStatusFailed, durationMs, err.Error())
+		return nil, err
 	}
-	checksum, err := calculateFileSHA256(outputPath)
+	checksum, err := calculateFileSHA256(run.outputPath)
 	if err != nil {
-		failureMessage := classifyBackupFailureMessage(err.Error())
-		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, finishedAt, failureMessage)
-		uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusFailed, failureMessage)
-		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, durationMs, failureMessage)
-		return nil, fmt.Errorf("%s", failureMessage)
+		uc.finishBackupRecord(ctx, record, DatabaseBackupStatusFailed, startedAt, finishedAt, err.Error())
+		uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusFailed, err.Error())
+		uc.finishBackupAudit(ctx, run.audit, DatabaseQueryStatusFailed, durationMs, err.Error())
+		return nil, err
 	}
 
-	recordMessage := buildBackupSuccessMessage(fileName, fileSize)
+	recordMessage := buildBackupSuccessMessage(run.fileName, fileSize)
 	taskMessage := recordMessage
 	uc.markBackupRecordStatus(ctx, record, DatabaseBackupStatusCleaning, "备份文件已生成，保留策略清理中")
 	uc.markBackupTaskStatus(ctx, task, DatabaseBackupStatusCleaning, "备份文件已生成，保留策略清理中")
@@ -151,17 +204,17 @@ func (uc *UseCase) runBackupTask(ctx context.Context, id uint, operator QueryOpe
 
 	uc.finishBackupRecordSuccess(ctx, record, startedAt, finishedAt, durationMs, fileSize, checksum, recordMessage)
 	uc.finishBackupTask(ctx, task, finishedAt, DatabaseBackupStatusSuccess, taskMessage)
-	uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusSuccess, durationMs, "")
+	uc.finishBackupAudit(ctx, run.audit, DatabaseQueryStatusSuccess, durationMs, "")
 
 	return &DatabaseBackupRunVO{
 		TaskID:         task.ID,
 		TaskName:       task.Name,
 		RecordID:       record.ID,
 		InstanceID:     task.InstanceID,
-		InstanceName:   instance.Name,
+		InstanceName:   run.instance.Name,
 		Status:         DatabaseBackupStatusSuccess,
 		StatusText:     BackupStatusText(DatabaseBackupStatusSuccess),
-		FileName:       fileName,
+		FileName:       run.fileName,
 		FileSize:       fileSize,
 		ChecksumSHA256: checksum,
 		DurationMs:     durationMs,
@@ -242,6 +295,9 @@ func (uc *UseCase) pruneBackupRecordFile(ctx context.Context, record *DatabaseBa
 	}
 
 	record.FilePath = ""
+	record.Status = DatabaseBackupStatusExpired
+	record.VerifyStatus = DatabaseBackupVerifyStatusExpired
+	record.VerifyMessage = trimText(buildBackupPrunedMessage(record.FileName), 500)
 	record.ErrorMessage = trimText(buildBackupPrunedMessage(record.FileName), 500)
 	if err := uc.backupRecordRepo.Update(ctx, record); err != nil {
 		return false, err
@@ -249,25 +305,93 @@ func (uc *UseCase) pruneBackupRecordFile(ctx context.Context, record *DatabaseBa
 	return true, nil
 }
 
-func (uc *UseCase) acquireBackupTaskRun(taskID uint) error {
+func backupRunQueuedVO(run *preparedBackupRun) *DatabaseBackupRunVO {
+	if run == nil || run.task == nil || run.record == nil {
+		return nil
+	}
+	instanceName := ""
+	if run.instance != nil {
+		instanceName = run.instance.Name
+	}
+	return &DatabaseBackupRunVO{
+		TaskID:       run.task.ID,
+		TaskName:     run.task.Name,
+		RecordID:     run.record.ID,
+		InstanceID:   run.task.InstanceID,
+		InstanceName: instanceName,
+		Status:       DatabaseBackupStatusQueued,
+		StatusText:   BackupStatusText(DatabaseBackupStatusQueued),
+		FileName:     run.fileName,
+		Message:      backupQueuedMessage,
+		TriggeredAt:  run.startedAt.Format("2006-01-02 15:04:05"),
+	}
+}
+
+func (uc *UseCase) startBackupRecordHeartbeat(ctx context.Context, record *DatabaseBackupRecord) func() {
+	if uc.backupRecordRepo == nil || record == nil || record.ID == 0 {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				now := time.Now()
+				record.LastHeartbeatAt = &now
+				_ = uc.backupRecordRepo.Update(context.Background(), record)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+func (uc *UseCase) acquireBackupTaskRun(taskID, instanceID uint) error {
 	if taskID == 0 {
 		return fmt.Errorf("备份任务不存在")
 	}
 	uc.backupRunMu.Lock()
 	defer uc.backupRunMu.Unlock()
+	if uc.backupRunningTasks == nil {
+		uc.backupRunningTasks = make(map[uint]struct{})
+	}
+	if uc.backupRunningInstances == nil {
+		uc.backupRunningInstances = make(map[uint]struct{})
+	}
 	if _, exists := uc.backupRunningTasks[taskID]; exists {
 		return fmt.Errorf("备份任务正在执行中，请稍后重试")
 	}
+	if instanceID > 0 {
+		if _, exists := uc.backupRunningInstances[instanceID]; exists {
+			return fmt.Errorf("数据库实例已有备份任务正在执行中，请稍后重试")
+		}
+	}
 	uc.backupRunningTasks[taskID] = struct{}{}
+	if instanceID > 0 {
+		uc.backupRunningInstances[instanceID] = struct{}{}
+	}
 	return nil
 }
 
-func (uc *UseCase) releaseBackupTaskRun(taskID uint) {
+func (uc *UseCase) releaseBackupTaskRun(taskID, instanceID uint) {
 	if taskID == 0 {
 		return
 	}
 	uc.backupRunMu.Lock()
 	delete(uc.backupRunningTasks, taskID)
+	if instanceID > 0 {
+		delete(uc.backupRunningInstances, instanceID)
+	}
 	uc.backupRunMu.Unlock()
 }
 
@@ -289,7 +413,7 @@ func normalizeBackupTriggerType(triggerType string) string {
 }
 
 func isBackupTaskRunningError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "备份任务正在执行中")
+	return err != nil && (strings.Contains(err.Error(), "备份任务正在执行中") || strings.Contains(err.Error(), "数据库实例已有备份任务正在执行中"))
 }
 
 func buildBackupCleanupMessage(cleanedCount int) string {

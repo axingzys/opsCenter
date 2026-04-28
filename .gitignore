@@ -31,6 +31,9 @@ go.work
 logs/
 *.log
 
+# Docker local build artifacts
+.docker-build/
+
 # Config - don't commit sensitive configuration
 config/config.yaml
 .env

@@ -23,16 +23,18 @@ type BackupSchedulerNotice struct {
 }
 
 type BackupSchedulerOptions struct {
-	Interval        time.Duration
-	CleanupInterval time.Duration
-	NotifyFailure   func(ctx context.Context, notice *BackupSchedulerNotice) error
-	Now             func() time.Time
+	Interval          time.Duration
+	CleanupInterval   time.Duration
+	MaxConcurrentRuns int
+	NotifyFailure     func(ctx context.Context, notice *BackupSchedulerNotice) error
+	Now               func() time.Time
 }
 
 type BackupScheduler struct {
 	useCase         *UseCase
 	interval        time.Duration
 	cleanupInterval time.Duration
+	runSlots        chan struct{}
 	notifyFailure   func(ctx context.Context, notice *BackupSchedulerNotice) error
 	now             func() time.Time
 
@@ -52,6 +54,10 @@ func NewBackupScheduler(useCase *UseCase, options BackupSchedulerOptions) *Backu
 	if cleanupInterval <= 0 {
 		cleanupInterval = 6 * time.Hour
 	}
+	maxConcurrentRuns := options.MaxConcurrentRuns
+	if maxConcurrentRuns <= 0 {
+		maxConcurrentRuns = 2
+	}
 	nowFn := options.Now
 	if nowFn == nil {
 		nowFn = time.Now
@@ -60,6 +66,7 @@ func NewBackupScheduler(useCase *UseCase, options BackupSchedulerOptions) *Backu
 		useCase:         useCase,
 		interval:        interval,
 		cleanupInterval: cleanupInterval,
+		runSlots:        make(chan struct{}, maxConcurrentRuns),
 		notifyFailure:   options.NotifyFailure,
 		now:             nowFn,
 	}
@@ -155,6 +162,7 @@ func (s *BackupScheduler) runOnce(ctx context.Context) {
 			)
 			continue
 		}
+		s.persistTaskNextRun(ctx, task, nextRun)
 		if !due {
 			continue
 		}
@@ -177,6 +185,15 @@ func (s *BackupScheduler) shouldRunCleanup(now time.Time) bool {
 }
 
 func (s *BackupScheduler) executeScheduledTask(ctx context.Context, taskID uint, nextRun time.Time) {
+	if !s.tryAcquireRunSlot() {
+		appLogger.Warn("数据库定时备份跳过，调度器全局并发已满",
+			zap.Uint("taskID", taskID),
+			zap.Time("scheduledAt", nextRun),
+		)
+		return
+	}
+	defer s.releaseRunSlot()
+
 	result, err := s.useCase.RunScheduledBackupTask(ctx, taskID)
 	if err != nil {
 		if isBackupTaskRunningError(err) {
@@ -208,6 +225,39 @@ func (s *BackupScheduler) executeScheduledTask(ctx context.Context, taskID uint,
 		zap.String("status", result.Status),
 		zap.String("message", result.Message),
 	)
+}
+
+func (s *BackupScheduler) tryAcquireRunSlot() bool {
+	if s == nil || s.runSlots == nil {
+		return true
+	}
+	select {
+	case s.runSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *BackupScheduler) releaseRunSlot() {
+	if s == nil || s.runSlots == nil {
+		return
+	}
+	select {
+	case <-s.runSlots:
+	default:
+	}
+}
+
+func (s *BackupScheduler) persistTaskNextRun(ctx context.Context, task *DatabaseBackupTask, nextRun time.Time) {
+	if s == nil || s.useCase == nil || s.useCase.backupTaskRepo == nil || task == nil || task.ID == 0 || nextRun.IsZero() {
+		return
+	}
+	if task.NextRunAt != nil && task.NextRunAt.Equal(nextRun) {
+		return
+	}
+	task.NextRunAt = &nextRun
+	_ = s.useCase.backupTaskRepo.Update(ctx, task)
 }
 
 func (s *BackupScheduler) runCleanupSweep(ctx context.Context) {

@@ -36,7 +36,7 @@
 5. 默认禁止 `DROP`、`TRUNCATE`、无条件 `UPDATE / DELETE`。
 
 ### B. SQL 风险识别与预检查
-1. 识别 `INSERT / UPDATE / DELETE / DDL` 等写操作类型。
+1. 识别 `INSERT / UPDATE / DELETE` 等 DML 写操作，并将 DDL 结构变更拆到独立通道。
 2. 标记 `low / medium / high / critical` 风险等级。
 3. 提供“执行前校验”结果，包括：
    - SQL 类型
@@ -122,6 +122,7 @@
 3. 从系统配置读取写开关、确认策略、影响行数限制。
 4. 审计动作补充：
    - `change_execute`
+   - `ddl_execute`
    - 后续可扩 `change_validate`
 5. 增加单元测试：
    - 禁止多语句
@@ -288,8 +289,9 @@
 在现有动作基础上新增：
 
 1. `change_execute`
-2. `backup_run`
-3. `backup_download`
+2. `ddl_execute`
+3. `backup_run`
+4. `backup_download`
 
 ## 风险分级建议
 1. `low`：只读查询、Explain、元数据导出、诊断查看。
@@ -327,20 +329,25 @@
    - SQL 控制台新增写前检查、执行确认弹窗和写结果展示
    - 查询审计页补充 `change_execute` 动作筛选及写操作详情展示
    - 系统配置页新增数据库三期配置入口，可直接管理写开关和阈值策略
-6. 已完成第 5 批第一阶段：
+6. 已补齐 DML / DDL 分层治理：
+   - DML 继续使用 `POST /api/v1/databases/instances/:id/query/write`，仅开放 `INSERT / UPDATE / DELETE`
+   - DDL 使用独立接口 `POST /api/v1/databases/instances/:id/query/ddl/validate` 和 `POST /api/v1/databases/instances/:id/query/ddl`
+   - DDL 使用独立系统开关、菜单权限、实例权限和审计动作 `ddl_execute`
+   - 首批 DDL 仅开放 `CREATE TABLE / CREATE INDEX`，`DROP / TRUNCATE / ALTER / RENAME` 默认拒绝
+7. 已完成第 5 批第一阶段：
    - 新增备份任务配置接口 `GET/POST/PUT/DELETE /api/v1/databases/backup-tasks`
    - 新增手动触发接口 `POST /api/v1/databases/backup-tasks/:id/run`
    - 新增备份记录接口 `GET /api/v1/databases/backup-records`
    - 前端数据库管理页新增“备份任务”页签，支持任务筛选、任务配置、手动触发和记录查看
    - 手动触发当前先创建待执行记录并写入统一审计，审计动作新增 `backup_run`
-7. 已完成第 6 批第一阶段：
+8. 已完成第 6 批第一阶段：
    - 手动触发已接入 MySQL / MariaDB / PostgreSQL 真实逻辑备份执行链路
    - 备份文件默认写入数据库系统配置中的本地目录，并回填文件名、文件大小、耗时和成功/失败状态
    - 新增备份下载接口 `GET /api/v1/databases/backup-records/:id/download`
    - 统一审计新增 `backup_download` 动作，下载成功和失败都会留痕
    - 前端备份记录新增文件大小与下载入口，手动触发失败后会自动刷新任务、记录和审计状态
    - 运行镜像已补数据库备份客户端依赖，后续构建的新后端镜像可直接执行逻辑备份
-8. 已完成第 7 批：
+9. 已完成第 7 批：
    - 后端新增数据库备份调度器，进程启动后会自动轮询启用且配置了 Cron 的备份任务，并按计划触发 `schedule` 方式执行
    - 手动触发与定时触发统一收口到同一条真实逻辑备份执行链路，避免两套实现分叉
    - 备份任务 Cron 校验已改为真实解析，不再只按字段数做弱校验
@@ -348,6 +355,6 @@
    - 后端进程停止时会同步停止备份调度器，避免容器退出期间继续拉起新任务
    - 定时备份失败和保留策略清理失败会复用监控插件已启用的告警通道进行失败通知；若未配置通道则只记录后端日志
    - `docker-compose.yml` 已补数据库备份目录挂载，避免镜像重建后本地备份文件丢失
-9. 下一步进入第 8 批：
+10. 下一步进入第 8 批：
    - 做 MySQL / PostgreSQL 定时备份、保留清理、下载链路的实库联调
    - 做批量回归与发布验收，包括写操作、审计、备份、下载、定时与失败告警

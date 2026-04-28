@@ -61,6 +61,11 @@ func (uc *UseCase) resolveWritePolicy(ctx context.Context) (*DatabaseWritePolicy
 	}
 
 	policy.WriteEnabled = resolved.WriteEnabled
+	policy.WriteExplainEnabled = resolved.WriteExplainEnabled
+	policy.DDLEnabled = resolved.DDLEnabled
+	policy.DDLHighRiskConfirm = resolved.DDLHighRiskConfirm
+	policy.DDLReasonRequired = resolved.DDLReasonRequired
+	policy.DDLRequireBackupHint = resolved.DDLRequireBackupHint
 	policy.HighRiskRequiresConfirm = resolved.HighRiskRequiresConfirm
 	policy.OperationReasonRequired = resolved.OperationReasonRequired
 	policy.MaxAffectedRows = normalizeMaxAffectedRows(resolved.MaxAffectedRows)
@@ -70,6 +75,11 @@ func (uc *UseCase) resolveWritePolicy(ctx context.Context) (*DatabaseWritePolicy
 func defaultDatabaseWritePolicy() *DatabaseWritePolicy {
 	return &DatabaseWritePolicy{
 		WriteEnabled:            false,
+		WriteExplainEnabled:     false,
+		DDLEnabled:              false,
+		DDLHighRiskConfirm:      true,
+		DDLReasonRequired:       true,
+		DDLRequireBackupHint:    true,
 		HighRiskRequiresConfirm: true,
 		OperationReasonRequired: true,
 		MaxAffectedRows:         defaultMaxAffectedRows,

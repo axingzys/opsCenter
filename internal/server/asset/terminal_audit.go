@@ -365,7 +365,7 @@ func (h *TerminalAuditHandler) loadRiskSummary(sessions []*assetbiz.TerminalSess
 }
 
 func (h *TerminalAuditHandler) inspectRecording(session *assetbiz.TerminalSession) (bool, string) {
-	_, err := h.recordingStore.Resolve(session.RecordingPath)
+	_, err := h.recordingStore.Validate(session.RecordingPath)
 	if err == nil {
 		return true, ""
 	}
@@ -376,16 +376,16 @@ func (h *TerminalAuditHandler) getSessionByParam(c *gin.Context) (*assetbiz.Term
 	idStr := c.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 32)
 	if err != nil {
-		response.ErrorCode(c, http.StatusBadRequest, "无效的会话ID")
+		h.writeTerminalSessionError(c, http.StatusBadRequest, "无效的会话ID")
 		return nil, false
 	}
 
 	var session assetbiz.TerminalSession
 	if err := h.db.First(&session, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			response.ErrorCode(c, http.StatusNotFound, "会话不存在")
+			h.writeTerminalSessionError(c, http.StatusNotFound, "会话不存在")
 		} else {
-			response.ErrorCode(c, http.StatusInternalServerError, "查询失败")
+			h.writeTerminalSessionError(c, http.StatusInternalServerError, "查询失败")
 		}
 		return nil, false
 	}
@@ -396,14 +396,22 @@ func (h *TerminalAuditHandler) getSessionByParam(c *gin.Context) (*assetbiz.Term
 func (h *TerminalAuditHandler) writeRecordingError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrTerminalRecordingPathEmpty):
-		response.ErrorCode(c, http.StatusNotFound, recordingIssueMessage(err))
+		h.writeTerminalSessionError(c, http.StatusNotFound, recordingIssueMessage(err))
 	case errors.Is(err, ErrTerminalRecordingMissing):
-		response.ErrorCode(c, http.StatusNotFound, recordingIssueMessage(err))
+		h.writeTerminalSessionError(c, http.StatusNotFound, recordingIssueMessage(err))
 	case errors.Is(err, ErrTerminalRecordingInvalid):
-		response.ErrorCode(c, http.StatusUnprocessableEntity, recordingIssueMessage(err))
+		h.writeTerminalSessionError(c, http.StatusUnprocessableEntity, recordingIssueMessage(err))
 	default:
-		response.ErrorCode(c, http.StatusInternalServerError, "读取录制文件失败")
+		h.writeTerminalSessionError(c, http.StatusInternalServerError, "读取录制文件失败")
 	}
+}
+
+func (h *TerminalAuditHandler) writeTerminalSessionError(c *gin.Context, httpStatus int, message string) {
+	c.AbortWithStatusJSON(httpStatus, response.Response{
+		Code:      httpStatus,
+		Message:   message,
+		Timestamp: time.Now().Unix(),
+	})
 }
 
 func formatDuration(seconds int) string {

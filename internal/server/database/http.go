@@ -30,6 +30,8 @@ const (
 	permDatabaseQueryExecute    = "database:query:execute"
 	permDatabaseQueryWrite      = "database:query:write"
 	permDatabaseQueryExplain    = "database:query:explain"
+	permDatabaseQueryWritePlan  = "database:query:write-explain"
+	permDatabaseQueryDDL        = "database:query:ddl"
 	permDatabaseQueryExport     = "database:query:export"
 	permDatabaseQueryHistory    = "database:query:history:view"
 	permDatabaseDiagnosisView   = "database:diagnosis:view"
@@ -61,6 +63,8 @@ var databaseUIPermissionCodes = map[string]string{
 	"queryExecute":               permDatabaseQueryExecute,
 	"queryWrite":                 permDatabaseQueryWrite,
 	"queryExplain":               permDatabaseQueryExplain,
+	"queryWriteExplain":          permDatabaseQueryWritePlan,
+	"queryDDL":                   permDatabaseQueryDDL,
 	"queryExport":                permDatabaseQueryExport,
 	"auditExport":                permDatabaseAuditExport,
 	"backupCreate":               permDatabaseBackupCreate,
@@ -140,6 +144,11 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 			}
 			return &dbbiz.DatabaseWritePolicy{
 				WriteEnabled:            cfg.WriteEnabled,
+				WriteExplainEnabled:     cfg.WriteExplainEnabled,
+				DDLEnabled:              cfg.DDLEnabled,
+				DDLHighRiskConfirm:      cfg.DDLHighRiskRequiresConfirm,
+				DDLReasonRequired:       cfg.DDLReasonRequired,
+				DDLRequireBackupHint:    cfg.DDLRequireBackupHint,
 				HighRiskRequiresConfirm: cfg.HighRiskRequiresConfirm,
 				OperationReasonRequired: cfg.OperationReasonRequired,
 				MaxAffectedRows:         int64(cfg.MaxAffectedRows),
@@ -169,7 +178,13 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	})
 
 	return &HTTPServer{
-		service:           dbservice.NewService(useCase, permissionRepo),
+		service: dbservice.NewService(useCase, permissionRepo, func(ctx context.Context) (string, error) {
+			cfg, err := configUseCase.GetDatabaseConfig(ctx)
+			if err != nil {
+				return "", err
+			}
+			return cfg.InstancePermissionMode, nil
+		}),
 		backupScheduler:   backupScheduler,
 		capacityScheduler: capacityScheduler,
 		authMiddleware:    authMiddleware,
@@ -241,6 +256,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/backup-tasks/:id/run", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupTask)
 		databases.GET("/backup-records", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupRecords)
 		databases.GET("/backup-records/:id/download", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDownload), s.service.DownloadBackupRecord)
+		databases.POST("/backup-records/:id/verify", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.VerifyBackupRecord)
 		databases.POST("/backup-records/:id/restore-dry-run", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreRun), s.service.RunRestoreDryRun)
 		databases.GET("/restore-jobs", s.authMiddleware.RequireMenuPermission(permDatabaseRestoreView), s.service.ListRestoreJobs)
 		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
@@ -272,7 +288,10 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.POST("/:id/capacity-snapshots", s.authMiddleware.RequireMenuPermission(permDatabaseCapacityCollect), s.service.CollectCapacitySnapshot)
 			instances.POST("/:id/query/format", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExecute), s.service.FormatQuerySQL)
 			instances.POST("/:id/query/write/validate", s.authMiddleware.RequireMenuPermission(permDatabaseQueryWrite), s.service.ValidateWriteQuery)
+			instances.POST("/:id/query/write/explain", s.authMiddleware.RequireMenuPermission(permDatabaseQueryWritePlan), s.service.ExplainWriteQuery)
 			instances.POST("/:id/query/write", s.authMiddleware.RequireMenuPermission(permDatabaseQueryWrite), s.service.ExecuteWriteQuery)
+			instances.POST("/:id/query/ddl/validate", s.authMiddleware.RequireMenuPermission(permDatabaseQueryDDL), s.service.ValidateDDLQuery)
+			instances.POST("/:id/query/ddl", s.authMiddleware.RequireMenuPermission(permDatabaseQueryDDL), s.service.ExecuteDDLQuery)
 			instances.POST("/:id/query", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExecute), s.service.ExecuteQuery)
 			instances.POST("/:id/query/explain", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExplain), s.service.ExplainQuery)
 			instances.POST("/:id/query/export", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExport), s.service.ExportQueryResult)

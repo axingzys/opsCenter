@@ -95,6 +95,12 @@ const router = createRouter({
           meta: { title: '主机管理' }
         },
         {
+          path: 'asset/connections',
+          name: 'AssetConnections',
+          component: () => import('@/views/asset/ConnectionWorkspace.vue'),
+          meta: { title: '连接工作台' }
+        },
+        {
           path: 'asset/credentials',
           name: 'AssetCredentials',
           component: () => import('@/views/asset/Credentials.vue'),

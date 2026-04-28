@@ -31,6 +31,7 @@ func TestIsSupportedWriteExecuteType(t *testing.T) {
 		{sqlType: "INSERT", want: true},
 		{sqlType: "UPDATE", want: true},
 		{sqlType: "DELETE", want: true},
+		{sqlType: "CREATE", want: false},
 		{sqlType: "ALTER", want: false},
 		{sqlType: "DROP", want: false},
 	}
@@ -39,6 +40,47 @@ func TestIsSupportedWriteExecuteType(t *testing.T) {
 		t.Run(tt.sqlType, func(t *testing.T) {
 			if got := isSupportedWriteExecuteType(tt.sqlType); got != tt.want {
 				t.Fatalf("isSupportedWriteExecuteType(%q) = %v, want %v", tt.sqlType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSupportsDDLExecution(t *testing.T) {
+	tests := []struct {
+		dbType string
+		want   bool
+	}{
+		{dbType: DBTypeMySQL, want: true},
+		{dbType: DBTypeMariaDB, want: true},
+		{dbType: DBTypePostgreSQL, want: true},
+		{dbType: DBTypeSQLServer, want: false},
+		{dbType: DBTypeRedis, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.dbType, func(t *testing.T) {
+			if got := supportsDDLExecution(tt.dbType); got != tt.want {
+				t.Fatalf("supportsDDLExecution(%q) = %v, want %v", tt.dbType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsSupportedDDLExecuteType(t *testing.T) {
+	tests := []struct {
+		sqlType string
+		want    bool
+	}{
+		{sqlType: "CREATE", want: true},
+		{sqlType: "ALTER", want: false},
+		{sqlType: "DROP", want: false},
+		{sqlType: "TRUNCATE", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sqlType, func(t *testing.T) {
+			if got := isSupportedDDLExecuteType(tt.sqlType); got != tt.want {
+				t.Fatalf("isSupportedDDLExecuteType(%q) = %v, want %v", tt.sqlType, got, tt.want)
 			}
 		})
 	}

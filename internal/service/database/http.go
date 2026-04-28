@@ -2,6 +2,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/csv"
 	"fmt"
 	"net/http"
@@ -16,12 +17,17 @@ import (
 )
 
 type Service struct {
-	useCase        *dbbiz.UseCase
-	permissionRepo dbbiz.DatabasePermissionRepo
+	useCase                *dbbiz.UseCase
+	permissionRepo         dbbiz.DatabasePermissionRepo
+	permissionModeResolver func(ctx context.Context) (string, error)
 }
 
-func NewService(useCase *dbbiz.UseCase, permissionRepo dbbiz.DatabasePermissionRepo) *Service {
-	return &Service{useCase: useCase, permissionRepo: permissionRepo}
+func NewService(useCase *dbbiz.UseCase, permissionRepo dbbiz.DatabasePermissionRepo, permissionModeResolvers ...func(ctx context.Context) (string, error)) *Service {
+	var resolver func(ctx context.Context) (string, error)
+	if len(permissionModeResolvers) > 0 {
+		resolver = permissionModeResolvers[0]
+	}
+	return &Service{useCase: useCase, permissionRepo: permissionRepo, permissionModeResolver: resolver}
 }
 
 type databasePermissionScope struct {
@@ -29,6 +35,31 @@ type databasePermissionScope struct {
 	admin      bool
 	userID     uint
 	allowedIDs []uint
+}
+
+func (s *Service) databasePermissionMode(ctx context.Context) (string, error) {
+	if s == nil || s.permissionModeResolver == nil {
+		return "compat", nil
+	}
+	mode, err := s.permissionModeResolver(ctx)
+	if err != nil {
+		return "", err
+	}
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "whitelist":
+		return "whitelist", nil
+	default:
+		return "compat", nil
+	}
+}
+
+func databasePermissionModeText(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "whitelist":
+		return "白名单模式"
+	default:
+		return "兼容模式"
+	}
 }
 
 func parseUintParam(c *gin.Context, key, name string) (uint, bool) {
@@ -54,6 +85,7 @@ func writeDatabaseError(c *gin.Context, prefix string, err error) {
 		strings.Contains(message, "表达式"),
 		strings.Contains(message, "执行中"),
 		strings.Contains(message, "后续批次"),
+		strings.Contains(message, "不支持"),
 		strings.Contains(message, "仅允许"),
 		strings.Contains(message, "禁止"),
 		strings.Contains(message, "不能"),
@@ -87,18 +119,23 @@ func (s *Service) databasePermissionScope(c *gin.Context, required uint) (*datab
 		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
 		return nil, false
 	}
-	if !hasRules {
-		return scope, true
+	mode, err := s.databasePermissionMode(c.Request.Context())
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限模式读取失败")
+		return nil, false
 	}
-	scope.enforced = true
-
 	admin, err := s.permissionRepo.IsAdmin(c.Request.Context(), scope.userID)
 	if err != nil {
 		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
 		return nil, false
 	}
-	if admin {
-		scope.admin = true
+	scope.admin = admin
+	if !hasRules && mode != "whitelist" {
+		return scope, true
+	}
+	scope.enforced = true
+
+	if scope.admin {
 		return scope, true
 	}
 
@@ -130,6 +167,38 @@ func (s *Service) ensureInstancePermission(c *gin.Context, instanceID uint, requ
 	}
 	if permissions&required == 0 {
 		response.ErrorCode(c, http.StatusForbidden, "权限不足：无权操作该数据库实例")
+		return false
+	}
+	return true
+}
+
+func (s *Service) allowUnlimitedQueryRows(c *gin.Context, instanceID uint) bool {
+	return s.allowExplicitInstancePermission(c, instanceID, dbbiz.DatabasePermissionQueryUnlimited, "权限不足：无不限行数查询权限")
+}
+
+func (s *Service) allowWriteExplainQuery(c *gin.Context, instanceID uint) bool {
+	return s.allowExplicitInstancePermission(c, instanceID, dbbiz.DatabasePermissionWriteExplain, "权限不足：无写 SQL 执行计划权限")
+}
+
+func (s *Service) allowExplicitInstancePermission(c *gin.Context, instanceID uint, required uint, deniedMessage string) bool {
+	if instanceID == 0 || s.permissionRepo == nil {
+		return false
+	}
+	userID := rbacservice.GetUserID(c)
+	if userID == 0 {
+		response.ErrorCode(c, http.StatusUnauthorized, "未登录")
+		return false
+	}
+	permissions, err := s.permissionRepo.GetUserInstancePermissions(c.Request.Context(), userID, instanceID)
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "数据库实例权限检查失败")
+		return false
+	}
+	if permissions&required == 0 {
+		if strings.TrimSpace(deniedMessage) == "" {
+			deniedMessage = "权限不足：无权操作该数据库实例"
+		}
+		response.ErrorCode(c, http.StatusForbidden, deniedMessage)
 		return false
 	}
 	return true
@@ -173,9 +242,15 @@ func (s *Service) decorateInstancePermissions(c *gin.Context, list []*dbbiz.Data
 	if len(list) == 0 {
 		return true
 	}
-	if scope == nil || !scope.enforced || scope.admin || s.permissionRepo == nil {
+	if scope == nil || scope.admin || s.permissionRepo == nil {
 		for _, item := range list {
 			item.Permissions = dbbiz.DatabasePermissionAll
+		}
+		return true
+	}
+	if !scope.enforced {
+		for _, item := range list {
+			item.Permissions = dbbiz.DatabasePermissionAll &^ (dbbiz.DatabasePermissionQueryUnlimited | dbbiz.DatabasePermissionWriteExplain | dbbiz.DatabasePermissionDDL)
 		}
 		return true
 	}
@@ -219,11 +294,25 @@ func (s *Service) ListInstancePermissions(c *gin.Context) {
 		writeDatabaseError(c, "查询失败: ", err)
 		return
 	}
+	mode, err := s.databasePermissionMode(c.Request.Context())
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	hasRules, err := s.permissionRepo.HasAnyRules(c.Request.Context())
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
 	response.Success(c, gin.H{
-		"list":     list,
-		"total":    total,
-		"page":     req.Page,
-		"pageSize": req.PageSize,
+		"list":                   list,
+		"total":                  total,
+		"page":                   req.Page,
+		"pageSize":               req.PageSize,
+		"permissionMode":         mode,
+		"permissionModeText":     databasePermissionModeText(mode),
+		"permissionModeEnforced": mode == "whitelist" || hasRules,
+		"permissionRulesEnabled": hasRules,
 	})
 }
 
@@ -707,6 +796,39 @@ func (s *Service) DownloadBackupRecord(c *gin.Context) {
 		c.Header("Content-Type", data.ContentType)
 	}
 	c.FileAttachment(data.FilePath, data.FileName)
+}
+
+// VerifyBackupRecord 手动校验备份文件
+// @Summary 手动校验备份文件
+// @Description 对成功备份记录执行文件存在性、大小和 checksum 校验，并写入统一审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Router /api/v1/databases/backup-records/{id}/verify [post]
+func (s *Service) VerifyBackupRecord(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "记录ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupRecordInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "校验失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.VerifyBackupRecord(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "校验失败: ", err)
+		return
+	}
+	response.Success(c, item)
 }
 
 // RunRestoreDryRun 发起恢复演练
@@ -1623,6 +1745,74 @@ func (s *Service) ExecuteWriteQuery(c *gin.Context) {
 	response.Success(c, data)
 }
 
+// ValidateDDLQuery 预检查 DDL 结构变更
+// @Summary 预检查 DDL 结构变更
+// @Description 对 DDL SQL 做风险识别、门禁校验和执行前确认项计算
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseDDLValidateRequest true "DDL 预检查请求"
+// @Success 200 {object} response.Response "预检查完成"
+// @Router /api/v1/databases/instances/{id}/query/ddl/validate [post]
+func (s *Service) ValidateDDLQuery(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseDDLValidateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionDDL) {
+		return
+	}
+	data, err := s.useCase.ValidateDDLQuery(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "DDL 检查失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ExecuteDDLQuery 执行 DDL 结构变更
+// @Summary 执行 DDL 结构变更
+// @Description 执行受控单条 DDL SQL，并写入统一审计
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseWriteExecuteRequest true "DDL 执行请求"
+// @Success 200 {object} response.Response "执行成功"
+// @Router /api/v1/databases/instances/{id}/query/ddl [post]
+func (s *Service) ExecuteDDLQuery(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseWriteExecuteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionDDL) {
+		return
+	}
+	data, err := s.useCase.ExecuteDDLQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "DDL 执行失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 // ExecuteQuery 执行只读 SQL 查询
 // @Summary 执行只读 SQL 查询
 // @Description 执行 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN / WITH 查询，并写入审计
@@ -1646,6 +1836,12 @@ func (s *Service) ExecuteQuery(c *gin.Context) {
 	}
 	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionQuery) {
 		return
+	}
+	if req.UnlimitedRows {
+		if !s.allowUnlimitedQueryRows(c, id) {
+			return
+		}
+		req.UnlimitedRowsPermitted = true
 	}
 	data, err := s.useCase.ExecuteQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
@@ -1690,6 +1886,45 @@ func (s *Service) ExplainQuery(c *gin.Context) {
 	})
 	if err != nil {
 		writeDatabaseError(c, "执行计划失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
+// ExplainWriteQuery 获取写 SQL 执行计划
+// @Summary 获取写 SQL 执行计划
+// @Description 对受控写 SQL 执行 EXPLAIN，并写入审计；不会执行真实写入
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param body body dbbiz.DatabaseQueryRequest true "查询请求"
+// @Success 200 {object} response.Response "执行成功"
+// @Router /api/v1/databases/instances/{id}/query/write/explain [post]
+func (s *Service) ExplainWriteQuery(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseQueryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionQuery) {
+		return
+	}
+	if !s.allowWriteExplainQuery(c, id) {
+		return
+	}
+	data, err := s.useCase.ExplainWriteQuery(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "写 SQL 执行计划失败: ", err)
 		return
 	}
 	response.Success(c, data)

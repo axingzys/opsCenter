@@ -95,6 +95,7 @@ func (uc *UseCase) ExecuteWriteQuery(ctx context.Context, instanceID uint, req *
 
 	return &DatabaseWriteExecuteVO{
 		AuditID:           audit.ID,
+		AuditAction:       DatabaseAuditActionChangeExecute,
 		InstanceID:        item.ID,
 		InstanceName:      item.Name,
 		DBType:            item.DBType,

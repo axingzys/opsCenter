@@ -6,8 +6,9 @@
         <div class="sidebar-title">
           <el-icon><Collection /></el-icon>
           <span>资产分组</span>
-          <span class="host-count">({{ allHosts.length }})</span>
+          <span class="host-count">({{ sshCapableHosts.length }})</span>
         </div>
+        <div class="sidebar-hint">仅显示支持 SSH 的主机</div>
         <div class="search-box">
           <el-input
             v-model="searchKeyword"
@@ -25,7 +26,6 @@
 
       <div class="sidebar-content">
         <el-tree
-          ref="treeRef"
           :data="filteredTreeData"
           :props="treeProps"
           :default-expand-all="false"
@@ -35,7 +35,7 @@
           class="terminal-tree"
         >
           <template #default="{ node, data }">
-            <div class="tree-node" @dblclick="handleNodeDblClick(data, node, $event)">
+            <div class="tree-node" @dblclick="handleNodeDblClick(data, $event)">
               <span class="node-icon">
                 <el-icon v-if="data.type === 'group'"><Folder /></el-icon>
                 <svg v-else class="host-svg-icon" viewBox="0 0 24 24" fill="currentColor">
@@ -81,7 +81,7 @@
               <div class="tab-content">
                 <div v-if="tab.host" class="terminal-connected">
                   <div class="terminal-body">
-                    <div :ref="el => terminalRefs[tab.id] = el" class="xterm-container"></div>
+                    <div :ref="el => setTerminalRef(tab.id, el)" class="xterm-container"></div>
                   </div>
                 </div>
                 <div v-else class="terminal-empty">
@@ -90,8 +90,8 @@
                       <path d="M20 18c1.1 0 1.99-.9 1.99-2L22 6c0-1.11-.9-2-2-2H4c-1.11 0-2 .89-2 2v10c0 1.1.89 2 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z"/>
                     </svg>
                   </div>
-                  <div class="empty-text">双击主机打开终端</div>
-                  <div class="empty-hint">在左侧资产分组中选择主机</div>
+                  <div class="empty-text">双击主机打开 SSH 终端</div>
+                  <div class="empty-hint">左侧仅显示 Linux 主机和 SSH 兼容模式的 Windows 主机</div>
                 </div>
               </div>
             </template>
@@ -104,14 +104,15 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, onBeforeUnmount } from 'vue'
-import { Collection, Search, Monitor, Folder } from '@element-plus/icons-vue'
+import type { ComponentPublicInstance } from 'vue'
+import { Collection, Search, Folder } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { Terminal } from 'xterm'
 import { FitAddon } from 'xterm-addon-fit'
 import 'xterm/css/xterm.css'
 import { getHostList } from '@/api/host'
 import { getGroupTree } from '@/api/assetGroup'
 
-const treeRef = ref()
 const searchKeyword = ref('')
 const activeTab = ref('1')
 const terminalRefs = ref<Record<string, HTMLElement>>({})
@@ -119,6 +120,16 @@ const terminals = ref<Record<string, Terminal>>({})
 const fitAddons = ref<Record<string, FitAddon>>({})
 const wss = ref<Record<string, WebSocket>>({})
 const resizeCleanups = ref<Record<string, () => void>>({})
+
+const setTerminalRef = (tabId: string, el: Element | ComponentPublicInstance | null) => {
+  if (el instanceof HTMLElement) {
+    terminalRefs.value[tabId] = el
+    return
+  }
+  if (el === null) {
+    delete terminalRefs.value[tabId]
+  }
+}
 
 // 终端标签页
 interface TerminalTab {
@@ -149,6 +160,12 @@ const treeProps = {
 // 加载分组树
 const groupTree = ref<any[]>([])
 const allHosts = ref<any[]>([])
+
+const isSSHCapableHost = (host: any) => {
+  return host?.osType !== 'windows' || host?.managementMode === 'ssh'
+}
+
+const sshCapableHosts = computed(() => allHosts.value.filter(isSSHCapableHost))
 
 const loadGroupTree = async () => {
   try {
@@ -182,8 +199,8 @@ const treeData = computed(() => {
         children: group.children ? buildTree(group.children) : []
       }
 
-      // 添加该分组下的主机
-      const groupHosts = allHosts.value.filter((h: any) => h.groupId === group.id)
+      // 添加该分组下支持 SSH 的主机
+      const groupHosts = sshCapableHosts.value.filter((h: any) => h.groupId === group.id)
       if (groupHosts.length > 0) {
         const hostNodes = groupHosts.map((host: any) => ({
           ...host,
@@ -242,18 +259,21 @@ const getStatusClass = (status: number) => {
 }
 
 // 双击节点
-const handleNodeDblClick = (data: any, node: any, event: Event) => {
+const handleNodeDblClick = (data: any, event: Event) => {
   event.preventDefault()
   event.stopPropagation()
 
   if (data.type === 'host' || (data.ip && data.port)) {
     openTerminal(data)
-  } else {
   }
 }
 
 // 打开新的终端标签页
 const openTerminal = async (host: any) => {
+  if (!isSSHCapableHost(host)) {
+    ElMessage.warning('该主机不支持 SSH 终端，请使用远程桌面或切换为 SSH 兼容模式')
+    return
+  }
 
   const tabId = Date.now().toString()
 
@@ -314,7 +334,6 @@ const initTerminal = async (tabId: string, host: any) => {
       background: '#1e1e1e',
       foreground: '#d4d4d4',
       cursor: '#d4d4d4',
-      selection: '#264f78',
       black: '#1e1e1e',
       red: '#f14c4c',
       green: '#23d18b',
@@ -431,7 +450,7 @@ const initTerminal = async (tabId: string, host: any) => {
     }
   }
 
-  ws.onerror = (error) => {
+  ws.onerror = () => {
     if (term) {
       term.writeln('\x1b[1;31m✗ 连接错误\x1b[0m')
     }
@@ -539,7 +558,7 @@ const closeTerminal = (tabId: string) => {
   }
 
   // 切换到第一个标签
-  activeTab.value = terminalTabs.value[0].id
+  activeTab.value = terminalTabs.value[0]?.id || ''
 }
 
 // 处理标签关闭
@@ -563,6 +582,10 @@ onMounted(async () => {
 
         // 为每个主机打开一个终端标签
         for (const host of hosts) {
+          if (!isSSHCapableHost(host)) {
+            ElMessage.warning(`${host.name || host.ip || '该主机'} 不支持 SSH 终端，已跳过`)
+            continue
+          }
           // 等待一下，避免同时打开多个连接
           await new Promise(resolve => setTimeout(resolve, 100))
           openTerminal(host)
@@ -639,6 +662,13 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: #858585;
   font-weight: normal;
+}
+
+.sidebar-hint {
+  color: #858585;
+  font-size: 12px;
+  line-height: 18px;
+  margin: -4px 0 10px;
 }
 
 .search-box {

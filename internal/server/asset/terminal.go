@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -121,6 +122,14 @@ func NewTerminalManager(hostUseCase *assetbiz.HostUseCase, db *gorm.DB, recordin
 	}
 }
 
+func normalizeTerminalCredentialProtocol(protocol string) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		return assetbiz.ManagementModeSSH
+	}
+	return protocol
+}
+
 func (s *TerminalSession) SetCloseReason(reason string) {
 	if reason == "" {
 		return
@@ -148,6 +157,12 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 	if err != nil {
 		return nil, fmt.Errorf("获取主机信息失败: %w", err)
 	}
+	if hostVO.OSType == assetbiz.OSTypeWindows && hostVO.ManagementMode != assetbiz.ManagementModeSSH {
+		return nil, fmt.Errorf("该 Windows 主机不支持 SSH 终端，请使用远程桌面或切换为 SSH 兼容模式")
+	}
+	if strings.TrimSpace(hostVO.SSHUser) == "" {
+		return nil, fmt.Errorf("主机未配置 SSH 用户名")
+	}
 
 	// 获取凭证（需要解密后的凭证）
 	var credential *assetbiz.Credential
@@ -159,6 +174,9 @@ func (tm *TerminalManager) CreateSession(ctx context.Context, hostID uint, userI
 		}
 	} else {
 		return nil, fmt.Errorf("主机未配置凭证")
+	}
+	if normalizeTerminalCredentialProtocol(credential.Protocol) != assetbiz.ManagementModeSSH {
+		return nil, fmt.Errorf("SSH终端需要 SSH 凭据")
 	}
 
 	// 解析私钥

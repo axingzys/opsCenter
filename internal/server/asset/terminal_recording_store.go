@@ -130,18 +130,53 @@ func (s *terminalRecordingStore) ReadValidated(recordingPath string) ([]byte, st
 	return content, resolvedPath, nil
 }
 
+func (s *terminalRecordingStore) Validate(recordingPath string) (string, error) {
+	resolvedPath, err := s.Resolve(recordingPath)
+	if err != nil {
+		return "", err
+	}
+
+	file, err := os.Open(resolvedPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", ErrTerminalRecordingMissing
+		}
+		return "", err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", err
+		}
+		return "", ErrTerminalRecordingInvalid
+	}
+	if err := validateAsciinemaCastHeader(scanner.Bytes()); err != nil {
+		return "", err
+	}
+
+	return resolvedPath, nil
+}
+
 func validateAsciinemaCast(content []byte) error {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	if !scanner.Scan() {
 		return ErrTerminalRecordingInvalid
 	}
+	if err := validateAsciinemaCastHeader(scanner.Bytes()); err != nil {
+		return err
+	}
+	return nil
+}
 
+func validateAsciinemaCastHeader(headerBytes []byte) error {
 	var header struct {
 		Version int `json:"version"`
 		Width   int `json:"width"`
 		Height  int `json:"height"`
 	}
-	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
 		return fmt.Errorf("%w: %v", ErrTerminalRecordingInvalid, err)
 	}
 	if header.Version != 2 || header.Width <= 0 || header.Height <= 0 {

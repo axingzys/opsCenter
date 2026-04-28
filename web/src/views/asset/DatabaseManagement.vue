@@ -20,112 +20,805 @@
 
     <el-tabs v-model="activeTab" class="main-tabs">
       <el-tab-pane label="实例管理" name="instances">
-        <DatabaseInstancesPanel
-          :query="query"
-          :supported-types="supportedTypes"
-          :rows="instances"
-          :loading="loading"
-          :total="total"
-          :testing-id="testingId"
-          :syncing-id="syncingId"
-          :can-test="row => canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'testEnabled')"
-          :can-sync="row => canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')"
-          :can-manage="row => hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)"
-          @load="loadInstances"
-          @reset="resetQuery"
-          @test="handleTest"
-          @sync="handleSync"
-          @toggle="toggleInstanceStatus"
-          @edit="openInstanceDialog"
-          @remove="handleDelete"
-        />
+        <div class="search-bar">
+          <div class="search-inputs">
+            <el-input
+              v-model="query.keyword"
+              placeholder="搜索实例名称、地址、默认库、业务系统..."
+              clearable
+              class="search-input"
+              @keyup.enter="loadInstances"
+              @clear="loadInstances"
+            >
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
+
+            <el-select v-model="query.dbType" placeholder="数据库类型" clearable class="search-input" @change="loadInstances">
+              <el-option v-for="item in supportedTypes" :key="item.type" :label="item.name" :value="item.type" />
+            </el-select>
+
+            <el-select v-model="query.status" placeholder="状态" clearable class="search-input" @change="loadInstances">
+              <el-option label="启用" value="enabled" />
+              <el-option label="禁用" value="disabled" />
+            </el-select>
+
+            <el-select v-model="query.environment" placeholder="环境" clearable class="search-input" @change="loadInstances">
+              <el-option label="生产" value="prod" />
+              <el-option label="预发" value="staging" />
+              <el-option label="测试" value="test" />
+              <el-option label="开发" value="dev" />
+            </el-select>
+          </div>
+          <div class="search-actions">
+            <el-button class="reset-btn" @click="resetQuery">
+              <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
+              重置
+            </el-button>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <el-table
+            :data="instances"
+            v-loading="loading"
+            stripe
+            class="modern-table"
+            :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
+          >
+            <el-table-column label="实例名称" min-width="170">
+              <template #default="{ row }">
+                <div class="instance-name">
+                  <span>{{ row.name }}</span>
+                  <el-tag v-if="row.environment" size="small" type="info">{{ environmentText(row.environment) }}</el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="130" align="center">
+              <template #default="{ row }">
+                <el-tag :type="dbTypeTag(row.dbType)">
+                  {{ row.dbTypeText || row.dbType }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="地址" min-width="220">
+              <template #default="{ row }">
+                <span class="mono">{{ row.endpoint || `${row.host}:${row.port}` }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="默认库" min-width="130">
+              <template #default="{ row }">
+                <span>{{ row.defaultDatabase || '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="业务系统" min-width="140">
+              <template #default="{ row }">
+                <span>{{ row.businessSystem || '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="负责人" min-width="110">
+              <template #default="{ row }">
+                <span>{{ row.owner || '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.status === 'enabled' ? 'success' : 'info'">
+                  {{ row.statusText || (row.status === 'enabled' ? '启用' : '禁用') }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="最近测试" width="170" align="center">
+              <template #default="{ row }">
+                {{ row.lastTestAt || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="最近同步" width="170" align="center">
+              <template #default="{ row }">
+                {{ row.lastSyncAt || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="容量增长" width="170" align="center">
+              <template #default="{ row }">
+                <div v-if="row.capacitySizeText" class="capacity-summary-cell">
+                  <span>{{ row.capacitySizeText }}</span>
+                  <el-tag size="small" :type="Number(row.capacityGrowthPercent || 0) >= 50 ? 'warning' : 'info'">
+                    {{ row.capacityGrowthText || '0 B' }}
+                  </el-tag>
+                </div>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="260" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-tooltip :content="canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'testEnabled') ? '连接测试' : '无连接测试权限或该类型暂未接入'" placement="top">
+                  <el-button link type="primary" :loading="testingId === row.id" :disabled="!canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'testEnabled')" @click="handleTest(row)">
+                    <el-icon><Connection /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip :content="canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'metadataEnabled') ? '同步结构' : '无同步权限或该类型暂未接入'" placement="top">
+                  <el-button link type="success" :loading="syncingId === row.id" :disabled="!canUseDatabaseFeature(row, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')" @click="handleSync(row)">
+                    <el-icon><Refresh /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip :content="row.status === 'enabled' ? '禁用' : '启用'" placement="top">
+                  <el-button link :type="row.status === 'enabled' ? 'warning' : 'success'" :disabled="!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)" @click="toggleInstanceStatus(row)">
+                    <el-icon><Switch /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="编辑" placement="top">
+                  <el-button link type="primary" :disabled="!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)" @click="openInstanceDialog(row)">
+                    <el-icon><Edit /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="删除" placement="top">
+                  <el-button link type="danger" :disabled="!hasDatabasePermission(row, DATABASE_PERMISSION.MANAGE)" @click="handleDelete(row)">
+                    <el-icon><Delete /></el-icon>
+                  </el-button>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+              v-model:current-page="query.page"
+              v-model:page-size="query.pageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="total"
+              layout="total, sizes, prev, pager, next, jumper"
+              @size-change="loadInstances"
+              @current-change="loadInstances"
+            />
+          </div>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane v-if="canManageInstancePermissions" label="实例权限" name="permissions">
-        <DatabaseInstancePermissionsPanel
-          :query="permissionQuery"
-          :role-options="roleOptions"
-          :instances="instances"
-          :rows="permissionRows"
-          :loading="permissionLoading"
-          :total="permissionTotal"
-          :can-manage="canManageInstancePermissions"
-          :permission-options="databasePermissionOptions"
-          @load="loadInstancePermissions"
-          @add="openPermissionDialog()"
-          @edit="openPermissionDialog"
-          @delete="handleDeletePermission"
-        />
+        <div class="backup-card">
+          <el-alert
+            :title="permissionModeAlertTitle"
+            :type="permissionMode === 'whitelist' ? 'success' : 'warning'"
+            :closable="false"
+            show-icon
+            class="permission-mode-alert"
+          />
+          <div class="backup-toolbar">
+            <div class="backup-toolbar-group">
+              <el-input
+                v-model="permissionQuery.keyword"
+                placeholder="搜索角色或实例"
+                clearable
+                class="audit-search-input"
+                @keyup.enter="loadInstancePermissions"
+                @clear="loadInstancePermissions"
+              >
+                <template #prefix>
+                  <el-icon><Search /></el-icon>
+                </template>
+              </el-input>
+              <el-select v-model="permissionQuery.roleId" placeholder="角色" clearable filterable class="audit-select" @change="loadInstancePermissions">
+                <el-option v-for="role in roleOptions" :key="role.id" :label="role.name" :value="role.id" />
+              </el-select>
+              <el-select v-model="permissionQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadInstancePermissions">
+                <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+              </el-select>
+            </div>
+            <el-button v-if="canManageInstancePermissions" type="primary" @click="openPermissionDialog()">
+              <el-icon style="margin-right: 6px;"><Plus /></el-icon>
+              添加权限
+            </el-button>
+          </div>
+
+          <el-table
+            :data="permissionRows"
+            v-loading="permissionLoading"
+            stripe
+            class="modern-table"
+            :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
+          >
+            <el-table-column label="角色" min-width="180">
+              <template #default="{ row }">
+                <div class="instance-name">
+                  <span>{{ row.roleName || '-' }}</span>
+                  <el-tag v-if="row.roleCode" size="small" type="info">{{ row.roleCode }}</el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="数据库实例" min-width="200">
+              <template #default="{ row }">{{ row.instanceName || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="权限" min-width="360">
+              <template #default="{ row }">
+                <div class="permission-tag-list">
+                  <el-tag
+                    v-for="item in databasePermissionOptions.filter(option => hasPermissionMask(row.permissions, option.value))"
+                    :key="item.value"
+                    size="small"
+                    type="primary"
+                  >
+                    {{ item.label }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="更新时间" width="170" align="center">
+              <template #default="{ row }">{{ row.updatedAt || '-' }}</template>
+            </el-table-column>
+            <el-table-column v-if="canManageInstancePermissions" label="操作" width="120" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openPermissionDialog(row)">编辑</el-button>
+                <el-button link type="danger" @click="handleDeletePermission(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+              v-model:current-page="permissionQuery.page"
+              v-model:page-size="permissionQuery.pageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="permissionTotal"
+              layout="total, sizes, prev, pager, next, jumper"
+              @size-change="loadInstancePermissions"
+              @current-change="loadInstancePermissions"
+            />
+          </div>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="结构浏览" name="schemas">
-        <DatabaseMetadataBrowserPanel
-          v-model:instance-id="metadataInstanceId"
-          v-model:detail-tab="detailTab"
-          :instances="metadataInstances"
-          :current-instance="currentMetadataInstance"
-          :can-sync="canUseDatabaseFeature(currentMetadataInstance, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')"
-          :can-export="hasDatabasePermission(currentMetadataInstance, DATABASE_PERMISSION.EXPORT)"
-          :syncing="syncingId === metadataInstanceId"
-          :schema-tree="schemaTree"
-          :schemas-loading="schemasLoading"
-          :schemas-count="schemas.length"
-          :is-redis="isRedisMetadataInstance"
-          :tables="tables"
-          :tables-loading="tablesLoading"
-          :selected-table="selectedTable"
-          :columns="columns"
-          :indexes="indexes"
-          :details-loading="detailsLoading"
-          :ddl-loading="ddlLoading"
-          :dictionary-exporting="dictionaryExporting"
-          @instance-change="handleMetadataInstanceChange"
-          @sync="handleSync"
-          @schema-click="handleSchemaClick"
-          @table-click="handleTableClick"
-          @preview-ddl="handlePreviewDDL"
-          @export-dictionary="handleExportDictionary"
-        />
+        <div class="metadata-browser">
+          <div class="metadata-toolbar">
+            <div class="metadata-selector">
+              <span class="toolbar-label">数据库实例</span>
+              <el-select
+                v-model="metadataInstanceId"
+                placeholder="请选择实例"
+                filterable
+                class="metadata-instance-select"
+                @change="handleMetadataInstanceChange"
+              >
+                <el-option
+                  v-for="item in metadataInstances"
+                  :key="item.id"
+                  :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                  :value="item.id"
+                />
+              </el-select>
+              <el-tag v-if="currentMetadataInstance?.lastSyncAt" type="success">
+                最近同步：{{ currentMetadataInstance.lastSyncAt }}
+              </el-tag>
+              <el-tag v-else type="info">未同步</el-tag>
+            </div>
+            <el-button
+              type="primary"
+              :disabled="!metadataInstanceId || !canUseDatabaseFeature(currentMetadataInstance, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')"
+              :loading="syncingId === metadataInstanceId"
+              @click="handleSync()"
+            >
+              <el-icon style="margin-right: 6px;"><Refresh /></el-icon>
+              同步元数据
+            </el-button>
+          </div>
+
+          <div v-if="!metadataInstanceId" class="metadata-empty">
+            <el-empty description="请先选择一个数据库实例" :image-size="82" />
+          </div>
+          <div v-else class="metadata-content">
+            <div class="schema-panel">
+              <div class="panel-title">
+                <el-icon><Coin /></el-icon>
+                <span>{{ isRedisMetadataInstance ? '逻辑 DB' : '库 / Schema' }}</span>
+              </div>
+              <el-tree
+                v-loading="schemasLoading"
+                :data="schemaTree"
+                node-key="id"
+                default-expand-all
+                highlight-current
+                class="schema-tree"
+                @node-click="handleSchemaClick"
+              >
+                <template #default="{ data }">
+                  <span class="schema-node">
+                    <span class="schema-node-name">{{ data.label }}</span>
+                    <el-tag size="small" type="info">{{ data.tableCount }}</el-tag>
+                  </span>
+                </template>
+              </el-tree>
+              <el-empty v-if="!schemasLoading && schemas.length === 0" description="暂无元数据，请先同步" :image-size="64" />
+            </div>
+
+            <div class="table-panel">
+              <div class="panel-title">
+                <el-icon><Grid /></el-icon>
+                <span>{{ isRedisMetadataInstance ? 'Key 列表' : '表 / 视图' }}</span>
+              </div>
+              <el-table
+                :data="tables"
+                v-loading="tablesLoading"
+                stripe
+                height="520"
+                highlight-current-row
+                class="metadata-table"
+                @row-click="handleTableClick"
+                @row-contextmenu="handleTableContextMenu"
+              >
+                <template v-if="isRedisMetadataInstance">
+                  <el-table-column label="Key" min-width="240" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="table-name-cell">
+                        <span>{{ row.tableName }}</span>
+                        <el-tag v-if="row.tableType" size="small" type="success">{{ row.tableType }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="TTL" width="120">
+                    <template #default="{ row }">{{ row.ttlText || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="内存" width="110" align="right">
+                    <template #default="{ row }">{{ formatBytes(row.dataSizeBytes) }}</template>
+                  </el-table-column>
+                  <el-table-column label="长度" width="100" align="right">
+                    <template #default="{ row }">{{ formatNumber(row.rowCount) }}</template>
+                  </el-table-column>
+                  <el-table-column label="节点" min-width="150" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.nodeAddress || '-' }}</template>
+                  </el-table-column>
+                </template>
+                <template v-else>
+                <el-table-column label="名称" min-width="190">
+                  <template #default="{ row }">
+                    <div class="table-name-cell">
+                      <span>{{ row.tableName }}</span>
+                      <el-tag v-if="row.tableType" size="small" type="info">{{ row.tableType }}</el-tag>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="引擎" width="100">
+                  <template #default="{ row }">{{ row.engine || '-' }}</template>
+                </el-table-column>
+                <el-table-column label="行数估算" width="110" align="right">
+                  <template #default="{ row }">{{ formatNumber(row.rowCount) }}</template>
+                </el-table-column>
+                <el-table-column label="容量" width="110" align="right">
+                  <template #default="{ row }">{{ formatBytes((row.dataSizeBytes || 0) + (row.indexSizeBytes || 0)) }}</template>
+                </el-table-column>
+                </template>
+              </el-table>
+            </div>
+
+            <div class="detail-panel">
+              <div class="panel-title detail-panel-title">
+                <div class="detail-panel-heading">
+                  <el-icon><Tickets /></el-icon>
+                  <span>{{ selectedTable?.tableName || (isRedisMetadataInstance ? 'Key 属性' : '字段 / 索引') }}</span>
+                </div>
+                <div v-if="selectedTable && !isRedisMetadataInstance" class="detail-panel-actions">
+                  <el-button link type="primary" :loading="ddlLoading" @click="handlePreviewDDL">
+                    查看 DDL
+                  </el-button>
+                  <el-button link type="primary" :loading="dictionaryExporting" :disabled="!hasDatabasePermission(currentMetadataInstance, DATABASE_PERMISSION.EXPORT)" @click="handleExportDictionary">
+                    <el-icon style="margin-right: 4px;"><Download /></el-icon>
+                    导出字典
+                  </el-button>
+                </div>
+              </div>
+              <el-empty v-if="!selectedTable" :description="isRedisMetadataInstance ? '请选择一个 Key 查看属性' : '请选择一张表查看字段和索引'" :image-size="72" />
+              <div v-else>
+                <div class="table-overview-cards">
+                  <div class="table-overview-card">
+                    <span class="summary-label">对象类型</span>
+                    <strong>{{ selectedTable.tableType || '-' }}</strong>
+                  </div>
+                  <div class="table-overview-card">
+                    <span class="summary-label">{{ isRedisMetadataInstance ? 'TTL' : '行数估算' }}</span>
+                    <strong>{{ isRedisMetadataInstance ? (selectedTable.ttlText || '-') : formatNumber(selectedTable.rowCount) }}</strong>
+                  </div>
+                  <div class="table-overview-card">
+                    <span class="summary-label">{{ isRedisMetadataInstance ? '内存占用' : '数据容量' }}</span>
+                    <strong>{{ formatBytes(selectedTable.dataSizeBytes) }}</strong>
+                  </div>
+                  <div class="table-overview-card">
+                    <span class="summary-label">{{ isRedisMetadataInstance ? '编码 / 节点' : '索引容量' }}</span>
+                    <strong>{{ isRedisMetadataInstance ? (selectedTable.encoding || selectedTable.nodeAddress || '-') : formatBytes(selectedTable.indexSizeBytes) }}</strong>
+                  </div>
+                </div>
+                <div v-if="isRedisMetadataInstance">
+                  <el-table :data="columns" v-loading="detailsLoading" stripe height="470" class="metadata-table">
+                    <el-table-column label="属性" prop="columnName" width="140" />
+                    <el-table-column label="值" min-width="220" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.defaultValue || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="说明" min-width="180" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.comment || '-' }}</template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+                <el-tabs v-else v-model="detailTab" class="detail-tabs">
+                  <el-tab-pane label="字段" name="columns">
+                  <el-table :data="columns" v-loading="detailsLoading" stripe height="470" class="metadata-table">
+                    <el-table-column label="#" prop="ordinalPosition" width="54" align="center" />
+                    <el-table-column label="字段" min-width="150">
+                      <template #default="{ row }">
+                        <div class="column-name-cell">
+                          <span>{{ row.columnName }}</span>
+                          <el-tag v-if="row.isSensitive" size="small" type="danger">敏感</el-tag>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="类型" prop="dataType" min-width="150" />
+                    <el-table-column label="可空" width="70" align="center">
+                      <template #default="{ row }">{{ row.isNullable ? '是' : '否' }}</template>
+                    </el-table-column>
+                    <el-table-column label="键" width="80" align="center">
+                      <template #default="{ row }">{{ row.columnKey || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="默认值" min-width="120">
+                      <template #default="{ row }">{{ row.defaultValue || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="注释" min-width="160">
+                      <template #default="{ row }">{{ row.comment || '-' }}</template>
+                    </el-table-column>
+                  </el-table>
+                  </el-tab-pane>
+                  <el-tab-pane label="索引" name="indexes">
+                  <el-table :data="indexes" v-loading="detailsLoading" stripe height="470" class="metadata-table">
+                    <el-table-column label="索引名" prop="indexName" min-width="150" />
+                    <el-table-column label="字段" prop="columns" min-width="180" />
+                    <el-table-column label="类型" width="110">
+                      <template #default="{ row }">{{ row.indexType || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="唯一" width="80" align="center">
+                      <template #default="{ row }">
+                        <el-tag :type="row.isUnique ? 'success' : 'info'" size="small">{{ row.isUnique ? '是' : '否' }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="基数" width="100" align="right">
+                      <template #default="{ row }">{{ formatNumber(row.cardinality) }}</template>
+                    </el-table-column>
+                    <el-table-column label="注释" min-width="140">
+                      <template #default="{ row }">{{ row.comment || '-' }}</template>
+                    </el-table-column>
+                  </el-table>
+                  </el-tab-pane>
+                </el-tabs>
+              </div>
+            </div>
+          </div>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="SQL 控制台" name="query">
-        <DatabaseSqlConsolePanel
-          v-model:instance-id="queryInstanceId"
-          v-model:schema-name="querySchemaName"
-          v-model:limit="queryLimit"
-          v-model:timeout-seconds="queryTimeoutSeconds"
-          v-model:export-limit="queryExportLimit"
-          v-model:sql-text="querySQL"
-          :alert-title="queryConsoleAlert"
-          :instances="queryInstances"
-          :schemas="querySchemas"
-          :schema-placeholder="querySchemaPlaceholder"
-          :editor-placeholder="queryEditorPlaceholder"
-          :current-instance="currentQueryInstance"
-          :is-redis="isRedisQueryInstance"
-          :can-query="canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')"
-          :can-write="canWriteCurrentQueryInstance"
-          :can-export="canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')"
-          :running="queryRunning"
-          :formatting="queryFormatting"
-          :explaining="queryExplaining"
-          :write-checking="queryWriteChecking"
-          :write-preparing="queryWritePreparing"
-          :exporting="queryExporting"
-          :history-loading="queryHistoryLoading"
-          :query-result="queryResult"
-          :write-check-result="writeCheckResult"
-          :write-result="writeResult"
-          @instance-change="handleQueryInstanceChange"
-          @execute="executeQuery"
-          @format-query="handleFormatQuery"
-          @explain="handleExplainQuery"
-          @validate-write="handleValidateWriteQuery"
-          @prepare-write="handlePrepareWriteExecute"
-          @export-query="handleExportQuery"
-          @open-history="openQueryHistory"
-          @reset="resetQueryConsole"
-        />
+        <div class="query-console">
+          <el-alert
+            :title="queryConsoleAlert"
+            type="info"
+            show-icon
+            :closable="false"
+          />
+
+          <div v-if="!isRedisQueryInstance" class="database-write-policy-bar">
+            <div class="database-write-switch">
+              <span class="query-option-label">写操作总开关</span>
+              <el-switch
+                v-model="databaseConfig.writeEnabled"
+                :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
+                :disabled="!canManageInstancePermissions"
+                active-text="开启"
+                inactive-text="关闭"
+                :before-change="handleBeforeDatabaseWriteToggle"
+              />
+            </div>
+            <el-tag :type="databaseConfig.writeEnabled ? 'success' : 'warning'">
+              {{ databaseConfig.writeEnabled ? '写操作可进入预检查' : '写操作会被统一拦截' }}
+            </el-tag>
+            <div class="database-write-switch">
+              <span class="query-option-label">写 SQL 计划</span>
+              <el-switch
+                v-model="databaseConfig.writeExplainEnabled"
+                :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
+                :disabled="!canManageInstancePermissions"
+                active-text="开启"
+                inactive-text="关闭"
+                :before-change="handleBeforeDatabaseWriteExplainToggle"
+              />
+            </div>
+            <el-tag :type="databaseConfig.writeExplainEnabled ? 'success' : 'info'">
+              {{ databaseConfig.writeExplainEnabled ? '可查看写 SQL 执行计划' : '写 SQL 计划关闭' }}
+            </el-tag>
+            <div class="database-write-switch">
+              <span class="query-option-label">DDL 变更</span>
+              <el-switch
+                v-model="databaseConfig.ddlEnabled"
+                :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
+                :disabled="!canManageInstancePermissions"
+                active-text="开启"
+                inactive-text="关闭"
+                :before-change="handleBeforeDatabaseDDLToggle"
+              />
+            </div>
+            <el-tag :type="databaseConfig.ddlEnabled ? 'danger' : 'info'">
+              {{ databaseConfig.ddlEnabled ? 'DDL 可进入结构变更' : 'DDL 结构变更关闭' }}
+            </el-tag>
+            <el-tag v-if="!canManageInstancePermissions" type="info">仅管理员可切换</el-tag>
+            <el-tag :type="databaseConfig.highRiskRequiresConfirm ? 'warning' : 'info'">
+              {{ databaseConfig.highRiskRequiresConfirm ? '高风险需二次确认' : '高风险不强制确认' }}
+            </el-tag>
+            <el-tag :type="databaseConfig.operationReasonRequired ? 'warning' : 'info'">
+              {{ databaseConfig.operationReasonRequired ? '操作原因必填' : '操作原因选填' }}
+            </el-tag>
+            <el-tag type="info">影响阈值 {{ formatNumber(databaseConfig.maxAffectedRows) }} 行</el-tag>
+            <el-button link type="primary" :loading="databaseWriteConfigLoading" @click="loadDatabaseWriteConfig">
+              刷新
+            </el-button>
+          </div>
+
+          <div class="query-toolbar">
+            <el-select
+              v-model="queryInstanceId"
+              placeholder="请选择实例"
+              filterable
+              class="query-select"
+              @change="handleQueryInstanceChange"
+            >
+              <el-option
+                v-for="item in queryInstances"
+                :key="item.id"
+                :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                :value="item.id"
+              />
+            </el-select>
+            <el-select v-model="querySchemaName" :placeholder="querySchemaPlaceholder" clearable filterable class="query-select">
+              <el-option v-for="item in querySchemas" :key="item.schemaName" :label="item.schemaName" :value="item.schemaName" />
+            </el-select>
+            <span class="query-option-label">最大行数</span>
+            <el-input-number v-model="queryLimit" :min="1" :max="500" :step="50" class="query-number" :disabled="queryUnlimitedRows" />
+            <el-switch
+              v-if="!isRedisQueryInstance && canUseQueryUnlimitedRows"
+              v-model="queryUnlimitedRows"
+              active-text="不限行数"
+              inactive-text="限制行数"
+            />
+            <span class="query-option-label">超时秒数</span>
+            <el-input-number v-model="queryTimeoutSeconds" :min="1" :max="30" class="query-number" />
+            <span class="query-option-label">导出上限</span>
+            <el-input-number v-model="queryExportLimit" :min="1" :max="5000" :step="100" class="query-number" />
+            <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="executeQuery()">
+              {{ isRedisQueryInstance ? '执行命令' : '执行查询' }}
+            </el-button>
+            <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleFormatQuery">
+              {{ isRedisQueryInstance ? '格式化命令' : '格式化 SQL' }}
+            </el-button>
+            <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleExplainQuery">
+              执行计划
+            </el-button>
+            <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryWriteChecking" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handleValidateWriteQuery">
+              写前检查
+            </el-button>
+            <el-button v-if="!isRedisQueryInstance" type="danger" plain :loading="queryWritePreparing" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handlePrepareWriteExecute">
+              受控写入
+            </el-button>
+            <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryDDLChecking" :disabled="!queryInstanceId || !canDDLCurrentQueryInstance" @click="handleValidateDDLQuery">
+              DDL 检查
+            </el-button>
+            <el-button v-if="!isRedisQueryInstance" type="danger" :loading="queryDDLPreparing" :disabled="!queryInstanceId || !canDDLCurrentQueryInstance" @click="handlePrepareDDLExecute">
+              DDL 执行
+            </el-button>
+            <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')" @click="handleExportQuery">
+              <el-icon style="margin-right: 4px;"><Download /></el-icon>
+              导出结果
+            </el-button>
+            <el-button type="primary" plain :loading="queryHistoryLoading" @click="openQueryHistory">
+              最近历史
+            </el-button>
+            <el-button @click="resetQueryConsole">清空</el-button>
+          </div>
+
+          <el-input
+            v-model="querySQL"
+            type="textarea"
+            :rows="10"
+            class="sql-editor"
+            :placeholder="queryEditorPlaceholder"
+          />
+
+          <div class="query-hints">
+            <template v-if="isRedisQueryInstance">
+              <el-tag size="small">只读命令</el-tag>
+              <el-tag size="small" type="success">SCAN 自动 COUNT</el-tag>
+              <el-tag size="small" type="primary">命令格式化</el-tag>
+              <el-tag size="small" type="warning">CSV 导出</el-tag>
+              <el-tag size="small" type="danger">禁止写命令</el-tag>
+            </template>
+            <template v-else>
+              <el-tag size="small">只读</el-tag>
+              <el-tag size="small" type="danger">受控写入</el-tag>
+              <el-tag size="small" type="success">自动 LIMIT</el-tag>
+              <el-tag v-if="canUseQueryUnlimitedRows" size="small" type="danger">可不限行数</el-tag>
+              <el-tag size="small" type="primary">SQL 格式化</el-tag>
+              <el-tag size="small" type="warning">执行计划 / CSV 导出</el-tag>
+              <el-tag size="small" type="warning">禁止多语句</el-tag>
+              <el-tag size="small" type="warning">原因 / 高风险确认</el-tag>
+            </template>
+            <span>当前实例：{{ currentQueryInstance?.name || '-' }}</span>
+          </div>
+
+	          <div v-if="writeResult" class="query-result">
+	            <div class="result-summary">
+	              <div class="summary-card">
+	                <span class="summary-label">{{ isDDLWriteResult ? '结构变更' : '影响行数' }}</span>
+	                <strong>{{ isDDLWriteResult ? '已执行' : writeResult.rowsAffected }}</strong>
+	              </div>
+              <div class="summary-card">
+                <span class="summary-label">耗时</span>
+                <strong>{{ writeResult.durationMs }} ms</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">SQL 类型</span>
+                <strong>{{ writeResult.sqlType }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">风险等级</span>
+                <strong>{{ writeResult.riskLevelText }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">审计 ID</span>
+                <strong>{{ writeResult.auditId }}</strong>
+              </div>
+	              <div class="summary-card">
+	                <span class="summary-label">{{ isDDLWriteResult ? '执行通道' : '影响阈值' }}</span>
+	                <strong>{{ isDDLWriteResult ? 'DDL' : writeResult.rowsAffectedLimit }}</strong>
+	              </div>
+	            </div>
+	            <el-alert
+	              :title="writeResult.message || (isDDLWriteResult ? 'DDL 结构变更执行完成' : '写操作执行完成')"
+	              type="success"
+              show-icon
+              :closable="false"
+            />
+            <el-alert
+              v-if="writeResult.executedSql"
+              :title="`实际执行 SQL：${writeResult.executedSql}`"
+              type="warning"
+              show-icon
+              :closable="false"
+              class="executed-sql-alert"
+            />
+            <div class="write-meta-tags">
+              <el-tag :type="riskLevelTag(writeResult.riskLevel)">{{ writeResult.riskLevelText }}</el-tag>
+              <el-tag v-if="writeResult.reason" type="info">原因：{{ writeResult.reason }}</el-tag>
+              <el-tag v-if="writeResult.confirmRequired" :type="writeResult.confirmed ? 'success' : 'warning'">
+                {{ writeResult.confirmed ? '已确认执行' : '未确认' }}
+              </el-tag>
+            </div>
+            <div v-if="writeResult.rollbackSql" class="audit-sql-block">
+              <div class="audit-sql-title">回滚 SQL / 恢复提示</div>
+              <pre>{{ writeResult.rollbackSql }}</pre>
+            </div>
+          </div>
+          <div v-else-if="ddlCheckResult" class="query-result">
+            <div class="result-summary">
+              <div class="summary-card">
+                <span class="summary-label">DDL 检查</span>
+                <strong>{{ ddlCheckResult.allowed ? '通过' : '未通过' }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">SQL 类型</span>
+                <strong>{{ ddlCheckResult.sqlType }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">风险等级</span>
+                <strong>{{ ddlCheckResult.riskLevelText }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">备份提示</span>
+                <strong>{{ ddlCheckResult.backupRequired ? '需要' : '不要求' }}</strong>
+              </div>
+            </div>
+            <el-alert
+              :title="ddlCheckResult.message || 'DDL 结构变更检查完成'"
+              :type="ddlCheckResult.allowed ? 'success' : 'warning'"
+              show-icon
+              :closable="false"
+            />
+            <div class="write-meta-tags">
+              <el-tag :type="riskLevelTag(ddlCheckResult.riskLevel)">{{ ddlCheckResult.riskLevelText }}</el-tag>
+              <el-tag :type="ddlCheckResult.reasonRequired ? 'warning' : 'info'">
+                {{ ddlCheckResult.reasonRequired ? '执行时必须填写原因' : '原因非必填' }}
+              </el-tag>
+              <el-tag :type="ddlCheckResult.confirmRequired ? 'danger' : 'success'">
+                {{ ddlCheckResult.confirmRequired ? '执行前需二次确认' : '无需二次确认' }}
+              </el-tag>
+              <el-tag v-if="ddlCheckResult.backupRequired" type="warning">建议先确认备份</el-tag>
+            </div>
+          </div>
+          <div v-else-if="writeCheckResult" class="query-result">
+            <div class="result-summary">
+              <div class="summary-card">
+                <span class="summary-label">预检查结果</span>
+                <strong>{{ writeCheckResult.allowed ? '通过' : '未通过' }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">SQL 类型</span>
+                <strong>{{ writeCheckResult.sqlType }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">风险等级</span>
+                <strong>{{ writeCheckResult.riskLevelText }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">影响阈值</span>
+                <strong>{{ writeCheckResult.rowsAffectedLimit }}</strong>
+              </div>
+            </div>
+            <el-alert
+              :title="writeCheckResult.message || '写操作预检查完成'"
+              :type="writeCheckResult.allowed ? 'success' : 'warning'"
+              show-icon
+              :closable="false"
+            />
+            <div class="write-meta-tags">
+              <el-tag :type="riskLevelTag(writeCheckResult.riskLevel)">{{ writeCheckResult.riskLevelText }}</el-tag>
+              <el-tag :type="writeCheckResult.reasonRequired ? 'warning' : 'info'">
+                {{ writeCheckResult.reasonRequired ? '执行时必须填写原因' : '原因非必填' }}
+              </el-tag>
+              <el-tag :type="writeCheckResult.confirmRequired ? 'danger' : 'success'">
+                {{ writeCheckResult.confirmRequired ? '执行前需二次确认' : '无需二次确认' }}
+              </el-tag>
+            </div>
+          </div>
+          <div v-else-if="queryResult" class="query-result">
+            <div class="result-summary">
+              <div class="summary-card">
+                <span class="summary-label">返回行数</span>
+                <strong>{{ queryResult.rowsReturned }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">耗时</span>
+                <strong>{{ queryResult.durationMs }} ms</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">{{ isRedisQueryInstance ? '命令类型' : 'SQL 类型' }}</span>
+                <strong>{{ queryResult.sqlType }}</strong>
+              </div>
+              <div class="summary-card">
+                <span class="summary-label">审计 ID</span>
+                <strong>{{ queryResult.auditId }}</strong>
+              </div>
+              <el-tag v-if="queryResult.truncated" type="warning">结果已截断</el-tag>
+              <el-tag v-if="queryUnlimitedRows" type="danger">不限行数</el-tag>
+              <el-tag v-if="queryResult.cellTruncated" type="warning">字段已截断</el-tag>
+              <el-tag v-if="queryResult.cellsMasked" type="info">敏感字段已脱敏</el-tag>
+              <el-tag v-if="queryResult.binaryPreviewed" type="info">二进制已预览</el-tag>
+            </div>
+            <el-alert
+              v-if="queryResult.executedSql"
+              :title="`${isRedisQueryInstance ? '实际执行命令' : '实际执行 SQL'}：${queryResult.executedSql}`"
+              type="success"
+              show-icon
+              :closable="false"
+              class="executed-sql-alert"
+            />
+            <el-table :data="queryResult.rows || []" border stripe height="420" class="query-result-table">
+              <el-table-column
+                v-for="column in queryResult.columns || []"
+                :key="column"
+                :prop="column"
+                :label="column"
+                min-width="150"
+                show-overflow-tooltip
+              >
+                <template #default="{ row }">
+                  <span class="query-cell">{{ formatQueryCell(row[column]) }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <el-empty v-else :description="isRedisQueryInstance ? '执行 Redis 只读命令后在这里查看结果' : '执行只读 SQL、写前检查或受控写入后在这里查看结果'" :image-size="80" />
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="诊断" name="diagnosis">
@@ -384,25 +1077,170 @@
       </el-tab-pane>
 
       <el-tab-pane label="拓扑" name="topology">
-        <DatabaseTopologyPanel
-          v-model:instance-id="topologyInstanceId"
-          :instances="topologyInstances"
-          :current-instance="currentTopologyInstance"
-          :result="topologyResult"
-          :loading="topologyLoading"
-          @instance-change="handleTopologyInstanceChange"
-          @load="loadTopology"
-        />
+        <div class="topology-panel">
+          <el-alert
+            title="四期第 1 批支持 Redis Cluster / MongoDB ReplicaSet / Elasticsearch / OpenSearch 的只读拓扑查询，并写入统一审计。"
+            type="info"
+            show-icon
+            :closable="false"
+          />
+
+          <div class="metadata-toolbar">
+            <div class="metadata-selector">
+              <span class="toolbar-label">数据库实例</span>
+              <el-select
+                v-model="topologyInstanceId"
+                placeholder="请选择拓扑实例"
+                filterable
+                class="metadata-instance-select"
+                @change="handleTopologyInstanceChange"
+              >
+                <el-option
+                  v-for="item in topologyInstances"
+                  :key="item.id"
+                  :label="`${item.name}（${item.dbTypeText || item.dbType} / ${item.endpoint || `${item.host}:${item.port}`}）`"
+                  :value="item.id"
+                />
+              </el-select>
+              <el-tag v-if="currentTopologyInstance?.dbTypeText" type="success">
+                {{ currentTopologyInstance.dbTypeText }}
+              </el-tag>
+            </div>
+            <el-button type="primary" :disabled="!topologyInstanceId" :loading="topologyLoading" @click="loadTopology">
+              刷新拓扑
+            </el-button>
+          </div>
+
+          <div v-if="!topologyInstanceId" class="metadata-empty">
+            <el-empty description="请先选择 Redis、MongoDB、Elasticsearch 或 OpenSearch 实例" :image-size="82" />
+          </div>
+          <div v-else class="topology-content" v-loading="topologyLoading">
+            <el-empty v-if="!topologyResult" description="点击刷新拓扑后查看结果" :image-size="82" />
+            <template v-else>
+              <div class="table-overview-cards diagnosis-cards">
+                <div v-for="card in topologyResult.cards || []" :key="card.key" class="table-overview-card">
+                  <span class="summary-label">{{ card.label }}</span>
+                  <strong>{{ card.value || '-' }}</strong>
+                  <div class="diagnosis-card-desc">{{ card.description }}</div>
+                </div>
+              </div>
+
+              <el-alert
+                v-if="topologyResult.message"
+                :title="topologyResult.message"
+                type="success"
+                show-icon
+                :closable="false"
+                class="topology-message"
+              />
+
+              <div class="topology-grid">
+                <div class="topology-section">
+                  <div class="panel-title">
+                    <span>拓扑节点</span>
+                    <el-tag size="small" type="info">{{ topologyResult.nodes?.length || 0 }}</el-tag>
+                  </div>
+                  <el-table :data="topologyResult.nodes || []" stripe height="360" class="modern-table">
+                    <el-table-column label="节点" min-width="150" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.name || row.id || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="角色" width="130">
+                      <template #default="{ row }">
+                        <el-tag size="small" :type="topologyRoleTag(row.role)">{{ row.roleText || row.role || '-' }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="地址" min-width="170" show-overflow-tooltip>
+                      <template #default="{ row }"><span class="mono">{{ row.address || '-' }}</span></template>
+                    </el-table-column>
+                    <el-table-column label="状态" width="110">
+                      <template #default="{ row }">
+                        <el-tag size="small" :type="topologyStateTag(row.state)">{{ row.state || '-' }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="Slots / 延迟" min-width="180" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.slots || row.lagText || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="版本" width="130">
+                      <template #default="{ row }">{{ row.version || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="备注" min-width="180" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.message || '-' }}</template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+
+                <div class="topology-section">
+                  <div class="panel-title">
+                    <span>复制关系</span>
+                    <el-tag size="small" type="info">{{ topologyResult.links?.length || 0 }}</el-tag>
+                  </div>
+                  <el-table :data="topologyResult.links || []" stripe height="360" class="modern-table">
+                    <el-table-column label="源节点" prop="source" min-width="160" show-overflow-tooltip />
+                    <el-table-column label="目标节点" prop="target" min-width="160" show-overflow-tooltip />
+                    <el-table-column label="关系" width="120">
+                      <template #default="{ row }">{{ row.label || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="状态" width="120">
+                      <template #default="{ row }">{{ row.state || '-' }}</template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+              </div>
+
+              <div v-if="topologyResult.shards?.length" class="topology-section">
+                <div class="panel-title">
+                  <span>索引分片</span>
+                  <el-tag size="small" type="warning">{{ topologyResult.shards.length }}</el-tag>
+                </div>
+                <el-table :data="topologyResult.shards" stripe height="420" class="modern-table">
+                  <el-table-column label="索引" prop="index" min-width="220" show-overflow-tooltip />
+                  <el-table-column label="分片" prop="shard" width="90" align="center" />
+                  <el-table-column label="主副" width="90" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="row.primary ? 'success' : 'info'">{{ row.primary ? '主' : '副' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="120">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="topologyStateTag(row.state)">{{ row.state || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="节点" prop="node" min-width="160" show-overflow-tooltip />
+                  <el-table-column label="地址" prop="address" min-width="140" show-overflow-tooltip />
+                  <el-table-column label="文档数" width="120" align="right">
+                    <template #default="{ row }">{{ formatNumber(row.docs) }}</template>
+                  </el-table-column>
+                  <el-table-column label="容量" width="120" align="right">
+                    <template #default="{ row }">{{ formatBytes(row.storeBytes) }}</template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </template>
+          </div>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="备份任务" name="backup">
         <div class="backup-panel">
           <el-alert
-            title="当前已支持 MySQL / MariaDB / PostgreSQL / Redis 逻辑备份执行、定时调度、保留策略清理、文件下载和统一审计。PostgreSQL 支持 Plain SQL 与 Custom 两种格式，备份文件默认写入系统配置中的数据库备份目录。"
-            type="info"
+            title="当前备份任务为逻辑全量备份链路，适合小库、临时导出、迁移和恢复演练；暂不支持 PITR，不建议作为大库生产主备份方案。"
+            type="warning"
             show-icon
             :closable="false"
           />
+          <el-alert
+            v-if="backupLargeWarnings.length"
+            :title="`发现 ${backupLargeWarnings.length} 个大库逻辑全量风险任务，建议后续按专项方案改造为物理备份 + binlog/WAL 连续归档。`"
+            type="error"
+            show-icon
+            :closable="false"
+          >
+            <div class="backup-risk-list">
+              <span v-for="item in backupLargeWarnings.slice(0, 3)" :key="item.id">
+                {{ item.name }}：{{ item.largeDataWarningText }}
+              </span>
+            </div>
+          </el-alert>
 
           <div class="backup-card">
             <div class="panel-title">
@@ -485,17 +1323,43 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="类型" width="120" align="center">
-                <template #default="{ row }">{{ row.backupTypeText || row.backupType || '-' }}</template>
+              <el-table-column label="策略" min-width="190">
+                <template #default="{ row }">
+                  <div class="backup-task-meta">
+                    <span>{{ row.strategyText || row.backupTypeText || row.backupType || '-' }}</span>
+                    <el-tag size="small" type="info">{{ row.restoreCapabilityText || '仅逻辑恢复' }}</el-tag>
+                  </div>
+                </template>
               </el-table-column>
-              <el-table-column label="计划" min-width="140">
+              <el-table-column label="PITR" width="130" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="row.pitrSupported ? 'success' : 'info'" size="small">
+                    {{ row.pitrStatusText || '不支持 PITR' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="容量提示" min-width="170">
+                <template #default="{ row }">
+                  <el-tooltip v-if="row.largeDataWarning" :content="row.largeDataWarningText" placement="top">
+                    <el-tag type="danger" size="small">{{ row.instanceCapacitySizeText || '大库风险' }}</el-tag>
+                  </el-tooltip>
+                  <span v-else>{{ row.instanceCapacitySizeText || '-' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="计划" min-width="150">
                 <template #default="{ row }">{{ row.schedule || '仅手动' }}</template>
+              </el-table-column>
+              <el-table-column label="下次执行" width="170">
+                <template #default="{ row }">{{ row.nextRunAt || '-' }}</template>
               </el-table-column>
               <el-table-column label="保留天数" width="100" align="right">
                 <template #default="{ row }">{{ row.retentionDays }}</template>
               </el-table-column>
               <el-table-column label="最近执行" width="170">
                 <template #default="{ row }">{{ row.lastRunAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="最近成功" width="170">
+                <template #default="{ row }">{{ row.lastSuccessAt || '-' }}</template>
               </el-table-column>
               <el-table-column label="最近状态" width="110" align="center">
                 <template #default="{ row }">
@@ -576,9 +1440,12 @@
                   @change="loadBackupRecords"
                 >
                   <el-option label="待执行" value="pending" />
+                  <el-option label="队列中" value="queued" />
                   <el-option label="执行中" value="running" />
+                  <el-option label="清理中" value="cleaning" />
                   <el-option label="成功" value="success" />
                   <el-option label="失败" value="failed" />
+                  <el-option label="已过期" value="expired" />
                 </el-select>
                 <el-select
                   v-model="backupRecordQuery.triggerType"
@@ -636,11 +1503,24 @@
               <el-table-column label="文件大小" width="120" align="right">
                 <template #default="{ row }">{{ row.fileSize ? formatBytes(row.fileSize) : '-' }}</template>
               </el-table-column>
-              <el-table-column label="校验" width="120" align="center">
+              <el-table-column label="校验" width="150" align="center">
                 <template #default="{ row }">
-                  <el-tooltip v-if="row.checksumSha256" :content="row.checksumSha256" placement="top">
-                    <el-tag size="small" type="success">{{ row.checksumSha256.slice(0, 8) }}</el-tag>
+                  <el-tooltip v-if="row.checksumSha256 || row.verifyMessage" :content="row.verifyMessage || row.checksumSha256" placement="top">
+                    <el-tag size="small" :type="backupVerifyStatusTag(row.verifyStatus)">
+                      {{ row.verifyStatusText || (row.checksumSha256 ? row.checksumSha256.slice(0, 8) : '-') }}
+                    </el-tag>
                   </el-tooltip>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="过期时间" width="170" align="center">
+                <template #default="{ row }">{{ row.expiresAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="恢复演练" width="130" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.restoreTestStatus" size="small" :type="backupStatusTag(row.restoreTestStatus)">
+                    {{ row.restoreTestStatusText || row.restoreTestStatus }}
+                  </el-tag>
                   <span v-else>-</span>
                 </template>
               </el-table-column>
@@ -650,8 +1530,17 @@
               <el-table-column label="结果" min-width="260" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.message || '-' }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="150" align="center" fixed="right">
+              <el-table-column label="操作" width="190" align="center" fixed="right">
                 <template #default="{ row }">
+                  <el-button
+                    v-if="row.status === 'success' && row.fileName"
+                    link
+                    type="success"
+                    :loading="verifyingBackupRecordId === row.id"
+                    @click="handleVerifyBackupRecord(row)"
+                  >
+                    校验
+                  </el-button>
                   <el-button
                     v-if="row.status === 'success' && row.fileName"
                     link
@@ -809,38 +1698,299 @@
       </el-tab-pane>
 
       <el-tab-pane label="巡检报告" name="inspection">
-        <DatabaseInspectionReportsPanel
-          :form="inspectionForm"
-          :query="inspectionQuery"
-          :instances="diagnosisInstances"
-          :reports="inspectionReports"
-          :generating="inspectionGenerating"
-          :loading="inspectionLoading"
-          :total="inspectionTotal"
-          @generate="handleGenerateInspectionReport"
-          @load="loadInspectionReports"
-          @reset="resetInspectionQuery"
-          @detail="openInspectionDetail"
-        />
+        <div class="backup-panel">
+          <el-alert
+            title="巡检报告会聚合容量趋势、性能诊断、安全审计和备份状态，首批支持手动生成并落库留痕。"
+            type="info"
+            show-icon
+            :closable="false"
+          />
+
+          <div class="backup-card">
+            <div class="panel-title">
+              <span>生成报告</span>
+              <el-tag size="small" type="success">manual</el-tag>
+            </div>
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <span class="toolbar-label">数据库实例</span>
+                <el-select
+                  v-model="inspectionForm.instanceId"
+                  placeholder="请选择实例"
+                  filterable
+                  class="metadata-instance-select"
+                >
+                  <el-option
+                    v-for="item in diagnosisInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.dbTypeText || item.dbType} / ${item.endpoint || `${item.host}:${item.port}`}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </div>
+              <el-button type="primary" :disabled="!inspectionForm.instanceId" :loading="inspectionGenerating" @click="handleGenerateInspectionReport">
+                生成巡检报告
+              </el-button>
+            </div>
+          </div>
+
+          <div class="backup-card">
+            <div class="panel-title">
+              <span>报告记录</span>
+              <el-tag size="small" type="info">{{ inspectionTotal }}</el-tag>
+            </div>
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <el-select
+                  v-model="inspectionQuery.instanceId"
+                  placeholder="实例"
+                  clearable
+                  filterable
+                  class="audit-select"
+                  @change="loadInspectionReports"
+                >
+                  <el-option v-for="item in diagnosisInstances" :key="item.id" :label="item.name" :value="item.id" />
+                </el-select>
+                <el-select
+                  v-model="inspectionQuery.riskLevel"
+                  placeholder="风险"
+                  clearable
+                  class="audit-select"
+                  @change="loadInspectionReports"
+                >
+                  <el-option label="低" value="low" />
+                  <el-option label="中" value="medium" />
+                  <el-option label="高" value="high" />
+                  <el-option label="严重" value="critical" />
+                </el-select>
+                <el-select
+                  v-model="inspectionQuery.status"
+                  placeholder="状态"
+                  clearable
+                  class="audit-select"
+                  @change="loadInspectionReports"
+                >
+                  <el-option label="执行中" value="running" />
+                  <el-option label="成功" value="success" />
+                  <el-option label="失败" value="failed" />
+                </el-select>
+              </div>
+              <div class="backup-toolbar-group">
+                <el-button @click="resetInspectionQuery">
+                  <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
+                  重置
+                </el-button>
+                <el-button type="primary" plain :loading="inspectionLoading" @click="loadInspectionReports">
+                  刷新报告
+                </el-button>
+              </div>
+            </div>
+
+            <el-table
+              :data="inspectionReports"
+              v-loading="inspectionLoading"
+              stripe
+              class="modern-table"
+              :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
+            >
+              <el-table-column label="生成时间" prop="generatedAt" width="170" />
+              <el-table-column label="实例" min-width="160">
+                <template #default="{ row }">{{ row.instanceName || `#${row.instanceId}` }}</template>
+              </el-table-column>
+              <el-table-column label="健康分" width="100" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="healthScoreTag(row.healthScore)" size="small">{{ row.healthScore }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="风险" width="100" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="riskLevelTag(row.riskLevel)" size="small">
+                    {{ row.riskLevelText || row.riskLevel || '-' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="100" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="backupStatusTag(row.status)" size="small">
+                    {{ row.statusText || row.status || '-' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="摘要" min-width="320" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.summary || row.errorMessage || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="耗时" width="100" align="right">
+                <template #default="{ row }">{{ row.durationMs ? `${row.durationMs} ms` : '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="100" align="center" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="primary" @click="openInspectionDetail(row)">详情</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <div class="pagination-container">
+              <el-pagination
+                v-model:current-page="inspectionQuery.page"
+                v-model:page-size="inspectionQuery.pageSize"
+                :page-sizes="[10, 20, 50, 100]"
+                :total="inspectionTotal"
+                layout="total, sizes, prev, pager, next, jumper"
+                @size-change="loadInspectionReports"
+                @current-change="loadInspectionReports"
+              />
+            </div>
+          </div>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="查询审计" name="audit">
-        <DatabaseQueryAuditPanel
-          :query="auditQuery"
-          :instances="instances"
-          :audit-actions="auditActions"
-          :sql-types="sqlTypes"
-          :rows="queryAudits"
-          :loading="auditLoading"
-          :exporting="auditExporting"
-          :total="auditTotal"
-          @load="loadQueryAudits"
-          @reset="resetAuditQuery"
-          @export="handleExportAudits"
-          @detail="openAuditDetail"
-        />
+        <div class="audit-panel">
+          <div class="audit-search-bar">
+            <el-input
+              v-model="auditQuery.keyword"
+              placeholder="搜索 SQL、操作者、Schema、客户端 IP..."
+              clearable
+              class="audit-search-input"
+              @keyup.enter="loadQueryAudits"
+              @clear="loadQueryAudits"
+            >
+              <template #prefix>
+                <el-icon><Search /></el-icon>
+              </template>
+            </el-input>
+            <el-select v-model="auditQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadQueryAudits">
+              <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+            </el-select>
+            <el-select v-model="auditQuery.status" placeholder="状态" clearable class="audit-select" @change="loadQueryAudits">
+              <el-option label="成功" value="success" />
+              <el-option label="失败" value="failed" />
+              <el-option label="已拦截" value="denied" />
+              <el-option label="执行中" value="pending" />
+            </el-select>
+            <el-select v-model="auditQuery.action" placeholder="审计动作" clearable class="audit-select" @change="loadQueryAudits">
+              <el-option v-for="item in auditActions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+            <el-select v-model="auditQuery.riskLevel" placeholder="风险" clearable class="audit-select" @change="loadQueryAudits">
+              <el-option label="低" value="low" />
+              <el-option label="中" value="medium" />
+              <el-option label="高" value="high" />
+              <el-option label="严重" value="critical" />
+            </el-select>
+            <el-select v-model="auditQuery.sqlType" placeholder="SQL 类型" clearable class="audit-select" @change="loadQueryAudits">
+              <el-option v-for="item in sqlTypes" :key="item" :label="item" :value="item" />
+            </el-select>
+            <el-button @click="resetAuditQuery">
+              <el-icon style="margin-right: 4px;"><RefreshLeft /></el-icon>
+              重置
+            </el-button>
+            <el-button type="primary" plain :loading="auditExporting" @click="handleExportAudits">
+              <el-icon style="margin-right: 4px;"><Download /></el-icon>
+              导出 CSV
+            </el-button>
+          </div>
+
+          <el-table
+            :data="queryAudits"
+            v-loading="auditLoading"
+            stripe
+            class="modern-table"
+            :header-cell-style="{ background: '#fafbfc', color: '#606266', fontWeight: '600' }"
+          >
+            <el-table-column label="执行时间" prop="createdAt" width="170" />
+            <el-table-column label="实例" min-width="150">
+              <template #default="{ row }">
+                <span>{{ row.instanceName || `#${row.instanceId}` }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="Schema" min-width="120">
+              <template #default="{ row }">{{ row.schemaName || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="动作" width="120" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" type="info">{{ row.actionText || row.action || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="SQL" min-width="260" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="mono">{{ row.sqlSummary || '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag size="small">{{ row.sqlType || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="风险" width="80" align="center">
+              <template #default="{ row }">
+                <el-tag :type="riskLevelTag(row.riskLevel)" size="small">
+                  {{ row.riskLevelText || row.riskLevel }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag :type="auditStatusTag(row.status)" size="small">
+                  {{ row.statusText || row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="返回行" prop="rowsReturned" width="90" align="right" />
+            <el-table-column label="耗时" width="100" align="right">
+              <template #default="{ row }">{{ row.durationMs }} ms</template>
+            </el-table-column>
+            <el-table-column label="操作者" min-width="110">
+              <template #default="{ row }">{{ row.operatorName || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="客户端 IP" min-width="130">
+              <template #default="{ row }">{{ row.clientIp || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="90" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openAuditDetail(row)">详情</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pagination-container">
+            <el-pagination
+              v-model:current-page="auditQuery.page"
+              v-model:page-size="auditQuery.pageSize"
+              :page-sizes="[10, 20, 50, 100]"
+              :total="auditTotal"
+              layout="total, sizes, prev, pager, next, jumper"
+              @size-change="loadQueryAudits"
+              @current-change="loadQueryAudits"
+            />
+          </div>
+        </div>
       </el-tab-pane>
     </el-tabs>
+
+    <div
+      v-if="tableContextMenu.visible"
+      class="metadata-context-menu"
+      :style="{ left: `${tableContextMenu.x}px`, top: `${tableContextMenu.y}px` }"
+      @click.stop
+      @contextmenu.prevent
+    >
+      <button
+        type="button"
+        class="metadata-context-menu-item"
+        :disabled="!canPreviewContextTable"
+        @click="handlePreviewContextTable(false)"
+      >
+        查看表内容
+      </button>
+      <button
+        v-if="canUseContextTableUnlimited"
+        type="button"
+        class="metadata-context-menu-item"
+        @click="handlePreviewContextTable(true)"
+      >
+        查看全部内容
+      </button>
+    </div>
 
     <el-dialog
       v-model="dialogVisible"
@@ -956,9 +2106,13 @@
         <el-descriptions-item label="风险">{{ currentAudit.riskLevelText || currentAudit.riskLevel }}</el-descriptions-item>
         <el-descriptions-item label="状态">{{ currentAudit.statusText || currentAudit.status }}</el-descriptions-item>
         <el-descriptions-item label="耗时">{{ currentAudit.durationMs }} ms</el-descriptions-item>
-        <el-descriptions-item label="返回行">{{ currentAudit.rowsReturned }}</el-descriptions-item>
-        <el-descriptions-item label="影响阈值">{{ currentAudit.rowsAffectedLimit || 0 }}</el-descriptions-item>
-        <el-descriptions-item label="影响行">{{ currentAudit.rowsAffected }}</el-descriptions-item>
+	        <el-descriptions-item label="返回行">{{ currentAudit.rowsReturned }}</el-descriptions-item>
+	        <el-descriptions-item :label="isDDLAudit(currentAudit) ? '变更类型' : '影响阈值'">
+	          {{ isDDLAudit(currentAudit) ? 'DDL' : (currentAudit.rowsAffectedLimit || 0) }}
+	        </el-descriptions-item>
+	        <el-descriptions-item :label="isDDLAudit(currentAudit) ? '执行结果' : '影响行'">
+	          {{ isDDLAudit(currentAudit) ? (currentAudit.statusText || currentAudit.status) : currentAudit.rowsAffected }}
+	        </el-descriptions-item>
         <el-descriptions-item label="原因">{{ currentAudit.reason || '-' }}</el-descriptions-item>
         <el-descriptions-item label="确认状态">
           {{ currentAudit.confirmRequired ? (currentAudit.confirmed ? '需要确认，已确认' : '需要确认，未确认') : '无需确认' }}
@@ -1108,6 +2262,62 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="ddlConfirmVisible" title="DDL 结构变更确认" width="760px" @close="resetDDLConfirmForm">
+      <div v-if="ddlCheckResult" class="write-confirm-dialog">
+        <el-alert
+          :title="ddlCheckResult.message || 'DDL 结构变更检查通过'"
+          :type="ddlCheckResult.allowed ? 'success' : 'warning'"
+          show-icon
+          :closable="false"
+        />
+        <el-alert
+          v-if="ddlCheckResult.backupRequired"
+          title="DDL 可能改变数据库结构，执行前请确认已有可用备份或回滚方案。"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="executed-sql-alert"
+        />
+        <el-descriptions :column="2" border class="write-confirm-desc">
+          <el-descriptions-item label="实例">{{ currentQueryInstance?.name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Schema">{{ ddlCheckResult.schemaName || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="SQL 类型">{{ ddlCheckResult.sqlType || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="风险等级">
+            <el-tag :type="riskLevelTag(ddlCheckResult.riskLevel)">{{ ddlCheckResult.riskLevelText }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="备份提示">
+            {{ ddlCheckResult.backupRequired ? '建议先确认备份' : '不要求' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="确认要求">
+            {{ ddlCheckResult.confirmRequired ? '需要二次确认' : '无需二次确认' }}
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-form label-width="100px" class="write-confirm-form">
+          <el-form-item :label="ddlCheckResult.reasonRequired ? '变更原因' : '变更说明'" :required="ddlCheckResult.reasonRequired">
+            <el-input
+              v-model="ddlConfirmForm.reason"
+              type="textarea"
+              :rows="3"
+              :placeholder="ddlCheckResult.reasonRequired ? '请填写本次 DDL 结构变更原因' : '可选，建议填写变更背景或工单号'"
+            />
+          </el-form-item>
+          <el-form-item v-if="ddlCheckResult.confirmRequired" label="执行确认" required>
+            <el-checkbox v-model="ddlConfirmForm.confirmed">
+              我已确认该 DDL 的影响范围、备份状态和回滚方案，继续执行结构变更
+            </el-checkbox>
+          </el-form-item>
+        </el-form>
+        <div class="audit-sql-block">
+          <div class="audit-sql-title">待执行 DDL</div>
+          <pre>{{ querySQL }}</pre>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="ddlConfirmVisible = false">取消</el-button>
+        <el-button type="danger" :loading="queryDDLSubmitting" @click="handleExecuteDDL">确认执行</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="queryHistoryDialogVisible" title="最近 SQL 历史" width="980px">
       <div class="query-history-toolbar">
         <el-input
@@ -1231,12 +2441,25 @@
         <el-form-item label="保留天数" prop="retentionDays">
           <el-input-number v-model="backupTaskForm.retentionDays" :min="1" :max="3650" class="query-number" />
         </el-form-item>
+        <el-form-item label="最长运行">
+          <el-input-number v-model="backupTaskForm.maxDurationMinutes" :min="1" :max="10080" class="query-number" />
+          <div class="field-tip">单位分钟。超过该时长仍未完成的备份会被判定为失败，默认 1440 分钟。</div>
+        </el-form-item>
         <el-form-item label="存储配置">
           <el-input
             v-model="backupTaskForm.storageConfig"
             type="textarea"
             :rows="3"
             placeholder="可选，预留给后续本地目录或对象存储扩展"
+          />
+          <div class="field-tip">P0 仅允许非敏感配置；对象存储密钥、数据库密码、SSH 私钥等后续必须接入 secret_profile 后再保存。</div>
+        </el-form-item>
+        <el-form-item v-if="selectedBackupTaskInstance?.capacitySizeText" label="容量提示">
+          <el-alert
+            :title="`当前实例容量 ${selectedBackupTaskInstance.capacitySizeText}，逻辑全量备份只适合作为小库、临时导出或演练能力。`"
+            :type="Number(selectedBackupTaskInstance.capacitySizeBytes || 0) >= 50 * 1024 * 1024 * 1024 ? 'error' : 'info'"
+            show-icon
+            :closable="false"
           />
         </el-form-item>
         <el-form-item label="状态">
@@ -1422,19 +2645,21 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  Coin,
   DataLine,
+  Delete,
+  Download,
+  Edit,
+  Connection,
+  Grid,
   Plus,
+  Refresh,
   RefreshLeft,
-  Search
+  Search,
+  Switch,
+  Tickets
 } from '@element-plus/icons-vue'
 import { getCredentials } from '@/api/host'
-import DatabaseInspectionReportsPanel from './components/DatabaseInspectionReportsPanel.vue'
-import DatabaseInstancesPanel from './components/DatabaseInstancesPanel.vue'
-import DatabaseInstancePermissionsPanel from './components/DatabaseInstancePermissionsPanel.vue'
-import DatabaseMetadataBrowserPanel from './components/DatabaseMetadataBrowserPanel.vue'
-import DatabaseQueryAuditPanel from './components/DatabaseQueryAuditPanel.vue'
-import DatabaseSqlConsolePanel from './components/DatabaseSqlConsolePanel.vue'
-import DatabaseTopologyPanel from './components/DatabaseTopologyPanel.vue'
 import {
   DATABASE_PERMISSION,
   createDatabaseBackupTask,
@@ -1445,10 +2670,12 @@ import {
   deleteDatabaseInstancePermission,
   disableDatabaseInstance,
   downloadDatabaseBackupRecord,
+  executeDatabaseDDLQuery,
   explainDatabaseQuery,
   enableDatabaseInstance,
   executeDatabaseQuery,
   executeDatabaseWriteQuery,
+  explainDatabaseWriteQuery,
   generateDatabaseInspectionReport,
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
@@ -1482,12 +2709,15 @@ import {
   updateDatabaseBackupTask,
   updateDatabaseInstance,
   upsertDatabaseInstancePermission,
+  validateDatabaseDDLQuery,
+  verifyDatabaseBackupRecord,
   type DatabaseBackupRecordResult,
   type DatabaseBackupRunResult,
   type DatabaseBackupTaskPayload,
   type DatabaseBackupTaskResult,
   type DatabaseCapacityCollectResult,
   type DatabaseCapacityTrendResult,
+  type DatabaseDDLValidateResult,
   type DatabaseInspectionSection,
   type DatabaseInspectionReportResult,
   type DatabaseInstancePayload,
@@ -1500,6 +2730,11 @@ import {
   type DatabaseWriteValidateResult,
   validateDatabaseWriteQuery
 } from '@/api/database'
+import {
+  getDatabaseConfig as getSystemDatabaseConfig,
+  saveDatabaseConfig as saveSystemDatabaseConfig,
+  type DatabaseConfig as SystemDatabaseConfig
+} from '@/api/system'
 import { getAllRoles } from '@/api/role'
 
 const activeTab = ref('instances')
@@ -1538,6 +2773,17 @@ const canUseDatabaseFeature = (item: any, permission: number, capability?: Datab
   !!item && hasDatabasePermission(item, permission) && (!capability || hasInstanceCapability(item, capability))
 
 const canManageInstancePermissions = computed(() => uiPermissions.value.instancePermissionManage === true)
+const permissionModeAlertTitle = computed(() => {
+  if (permissionMode.value === 'whitelist') {
+    return permissionRulesEnabled.value
+      ? '实例对象权限处于白名单模式：非 admin 用户只能访问已授权实例。'
+      : '实例对象权限处于白名单模式：当前没有授权规则，非 admin 用户默认无法访问数据库实例。'
+  }
+  if (permissionModeEnforced.value) {
+    return '实例对象权限处于兼容模式，但已存在授权规则，非 admin 用户会按实例权限收敛。'
+  }
+  return '实例对象权限处于兼容模式：当前没有授权规则，非 admin 用户不会被实例级权限收敛。'
+})
 
 const hasPermissionMask = (mask: number | undefined, permission: number) =>
   (Number(mask || 0) & permission) > 0
@@ -1551,7 +2797,10 @@ const databasePermissionOptions = [
   { label: '恢复', value: DATABASE_PERMISSION.RESTORE },
   { label: '诊断', value: DATABASE_PERMISSION.DIAGNOSIS },
   { label: '拓扑', value: DATABASE_PERMISSION.TOPOLOGY },
-  { label: '管理', value: DATABASE_PERMISSION.MANAGE }
+  { label: '管理', value: DATABASE_PERMISSION.MANAGE },
+  { label: '不限行数', value: DATABASE_PERMISSION.QUERY_UNLIMITED },
+  { label: '写SQL计划', value: DATABASE_PERMISSION.WRITE_EXPLAIN },
+  { label: 'DDL变更', value: DATABASE_PERMISSION.DDL }
 ]
 
 const formRef = ref<FormInstance>()
@@ -1570,11 +2819,18 @@ const detailTab = ref('columns')
 const ddlDialogVisible = ref(false)
 const currentDDL = ref<any>()
 const dictionaryExporting = ref(false)
+const tableContextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  row: undefined as any
+})
 const queryInstanceId = ref<number>()
 const querySchemaName = ref('')
 const querySchemas = ref<any[]>([])
 const querySQL = ref('SELECT 1')
 const queryLimit = ref(500)
+const queryUnlimitedRows = ref(false)
 const queryTimeoutSeconds = ref(30)
 const queryExportLimit = ref(1000)
 const queryRunning = ref(false)
@@ -1584,11 +2840,21 @@ const queryExporting = ref(false)
 const queryWriteChecking = ref(false)
 const queryWritePreparing = ref(false)
 const queryWriteSubmitting = ref(false)
+const queryDDLChecking = ref(false)
+const queryDDLPreparing = ref(false)
+const queryDDLSubmitting = ref(false)
 const queryResult = ref<any>()
 const writeCheckResult = ref<DatabaseWriteValidateResult>()
+const ddlCheckResult = ref<DatabaseDDLValidateResult>()
 const writeResult = ref<DatabaseWriteExecuteResult>()
+const ddlSQLTypes = new Set(['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME'])
 const writeConfirmVisible = ref(false)
+const ddlConfirmVisible = ref(false)
 const writeConfirmForm = reactive({
+  reason: '',
+  confirmed: false
+})
+const ddlConfirmForm = reactive({
   reason: '',
   confirmed: false
 })
@@ -1597,6 +2863,22 @@ const explainResult = ref<any>()
 const queryHistoryDialogVisible = ref(false)
 const queryHistoryLoading = ref(false)
 const queryHistoryItems = ref<any[]>([])
+const databaseWriteConfigLoading = ref(false)
+const databaseWriteConfigSaving = ref(false)
+const databaseConfig = reactive<SystemDatabaseConfig>({
+  writeEnabled: false,
+  writeExplainEnabled: false,
+  ddlEnabled: false,
+  ddlHighRiskRequiresConfirm: true,
+  ddlReasonRequired: true,
+  ddlRequireBackupHint: true,
+  highRiskRequiresConfirm: true,
+  operationReasonRequired: true,
+  maxAffectedRows: 1000,
+  defaultBackupRetentionDays: 7,
+  backupStoragePath: './data/database-backups',
+  instancePermissionMode: 'compat'
+})
 const diagnosisInstanceId = ref<number>()
 const diagnosisLoading = ref(false)
 const diagnosisMetrics = ref<any>()
@@ -1624,7 +2906,11 @@ const permissionSubmitting = ref(false)
 const permissionDialogVisible = ref(false)
 const permissionRows = ref<any[]>([])
 const permissionTotal = ref(0)
+const permissionMode = ref<'compat' | 'whitelist'>('compat')
+const permissionModeEnforced = ref(false)
+const permissionRulesEnabled = ref(false)
 const backupRecordLoading = ref(false)
+const verifyingBackupRecordId = ref(0)
 const backupRecords = ref<DatabaseBackupRecordResult[]>([])
 const backupRecordTotal = ref(0)
 const restoreJobLoading = ref(false)
@@ -1650,10 +2936,13 @@ const sqlTypes = ['SELECT', 'SHOW', 'DESC', 'DESCRIBE', 'EXPLAIN', 'WITH', 'INSE
 const auditActions = [
   { label: '只读查询', value: 'query' },
   { label: '执行计划', value: 'explain' },
+  { label: '写 SQL 执行计划', value: 'write_explain' },
   { label: '查询结果导出', value: 'query_export' },
   { label: '写操作执行', value: 'change_execute' },
+  { label: 'DDL 结构变更', value: 'ddl_execute' },
   { label: '逻辑备份执行', value: 'backup_run' },
   { label: '备份文件下载', value: 'backup_download' },
+  { label: '备份文件校验', value: 'backup_verify' },
   { label: '拓扑查看', value: 'topology_view' },
   { label: '恢复演练', value: 'restore_dry_run' },
   { label: '容量趋势查看', value: 'capacity_view' },
@@ -1665,6 +2954,13 @@ const auditActions = [
   { label: '活跃会话查看', value: 'diagnosis_sessions' },
   { label: '慢 SQL 查看', value: 'diagnosis_slow_queries' }
 ]
+
+const isDDLAudit = (item: any) =>
+  item?.action === 'ddl_execute' || item?.auditAction === 'ddl_execute'
+
+const isDDLWriteResult = computed(() =>
+  writeResult.value?.auditAction === 'ddl_execute' || ddlSQLTypes.has(String(writeResult.value?.sqlType || '').toUpperCase())
+)
 
 const query = reactive({
   page: 1,
@@ -1773,6 +3069,7 @@ const backupTaskForm = reactive<DatabaseBackupTaskPayload & { id?: number }>({
   storageType: 'local',
   storageConfig: '',
   retentionDays: 7,
+  maxDurationMinutes: 1440,
   enabled: true
 })
 const backupTaskFormInstanceDbType = ref('')
@@ -1840,10 +3137,40 @@ const canWriteCurrentQueryInstance = computed(() =>
   hasDatabasePermission(currentQueryInstance.value, DATABASE_PERMISSION.WRITE)
 )
 
+const canDDLCurrentQueryInstance = computed(() =>
+  ['mysql', 'mariadb', 'postgresql'].includes(currentQueryInstance.value?.dbType || '') &&
+  uiPermissions.value.queryDDL === true &&
+  hasDatabasePermission(currentQueryInstance.value, DATABASE_PERMISSION.DDL)
+)
+
+const canUseQueryUnlimitedRows = computed(() =>
+  !isRedisQueryInstance.value &&
+  canUseDatabaseFeature(currentQueryInstance.value, DATABASE_PERMISSION.QUERY, 'queryEnabled') &&
+  hasDatabasePermission(currentQueryInstance.value, DATABASE_PERMISSION.QUERY_UNLIMITED)
+)
+
+const canUseWriteExplainCurrentQueryInstance = computed(() =>
+  !isRedisQueryInstance.value &&
+  uiPermissions.value.queryWriteExplain === true &&
+  canUseDatabaseFeature(currentQueryInstance.value, DATABASE_PERMISSION.QUERY, 'queryEnabled') &&
+  hasDatabasePermission(currentQueryInstance.value, DATABASE_PERMISSION.WRITE_EXPLAIN)
+)
+
+const canPreviewContextTable = computed(() =>
+  !!tableContextMenu.row &&
+  !isRedisMetadataInstance.value &&
+  canUseDatabaseFeature(currentMetadataInstance.value, DATABASE_PERMISSION.QUERY, 'queryEnabled')
+)
+
+const canUseContextTableUnlimited = computed(() =>
+  canPreviewContextTable.value &&
+  hasDatabasePermission(currentMetadataInstance.value, DATABASE_PERMISSION.QUERY_UNLIMITED)
+)
+
 const queryConsoleAlert = computed(() =>
   isRedisQueryInstance.value
     ? '命令控制台支持 Redis 白名单只读命令。当前支持 GET / MGET / HGET / HGETALL / LRANGE / SMEMBERS / ZRANGE / XRANGE / SCAN / INFO / DBSIZE / MEMORY USAGE / CLUSTER INFO|NODES|SLOTS，所有动作都会写入统一审计。'
-    : 'SQL 控制台支持只读查询和受控写操作。只读链路仅允许 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN / WITH；写操作请先做预检查，再按风险确认后执行，所有动作都会写入统一审计。'
+    : 'SQL 控制台支持只读查询、执行计划、受控 DML 和独立 DDL 结构变更。只读链路仅允许 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN / WITH；DML 仅支持 INSERT / UPDATE / DELETE；DDL 由独立开关和权限控制，所有动作都会写入统一审计。'
 )
 
 const querySchemaPlaceholder = computed(() =>
@@ -1894,6 +3221,10 @@ const selectedBackupTaskInstance = computed(() =>
 
 const selectedBackupTaskDbType = computed(() =>
   selectedBackupTaskInstance.value?.dbType || backupTaskFormInstanceDbType.value
+)
+
+const backupLargeWarnings = computed(() =>
+  backupTasks.value.filter(item => item.largeDataWarning)
 )
 
 const availableBackupTypeOptions = computed(() => {
@@ -2109,6 +3440,154 @@ const loadUIPermissions = async () => {
   }
 }
 
+const applyDatabaseWriteConfig = (res: Partial<SystemDatabaseConfig> | undefined) => {
+  if (!res) return
+  databaseConfig.writeEnabled = !!res.writeEnabled
+  databaseConfig.writeExplainEnabled = !!res.writeExplainEnabled
+  databaseConfig.ddlEnabled = !!res.ddlEnabled
+  databaseConfig.ddlHighRiskRequiresConfirm = res.ddlHighRiskRequiresConfirm !== false
+  databaseConfig.ddlReasonRequired = res.ddlReasonRequired !== false
+  databaseConfig.ddlRequireBackupHint = res.ddlRequireBackupHint !== false
+  databaseConfig.highRiskRequiresConfirm = res.highRiskRequiresConfirm !== false
+  databaseConfig.operationReasonRequired = res.operationReasonRequired !== false
+  databaseConfig.maxAffectedRows = res.maxAffectedRows || 1000
+  databaseConfig.defaultBackupRetentionDays = res.defaultBackupRetentionDays || 7
+  databaseConfig.backupStoragePath = res.backupStoragePath || './data/database-backups'
+  databaseConfig.instancePermissionMode = res.instancePermissionMode === 'whitelist' ? 'whitelist' : 'compat'
+}
+
+const loadDatabaseWriteConfig = async () => {
+  databaseWriteConfigLoading.value = true
+  try {
+    const res: any = await getSystemDatabaseConfig()
+    applyDatabaseWriteConfig(res)
+  } catch {
+    ElMessage.warning('加载数据库写操作配置失败')
+  } finally {
+    databaseWriteConfigLoading.value = false
+  }
+}
+
+const handleBeforeDatabaseWriteToggle = async () => {
+  if (!canManageInstancePermissions.value) {
+    ElMessage.warning('无权切换数据库写操作总开关')
+    return false
+  }
+  if (databaseWriteConfigSaving.value) {
+    return false
+  }
+  const nextEnabled = !databaseConfig.writeEnabled
+  if (nextEnabled) {
+    try {
+      await ElMessageBox.confirm(
+        '开启后，拥有写入权限的用户可通过预检查和受控确认执行数据库写操作。确认开启？',
+        '开启数据库写操作总开关',
+        {
+          type: 'warning',
+          confirmButtonText: '开启',
+          cancelButtonText: '取消'
+        }
+      )
+    } catch {
+      return false
+    }
+  }
+  databaseWriteConfigSaving.value = true
+  try {
+    await saveSystemDatabaseConfig({
+      ...databaseConfig,
+      writeEnabled: nextEnabled
+    })
+    clearWriteConsoleState()
+    ElMessage.success(nextEnabled ? '数据库写操作总开关已开启' : '数据库写操作总开关已关闭')
+    return true
+  } catch {
+    return false
+  } finally {
+    databaseWriteConfigSaving.value = false
+  }
+}
+
+const handleBeforeDatabaseWriteExplainToggle = async () => {
+  if (!canManageInstancePermissions.value) {
+    ElMessage.warning('无权切换写 SQL 执行计划开关')
+    return false
+  }
+  if (databaseWriteConfigSaving.value) {
+    return false
+  }
+  const nextEnabled = !databaseConfig.writeExplainEnabled
+  if (nextEnabled) {
+    try {
+      await ElMessageBox.confirm(
+        '开启后，拥有写 SQL 计划权限的用户可以对 INSERT / UPDATE / DELETE 等语句查看 EXPLAIN。确认开启？',
+        '开启写 SQL 执行计划',
+        {
+          type: 'warning',
+          confirmButtonText: '开启',
+          cancelButtonText: '取消'
+        }
+      )
+    } catch {
+      return false
+    }
+  }
+  databaseWriteConfigSaving.value = true
+  try {
+    await saveSystemDatabaseConfig({
+      ...databaseConfig,
+      writeExplainEnabled: nextEnabled
+    })
+    clearWriteConsoleState()
+    ElMessage.success(nextEnabled ? '写 SQL 执行计划已开启' : '写 SQL 执行计划已关闭')
+    return true
+  } catch {
+    return false
+  } finally {
+    databaseWriteConfigSaving.value = false
+  }
+}
+
+const handleBeforeDatabaseDDLToggle = async () => {
+  if (!canManageInstancePermissions.value) {
+    ElMessage.warning('无权切换 DDL 结构变更开关')
+    return false
+  }
+  if (databaseWriteConfigSaving.value) {
+    return false
+  }
+  const nextEnabled = !databaseConfig.ddlEnabled
+  if (nextEnabled) {
+    try {
+      await ElMessageBox.confirm(
+        '开启后，拥有 DDL 实例权限的用户可执行受控 CREATE TABLE / CREATE INDEX。确认开启？',
+        '开启 DDL 结构变更',
+        {
+          type: 'warning',
+          confirmButtonText: '开启',
+          cancelButtonText: '取消'
+        }
+      )
+    } catch {
+      return false
+    }
+  }
+  databaseWriteConfigSaving.value = true
+  try {
+    await saveSystemDatabaseConfig({
+      ...databaseConfig,
+      ddlEnabled: nextEnabled
+    })
+    clearWriteConsoleState()
+    ElMessage.success(nextEnabled ? 'DDL 结构变更开关已开启' : 'DDL 结构变更开关已关闭')
+    return true
+  } catch {
+    return false
+  } finally {
+    databaseWriteConfigSaving.value = false
+  }
+}
+
 const loadRoles = async () => {
   const res: any = await getAllRoles()
   roleOptions.value = (res || []).map((item: any) => ({
@@ -2135,7 +3614,11 @@ const loadInstances = async () => {
       queryInstanceId.value = undefined
       querySchemaName.value = ''
       querySchemas.value = []
+      queryUnlimitedRows.value = false
       clearQueryConsoleState()
+    }
+    if (queryUnlimitedRows.value && !canUseQueryUnlimitedRows.value) {
+      queryUnlimitedRows.value = false
     }
     if (diagnosisInstanceId.value && !diagnosisInstances.value.some(item => item.id === diagnosisInstanceId.value)) {
       diagnosisInstanceId.value = undefined
@@ -2257,6 +3740,9 @@ const ensureQueryInstance = async () => {
   if (!queryInstanceId.value && queryInstances.value.length > 0) {
     queryInstanceId.value = queryInstances.value[0].id
   }
+  if (queryUnlimitedRows.value && !canUseQueryUnlimitedRows.value) {
+    queryUnlimitedRows.value = false
+  }
   if (queryInstanceId.value) {
     await loadQuerySchemas()
   }
@@ -2280,6 +3766,11 @@ const resetWriteConfirmForm = () => {
   writeConfirmForm.confirmed = false
 }
 
+const resetDDLConfirmForm = () => {
+  ddlConfirmForm.reason = ''
+  ddlConfirmForm.confirmed = false
+}
+
 const clearReadOnlyConsoleState = () => {
   queryResult.value = undefined
   explainResult.value = undefined
@@ -2287,9 +3778,12 @@ const clearReadOnlyConsoleState = () => {
 
 const clearWriteConsoleState = () => {
   writeCheckResult.value = undefined
+  ddlCheckResult.value = undefined
   writeResult.value = undefined
   writeConfirmVisible.value = false
+  ddlConfirmVisible.value = false
   resetWriteConfirmForm()
+  resetDDLConfirmForm()
 }
 
 const clearQueryConsoleState = () => {
@@ -2490,6 +3984,7 @@ const resetBackupTaskForm = () => {
   backupTaskForm.storageType = 'local'
   backupTaskForm.storageConfig = ''
   backupTaskForm.retentionDays = 7
+  backupTaskForm.maxDurationMinutes = 1440
   backupTaskForm.enabled = true
   backupTaskFormInstanceDbType.value = ''
   backupTaskFormRef.value?.clearValidate()
@@ -2522,6 +4017,7 @@ const openBackupTaskDialog = (row?: DatabaseBackupTaskResult) => {
     backupTaskForm.storageType = row.storageType || 'local'
     backupTaskForm.storageConfig = row.storageConfig || ''
     backupTaskForm.retentionDays = row.retentionDays || 7
+    backupTaskForm.maxDurationMinutes = row.maxDurationMinutes || 1440
     backupTaskForm.enabled = !!row.enabled
   } else if (supportedBackupInstances.value.length > 0) {
     backupTaskForm.instanceId = supportedBackupInstances.value[0].id
@@ -2545,6 +4041,7 @@ const submitBackupTaskForm = async () => {
       storageType: backupTaskForm.storageType || 'local',
       storageConfig: backupTaskForm.storageConfig?.trim(),
       retentionDays: backupTaskForm.retentionDays,
+      maxDurationMinutes: backupTaskForm.maxDurationMinutes,
       enabled: backupTaskForm.enabled
     }
     if (backupTaskForm.id) {
@@ -2567,6 +4064,9 @@ const loadInstancePermissions = async () => {
     const res: any = await listDatabaseInstancePermissions(permissionQuery)
     permissionRows.value = res.list || []
     permissionTotal.value = res.total || 0
+    permissionMode.value = res.permissionMode === 'whitelist' ? 'whitelist' : 'compat'
+    permissionModeEnforced.value = !!res.permissionModeEnforced
+    permissionRulesEnabled.value = !!res.permissionRulesEnabled
     if (res.page) permissionQuery.page = res.page
     if (res.pageSize) permissionQuery.pageSize = res.pageSize
   } finally {
@@ -2612,6 +4112,27 @@ const submitPermissionForm = async () => {
   }
   if (!permissionFormRef.value) return
   await permissionFormRef.value.validate()
+  if (
+    permissionForm.permissions.includes(DATABASE_PERMISSION.QUERY_UNLIMITED) &&
+    !permissionForm.permissions.includes(DATABASE_PERMISSION.QUERY)
+  ) {
+    ElMessage.warning('不限行数需要同时授予查询权限')
+    return
+  }
+  if (
+    permissionForm.permissions.includes(DATABASE_PERMISSION.WRITE_EXPLAIN) &&
+    !permissionForm.permissions.includes(DATABASE_PERMISSION.QUERY)
+  ) {
+    ElMessage.warning('写 SQL 计划需要同时授予查询权限')
+    return
+  }
+  if (
+    permissionForm.permissions.includes(DATABASE_PERMISSION.DDL) &&
+    !permissionForm.permissions.includes(DATABASE_PERMISSION.QUERY)
+  ) {
+    ElMessage.warning('DDL 变更需要同时授予查询权限')
+    return
+  }
   permissionSubmitting.value = true
   try {
     await upsertDatabaseInstancePermission({
@@ -2829,6 +4350,103 @@ const handleTableClick = async (row: any) => {
   await loadTableDetails(row)
 }
 
+const closeTableContextMenu = () => {
+  tableContextMenu.visible = false
+  tableContextMenu.row = undefined
+}
+
+const handleTableContextMenu = async (row: any, _column: any, event: MouseEvent) => {
+  event.preventDefault()
+  event.stopPropagation()
+  if (!row) return
+  selectedTable.value = row
+  currentDDL.value = undefined
+  tableContextMenu.row = row
+  tableContextMenu.x = event.clientX
+  tableContextMenu.y = event.clientY
+  tableContextMenu.visible = true
+  await loadTableDetails(row)
+}
+
+const quoteQueryIdentifier = (dbType: string | undefined, value: string) => {
+  const text = String(value || '').trim()
+  if (!text) return text
+  switch (dbType) {
+    case 'postgresql':
+    case 'opengauss':
+    case 'kingbase':
+    case 'oracle':
+      return `"${text.replace(/"/g, '""')}"`
+    case 'sqlserver':
+      return `[${text.replace(/]/g, ']]')}]`
+    default:
+      return `\`${text.replace(/`/g, '``')}\``
+  }
+}
+
+const qualifiedQueryTableName = (dbType: string | undefined, schemaName: string, tableName: string) => {
+  const quotedTable = quoteQueryIdentifier(dbType, tableName)
+  if (!String(schemaName || '').trim()) return quotedTable
+  return `${quoteQueryIdentifier(dbType, schemaName)}.${quotedTable}`
+}
+
+const buildTablePreviewSQL = (instance: any, table: any, unlimitedRows: boolean) => {
+  const dbType = instance?.dbType || ''
+  const qualifiedName = qualifiedQueryTableName(dbType, table?.schemaName || '', table?.tableName || '')
+  if (unlimitedRows) {
+    return `SELECT * FROM ${qualifiedName}`
+  }
+  if (dbType === 'sqlserver') {
+    return `SELECT TOP (100) * FROM ${qualifiedName}`
+  }
+  if (dbType === 'oracle') {
+    return `SELECT * FROM ${qualifiedName} FETCH FIRST 100 ROWS ONLY`
+  }
+  return `SELECT * FROM ${qualifiedName} LIMIT 100`
+}
+
+const handlePreviewContextTable = async (unlimitedRows: boolean) => {
+  const table = tableContextMenu.row
+  closeTableContextMenu()
+  if (!metadataInstanceId.value || !table?.tableName) {
+    ElMessage.warning('请先选择一张表')
+    return
+  }
+  if (isRedisMetadataInstance.value) {
+    ElMessage.warning('Redis Key 暂不支持表内容预览')
+    return
+  }
+  if (!canUseDatabaseFeature(currentMetadataInstance.value, DATABASE_PERMISSION.QUERY, 'queryEnabled')) {
+    ElMessage.warning('无查询权限或该数据库类型暂未接入查询控制台')
+    return
+  }
+  if (unlimitedRows && !hasDatabasePermission(currentMetadataInstance.value, DATABASE_PERMISSION.QUERY_UNLIMITED)) {
+    ElMessage.warning('无不限行数查询权限')
+    return
+  }
+  if (unlimitedRows) {
+    try {
+      await ElMessageBox.confirm('该操作可能返回大量数据，确认继续？', '不限行数查询确认', {
+        type: 'warning',
+        confirmButtonText: '继续',
+        cancelButtonText: '取消'
+      })
+    } catch {
+      return
+    }
+  }
+
+  queryInstanceId.value = metadataInstanceId.value
+  await loadQuerySchemas()
+  querySchemaName.value = table.schemaName || ''
+  queryLimit.value = 100
+  queryUnlimitedRows.value = unlimitedRows
+  querySQL.value = buildTablePreviewSQL(currentMetadataInstance.value, table, unlimitedRows)
+  clearQueryConsoleState()
+  activeTab.value = 'query'
+  await executeQuery({ skipUnlimitedConfirm: true })
+}
+
 const handlePreviewDDL = async () => {
   if (!metadataInstanceId.value || !selectedTable.value?.tableName) {
     ElMessage.warning('请先选择一张表')
@@ -2872,6 +4490,7 @@ const handleExportDictionary = async () => {
 
 const handleQueryInstanceChange = async () => {
   querySchemaName.value = ''
+  queryUnlimitedRows.value = false
   clearQueryConsoleState()
   await loadQuerySchemas()
 }
@@ -2892,11 +4511,12 @@ const handleTopologyInstanceChange = async () => {
   await loadTopology()
 }
 
-const buildQueryPayload = (limit: number): DatabaseQueryPayload => ({
+const buildQueryPayload = (limit: number, options?: { unlimitedRows?: boolean }): DatabaseQueryPayload => ({
   schemaName: querySchemaName.value,
   sqlText: querySQL.value,
-  limit,
-  timeoutSeconds: queryTimeoutSeconds.value
+  limit: options?.unlimitedRows ? undefined : limit,
+  timeoutSeconds: queryTimeoutSeconds.value,
+  unlimitedRows: !!options?.unlimitedRows
 })
 
 const buildWriteValidatePayload = () => ({
@@ -2904,7 +4524,31 @@ const buildWriteValidatePayload = () => ({
   sqlText: querySQL.value
 })
 
-const executeQuery = async () => {
+type ExplainRoute = 'readonly' | 'write' | 'ddl' | 'analyze' | 'unsupported'
+
+const sqlKeywordsForRouting = (sqlText: string) => {
+  const masked = sqlText
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/--.*$/gm, ' ')
+    .replace(/'(?:''|[^'])*'/g, ' ')
+    .replace(/"(?:\\"|[^"])*"/g, ' ')
+    .replace(/`(?:``|[^`])*`/g, ' ')
+  return (masked.match(/[a-zA-Z_][a-zA-Z0-9_]*/g) || []).map(item => item.toLowerCase())
+}
+
+const classifyExplainRoute = (sqlText: string): ExplainRoute => {
+  const keywords = sqlKeywordsForRouting(sqlText)
+  if (keywords.length === 0) return 'unsupported'
+  if (keywords[0] === 'explain' && keywords[1] === 'analyze') return 'analyze'
+  const target = keywords[0] === 'explain' ? keywords[1] : keywords[0]
+  if (!target) return 'unsupported'
+  if (['select', 'with'].includes(target)) return 'readonly'
+  if (['insert', 'update', 'delete', 'replace', 'merge'].includes(target)) return 'write'
+  if (['create', 'alter', 'drop', 'truncate', 'rename', 'grant', 'revoke'].includes(target)) return 'ddl'
+  return 'unsupported'
+}
+
+const executeQuery = async (options?: { skipUnlimitedConfirm?: boolean }) => {
   if (!queryInstanceId.value) {
     ElMessage.warning('请先选择数据库实例')
     return
@@ -2917,10 +4561,28 @@ const executeQuery = async () => {
     ElMessage.warning(isRedisQueryInstance.value ? '请输入 Redis 命令' : '请输入 SQL')
     return
   }
+  if (queryUnlimitedRows.value && !canUseQueryUnlimitedRows.value) {
+    queryUnlimitedRows.value = false
+    ElMessage.warning('无不限行数查询权限')
+    return
+  }
+  if (queryUnlimitedRows.value && !options?.skipUnlimitedConfirm) {
+    try {
+      await ElMessageBox.confirm('该操作可能返回大量数据，确认继续？', '不限行数查询确认', {
+        type: 'warning',
+        confirmButtonText: '继续',
+        cancelButtonText: '取消'
+      })
+    } catch {
+      return
+    }
+  }
   queryRunning.value = true
   try {
     clearWriteConsoleState()
-    queryResult.value = await executeDatabaseQuery(queryInstanceId.value, buildQueryPayload(queryLimit.value))
+    queryResult.value = await executeDatabaseQuery(queryInstanceId.value, buildQueryPayload(queryLimit.value, {
+      unlimitedRows: queryUnlimitedRows.value
+    }))
     ElMessage.success(
       isRedisQueryInstance.value
         ? `命令执行成功，返回 ${queryResult.value?.rowsReturned || 0} 行`
@@ -2967,10 +4629,31 @@ const handleExplainQuery = async () => {
     ElMessage.warning('请输入 SQL')
     return
   }
+  const explainRoute = classifyExplainRoute(querySQL.value)
+  if (explainRoute === 'analyze') {
+    ElMessage.warning('执行计划仅支持 EXPLAIN，不允许 EXPLAIN ANALYZE')
+    return
+  }
+  if (explainRoute === 'ddl') {
+    ElMessage.warning('DDL 不支持执行计划，请使用 DDL 检查')
+    return
+  }
+  if (explainRoute === 'write') {
+    if (!databaseConfig.writeExplainEnabled) {
+      ElMessage.warning('写 SQL 执行计划开关未开启')
+      return
+    }
+    if (!canUseWriteExplainCurrentQueryInstance.value) {
+      ElMessage.warning('无写 SQL 执行计划权限')
+      return
+    }
+  }
   queryExplaining.value = true
   try {
     clearWriteConsoleState()
-    explainResult.value = await explainDatabaseQuery(queryInstanceId.value, buildQueryPayload(queryLimit.value))
+    explainResult.value = explainRoute === 'write'
+      ? await explainDatabaseWriteQuery(queryInstanceId.value, buildQueryPayload(queryLimit.value))
+      : await explainDatabaseQuery(queryInstanceId.value, buildQueryPayload(queryLimit.value))
     explainDialogVisible.value = true
   } finally {
     queryExplaining.value = false
@@ -3018,6 +4701,7 @@ const handleValidateWriteQuery = async () => {
   try {
     clearReadOnlyConsoleState()
     writeResult.value = undefined
+    ddlCheckResult.value = undefined
     writeCheckResult.value = await validateDatabaseWriteQuery(queryInstanceId.value, buildWriteValidatePayload())
     if (writeCheckResult.value?.allowed) {
       ElMessage.success(writeCheckResult.value.message || '写操作预检查通过')
@@ -3046,6 +4730,7 @@ const handlePrepareWriteExecute = async () => {
   try {
     clearReadOnlyConsoleState()
     writeResult.value = undefined
+    ddlCheckResult.value = undefined
     const result = await validateDatabaseWriteQuery(queryInstanceId.value, buildWriteValidatePayload())
     writeCheckResult.value = result
     if (!result?.allowed) {
@@ -3098,6 +4783,110 @@ const handleExecuteWrite = async () => {
   }
 }
 
+const handleValidateDDLQuery = async () => {
+  if (!queryInstanceId.value) {
+    ElMessage.warning('请先选择数据库实例')
+    return
+  }
+  if (!canDDLCurrentQueryInstance.value) {
+    ElMessage.warning('无 DDL 权限或该数据库类型暂未接入结构变更')
+    return
+  }
+  if (!querySQL.value.trim()) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  queryDDLChecking.value = true
+  try {
+    clearReadOnlyConsoleState()
+    writeCheckResult.value = undefined
+    writeResult.value = undefined
+    ddlCheckResult.value = await validateDatabaseDDLQuery(queryInstanceId.value, buildWriteValidatePayload())
+    if (ddlCheckResult.value?.allowed) {
+      ElMessage.success(ddlCheckResult.value.message || 'DDL 结构变更检查通过')
+      return
+    }
+    ElMessage.warning(ddlCheckResult.value?.message || 'DDL 结构变更检查未通过')
+  } finally {
+    queryDDLChecking.value = false
+  }
+}
+
+const handlePrepareDDLExecute = async () => {
+  if (!queryInstanceId.value) {
+    ElMessage.warning('请先选择数据库实例')
+    return
+  }
+  if (!canDDLCurrentQueryInstance.value) {
+    ElMessage.warning('无 DDL 权限或该数据库类型暂未接入结构变更')
+    return
+  }
+  if (!databaseConfig.ddlEnabled) {
+    ElMessage.warning('DDL 结构变更开关未开启')
+    return
+  }
+  if (!querySQL.value.trim()) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  queryDDLPreparing.value = true
+  try {
+    clearReadOnlyConsoleState()
+    writeCheckResult.value = undefined
+    writeResult.value = undefined
+    const result = await validateDatabaseDDLQuery(queryInstanceId.value, buildWriteValidatePayload())
+    ddlCheckResult.value = result
+    if (!result?.allowed) {
+      ElMessage.warning(result?.message || 'DDL 结构变更检查未通过')
+      return
+    }
+    resetDDLConfirmForm()
+    ddlConfirmForm.confirmed = !result.confirmRequired
+    ddlConfirmVisible.value = true
+  } finally {
+    queryDDLPreparing.value = false
+  }
+}
+
+const handleExecuteDDL = async () => {
+  if (!queryInstanceId.value) {
+    ElMessage.warning('请先选择数据库实例')
+    return
+  }
+  if (!canDDLCurrentQueryInstance.value) {
+    ElMessage.warning('无 DDL 权限或该数据库类型暂未接入结构变更')
+    return
+  }
+  if (!ddlCheckResult.value?.allowed) {
+    ElMessage.warning('请先完成 DDL 结构变更检查')
+    return
+  }
+  if (ddlCheckResult.value.reasonRequired && !ddlConfirmForm.reason.trim()) {
+    ElMessage.warning('请填写 DDL 结构变更原因')
+    return
+  }
+  if (ddlCheckResult.value.confirmRequired && !ddlConfirmForm.confirmed) {
+    ElMessage.warning('请确认 DDL 结构变更风险')
+    return
+  }
+  queryDDLSubmitting.value = true
+  try {
+    writeResult.value = await executeDatabaseDDLQuery(queryInstanceId.value, {
+      schemaName: querySchemaName.value,
+      sqlText: querySQL.value,
+      reason: ddlConfirmForm.reason.trim(),
+      confirmed: ddlConfirmForm.confirmed,
+      timeoutSeconds: queryTimeoutSeconds.value
+    })
+    ddlConfirmVisible.value = false
+    ddlCheckResult.value = undefined
+    await loadQueryAudits()
+    ElMessage.success(writeResult.value?.message || 'DDL 结构变更执行成功')
+  } finally {
+    queryDDLSubmitting.value = false
+  }
+}
+
 const loadQueryHistory = async () => {
   queryHistoryLoading.value = true
   try {
@@ -3143,6 +4932,7 @@ const applyHistoryQuery = async (row: any) => {
 
 const resetQueryConsole = () => {
   querySQL.value = ''
+  queryUnlimitedRows.value = false
   clearQueryConsoleState()
 }
 
@@ -3427,7 +5217,7 @@ const handleDeleteBackupTask = async (row: DatabaseBackupTaskResult) => {
 
 const handleRunBackupTask = async (row: DatabaseBackupTaskResult) => {
   await ElMessageBox.confirm(
-    `确定手动触发备份任务「${row.name}」吗？系统会立即执行逻辑备份并写入统一审计。`,
+    `确定手动触发备份任务「${row.name}」吗？系统会创建一条队列记录并在后台执行逻辑全量备份，所有动作会写入统一审计。`,
     '手动触发确认',
     {
       type: 'warning',
@@ -3438,7 +5228,7 @@ const handleRunBackupTask = async (row: DatabaseBackupTaskResult) => {
   runningBackupTaskId.value = row.id
   try {
     const res = await runDatabaseBackupTask(row.id) as DatabaseBackupRunResult
-    ElMessage.success(res.message || '备份任务已触发')
+    ElMessage.success(res.message || '备份任务已进入队列，可在备份记录中刷新查看进度')
   } finally {
     runningBackupTaskId.value = 0
     await Promise.all([loadBackupTasks(), loadBackupRecords(), loadQueryAudits()])
@@ -3449,6 +5239,17 @@ const handleDownloadBackupRecord = async (row: DatabaseBackupRecordResult) => {
   const blob = await downloadDatabaseBackupRecord(row.id) as Blob
   downloadBlob(blob, row.fileName || `database-backup-${row.id}.sql.gz`)
   ElMessage.success('备份文件已开始下载')
+}
+
+const handleVerifyBackupRecord = async (row: DatabaseBackupRecordResult) => {
+  verifyingBackupRecordId.value = row.id
+  try {
+    await verifyDatabaseBackupRecord(row.id)
+    ElMessage.success('备份文件校验通过')
+  } finally {
+    verifyingBackupRecordId.value = 0
+    await Promise.all([loadBackupRecords(), loadQueryAudits()])
+  }
 }
 
 const openRestoreDialog = (row: DatabaseBackupRecordResult) => {
@@ -3575,6 +5376,22 @@ const dbTypeTag = (dbType: string) => {
   }
 }
 
+const topologyRoleTag = (role: string) => {
+  const normalized = String(role || '').toLowerCase()
+  if (['master', 'primary'].includes(normalized)) return 'success'
+  if (['replica', 'slave', 'secondary'].includes(normalized)) return 'primary'
+  if (normalized === 'arbiter') return 'warning'
+  return 'info'
+}
+
+const topologyStateTag = (state: string) => {
+  const normalized = String(state || '').toLowerCase()
+  if (['ok', 'online', 'connected', 'healthy', 'started', 'green'].includes(normalized)) return 'success'
+  if (['yellow', 'recovering', 'initializing', 'relocating'].includes(normalized)) return 'warning'
+  if (['unhealthy', 'fail', 'failed', 'red', 'disconnected', 'down'].includes(normalized)) return 'danger'
+  return 'info'
+}
+
 const auditStatusTag = (status: string) => {
   switch (status) {
     case 'success':
@@ -3604,6 +5421,21 @@ const backupStatusTag = (status: string) => {
       return 'warning'
     case 'pending':
       return 'info'
+    default:
+      return 'info'
+  }
+}
+
+const backupVerifyStatusTag = (status?: string) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'expired':
+      return 'info'
+    case 'pending':
+      return 'warning'
     default:
       return 'info'
   }
@@ -3672,6 +5504,16 @@ const findingSeverityTag = (severity?: string) => {
   }
 }
 
+const environmentText = (value: string) => {
+  const map: Record<string, string> = {
+    prod: '生产',
+    staging: '预发',
+    test: '测试',
+    dev: '开发'
+  }
+  return map[value] || value
+}
+
 const formatNumber = (value?: number) => {
   return Number(value || 0).toLocaleString()
 }
@@ -3710,6 +5552,10 @@ const downloadBlob = (blob: Blob, filename: string) => {
   link.click()
   document.body.removeChild(link)
   window.URL.revokeObjectURL(url)
+}
+
+const handleDocumentClick = () => {
+  closeTableContextMenu()
 }
 
 watch(
@@ -3755,6 +5601,12 @@ watch(activeTab, async (tab) => {
   }
 })
 
+watch(canUseQueryUnlimitedRows, (canUse) => {
+  if (!canUse && queryUnlimitedRows.value) {
+    queryUnlimitedRows.value = false
+  }
+})
+
 watch(
   () => [
     diagnosisInstanceId.value,
@@ -3774,12 +5626,14 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('resize', resizeCapacityChart)
-  await Promise.all([loadSupportedTypes(), loadCredentials(), loadRoles(), loadUIPermissions()])
+  document.addEventListener('click', handleDocumentClick)
+  await Promise.all([loadSupportedTypes(), loadCredentials(), loadRoles(), loadUIPermissions(), loadDatabaseWriteConfig()])
   await loadInstances()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resizeCapacityChart)
+  document.removeEventListener('click', handleDocumentClick)
   capacityChart?.dispose()
   capacityChart = null
 })
@@ -4059,6 +5913,41 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
+.metadata-context-menu {
+  position: fixed;
+  z-index: 3000;
+  min-width: 150px;
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+}
+
+.metadata-context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.metadata-context-menu-item:hover:not(:disabled) {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.metadata-context-menu-item:disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
 .detail-tabs {
   margin-top: -8px;
 }
@@ -4086,6 +5975,23 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.database-write-policy-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 16px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+}
+
+.database-write-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .query-toolbar {
@@ -4377,6 +6283,21 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.backup-risk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.backup-task-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
 .permission-tag-list {
   display: flex;
   align-items: center;
@@ -4393,6 +6314,10 @@ onBeforeUnmount(() => {
 
 .backup-dialog-alert {
   margin-bottom: 16px;
+}
+
+.permission-mode-alert {
+  margin-bottom: 14px;
 }
 
 .audit-panel {

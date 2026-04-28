@@ -42,14 +42,17 @@ const (
 
 	DatabaseAuditActionQuery              = "query"
 	DatabaseAuditActionExplain            = "explain"
+	DatabaseAuditActionWriteExplain       = "write_explain"
 	DatabaseAuditActionQueryExport        = "query_export"
 	DatabaseAuditActionMetadataExport     = "metadata_export"
 	DatabaseAuditActionDiagnosisMetrics   = "diagnosis_metrics"
 	DatabaseAuditActionDiagnosisSessions  = "diagnosis_sessions"
 	DatabaseAuditActionDiagnosisSlowQuery = "diagnosis_slow_queries"
 	DatabaseAuditActionChangeExecute      = "change_execute"
+	DatabaseAuditActionDDLExecute         = "ddl_execute"
 	DatabaseAuditActionBackupRun          = "backup_run"
 	DatabaseAuditActionBackupDownload     = "backup_download"
+	DatabaseAuditActionBackupVerify       = "backup_verify"
 	DatabaseAuditActionTopologyView       = "topology_view"
 	DatabaseAuditActionRestoreDryRun      = "restore_dry_run"
 	DatabaseAuditActionCapacityView       = "capacity_view"
@@ -57,18 +60,29 @@ const (
 	DatabaseAuditActionPermissionUpsert   = "instance_permission_upsert"
 	DatabaseAuditActionPermissionDelete   = "instance_permission_delete"
 
-	DatabaseBackupTypeLogical        = "logical"
-	DatabaseBackupTypeLogicalCustom  = "logical_custom"
-	DatabaseBackupStorageLocal       = "local"
-	DatabaseBackupStatusPending      = "pending"
-	DatabaseBackupStatusQueued       = "queued"
-	DatabaseBackupStatusRunning      = "running"
-	DatabaseBackupStatusCleaning     = "cleaning"
-	DatabaseBackupStatusSuccess      = "success"
-	DatabaseBackupStatusFailed       = "failed"
-	DatabaseBackupTriggerManual      = "manual"
-	DatabaseBackupTriggerSchedule    = "schedule"
-	DatabaseBackupTriggerManualRetry = "manual_retry"
+	DatabaseBackupTypeLogical         = "logical"
+	DatabaseBackupTypeLogicalCustom   = "logical_custom"
+	DatabaseBackupStorageLocal        = "local"
+	DatabaseBackupStatusPending       = "pending"
+	DatabaseBackupStatusQueued        = "queued"
+	DatabaseBackupStatusRunning       = "running"
+	DatabaseBackupStatusCleaning      = "cleaning"
+	DatabaseBackupStatusSuccess       = "success"
+	DatabaseBackupStatusFailed        = "failed"
+	DatabaseBackupStatusExpired       = "expired"
+	DatabaseBackupTriggerManual       = "manual"
+	DatabaseBackupTriggerSchedule     = "schedule"
+	DatabaseBackupTriggerManualRetry  = "manual_retry"
+	DatabaseBackupVerifyStatusPending = "pending"
+	DatabaseBackupVerifyStatusSuccess = "success"
+	DatabaseBackupVerifyStatusFailed  = "failed"
+	DatabaseBackupVerifyStatusExpired = "expired"
+
+	DatabaseRestoreCapabilityNone               = "none"
+	DatabaseRestoreCapabilityLogicalRestoreOnly = "logical_restore_only"
+	DatabaseRestoreCapabilityPhysicalRestore    = "physical_restore"
+	DatabaseRestoreCapabilityPITRCapable        = "pitr_capable"
+	DatabaseRestoreCapabilityPITRVerified       = "pitr_verified"
 
 	DatabaseRestoreModeDryRun = "dry_run"
 
@@ -81,16 +95,19 @@ const (
 
 	DatabaseInspectionReportManual = "manual"
 
-	DatabasePermissionView      uint = 1 << 0
-	DatabasePermissionQuery     uint = 1 << 1
-	DatabasePermissionExport    uint = 1 << 2
-	DatabasePermissionWrite     uint = 1 << 3
-	DatabasePermissionBackup    uint = 1 << 4
-	DatabasePermissionRestore   uint = 1 << 5
-	DatabasePermissionDiagnosis uint = 1 << 6
-	DatabasePermissionTopology  uint = 1 << 7
-	DatabasePermissionManage    uint = 1 << 8
-	DatabasePermissionAll            = DatabasePermissionView |
+	DatabasePermissionView           uint = 1 << 0
+	DatabasePermissionQuery          uint = 1 << 1
+	DatabasePermissionExport         uint = 1 << 2
+	DatabasePermissionWrite          uint = 1 << 3
+	DatabasePermissionBackup         uint = 1 << 4
+	DatabasePermissionRestore        uint = 1 << 5
+	DatabasePermissionDiagnosis      uint = 1 << 6
+	DatabasePermissionTopology       uint = 1 << 7
+	DatabasePermissionManage         uint = 1 << 8
+	DatabasePermissionQueryUnlimited uint = 1 << 9
+	DatabasePermissionWriteExplain   uint = 1 << 10
+	DatabasePermissionDDL            uint = 1 << 11
+	DatabasePermissionAll                 = DatabasePermissionView |
 		DatabasePermissionQuery |
 		DatabasePermissionExport |
 		DatabasePermissionWrite |
@@ -98,7 +115,10 @@ const (
 		DatabasePermissionRestore |
 		DatabasePermissionDiagnosis |
 		DatabasePermissionTopology |
-		DatabasePermissionManage
+		DatabasePermissionManage |
+		DatabasePermissionQueryUnlimited |
+		DatabasePermissionWriteExplain |
+		DatabasePermissionDDL
 )
 
 // DatabaseInstance 数据库实例资产
@@ -305,17 +325,21 @@ func (DatabaseQueryAudit) TableName() string {
 // DatabaseBackupTask 备份任务配置
 type DatabaseBackupTask struct {
 	gorm.Model
-	InstanceID    uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
-	Name          string     `gorm:"type:varchar(120);not null;comment:任务名称" json:"name"`
-	BackupType    string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
-	Schedule      string     `gorm:"type:varchar(120);comment:Cron表达式" json:"schedule"`
-	StorageType   string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
-	StorageConfig string     `gorm:"column:storage_config;type:text;comment:存储配置JSON" json:"storageConfig"`
-	RetentionDays int        `gorm:"column:retention_days;type:int;default:7;comment:保留天数" json:"retentionDays"`
-	Enabled       bool       `gorm:"default:true;comment:是否启用" json:"enabled"`
-	LastRunAt     *time.Time `gorm:"column:last_run_at;comment:最近执行时间" json:"lastRunAt,omitempty"`
-	LastStatus    string     `gorm:"column:last_status;type:varchar(20);comment:最近执行状态" json:"lastStatus"`
-	LastMessage   string     `gorm:"column:last_message;type:varchar(500);comment:最近执行结果" json:"lastMessage"`
+	InstanceID         uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	Name               string     `gorm:"type:varchar(120);not null;comment:任务名称" json:"name"`
+	BackupType         string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
+	Schedule           string     `gorm:"type:varchar(120);comment:Cron表达式" json:"schedule"`
+	StorageType        string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
+	StorageConfig      string     `gorm:"column:storage_config;type:text;comment:存储配置JSON" json:"storageConfig"`
+	RetentionDays      int        `gorm:"column:retention_days;type:int;default:7;comment:保留天数" json:"retentionDays"`
+	MaxDurationMinutes int        `gorm:"column:max_duration_minutes;type:int;default:1440;comment:最大运行时长分钟" json:"maxDurationMinutes"`
+	Enabled            bool       `gorm:"default:true;comment:是否启用" json:"enabled"`
+	NextRunAt          *time.Time `gorm:"column:next_run_at;comment:下次预计执行时间" json:"nextRunAt,omitempty"`
+	LastRunAt          *time.Time `gorm:"column:last_run_at;comment:最近执行时间" json:"lastRunAt,omitempty"`
+	LastSuccessAt      *time.Time `gorm:"column:last_success_at;comment:最近成功备份时间" json:"lastSuccessAt,omitempty"`
+	LastStatus         string     `gorm:"column:last_status;type:varchar(20);comment:最近执行状态" json:"lastStatus"`
+	LastMessage        string     `gorm:"column:last_message;type:varchar(500);comment:最近执行结果" json:"lastMessage"`
+	RestoreCapability  string     `gorm:"column:restore_capability;type:varchar(30);default:'logical_restore_only';comment:恢复能力" json:"restoreCapability"`
 }
 
 func (DatabaseBackupTask) TableName() string {
@@ -325,20 +349,29 @@ func (DatabaseBackupTask) TableName() string {
 // DatabaseBackupRecord 备份执行记录
 type DatabaseBackupRecord struct {
 	gorm.Model
-	TaskID         uint       `gorm:"column:task_id;index;comment:任务ID" json:"taskId"`
-	InstanceID     uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
-	TriggerType    string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发方式" json:"triggerType"`
-	BackupType     string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
-	StorageType    string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
-	Status         string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
-	FilePath       string     `gorm:"column:file_path;type:varchar(500);comment:文件路径" json:"filePath"`
-	FileName       string     `gorm:"column:file_name;type:varchar(255);comment:文件名" json:"fileName"`
-	FileSize       int64      `gorm:"column:file_size;type:bigint;default:0;comment:文件大小" json:"fileSize"`
-	ChecksumSHA256 string     `gorm:"column:checksum_sha256;type:varchar(64);comment:文件SHA256校验和" json:"checksumSha256"`
-	StartedAt      *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
-	FinishedAt     *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
-	DurationMs     int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
-	ErrorMessage   string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
+	TaskID            uint       `gorm:"column:task_id;index;comment:任务ID" json:"taskId"`
+	InstanceID        uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	TriggerType       string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发方式" json:"triggerType"`
+	BackupType        string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
+	StorageType       string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
+	Status            string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
+	FilePath          string     `gorm:"column:file_path;type:varchar(500);comment:文件路径" json:"filePath"`
+	FileName          string     `gorm:"column:file_name;type:varchar(255);comment:文件名" json:"fileName"`
+	FileSize          int64      `gorm:"column:file_size;type:bigint;default:0;comment:文件大小" json:"fileSize"`
+	ChecksumSHA256    string     `gorm:"column:checksum_sha256;type:varchar(64);comment:文件SHA256校验和" json:"checksumSha256"`
+	Encrypted         bool       `gorm:"default:false;comment:备份是否加密" json:"encrypted"`
+	Compression       string     `gorm:"type:varchar(30);comment:压缩方式" json:"compression"`
+	ExpiresAt         *time.Time `gorm:"column:expires_at;index;comment:过期时间" json:"expiresAt,omitempty"`
+	VerifiedAt        *time.Time `gorm:"column:verified_at;comment:最近校验时间" json:"verifiedAt,omitempty"`
+	VerifyStatus      string     `gorm:"column:verify_status;type:varchar(20);comment:校验状态" json:"verifyStatus"`
+	VerifyMessage     string     `gorm:"column:verify_message;type:varchar(500);comment:校验结果" json:"verifyMessage"`
+	RestoreTestedAt   *time.Time `gorm:"column:restore_tested_at;comment:最近恢复演练时间" json:"restoreTestedAt,omitempty"`
+	RestoreTestStatus string     `gorm:"column:restore_test_status;type:varchar(20);comment:最近恢复演练状态" json:"restoreTestStatus"`
+	StartedAt         *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	LastHeartbeatAt   *time.Time `gorm:"column:last_heartbeat_at;comment:最近心跳时间" json:"lastHeartbeatAt,omitempty"`
+	FinishedAt        *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
+	DurationMs        int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	ErrorMessage      string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
 }
 
 func (DatabaseBackupRecord) TableName() string {

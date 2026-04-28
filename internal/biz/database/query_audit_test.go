@@ -13,6 +13,8 @@ func TestNormalizeAuditAction(t *testing.T) {
 	}{
 		{name: "empty defaults to query", input: "", output: DatabaseAuditActionQuery},
 		{name: "query export", input: "QUERY_EXPORT", output: DatabaseAuditActionQueryExport},
+		{name: "write explain", input: "WRITE_EXPLAIN", output: DatabaseAuditActionWriteExplain},
+		{name: "ddl execute", input: "DDL_EXECUTE", output: DatabaseAuditActionDDLExecute},
 		{name: "diagnosis slow", input: "diagnosis_slow_queries", output: DatabaseAuditActionDiagnosisSlowQuery},
 		{name: "permission upsert", input: "INSTANCE_PERMISSION_UPSERT", output: DatabaseAuditActionPermissionUpsert},
 	}
@@ -33,11 +35,38 @@ func TestQueryAuditActionText(t *testing.T) {
 	if got := QueryAuditActionText(DatabaseAuditActionChangeExecute); got != "写操作执行" {
 		t.Fatalf("unexpected change action text: %s", got)
 	}
+	if got := QueryAuditActionText(DatabaseAuditActionWriteExplain); got != "写 SQL 执行计划" {
+		t.Fatalf("unexpected write explain action text: %s", got)
+	}
+	if got := QueryAuditActionText(DatabaseAuditActionDDLExecute); got != "DDL 结构变更" {
+		t.Fatalf("unexpected ddl action text: %s", got)
+	}
 	if got := QueryAuditActionText(""); got != "只读查询" {
 		t.Fatalf("expected empty action to fallback to query text, got %s", got)
 	}
 	if got := QueryAuditActionText(DatabaseAuditActionPermissionDelete); got != "实例权限删除" {
 		t.Fatalf("unexpected permission action text: %s", got)
+	}
+}
+
+func TestIsDatabaseChangeAuditAction(t *testing.T) {
+	tests := []struct {
+		name   string
+		action string
+		want   bool
+	}{
+		{name: "dml", action: DatabaseAuditActionChangeExecute, want: true},
+		{name: "ddl", action: DatabaseAuditActionDDLExecute, want: true},
+		{name: "query", action: DatabaseAuditActionQuery, want: false},
+		{name: "empty query fallback", action: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDatabaseChangeAuditAction(tt.action); got != tt.want {
+				t.Fatalf("isDatabaseChangeAuditAction(%q) = %v, want %v", tt.action, got, tt.want)
+			}
+		})
 	}
 }
 

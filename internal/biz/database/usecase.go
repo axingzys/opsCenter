@@ -23,6 +23,11 @@ type ConnectionCredential struct {
 
 type DatabaseWritePolicy struct {
 	WriteEnabled            bool
+	WriteExplainEnabled     bool
+	DDLEnabled              bool
+	DDLHighRiskConfirm      bool
+	DDLReasonRequired       bool
+	DDLRequireBackupHint    bool
 	HighRiskRequiresConfirm bool
 	OperationReasonRequired bool
 	MaxAffectedRows         int64
@@ -34,29 +39,30 @@ type DatabaseBackupPolicy struct {
 }
 
 type UseCase struct {
-	instanceRepo          InstanceRepo
-	schemaRepo            SchemaRepo
-	tableRepo             TableRepo
-	columnRepo            ColumnRepo
-	indexRepo             IndexRepo
-	metadataRepo          MetadataRepo
-	redisMetadataRepo     RedisMetadataRepo
-	syncJobRepo           SyncJobRepo
-	auditRepo             QueryAuditRepo
-	backupTaskRepo        BackupTaskRepo
-	backupRecordRepo      BackupRecordRepo
-	restoreJobRepo        RestoreJobRepo
-	capacitySnapshotRepo  CapacitySnapshotRepo
-	inspectionReportRepo  InspectionReportRepo
-	credentialIDExists    func(ctx context.Context, id uint) error
-	credentialResolver    func(ctx context.Context, id uint) (*ConnectionCredential, error)
-	writePolicyResolver   func(ctx context.Context) (*DatabaseWritePolicy, error)
-	backupPolicyResolver  func(ctx context.Context) (*DatabaseBackupPolicy, error)
-	backupRunMu           sync.Mutex
-	backupRunningTasks    map[uint]struct{}
-	restoreRunMu          sync.Mutex
-	restoreRunningTargets map[string]struct{}
-	startedAt             time.Time
+	instanceRepo           InstanceRepo
+	schemaRepo             SchemaRepo
+	tableRepo              TableRepo
+	columnRepo             ColumnRepo
+	indexRepo              IndexRepo
+	metadataRepo           MetadataRepo
+	redisMetadataRepo      RedisMetadataRepo
+	syncJobRepo            SyncJobRepo
+	auditRepo              QueryAuditRepo
+	backupTaskRepo         BackupTaskRepo
+	backupRecordRepo       BackupRecordRepo
+	restoreJobRepo         RestoreJobRepo
+	capacitySnapshotRepo   CapacitySnapshotRepo
+	inspectionReportRepo   InspectionReportRepo
+	credentialIDExists     func(ctx context.Context, id uint) error
+	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
+	writePolicyResolver    func(ctx context.Context) (*DatabaseWritePolicy, error)
+	backupPolicyResolver   func(ctx context.Context) (*DatabaseBackupPolicy, error)
+	backupRunMu            sync.Mutex
+	backupRunningTasks     map[uint]struct{}
+	backupRunningInstances map[uint]struct{}
+	restoreRunMu           sync.Mutex
+	restoreRunningTargets  map[string]struct{}
+	startedAt              time.Time
 }
 
 func NewUseCase(
@@ -80,27 +86,28 @@ func NewUseCase(
 	backupPolicyResolver func(ctx context.Context) (*DatabaseBackupPolicy, error),
 ) *UseCase {
 	return &UseCase{
-		instanceRepo:          instanceRepo,
-		schemaRepo:            schemaRepo,
-		tableRepo:             tableRepo,
-		columnRepo:            columnRepo,
-		indexRepo:             indexRepo,
-		metadataRepo:          metadataRepo,
-		redisMetadataRepo:     redisMetadataRepo,
-		syncJobRepo:           syncJobRepo,
-		auditRepo:             auditRepo,
-		backupTaskRepo:        backupTaskRepo,
-		backupRecordRepo:      backupRecordRepo,
-		restoreJobRepo:        restoreJobRepo,
-		capacitySnapshotRepo:  capacitySnapshotRepo,
-		inspectionReportRepo:  inspectionReportRepo,
-		credentialIDExists:    credentialIDExists,
-		credentialResolver:    credentialResolver,
-		writePolicyResolver:   writePolicyResolver,
-		backupPolicyResolver:  backupPolicyResolver,
-		backupRunningTasks:    make(map[uint]struct{}),
-		restoreRunningTargets: make(map[string]struct{}),
-		startedAt:             time.Now(),
+		instanceRepo:           instanceRepo,
+		schemaRepo:             schemaRepo,
+		tableRepo:              tableRepo,
+		columnRepo:             columnRepo,
+		indexRepo:              indexRepo,
+		metadataRepo:           metadataRepo,
+		redisMetadataRepo:      redisMetadataRepo,
+		syncJobRepo:            syncJobRepo,
+		auditRepo:              auditRepo,
+		backupTaskRepo:         backupTaskRepo,
+		backupRecordRepo:       backupRecordRepo,
+		restoreJobRepo:         restoreJobRepo,
+		capacitySnapshotRepo:   capacitySnapshotRepo,
+		inspectionReportRepo:   inspectionReportRepo,
+		credentialIDExists:     credentialIDExists,
+		credentialResolver:     credentialResolver,
+		writePolicyResolver:    writePolicyResolver,
+		backupPolicyResolver:   backupPolicyResolver,
+		backupRunningTasks:     make(map[uint]struct{}),
+		backupRunningInstances: make(map[uint]struct{}),
+		restoreRunningTargets:  make(map[string]struct{}),
+		startedAt:              time.Now(),
 	}
 }
 
@@ -207,10 +214,12 @@ type DatabaseInstancePermissionAuditRequest struct {
 }
 
 type DatabaseQueryRequest struct {
-	SchemaName     string `json:"schemaName" binding:"omitempty,max=150"`
-	SQLText        string `json:"sqlText" binding:"required"`
-	Limit          int    `json:"limit" binding:"omitempty,min=1,max=5000"`
-	TimeoutSeconds int    `json:"timeoutSeconds" binding:"omitempty,min=1,max=30"`
+	SchemaName             string `json:"schemaName" binding:"omitempty,max=150"`
+	SQLText                string `json:"sqlText" binding:"required"`
+	Limit                  int    `json:"limit" binding:"omitempty,min=1,max=5000"`
+	TimeoutSeconds         int    `json:"timeoutSeconds" binding:"omitempty,min=1,max=30"`
+	UnlimitedRows          bool   `json:"unlimitedRows"`
+	UnlimitedRowsPermitted bool   `json:"-"`
 }
 
 type DatabaseWriteValidateRequest struct {
@@ -226,15 +235,21 @@ type DatabaseWriteExecuteRequest struct {
 	TimeoutSeconds int    `json:"timeoutSeconds" binding:"omitempty,min=1,max=30"`
 }
 
+type DatabaseDDLValidateRequest struct {
+	SchemaName string `json:"schemaName" binding:"omitempty,max=150"`
+	SQLText    string `json:"sqlText" binding:"required"`
+}
+
 type DatabaseBackupTaskRequest struct {
-	InstanceID    uint   `json:"instanceId" binding:"required"`
-	Name          string `json:"name" binding:"required,min=2,max=120"`
-	BackupType    string `json:"backupType" binding:"omitempty,max=30"`
-	Schedule      string `json:"schedule" binding:"omitempty,max=120"`
-	StorageType   string `json:"storageType" binding:"omitempty,max=30"`
-	StorageConfig string `json:"storageConfig" binding:"omitempty,max=2000"`
-	RetentionDays int    `json:"retentionDays" binding:"omitempty,min=1,max=3650"`
-	Enabled       bool   `json:"enabled"`
+	InstanceID         uint   `json:"instanceId" binding:"required"`
+	Name               string `json:"name" binding:"required,min=2,max=120"`
+	BackupType         string `json:"backupType" binding:"omitempty,max=30"`
+	Schedule           string `json:"schedule" binding:"omitempty,max=120"`
+	StorageType        string `json:"storageType" binding:"omitempty,max=30"`
+	StorageConfig      string `json:"storageConfig" binding:"omitempty,max=2000"`
+	RetentionDays      int    `json:"retentionDays" binding:"omitempty,min=1,max=3650"`
+	MaxDurationMinutes int    `json:"maxDurationMinutes" binding:"omitempty,min=1,max=10080"`
+	Enabled            bool   `json:"enabled"`
 }
 
 type DatabaseRestoreDryRunRequest struct {
@@ -427,8 +442,25 @@ type DatabaseWriteValidateVO struct {
 	Message           string `json:"message"`
 }
 
+type DatabaseDDLValidateVO struct {
+	InstanceID      uint   `json:"instanceId"`
+	InstanceName    string `json:"instanceName"`
+	DBType          string `json:"dbType"`
+	DBTypeText      string `json:"dbTypeText"`
+	SchemaName      string `json:"schemaName"`
+	SQLType         string `json:"sqlType"`
+	RiskLevel       string `json:"riskLevel"`
+	RiskLevelText   string `json:"riskLevelText"`
+	Allowed         bool   `json:"allowed"`
+	ConfirmRequired bool   `json:"confirmRequired"`
+	ReasonRequired  bool   `json:"reasonRequired"`
+	BackupRequired  bool   `json:"backupRequired"`
+	Message         string `json:"message"`
+}
+
 type DatabaseWriteExecuteVO struct {
 	AuditID           uint   `json:"auditId"`
+	AuditAction       string `json:"auditAction"`
 	InstanceID        uint   `json:"instanceId"`
 	InstanceName      string `json:"instanceName"`
 	DBType            string `json:"dbType"`
@@ -450,51 +482,74 @@ type DatabaseWriteExecuteVO struct {
 }
 
 type DatabaseBackupTaskVO struct {
-	ID                 uint   `json:"id"`
-	InstanceID         uint   `json:"instanceId"`
-	InstanceName       string `json:"instanceName"`
-	InstanceDBType     string `json:"instanceDbType"`
-	InstanceDBTypeText string `json:"instanceDbTypeText"`
-	Name               string `json:"name"`
-	BackupType         string `json:"backupType"`
-	BackupTypeText     string `json:"backupTypeText"`
-	Schedule           string `json:"schedule"`
-	StorageType        string `json:"storageType"`
-	StorageTypeText    string `json:"storageTypeText"`
-	StorageConfig      string `json:"storageConfig"`
-	RetentionDays      int    `json:"retentionDays"`
-	Enabled            bool   `json:"enabled"`
-	LastRunAt          string `json:"lastRunAt"`
-	LastStatus         string `json:"lastStatus"`
-	LastStatusText     string `json:"lastStatusText"`
-	LastMessage        string `json:"lastMessage"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
+	ID                        uint   `json:"id"`
+	InstanceID                uint   `json:"instanceId"`
+	InstanceName              string `json:"instanceName"`
+	InstanceDBType            string `json:"instanceDbType"`
+	InstanceDBTypeText        string `json:"instanceDbTypeText"`
+	Name                      string `json:"name"`
+	BackupType                string `json:"backupType"`
+	BackupTypeText            string `json:"backupTypeText"`
+	Schedule                  string `json:"schedule"`
+	StorageType               string `json:"storageType"`
+	StorageTypeText           string `json:"storageTypeText"`
+	StorageConfig             string `json:"storageConfig"`
+	RetentionDays             int    `json:"retentionDays"`
+	MaxDurationMinutes        int    `json:"maxDurationMinutes"`
+	Enabled                   bool   `json:"enabled"`
+	NextRunAt                 string `json:"nextRunAt"`
+	LastRunAt                 string `json:"lastRunAt"`
+	LastSuccessAt             string `json:"lastSuccessAt"`
+	LastStatus                string `json:"lastStatus"`
+	LastStatusText            string `json:"lastStatusText"`
+	LastMessage               string `json:"lastMessage"`
+	RestoreCapability         string `json:"restoreCapability"`
+	RestoreCapabilityText     string `json:"restoreCapabilityText"`
+	PITRSupported             bool   `json:"pitrSupported"`
+	PITRStatusText            string `json:"pitrStatusText"`
+	StrategyText              string `json:"strategyText"`
+	InstanceCapacitySizeBytes int64  `json:"instanceCapacitySizeBytes"`
+	InstanceCapacitySizeText  string `json:"instanceCapacitySizeText"`
+	LargeDataWarning          bool   `json:"largeDataWarning"`
+	LargeDataWarningText      string `json:"largeDataWarningText"`
+	CreatedAt                 string `json:"createdAt"`
+	UpdatedAt                 string `json:"updatedAt"`
 }
 
 type DatabaseBackupRecordVO struct {
-	ID              uint   `json:"id"`
-	TaskID          uint   `json:"taskId"`
-	TaskName        string `json:"taskName"`
-	InstanceID      uint   `json:"instanceId"`
-	InstanceName    string `json:"instanceName"`
-	TriggerType     string `json:"triggerType"`
-	TriggerTypeText string `json:"triggerTypeText"`
-	BackupType      string `json:"backupType"`
-	BackupTypeText  string `json:"backupTypeText"`
-	StorageType     string `json:"storageType"`
-	StorageTypeText string `json:"storageTypeText"`
-	Status          string `json:"status"`
-	StatusText      string `json:"statusText"`
-	FileName        string `json:"fileName"`
-	FileSize        int64  `json:"fileSize"`
-	ChecksumSHA256  string `json:"checksumSha256"`
-	StartedAt       string `json:"startedAt"`
-	FinishedAt      string `json:"finishedAt"`
-	DurationMs      int64  `json:"durationMs"`
-	Message         string `json:"message"`
-	CreatedAt       string `json:"createdAt"`
-	UpdatedAt       string `json:"updatedAt"`
+	ID                    uint   `json:"id"`
+	TaskID                uint   `json:"taskId"`
+	TaskName              string `json:"taskName"`
+	InstanceID            uint   `json:"instanceId"`
+	InstanceName          string `json:"instanceName"`
+	TriggerType           string `json:"triggerType"`
+	TriggerTypeText       string `json:"triggerTypeText"`
+	BackupType            string `json:"backupType"`
+	BackupTypeText        string `json:"backupTypeText"`
+	StorageType           string `json:"storageType"`
+	StorageTypeText       string `json:"storageTypeText"`
+	Status                string `json:"status"`
+	StatusText            string `json:"statusText"`
+	FileName              string `json:"fileName"`
+	FileSize              int64  `json:"fileSize"`
+	ChecksumSHA256        string `json:"checksumSha256"`
+	Encrypted             bool   `json:"encrypted"`
+	Compression           string `json:"compression"`
+	ExpiresAt             string `json:"expiresAt"`
+	VerifiedAt            string `json:"verifiedAt"`
+	VerifyStatus          string `json:"verifyStatus"`
+	VerifyStatusText      string `json:"verifyStatusText"`
+	VerifyMessage         string `json:"verifyMessage"`
+	RestoreTestedAt       string `json:"restoreTestedAt"`
+	RestoreTestStatus     string `json:"restoreTestStatus"`
+	RestoreTestStatusText string `json:"restoreTestStatusText"`
+	StartedAt             string `json:"startedAt"`
+	LastHeartbeatAt       string `json:"lastHeartbeatAt"`
+	FinishedAt            string `json:"finishedAt"`
+	DurationMs            int64  `json:"durationMs"`
+	Message               string `json:"message"`
+	CreatedAt             string `json:"createdAt"`
+	UpdatedAt             string `json:"updatedAt"`
 }
 
 type DatabaseBackupRunVO struct {
@@ -932,7 +987,14 @@ func (uc *UseCase) ExecuteQuery(ctx context.Context, instanceID uint, req *Datab
 		return nil, err
 	}
 
-	limit := normalizeQueryLimit(req.Limit)
+	if req.UnlimitedRows && !req.UnlimitedRowsPermitted {
+		return nil, fmt.Errorf("无不限行数查询权限")
+	}
+	if req.UnlimitedRows && normalizeDBType(item.DBType) == DBTypeRedis {
+		return nil, fmt.Errorf("Redis 查询控制台暂不支持不限行数")
+	}
+
+	limit := normalizeQueryLimit(req.Limit, req.UnlimitedRows)
 	timeout := normalizeQueryTimeout(req.TimeoutSeconds)
 	schemaName := resolveQuerySchemaName(item, req.SchemaName)
 	sqlText := strings.TrimSpace(req.SQLText)
@@ -1196,62 +1258,25 @@ func executeMySQLQuery(ctx context.Context, item *DatabaseInstance, credential *
 		return nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
 
-	rows, err := db.QueryContext(queryCtx, sqlText)
+	tx, err := db.BeginTx(queryCtx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("开启只读事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(queryCtx, sqlText)
 	if err != nil {
 		return nil, fmt.Errorf("执行查询失败: %w", err)
 	}
-	defer rows.Close()
-
-	columns, err := rows.Columns()
+	result, err := readSQLQueryResult(rows, sqlType, sqlText, limit)
+	closeErr := rows.Close()
 	if err != nil {
-		return nil, fmt.Errorf("读取结果列失败: %w", err)
+		return nil, err
 	}
-	columnTypes := make([]string, 0, len(columns))
-	if types, err := rows.ColumnTypes(); err == nil {
-		for _, item := range types {
-			columnTypes = append(columnTypes, item.DatabaseTypeName())
-		}
+	if closeErr != nil {
+		return nil, fmt.Errorf("关闭查询结果失败: %w", closeErr)
 	}
-	for len(columnTypes) < len(columns) {
-		columnTypes = append(columnTypes, "")
-	}
-
-	resultRows := make([]map[string]any, 0, limit)
-	truncated := false
-	for rows.Next() {
-		if len(resultRows) >= limit {
-			truncated = true
-			break
-		}
-		values := make([]any, len(columns))
-		dest := make([]any, len(columns))
-		for i := range values {
-			dest[i] = &values[i]
-		}
-		if err := rows.Scan(dest...); err != nil {
-			return nil, fmt.Errorf("读取结果行失败: %w", err)
-		}
-		row := make(map[string]any, len(columns))
-		for i, column := range columns {
-			row[column] = normalizeSQLValue(values[i])
-		}
-		resultRows = append(resultRows, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("遍历查询结果失败: %w", err)
-	}
-
-	return &DatabaseQueryResultVO{
-		SQLType:      sqlType,
-		ExecutedSQL:  sqlText,
-		Columns:      columns,
-		ColumnTypes:  columnTypes,
-		Rows:         resultRows,
-		RowsReturned: len(resultRows),
-		Limit:        limit,
-		Truncated:    truncated,
-		Message:      "查询成功",
-	}, nil
+	return result, nil
 }
 
 func openMySQLDB(item *DatabaseInstance, credential *ConnectionCredential) (*sql.DB, error) {
@@ -1908,6 +1933,8 @@ func BackupStatusText(status string) string {
 		return "成功"
 	case DatabaseBackupStatusFailed:
 		return "失败"
+	case DatabaseBackupStatusExpired:
+		return "已过期"
 	default:
 		return "未知"
 	}
@@ -1941,6 +1968,8 @@ func QueryAuditActionText(action string) string {
 		return "只读查询"
 	case DatabaseAuditActionExplain:
 		return "执行计划"
+	case DatabaseAuditActionWriteExplain:
+		return "写 SQL 执行计划"
 	case DatabaseAuditActionQueryExport:
 		return "查询结果导出"
 	case DatabaseAuditActionMetadataExport:
@@ -1953,10 +1982,14 @@ func QueryAuditActionText(action string) string {
 		return "慢 SQL 查看"
 	case DatabaseAuditActionChangeExecute:
 		return "写操作执行"
+	case DatabaseAuditActionDDLExecute:
+		return "DDL 结构变更"
 	case DatabaseAuditActionBackupRun:
 		return "逻辑备份执行"
 	case DatabaseAuditActionBackupDownload:
 		return "备份文件下载"
+	case DatabaseAuditActionBackupVerify:
+		return "备份文件校验"
 	case DatabaseAuditActionTopologyView:
 		return "拓扑查看"
 	case DatabaseAuditActionRestoreDryRun:
@@ -1980,6 +2013,8 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionQuery
 	case DatabaseAuditActionExplain:
 		return DatabaseAuditActionExplain
+	case DatabaseAuditActionWriteExplain:
+		return DatabaseAuditActionWriteExplain
 	case DatabaseAuditActionQueryExport:
 		return DatabaseAuditActionQueryExport
 	case DatabaseAuditActionMetadataExport:
@@ -1992,10 +2027,14 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionDiagnosisSlowQuery
 	case DatabaseAuditActionChangeExecute:
 		return DatabaseAuditActionChangeExecute
+	case DatabaseAuditActionDDLExecute:
+		return DatabaseAuditActionDDLExecute
 	case DatabaseAuditActionBackupRun:
 		return DatabaseAuditActionBackupRun
 	case DatabaseAuditActionBackupDownload:
 		return DatabaseAuditActionBackupDownload
+	case DatabaseAuditActionBackupVerify:
+		return DatabaseAuditActionBackupVerify
 	case DatabaseAuditActionTopologyView:
 		return DatabaseAuditActionTopologyView
 	case DatabaseAuditActionRestoreDryRun:
@@ -2037,7 +2076,10 @@ func formatTime(t *time.Time) string {
 	return t.Format("2006-01-02 15:04:05")
 }
 
-func normalizeQueryLimit(limit int) int {
+func normalizeQueryLimit(limit int, unlimited bool) int {
+	if unlimited {
+		return 0
+	}
 	if limit <= 0 {
 		return 500
 	}

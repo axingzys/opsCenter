@@ -345,6 +345,31 @@ const extractErrorMessage = (error: any, fallback: string) => {
   return fallback
 }
 
+const ensureValidRecordingContent = (content: string) => {
+  const trimmed = content.trim()
+  if (!trimmed) {
+    throw new Error('录屏文件为空，无法播放')
+  }
+
+  const firstLine = content.split(/\r?\n/, 1)[0] || ''
+  try {
+    const header = JSON.parse(firstLine)
+    if (header?.code && header.code !== 0 && header.code !== 200) {
+      throw new Error(header.message || '录屏文件不可用')
+    }
+    if (header?.version === 2 && Number(header.width) > 0 && Number(header.height) > 0) {
+      return
+    }
+  } catch (error: any) {
+    if (error?.name !== 'SyntaxError') {
+      throw error
+    }
+    // fall through to the unified playback error below
+  }
+
+  throw new Error('录屏文件格式损坏，无法播放')
+}
+
 const cleanupRecordingUrl = () => {
   if (recordingUrl.value) {
     URL.revokeObjectURL(recordingUrl.value)
@@ -379,7 +404,9 @@ const handlePlay = async (session: TerminalSession) => {
   try {
     cleanupRecordingUrl()
     const response = await playTerminalSession(session.id)
-    const blob = new Blob([response], { type: 'text/plain;charset=utf-8' })
+    const recordingContent = typeof response === 'string' ? response : String(response ?? '')
+    ensureValidRecordingContent(recordingContent)
+    const blob = new Blob([recordingContent], { type: 'text/plain;charset=utf-8' })
     recordingUrl.value = URL.createObjectURL(blob)
     currentSession.value = session
     playerVisible.value = true

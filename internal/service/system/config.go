@@ -207,11 +207,17 @@ type SaveMonitoringConfigRequest struct {
 // SaveDatabaseConfigRequest 保存数据库配置请求
 type SaveDatabaseConfigRequest struct {
 	WriteEnabled               bool   `json:"writeEnabled"`
+	WriteExplainEnabled        bool   `json:"writeExplainEnabled"`
+	DDLEnabled                 bool   `json:"ddlEnabled"`
+	DDLHighRiskRequiresConfirm bool   `json:"ddlHighRiskRequiresConfirm"`
+	DDLReasonRequired          bool   `json:"ddlReasonRequired"`
+	DDLRequireBackupHint       bool   `json:"ddlRequireBackupHint"`
 	HighRiskRequiresConfirm    bool   `json:"highRiskRequiresConfirm"`
 	OperationReasonRequired    bool   `json:"operationReasonRequired"`
 	MaxAffectedRows            int    `json:"maxAffectedRows"`
 	DefaultBackupRetentionDays int    `json:"defaultBackupRetentionDays"`
 	BackupStoragePath          string `json:"backupStoragePath"`
+	InstancePermissionMode     string `json:"instancePermissionMode"`
 }
 
 // SaveSecurityConfig 保存安全配置
@@ -320,6 +326,14 @@ func (s *ConfigService) SaveDatabaseConfig(c *gin.Context) {
 		response.ErrorCode(c, http.StatusBadRequest, "默认备份保留天数必须在1-3650之间")
 		return
 	}
+	instancePermissionMode := strings.ToLower(strings.TrimSpace(req.InstancePermissionMode))
+	if instancePermissionMode == "" {
+		instancePermissionMode = "compat"
+	}
+	if instancePermissionMode != "compat" && instancePermissionMode != "whitelist" {
+		response.ErrorCode(c, http.StatusBadRequest, "实例对象权限模式仅支持 compat 或 whitelist")
+		return
+	}
 
 	backupStoragePath := strings.TrimSpace(req.BackupStoragePath)
 	if backupStoragePath == "" {
@@ -328,11 +342,17 @@ func (s *ConfigService) SaveDatabaseConfig(c *gin.Context) {
 
 	config := &system.DatabaseConfig{
 		WriteEnabled:               req.WriteEnabled,
+		WriteExplainEnabled:        req.WriteExplainEnabled,
+		DDLEnabled:                 req.DDLEnabled,
+		DDLHighRiskRequiresConfirm: req.DDLHighRiskRequiresConfirm,
+		DDLReasonRequired:          req.DDLReasonRequired,
+		DDLRequireBackupHint:       req.DDLRequireBackupHint,
 		HighRiskRequiresConfirm:    req.HighRiskRequiresConfirm,
 		OperationReasonRequired:    req.OperationReasonRequired,
 		MaxAffectedRows:            req.MaxAffectedRows,
 		DefaultBackupRetentionDays: req.DefaultBackupRetentionDays,
 		BackupStoragePath:          backupStoragePath,
+		InstancePermissionMode:     instancePermissionMode,
 	}
 	if err := s.configUseCase.SaveDatabaseConfig(c.Request.Context(), config); err != nil {
 		response.ErrorCode(c, http.StatusInternalServerError, "保存数据库配置失败: "+err.Error())

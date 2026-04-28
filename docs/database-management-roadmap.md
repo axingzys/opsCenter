@@ -112,8 +112,9 @@
 4. 支持最大返回行数、查询超时、只读模式、事务模式。
 5. 支持结果分页、复制、CSV 导出、Excel 导出。
 6. 支持 SQL 格式化、历史记录、收藏、常用语句模板。
-7. 支持执行计划查看，例如 `EXPLAIN`、`EXPLAIN ANALYZE`。
-8. 控制台默认只读，高风险写操作由全局开关和权限控制。
+7. 支持执行计划查看，例如只读 SQL 的 `EXPLAIN`。
+8. 写 SQL 执行计划使用独立开关和实例权限控制，禁止 `EXPLAIN ANALYZE`，避免真实执行。
+9. 控制台默认只读，DML 数据变更和 DDL 结构变更分通道治理：DML 当前只支持 `INSERT / UPDATE / DELETE`，DDL 使用独立开关、实例权限和确认流程。
 
 ### 5. 结构管理
 1. 数据库、Schema、表、视图、字段、索引浏览。
@@ -131,13 +132,13 @@
 6. 导出敏感表或大批量数据应预留审批能力。
 
 ### 7. 数据变更
-1. 支持 INSERT、UPDATE、DELETE、DDL 等变更操作。
-2. 默认关闭写操作，需要系统配置开启。
+1. 支持 DML 和 DDL 分层变更：DML 当前开放 `INSERT / UPDATE / DELETE`，DDL 第一批开放 `CREATE TABLE / CREATE INDEX`。
+2. 默认关闭写操作和 DDL 结构变更，需要系统配置分别开启。
 3. 高危 SQL 需要二次确认和操作原因。
-4. 支持影响行数预估和最大影响行数限制。
-5. 支持变更前数据快照或回滚 SQL 生成。
-6. 支持执行前 SQL 规则检查。
-7. 后续支持审批流和定时执行。
+4. DML 支持影响行数预估和最大影响行数限制；DDL 不使用影响行数作为安全边界。
+5. 支持变更前数据快照、备份提示或回滚 SQL 辅助。
+6. 支持执行前 SQL 规则检查，禁止多语句、可执行注释和无法安全识别的拼接 SQL。
+7. 后续支持审批流、定时执行和更多 DDL 类型。
 
 ### 8. 性能诊断
 1. 慢 SQL 列表、执行次数、平均耗时、最大耗时、扫描行数。
@@ -155,6 +156,7 @@
 4. 支持恢复演练，优先恢复到临时实例或指定测试实例。
 5. 生产恢复默认不在一期开放。
 6. 备份失败必须告警，备份成功率应进入巡检报告。
+7. 大库生产备份、物理备份、binlog/WAL 连续归档、延迟副本治理和 PITR 恢复演练以 `docs/database-large-backup-pitr-plan.md` 为后续专项实施基准。
 
 ### 10. 账号与权限管理
 1. 展示数据库账号、角色和授权信息。
@@ -423,10 +425,11 @@ type DatabaseAdapter interface {
 ### 查询与数据浏览
 1. `POST /api/v1/databases/instances/{id}/query`
 2. `POST /api/v1/databases/instances/{id}/explain`
-3. `POST /api/v1/databases/instances/{id}/export`
-4. `GET /api/v1/databases/query-audits`
-5. `GET /api/v1/databases/query-history`
-6. `POST /api/v1/databases/sql/validate`
+3. `POST /api/v1/databases/instances/{id}/query/write/explain`
+4. `POST /api/v1/databases/instances/{id}/export`
+5. `GET /api/v1/databases/query-audits`
+6. `GET /api/v1/databases/query-history`
+7. `POST /api/v1/databases/sql/validate`
 
 ### 性能诊断
 1. `GET /api/v1/databases/instances/{id}/metrics`
@@ -503,12 +506,13 @@ type DatabaseAdapter interface {
 
 ### `DatabaseSettings.vue`
 1. 写操作总开关。
-2. 最大查询超时。
-3. 最大返回行数。
-4. 最大导出行数。
-5. 高风险 SQL 策略。
-6. 审计保留天数。
-7. 备份默认保留天数。
+2. 写 SQL 执行计划开关。
+3. 最大查询超时。
+4. 最大返回行数。
+5. 最大导出行数。
+6. 高风险 SQL 策略。
+7. 审计保留天数。
+8. 备份默认保留天数。
 
 ## 权限设计
 建议新增权限点：
@@ -522,15 +526,17 @@ type DatabaseAdapter interface {
 7. `database:metadata:view`
 8. `database:query:readonly`
 9. `database:query:write`
-10. `database:query:export`
-11. `database:performance:view`
-12. `database:backup:list`
-13. `database:backup:create`
-14. `database:backup:run`
-15. `database:restore:dryrun`
-16. `database:restore:execute`
-17. `database:audit:view`
-18. `database:settings:update`
+10. `database:query:write-explain`
+11. `database:query:ddl`
+12. `database:query:export`
+13. `database:performance:view`
+14. `database:backup:list`
+15. `database:backup:create`
+16. `database:backup:run`
+17. `database:restore:dryrun`
+18. `database:restore:execute`
+19. `database:audit:view`
+20. `database:settings:update`
 
 权限边界：
 
@@ -538,7 +544,9 @@ type DatabaseAdapter interface {
 2. 后续支持按库、Schema、表授权。
 3. 导出权限必须独立于查询权限。
 4. 写操作权限必须独立于只读查询权限。
-5. 恢复执行权限必须独立于备份权限。
+5. 写 SQL 执行计划权限必须独立于写操作执行权限。
+6. DDL 结构变更权限必须独立于 DML 写操作权限。
+7. 恢复执行权限必须独立于备份权限。
 
 ## 风险等级
 1. `low`：元数据查看、只读查询、执行计划。
@@ -556,7 +564,8 @@ type DatabaseAdapter interface {
 7. 默认限制导出最大行数。
 8. 默认记录完整审计。
 9. 高风险 SQL 必须二次确认。
-10. critical 级别 SQL 预留审批能力。
+10. DML 和 DDL 分通道治理：DML 使用影响行数阈值，DDL 使用独立总开关、独立实例权限、原因和备份/回滚确认。
+11. critical 级别 SQL 预留审批能力。
 
 ## 敏感数据保护
 1. 支持配置敏感字段规则，例如手机号、身份证、邮箱、密码、token。
@@ -782,8 +791,6 @@ type DatabaseAdapter interface {
 ### 4. 备份和恢复链路增强
 目标：在三期备份和四期恢复演练基础上，提升可靠性、可诊断性和误操作防护。
 
-状态：已实现。成功备份记录会保存 SHA256 checksum；下载和恢复演练前会校验路径、文件大小和 checksum；备份运行态补充队列中、执行中、清理中；恢复演练锁收紧到目标实例级别，失败后可再次发起并保留每次记录。
-
 改造范围：
 
 1. 备份文件生成后记录 checksum，下载和恢复演练前校验文件完整性。
@@ -802,8 +809,6 @@ type DatabaseAdapter interface {
 
 ### 5. 数据库管理页面组件拆分
 目标：降低 `DatabaseManagement.vue` 的维护成本，为后续迭代提供清晰边界。
-
-状态：进行中。已先拆出实例管理、实例权限、结构浏览、SQL 控制台、查询审计、巡检报告和拓扑页签主体为独立组件，保留父组件中的数据加载、权限判断和提交逻辑，后续继续按页签小步拆分。
 
 改造范围：
 

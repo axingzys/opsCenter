@@ -207,6 +207,46 @@
               />
               <span class="form-tip">关闭时所有数据库写操作都会被统一拦截。</span>
             </el-form-item>
+            <el-form-item label="写 SQL 执行计划">
+              <el-switch
+                v-model="databaseConfig.writeExplainEnabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">开启后，具备实例权限的用户可对受控写 SQL 查看 EXPLAIN，不会执行真实写入。</span>
+            </el-form-item>
+            <el-form-item label="DDL 结构变更">
+              <el-switch
+                v-model="databaseConfig.ddlEnabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">开启后，具备 DDL 实例权限的用户可执行受控 CREATE TABLE / CREATE INDEX。</span>
+            </el-form-item>
+            <el-form-item label="DDL 二次确认">
+              <el-switch
+                v-model="databaseConfig.ddlHighRiskRequiresConfirm"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">DDL 结构变更默认高风险，建议长期保持开启。</span>
+            </el-form-item>
+            <el-form-item label="DDL 原因必填">
+              <el-switch
+                v-model="databaseConfig.ddlReasonRequired"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">开启后执行 DDL 必须填写变更原因，并写入审计。</span>
+            </el-form-item>
+            <el-form-item label="DDL 备份提示">
+              <el-switch
+                v-model="databaseConfig.ddlRequireBackupHint"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">开启后 DDL 确认框会提示先确认备份或回滚方案。</span>
+            </el-form-item>
             <el-form-item label="高风险二次确认">
               <el-switch
                 v-model="databaseConfig.highRiskRequiresConfirm"
@@ -222,6 +262,13 @@
                 inactive-text="关闭"
               />
               <span class="form-tip">开启后写操作必须填写原因，并随审计一起留痕。</span>
+            </el-form-item>
+            <el-form-item label="实例对象权限模式">
+              <el-select v-model="databaseConfig.instancePermissionMode" style="width: 260px;">
+                <el-option label="兼容模式" value="compat" />
+                <el-option label="白名单模式" value="whitelist" />
+              </el-select>
+              <span class="form-tip">白名单模式下，非 admin 用户默认不能访问未授权的数据库实例。</span>
             </el-form-item>
             <el-form-item label="最大影响行数阈值">
               <el-input-number v-model="databaseConfig.maxAffectedRows" :min="1" :max="1000000" :step="100" />
@@ -435,11 +482,17 @@ const monitoringConfig = reactive<MonitoringConfig>({
 
 const databaseConfig = reactive<DatabaseConfig>({
   writeEnabled: false,
+  writeExplainEnabled: false,
+  ddlEnabled: false,
+  ddlHighRiskRequiresConfirm: true,
+  ddlReasonRequired: true,
+  ddlRequireBackupHint: true,
   highRiskRequiresConfirm: true,
   operationReasonRequired: true,
   maxAffectedRows: 1000,
   defaultBackupRetentionDays: 7,
-  backupStoragePath: ''
+  backupStoragePath: '',
+  instancePermissionMode: 'compat'
 })
 
 // LDAP 配置
@@ -550,11 +603,17 @@ const loadDatabaseConfig = async () => {
     const res: any = await getDatabaseConfig()
     if (res) {
       databaseConfig.writeEnabled = !!res.writeEnabled
+      databaseConfig.writeExplainEnabled = !!res.writeExplainEnabled
+      databaseConfig.ddlEnabled = !!res.ddlEnabled
+      databaseConfig.ddlHighRiskRequiresConfirm = res.ddlHighRiskRequiresConfirm !== false
+      databaseConfig.ddlReasonRequired = res.ddlReasonRequired !== false
+      databaseConfig.ddlRequireBackupHint = res.ddlRequireBackupHint !== false
       databaseConfig.highRiskRequiresConfirm = res.highRiskRequiresConfirm !== false
       databaseConfig.operationReasonRequired = res.operationReasonRequired !== false
       databaseConfig.maxAffectedRows = res.maxAffectedRows || 1000
       databaseConfig.defaultBackupRetentionDays = res.defaultBackupRetentionDays || 7
       databaseConfig.backupStoragePath = res.backupStoragePath || ''
+      databaseConfig.instancePermissionMode = res.instancePermissionMode === 'whitelist' ? 'whitelist' : 'compat'
     }
   } catch (error) {
     console.error('加载数据库配置失败', error)
@@ -588,19 +647,6 @@ const handleTestLDAP = async () => {
   }
 }
 
-// 保存LDAP配置
-const handleSaveLDAP = async () => {
-  saving.value = true
-  try {
-    await saveLDAPConfig({ ...ldapConfig })
-    ElMessage.success('LDAP配置保存成功')
-  } catch (error) {
-    ElMessage.error('LDAP配置保存失败')
-  } finally {
-    saving.value = false
-  }
-}
-
 const loadConfig = async () => {
   try {
     const res = await getAllConfig()
@@ -629,11 +675,17 @@ const loadConfig = async () => {
       }
       if (res.database) {
         databaseConfig.writeEnabled = !!res.database.writeEnabled
+        databaseConfig.writeExplainEnabled = !!res.database.writeExplainEnabled
+        databaseConfig.ddlEnabled = !!res.database.ddlEnabled
+        databaseConfig.ddlHighRiskRequiresConfirm = res.database.ddlHighRiskRequiresConfirm !== false
+        databaseConfig.ddlReasonRequired = res.database.ddlReasonRequired !== false
+        databaseConfig.ddlRequireBackupHint = res.database.ddlRequireBackupHint !== false
         databaseConfig.highRiskRequiresConfirm = res.database.highRiskRequiresConfirm !== false
         databaseConfig.operationReasonRequired = res.database.operationReasonRequired !== false
         databaseConfig.maxAffectedRows = res.database.maxAffectedRows || 1000
         databaseConfig.defaultBackupRetentionDays = res.database.defaultBackupRetentionDays || 7
         databaseConfig.backupStoragePath = res.database.backupStoragePath || ''
+        databaseConfig.instancePermissionMode = res.database.instancePermissionMode === 'whitelist' ? 'whitelist' : 'compat'
       }
     }
   } catch (error) {

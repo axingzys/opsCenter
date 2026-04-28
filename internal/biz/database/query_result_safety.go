@@ -115,6 +115,27 @@ func sanitizeDatabaseQueryResult(result *DatabaseQueryResultVO, policy queryResu
 	return nil
 }
 
+func estimateQuerySafeRowBytes(columns []string, row map[string]any, maxRunes int) int {
+	if maxRunes <= 0 {
+		maxRunes = queryPreviewCellMaxRunes
+	}
+	rowBytes := 0
+	seen := make(map[string]struct{}, len(columns))
+	for _, column := range columns {
+		value, _ := safeQueryCellPreview(column, row[column], maxRunes)
+		rowBytes += estimateQueryCellBytes(column, value)
+		seen[column] = struct{}{}
+	}
+	for column, value := range row {
+		if _, ok := seen[column]; ok {
+			continue
+		}
+		value, _ := safeQueryCellPreview(column, value, maxRunes)
+		rowBytes += estimateQueryCellBytes(column, value)
+	}
+	return rowBytes
+}
+
 func safeQueryCellPreview(column string, value any, maxRunes int) (any, queryCellSafety) {
 	if isSensitiveQueryColumn(column) {
 		if value == nil {

@@ -29,6 +29,17 @@ type SQLWriteSafetyResult struct {
 	Message           string
 }
 
+type SQLDDLSafetyResult struct {
+	Allowed         bool
+	SQLText         string
+	SQLType         string
+	RiskLevel       string
+	ConfirmRequired bool
+	ReasonRequired  bool
+	BackupRequired  bool
+	Message         string
+}
+
 func AnalyzeReadOnlySQL(sqlText string, limit int) SQLSafetyResult {
 	return AnalyzeReadOnlySQLByDB("", sqlText, limit)
 }
@@ -46,6 +57,85 @@ func AnalyzeReadOnlySQLRaw(sqlText string) SQLSafetyResult {
 
 func AnalyzeExplainSQL(sqlText string) SQLSafetyResult {
 	return AnalyzeExplainSQLByDB("", sqlText)
+}
+
+func AnalyzeWriteExplainSQLByDB(dbType, sqlText string, policy *DatabaseWritePolicy) SQLSafetyResult {
+	if policy == nil {
+		policy = defaultDatabaseWritePolicy()
+	}
+	if !supportsWriteExplain(dbType) {
+		if strings.TrimSpace(dbType) == "" {
+			return denySQL("当前数据库类型暂不支持写 SQL 执行计划")
+		}
+		return denySQL(DBTypeText(dbType) + " 暂不支持写 SQL 执行计划")
+	}
+
+	trimmed := strings.TrimSpace(sqlText)
+	if trimmed == "" {
+		return denySQL("SQL 不能为空")
+	}
+	if len([]rune(trimmed)) > 20000 {
+		return denySQL("SQL 长度不能超过 20000 个字符")
+	}
+	if hasExecutableSQLComment(trimmed) {
+		return denySQL("禁止使用数据库可执行注释")
+	}
+	if hasUnsafeSemicolon(trimmed) {
+		return denySQL("仅允许执行单条 SQL，禁止多语句")
+	}
+
+	withoutTrailingSemicolon := trimTrailingStatementSemicolon(trimmed)
+	tokenText := maskSQLLiteralsAndComments(withoutTrailingSemicolon)
+	if hasUnsafeNumericKeywordToken(tokenText) {
+		return denySQL("SQL 存在数字和关键字粘连，无法安全识别")
+	}
+	tokens := sqlKeywords(tokenText)
+	if len(tokens) == 0 {
+		return denySQL("无法识别 SQL 类型")
+	}
+
+	statementKeyword := tokens[0]
+	explicitExplain := statementKeyword == "explain"
+	if explicitExplain {
+		if len(tokens) < 2 {
+			return denySQL("EXPLAIN 后必须跟写 SQL")
+		}
+		if tokens[1] == "analyze" {
+			return denySQL("写 SQL 执行计划仅支持 EXPLAIN，不允许 EXPLAIN ANALYZE")
+		}
+		statementKeyword = tokens[1]
+	}
+	if statementKeyword == "with" {
+		return denySQL("写 SQL 执行计划暂不支持 WITH 语句")
+	}
+
+	sqlType, _, knownWriteType := classifyWriteSQLKeyword(statementKeyword)
+	if !knownWriteType {
+		return denySQL("写 SQL 执行计划仅支持 INSERT / UPDATE / DELETE / REPLACE / MERGE")
+	}
+	if isDDLOrPrivilegeSQLType(sqlType) {
+		return denySQL("DDL 不支持执行计划，请使用 DDL 检查")
+	}
+	if !isSupportedWriteExplainSQLType(dbType, sqlType) {
+		return denySQL(DBTypeText(dbType) + " 暂不支持 " + sqlType + " 执行计划")
+	}
+	if keyword, ok := findForbiddenWriteExplainKeyword(tokenText); ok {
+		return denySQL("写 SQL 执行计划禁止关键字: " + keyword)
+	}
+	if !policy.WriteExplainEnabled {
+		return denySQL("数据库写 SQL 执行计划开关未开启")
+	}
+
+	explainSQL := withoutTrailingSemicolon
+	if !explicitExplain {
+		explainSQL = "EXPLAIN " + withoutTrailingSemicolon
+	}
+	return SQLSafetyResult{
+		Allowed: true,
+		SQLText: explainSQL,
+		SQLType: "EXPLAIN",
+		Message: "通过写 SQL 执行计划校验",
+	}
 }
 
 func AnalyzeExplainSQLByDB(dbType, sqlText string) SQLSafetyResult {
@@ -123,6 +213,9 @@ func AnalyzeWriteSQLByDB(dbType, sqlText string, policy *DatabaseWritePolicy) SQ
 	if len([]rune(trimmed)) > 20000 {
 		return denyWriteSQL(result, "SQL 长度不能超过 20000 个字符")
 	}
+	if hasExecutableSQLComment(trimmed) {
+		return denyWriteSQL(result, "禁止使用数据库可执行注释")
+	}
 	if hasUnsafeSemicolon(trimmed) {
 		return denyWriteSQL(result, "仅允许执行单条 SQL，禁止多语句")
 	}
@@ -149,8 +242,20 @@ func AnalyzeWriteSQLByDB(dbType, sqlText string, policy *DatabaseWritePolicy) SQ
 	if !ok {
 		return denyWriteSQL(result, "当前接口仅支持写操作预检查")
 	}
+	if !isSupportedWriteExecuteType(sqlType) {
+		if isDDLOrPrivilegeSQLType(sqlType) {
+			return denyWriteSQL(result, "当前受控写入仅支持 INSERT / UPDATE / DELETE，DDL 请使用 DDL 检查 / DDL 执行")
+		}
+		return denyWriteSQL(result, "当前仅支持 INSERT / UPDATE / DELETE 写操作执行")
+	}
+	if !supportsWriteExecution(dbType) {
+		return denyWriteSQL(result, DBTypeText(dbType)+" 写操作执行将在后续批次接入")
+	}
 
 	tokenText := maskSQLLiteralsAndComments(withoutTrailingSemicolon)
+	if hasUnsafeNumericKeywordToken(tokenText) {
+		return denyWriteSQL(result, "SQL 存在数字和关键字粘连，无法安全识别")
+	}
 	switch sqlType {
 	case "DROP", "TRUNCATE":
 		return denyWriteSQL(result, "默认禁止 DROP / TRUNCATE")
@@ -170,6 +275,85 @@ func AnalyzeWriteSQLByDB(dbType, sqlText string, policy *DatabaseWritePolicy) SQ
 	result.Message = "通过写操作预检查"
 	if result.ConfirmRequired {
 		result.Message = "通过写操作预检查，执行前需二次确认"
+	}
+	return result
+}
+
+func AnalyzeDDLSQLByDB(dbType, sqlText string, policy *DatabaseWritePolicy) SQLDDLSafetyResult {
+	if policy == nil {
+		policy = defaultDatabaseWritePolicy()
+	}
+	result := SQLDDLSafetyResult{
+		Allowed:         false,
+		SQLType:         "UNKNOWN",
+		RiskLevel:       DatabaseQueryRiskHigh,
+		ReasonRequired:  policy.DDLReasonRequired,
+		BackupRequired:  policy.DDLRequireBackupHint,
+		ConfirmRequired: policy.DDLHighRiskConfirm,
+	}
+
+	if !supportsDDLValidation(dbType) {
+		if strings.TrimSpace(dbType) == "" {
+			return denyDDLSQL(result, "当前数据库类型暂不支持 DDL 结构变更检查")
+		}
+		return denyDDLSQL(result, DBTypeText(dbType)+" 暂不支持 DDL 结构变更检查")
+	}
+
+	trimmed := strings.TrimSpace(sqlText)
+	if trimmed == "" {
+		return denyDDLSQL(result, "SQL 不能为空")
+	}
+	if len([]rune(trimmed)) > 20000 {
+		return denyDDLSQL(result, "SQL 长度不能超过 20000 个字符")
+	}
+	if hasExecutableSQLComment(trimmed) {
+		return denyDDLSQL(result, "禁止使用数据库可执行注释")
+	}
+	if hasUnsafeSemicolon(trimmed) {
+		return denyDDLSQL(result, "仅允许执行单条 SQL，禁止多语句")
+	}
+
+	withoutTrailingSemicolon := trimTrailingStatementSemicolon(trimmed)
+	result.SQLText = withoutTrailingSemicolon
+	tokenText := maskSQLLiteralsAndComments(withoutTrailingSemicolon)
+	if hasUnsafeNumericKeywordToken(tokenText) {
+		return denyDDLSQL(result, "SQL 存在数字和关键字粘连，无法安全识别")
+	}
+	tokens := sqlKeywords(tokenText)
+	if len(tokens) == 0 {
+		return denyDDLSQL(result, "无法识别 SQL 类型")
+	}
+
+	sqlType, riskLevel, knownWriteType := classifyWriteSQLKeyword(tokens[0])
+	result.SQLType = sqlType
+	result.RiskLevel = riskLevel
+	result.ConfirmRequired = policy.DDLHighRiskConfirm && requiresWriteConfirmation(riskLevel)
+	if !knownWriteType || (!isDDLSQLType(sqlType) && !isPrivilegeSQLType(sqlType)) {
+		return denyDDLSQL(result, "当前接口仅支持 DDL 结构变更检查")
+	}
+	if isPrivilegeSQLType(sqlType) {
+		return denyDDLSQL(result, "GRANT / REVOKE 属于账号权限变更，请走账号权限管理通道")
+	}
+	switch sqlType {
+	case "DROP", "TRUNCATE":
+		result.RiskLevel = DatabaseQueryRiskCritical
+		result.ConfirmRequired = policy.DDLHighRiskConfirm && requiresWriteConfirmation(result.RiskLevel)
+		return denyDDLSQL(result, "默认禁止 DROP / TRUNCATE")
+	case "ALTER", "RENAME":
+		return denyDDLSQL(result, "当前 DDL 执行仅支持 CREATE TABLE / CREATE INDEX")
+	case "CREATE":
+		if !isSupportedCreateDDL(tokens) {
+			return denyDDLSQL(result, "当前 DDL 执行仅支持 CREATE TABLE / CREATE INDEX")
+		}
+	}
+	if !policy.DDLEnabled {
+		return denyDDLSQL(result, "数据库 DDL 结构变更开关未开启")
+	}
+
+	result.Allowed = true
+	result.Message = "通过 DDL 结构变更检查"
+	if result.ConfirmRequired {
+		result.Message = "通过 DDL 结构变更检查，执行前需二次确认"
 	}
 	return result
 }
@@ -201,6 +385,24 @@ func supportsExplain(dbType string) bool {
 	}
 }
 
+func supportsWriteExplain(dbType string) bool {
+	switch normalizeDBType(dbType) {
+	case "", DBTypeMySQL, DBTypeMariaDB, DBTypePostgreSQL, DBTypeTiDB, DBTypeOceanBase, DBTypeOpenGauss, DBTypeKingbase:
+		return true
+	default:
+		return false
+	}
+}
+
+func supportsDDLValidation(dbType string) bool {
+	switch normalizeDBType(dbType) {
+	case "", DBTypeMySQL, DBTypeMariaDB, DBTypePostgreSQL:
+		return true
+	default:
+		return false
+	}
+}
+
 func analyzeReadOnlySQL(sqlText string, opts sqlAnalyzeOptions) SQLSafetyResult {
 	trimmed := strings.TrimSpace(sqlText)
 	if trimmed == "" {
@@ -208,6 +410,9 @@ func analyzeReadOnlySQL(sqlText string, opts sqlAnalyzeOptions) SQLSafetyResult 
 	}
 	if len([]rune(trimmed)) > 20000 {
 		return denySQL("SQL 长度不能超过 20000 个字符")
+	}
+	if hasExecutableSQLComment(trimmed) {
+		return denySQL("禁止使用数据库可执行注释")
 	}
 	if hasUnsafeSemicolon(trimmed) {
 		return denySQL("仅允许执行单条 SQL，禁止多语句")
@@ -224,12 +429,15 @@ func analyzeReadOnlySQL(sqlText string, opts sqlAnalyzeOptions) SQLSafetyResult 
 	}
 
 	tokenText := maskSQLLiteralsAndComments(withoutTrailingSemicolon)
+	if hasUnsafeNumericKeywordToken(tokenText) {
+		return denySQL("SQL 存在数字和关键字粘连，无法安全识别")
+	}
 	if keyword, ok := findForbiddenSQLKeyword(tokenText); ok {
 		return denySQL("仅允许执行只读查询，禁止关键字: " + keyword)
 	}
 
 	finalSQL := withoutTrailingSemicolon
-	if opts.appendLimit && shouldAppendLimit(first, tokenText) {
+	if opts.appendLimit && opts.limit > 0 && shouldAppendLimit(first, tokenText) {
 		finalSQL = fmt.Sprintf("%s LIMIT %d", finalSQL, opts.limit)
 	}
 	return SQLSafetyResult{
@@ -249,6 +457,12 @@ func denySQL(message string) SQLSafetyResult {
 }
 
 func denyWriteSQL(result SQLWriteSafetyResult, message string) SQLWriteSafetyResult {
+	result.Allowed = false
+	result.Message = message
+	return result
+}
+
+func denyDDLSQL(result SQLDDLSafetyResult, message string) SQLDDLSafetyResult {
 	result.Allowed = false
 	result.Message = message
 	return result
@@ -301,6 +515,93 @@ func requiresWriteConfirmation(riskLevel string) bool {
 	default:
 		return false
 	}
+}
+
+func isDDLOrPrivilegeSQLType(sqlType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(sqlType)) {
+	case "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDDLSQLType(sqlType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(sqlType)) {
+	case "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPrivilegeSQLType(sqlType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(sqlType)) {
+	case "GRANT", "REVOKE":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupportedCreateDDL(tokens []string) bool {
+	if len(tokens) < 2 || tokens[0] != "create" {
+		return false
+	}
+	switch tokens[1] {
+	case "table", "index":
+		return true
+	case "temporary":
+		return len(tokens) > 2 && tokens[2] == "table"
+	case "unique", "fulltext", "spatial":
+		return len(tokens) > 2 && tokens[2] == "index"
+	default:
+		return false
+	}
+}
+
+func isSupportedWriteExplainSQLType(dbType, sqlType string) bool {
+	sqlType = strings.ToUpper(strings.TrimSpace(sqlType))
+	switch normalizeDBType(dbType) {
+	case "", DBTypeMySQL, DBTypeMariaDB, DBTypeTiDB, DBTypeOceanBase:
+		switch sqlType {
+		case "INSERT", "UPDATE", "DELETE", "REPLACE":
+			return true
+		default:
+			return false
+		}
+	case DBTypePostgreSQL, DBTypeOpenGauss, DBTypeKingbase:
+		switch sqlType {
+		case "INSERT", "UPDATE", "DELETE", "MERGE":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func findForbiddenWriteExplainKeyword(sqlText string) (string, bool) {
+	forbidden := map[string]struct{}{
+		"call":      {},
+		"exec":      {},
+		"execute":   {},
+		"load":      {},
+		"lock":      {},
+		"unlock":    {},
+		"outfile":   {},
+		"dumpfile":  {},
+		"load_file": {},
+		"sleep":     {},
+		"benchmark": {},
+	}
+	for _, token := range sqlKeywords(sqlText) {
+		if _, ok := forbidden[token]; ok {
+			return strings.ToUpper(token), true
+		}
+	}
+	return "", false
 }
 
 func findForbiddenSQLKeyword(sqlText string) (string, bool) {
@@ -394,6 +695,24 @@ func sqlKeywords(sqlText string) []string {
 	return tokens
 }
 
+func hasUnsafeNumericKeywordToken(sqlText string) bool {
+	for _, token := range sqlKeywords(sqlText) {
+		if token == "" {
+			continue
+		}
+		runes := []rune(token)
+		if len(runes) == 0 || !unicode.IsDigit(runes[0]) {
+			continue
+		}
+		for _, r := range runes[1:] {
+			if unicode.IsLetter(r) || r == '_' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func hasUnsafeSemicolon(sqlText string) bool {
 	inSingle := false
 	inDouble := false
@@ -475,6 +794,83 @@ func hasUnsafeSemicolon(sqlText string) bool {
 		return false
 	}
 	return strings.TrimSpace(string(runes[semicolon+1:])) != ""
+}
+
+func hasExecutableSQLComment(sqlText string) bool {
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	inLineComment := false
+	inBlockComment := false
+	runes := []rune(sqlText)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+		if inLineComment {
+			if r == '\n' || r == '\r' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			if r == '*' && next == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+		if inSingle {
+			if r == '\'' {
+				if next == '\'' {
+					i++
+					continue
+				}
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if r == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		if inBacktick {
+			if r == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		if r == '-' && next == '-' {
+			inLineComment = true
+			i++
+			continue
+		}
+		if r == '#' {
+			inLineComment = true
+			continue
+		}
+		if r == '/' && next == '*' {
+			if i+2 < len(runes) && runes[i+2] == '!' {
+				return true
+			}
+			inBlockComment = true
+			i++
+			continue
+		}
+		switch r {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		}
+	}
+	return false
 }
 
 func trimTrailingStatementSemicolon(sqlText string) string {
