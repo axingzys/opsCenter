@@ -54,16 +54,17 @@ const (
 	ResourceTypeSubscription = "subscription"
 	ResourceTypeConsumer     = "consumer"
 
-	AuditActionConnectionTest = "connection_test"
-	AuditActionMetadataSync   = "metadata_sync"
-	AuditActionMessageSample  = "message_sample"
-	AuditActionMessageSchema  = "message_schema_inspect"
-	AuditActionMessageReplay  = "message_replay_apply"
-	AuditActionMetricSnapshot = "metric_snapshot_collect"
-	AuditActionInspectionRun  = "inspection_run"
-	AuditActionConfigClone    = "config_clone_plan"
-	AuditActionPermissionSet  = "instance_permission_upsert"
-	AuditActionPermissionDel  = "instance_permission_delete"
+	AuditActionConnectionTest   = "connection_test"
+	AuditActionMetadataSync     = "metadata_sync"
+	AuditActionMessageSample    = "message_sample"
+	AuditActionMessageSchema    = "message_schema_inspect"
+	AuditActionMessageReplay    = "message_replay_apply"
+	AuditActionMetricSnapshot   = "metric_snapshot_collect"
+	AuditActionInspectionRun    = "inspection_run"
+	AuditActionConfigClone      = "config_clone_plan"
+	AuditActionConfigCloneApply = "config_clone_apply"
+	AuditActionPermissionSet    = "instance_permission_upsert"
+	AuditActionPermissionDel    = "instance_permission_delete"
 
 	OperationActionRabbitMQQueueUpsert     = "rabbitmq_queue_upsert"
 	OperationActionRabbitMQExchangeUpsert  = "rabbitmq_exchange_upsert"
@@ -1205,6 +1206,20 @@ type ConfigClonePlanRequest struct {
 	IncludeGovernanceFields bool   `json:"includeGovernanceFields"`
 }
 
+type ConfigCloneApplyRequest struct {
+	ResourceType            string `json:"resourceType" binding:"required,max=40"`
+	Namespace               string `json:"namespace" binding:"omitempty,max=255"`
+	ResourceName            string `json:"resourceName" binding:"required,max=512"`
+	TargetInstanceID        uint   `json:"targetInstanceId" binding:"required"`
+	TargetNamespace         string `json:"targetNamespace" binding:"omitempty,max=255"`
+	TargetResourceName      string `json:"targetResourceName" binding:"omitempty,max=512"`
+	IncludeGovernanceFields bool   `json:"includeGovernanceFields"`
+	Reason                  string `json:"reason" binding:"required,max=500"`
+	Confirmed               bool   `json:"confirmed"`
+	ConfirmText             string `json:"confirmText" binding:"omitempty,max=512"`
+	IdempotencyKey          string `json:"idempotencyKey" binding:"omitempty,max=120"`
+}
+
 type ConfigClonePlanVO struct {
 	SourceInstanceID   uint                `json:"sourceInstanceId"`
 	SourceInstanceName string              `json:"sourceInstanceName"`
@@ -1229,6 +1244,16 @@ type ConfigClonePlanVO struct {
 	Suggestions        []string            `json:"suggestions"`
 	Message            string              `json:"message"`
 	GeneratedAt        string              `json:"generatedAt"`
+}
+
+type ConfigCloneApplyVO struct {
+	Plan       *ConfigClonePlanVO             `json:"plan"`
+	Validation *ResourceOperationValidationVO `json:"validation,omitempty"`
+	Operation  *ResourceOperationResultVO     `json:"operation,omitempty"`
+	Status     string                         `json:"status"`
+	Message    string                         `json:"message"`
+	Executed   bool                           `json:"executed"`
+	ExecutedAt string                         `json:"executedAt"`
 }
 
 type CapacityForecastRequest struct {

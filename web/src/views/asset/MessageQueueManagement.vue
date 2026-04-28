@@ -260,7 +260,7 @@
             <div v-if="clonePlan" class="operation-validation">
               <div class="validation-header">
                 <el-tag :type="riskTag(clonePlan.riskLevel)">{{ riskText(clonePlan.riskLevel) }}</el-tag>
-                <el-tag type="info">只生成计划</el-tag>
+                <el-tag :type="clonePlan.executable ? 'success' : 'info'">{{ clonePlan.executable ? '可执行' : '只生成计划' }}</el-tag>
                 <span>{{ clonePlan.message }}</span>
               </div>
               <el-alert v-for="item in clonePlan.warnings || []" :key="item" :title="item" type="warning" :closable="false" show-icon />
@@ -273,6 +273,14 @@
                   <template #default="{ row }">{{ formatDiffValue(row.after) }}</template>
                 </el-table-column>
               </el-table>
+              <el-form v-if="clonePlan.executable" :model="cloneApplyForm" label-width="120px" class="compact-form clone-apply-form">
+                <el-form-item label="执行原因">
+                  <el-input v-model="cloneApplyForm.reason" type="textarea" :rows="2" maxlength="500" show-word-limit placeholder="说明跨实例配置克隆原因" />
+                </el-form-item>
+                <el-form-item>
+                  <el-button type="warning" :loading="cloneApplyLoading" :disabled="!cloneApplyForm.reason" @click="handleApplyClonePlan">确认执行克隆</el-button>
+                </el-form-item>
+              </el-form>
             </div>
           </div>
 
@@ -990,6 +998,7 @@ import { getCredentials } from '@/api/host'
 import { getAllRoles } from '@/api/role'
 import {
   MQ_PERMISSION,
+  applyMQConfigClone,
   buildMQConfigClonePlan,
   collectMQMetricSnapshot,
   createMQInstance,
@@ -1086,8 +1095,10 @@ const schemaInspectLoading = ref(false)
 const schemaInspectResult = ref<any>(null)
 const schemaForm = reactive<any>({ resourceType: 'topic', namespace: '', resourceName: '', payload: '', schemaJson: '', strict: false })
 const clonePlanLoading = ref(false)
+const cloneApplyLoading = ref(false)
 const clonePlan = ref<any>(null)
 const clonePlanForm = reactive<any>({ resourceType: 'topic', namespace: '', resourceName: '', targetInstanceId: undefined, targetNamespace: '', targetResourceName: '', includeGovernanceFields: true })
+const cloneApplyForm = reactive<any>({ reason: '' })
 const auditChainLoading = ref(false)
 const auditChainVerify = ref<any>(null)
 const auditChainQuery = reactive<any>({ auditType: 'operation', limit: 200 })
@@ -1467,6 +1478,41 @@ const handleBuildClonePlan = async () => {
     await loadAudits()
   } finally {
     clonePlanLoading.value = false
+  }
+}
+
+const handleApplyClonePlan = async () => {
+  if (!advancedInstanceId.value || !clonePlan.value?.executable) {
+    ElMessage.warning('请先生成可执行的配置克隆计划')
+    return
+  }
+  if (!cloneApplyForm.reason?.trim()) {
+    ElMessage.warning('请填写执行原因')
+    return
+  }
+  const expected = clonePlan.value.targetResourceName || clonePlanForm.targetResourceName || clonePlanForm.resourceName
+  const { value } = await ElMessageBox.prompt(`请输入目标资源名 ${expected} 确认执行`, '配置克隆确认', {
+    confirmButtonText: '执行',
+    cancelButtonText: '取消',
+    inputPlaceholder: expected
+  })
+  if (value !== expected) {
+    ElMessage.error('资源名确认不一致')
+    return
+  }
+  cloneApplyLoading.value = true
+  try {
+    const result = await applyMQConfigClone(advancedInstanceId.value, {
+      ...clonePlanForm,
+      reason: cloneApplyForm.reason.trim(),
+      confirmed: true,
+      confirmText: value,
+      idempotencyKey: `mq-clone-${Date.now()}`
+    })
+    ElMessage.success(result?.message || '配置克隆已执行')
+    await Promise.allSettled([loadAudits(), loadResources(), loadJobs()])
+  } finally {
+    cloneApplyLoading.value = false
   }
 }
 

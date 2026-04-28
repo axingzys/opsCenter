@@ -265,6 +265,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.POST("/:id/messages/schema-inspect", s.authMiddleware.RequireMenuPermission(permMQMessageRead), s.service.InspectMessageSchema)
 			instances.POST("/:id/messages/replay-requests", s.authMiddleware.RequireMenuPermission(permMQMessageWrite), s.service.PrepareMessageReplayApplication)
 			instances.POST("/:id/config-clone-plan", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.BuildConfigClonePlan)
+			instances.POST("/:id/config-clone-apply", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ApplyConfigClone)
 			instances.GET("/:id/operations/actions", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ListOperationActions)
 			instances.POST("/:id/operations/validate", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ValidateResourceOperation)
 			instances.POST("/:id/operations", s.authMiddleware.RequireMenuPermission(permMQResourceManage), s.service.ExecuteResourceOperation)

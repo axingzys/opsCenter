@@ -809,6 +809,42 @@ func (s *Service) BuildConfigClonePlan(c *gin.Context) {
 	response.Success(c, data)
 }
 
+func (s *Service) ApplyConfigClone(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionResourceManage) {
+		return
+	}
+	var req mqbiz.ConfigCloneApplyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.TargetInstanceID, mqbiz.PermissionResourceManage) {
+		return
+	}
+	preflight, err := s.useCase.ValidateConfigCloneApply(c.Request.Context(), id, &req)
+	if err != nil {
+		writeError(c, "校验失败: ", err)
+		return
+	}
+	if preflight != nil && preflight.Plan != nil && mqbiz.IsHighRiskLevel(preflight.Plan.RiskLevel) {
+		if !s.ensureHighRiskPermission(c, id) || !s.ensureHighRiskPermission(c, req.TargetInstanceID) {
+			return
+		}
+	}
+	if preflight != nil && preflight.Validation != nil && preflight.Validation.Supported && mqbiz.IsHighRiskLevel(preflight.Validation.RiskLevel) {
+		if !s.ensureHighRiskPermission(c, req.TargetInstanceID) {
+			return
+		}
+	}
+	data, err := s.useCase.ApplyConfigClone(c.Request.Context(), id, &req, currentOperator(c))
+	if err != nil {
+		writeError(c, "执行失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 func (s *Service) ListOperationActions(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "实例ID")
 	if !ok || !s.ensureInstancePermission(c, id, mqbiz.PermissionResourceManage) {

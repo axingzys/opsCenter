@@ -210,7 +210,7 @@
 7. 容量预测、成本分析和自动整改建议。
 
 ### 六期当前落地状态
-截至 2026-04-27，六期已完成高级消息治理 MVP：
+截至 2026-04-28，六期已完成高级消息治理 MVP：
 
 1. 新增消息采样默认 DLP 脱敏：
    - JSON payload 会按敏感字段名递归脱敏，默认覆盖 `password`、`passwd`、`secret`、`token`、`access_token`、`refresh_token`、`authorization`、`phone`、`email`、`id_card`、`bank_card`、`private_key`、`api_key` 等字段。
@@ -236,18 +236,23 @@
    - 前端 `高级治理` Tab 提供 payload、Schema JSON 和严格模式输入，展示校验结果、敏感命中和审计摘要。
 7. 新增跨实例配置克隆计划：
    - `POST /api/v1/message-queues/instances/:id/config-clone-plan`：基于已同步资源生成源资源快照、目标资源快照、建议配置、diff、风险提示和执行建议。
-   - 当前只生成计划，不执行目标集群变更，不迁移消息；生产环境或跨类型克隆自动提升风险并建议审批。
-   - 支持 Kafka topic、RabbitMQ queue/exchange、Pulsar namespace 的动作建议，后续可复用二期/三期资源操作流程做受控执行。
-8. 新增容量预测和自动整改建议：
+   - 计划会标记 `executable`，跨 MQ 类型、无可执行动作或缺少可同步配置时自动降级为只读计划。
+   - 支持 Kafka topic、RabbitMQ queue/exchange、Pulsar namespace 的动作建议；生产环境或跨类型克隆自动提升风险并建议审批。
+8. 新增跨实例配置克隆受控执行：
+   - `POST /api/v1/message-queues/instances/:id/config-clone-apply`：复用二期资源操作的 validate、diff、幂等、资源锁、审计和高危权限校验，执行前要求填写原因、二次确认并输入目标资源名。
+   - Kafka topic 克隆只同步白名单配置；目标 topic 不存在时生成 create 动作，已存在时生成 config update 动作，非白名单配置仅保留在计划里供人工复核。
+   - RabbitMQ queue/exchange 克隆复用 upsert 能力，保留 durable、auto_delete、internal、arguments 等可安全重放配置；Pulsar namespace 当前支持 retention 策略克隆。
+   - 执行结果额外写入 `config_clone_apply` 审计，明确源实例、目标实例、目标动作、配置 diff 和执行原因；消息内容不迁移。
+9. 新增容量预测和自动整改建议：
    - `GET /api/v1/message-queues/instances/:id/capacity-forecast?horizonHours=24`：基于 `mq_metric_snapshots` 计算 backlog/lag 增长率、预测窗口内 backlog/lag 和风险等级。
    - 样本不足时降级使用当前元数据，并提示先连续采集指标。
    - 返回扩消费者、排查分区热点、补告警阈值、生成巡检和维护窗口等整改建议；生产自动修复默认不开放。
-9. 新增审计链校验：
+10. 新增审计链校验：
    - `GET /api/v1/message-queues/audit-chain/verify?auditType=operation|message&limit=200`：校验最近审计记录的内容 hash 和 previous hash 连续性。
    - 支持按实例权限过滤；过滤场景下只校验内容 hash，避免跨实例全局链被权限过滤误判。
    - 前端 `高级治理` Tab 展示校验条数、断点数量和异常审计 ID。
-10. 新增测试：
-   - 覆盖 Schema 检查脱敏与审计、容量预测建议、配置克隆计划不执行真实变更、审计链篡改检测。
+11. 新增测试：
+   - 覆盖 Schema 检查脱敏与审计、容量预测建议、配置克隆计划可执行判断、配置克隆执行目标操作和审计链篡改检测。
 
 ## 生产化优化补充清单
 以下内容为结合当前一二三期落地状态、现有代码结构和后续四期目标整理出的优化项。除上文“落地状态”明确说明的能力外，本节均表示后续建议，不代表当前已全部实现。

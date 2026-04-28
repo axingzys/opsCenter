@@ -157,34 +157,125 @@ func (uc *UseCase) GetCapacityForecast(ctx context.Context, instanceID uint, req
 }
 
 func (uc *UseCase) BuildConfigClonePlan(ctx context.Context, sourceInstanceID uint, req *ConfigClonePlanRequest, operator Operator) (*ConfigClonePlanVO, error) {
+	plan, sourceInstance, targetInstance, err := uc.buildConfigClonePlan(ctx, sourceInstanceID, req)
+	if err != nil {
+		return nil, err
+	}
+	uc.auditConfigClonePlan(ctx, sourceInstance, targetInstance, plan, operator)
+	return plan, nil
+}
+
+func (uc *UseCase) ValidateConfigCloneApply(ctx context.Context, sourceInstanceID uint, req *ConfigCloneApplyRequest) (*ConfigCloneApplyVO, error) {
+	planReq := req.configClonePlanRequest()
+	plan, _, _, err := uc.buildConfigClonePlan(ctx, sourceInstanceID, planReq)
+	if err != nil {
+		return nil, err
+	}
+	operationReq, err := configCloneOperationRequest(plan, req)
+	if err != nil {
+		return &ConfigCloneApplyVO{
+			Plan:       plan,
+			Status:     AuditStatusFailed,
+			Message:    err.Error(),
+			Executed:   false,
+			ExecutedAt: nowText(),
+		}, nil
+	}
+	validation, err := uc.ValidateResourceOperation(ctx, plan.TargetInstanceID, operationReq)
+	if err != nil {
+		return nil, err
+	}
+	return &ConfigCloneApplyVO{
+		Plan:       plan,
+		Validation: validation,
+		Status:     AuditStatusPending,
+		Message:    "配置克隆执行预检已完成",
+		Executed:   false,
+		ExecutedAt: nowText(),
+	}, nil
+}
+
+func (uc *UseCase) ApplyConfigClone(ctx context.Context, sourceInstanceID uint, req *ConfigCloneApplyRequest, operator Operator) (*ConfigCloneApplyVO, error) {
 	if req == nil {
-		return nil, fmt.Errorf("配置克隆参数不能为空")
+		return nil, fmt.Errorf("配置克隆执行参数不能为空")
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		return nil, fmt.Errorf("配置克隆执行原因不能为空")
+	}
+	if !req.Confirmed {
+		return nil, fmt.Errorf("请确认配置克隆影响后再执行")
+	}
+	planReq := req.configClonePlanRequest()
+	plan, sourceInstance, targetInstance, err := uc.buildConfigClonePlan(ctx, sourceInstanceID, planReq)
+	if err != nil {
+		return nil, err
+	}
+	expectedConfirmText := strings.TrimSpace(plan.TargetResourceName)
+	if expectedConfirmText == "" {
+		expectedConfirmText = strings.TrimSpace(plan.ResourceName)
+	}
+	if strings.TrimSpace(req.ConfirmText) != expectedConfirmText {
+		return nil, fmt.Errorf("配置克隆资源名确认不一致")
+	}
+	operationReq, err := configCloneOperationRequest(plan, req)
+	if err != nil {
+		uc.auditConfigCloneApply(ctx, sourceInstance, targetInstance, plan, nil, AuditStatusFailed, err.Error(), req, operator)
+		return nil, err
+	}
+	validation, err := uc.ValidateResourceOperation(ctx, plan.TargetInstanceID, operationReq)
+	if err != nil {
+		uc.auditConfigCloneApply(ctx, sourceInstance, targetInstance, plan, nil, AuditStatusFailed, err.Error(), req, operator)
+		return nil, err
+	}
+	result, err := uc.ExecuteResourceOperation(ctx, plan.TargetInstanceID, operationReq, operator)
+	if err != nil {
+		uc.auditConfigCloneApply(ctx, sourceInstance, targetInstance, plan, validation, AuditStatusFailed, err.Error(), req, operator)
+		return nil, err
+	}
+	status := AuditStatusSuccess
+	message := "跨实例配置克隆已执行，消息内容未迁移"
+	if result != nil {
+		status = result.Status
+		message = firstNonEmpty(result.Message, message)
+	}
+	uc.auditConfigCloneApply(ctx, sourceInstance, targetInstance, plan, validation, status, message, req, operator)
+	return &ConfigCloneApplyVO{
+		Plan:       plan,
+		Validation: validation,
+		Operation:  result,
+		Status:     status,
+		Message:    message,
+		Executed:   true,
+		ExecutedAt: nowText(),
+	}, nil
+}
+
+func (uc *UseCase) buildConfigClonePlan(ctx context.Context, sourceInstanceID uint, req *ConfigClonePlanRequest) (*ConfigClonePlanVO, *MQInstance, *MQInstance, error) {
+	if req == nil {
+		return nil, nil, nil, fmt.Errorf("配置克隆参数不能为空")
 	}
 	if uc.instanceRepo == nil || uc.resourceRepo == nil {
-		return nil, fmt.Errorf("MQ实例或资源仓库未初始化")
+		return nil, nil, nil, fmt.Errorf("MQ实例或资源仓库未初始化")
 	}
 	sourceInstance, err := uc.instanceRepo.GetByID(ctx, sourceInstanceID)
 	if err != nil {
-		return nil, fmt.Errorf("源MQ实例不存在")
+		return nil, nil, nil, fmt.Errorf("源MQ实例不存在")
 	}
 	targetInstance, err := uc.instanceRepo.GetByID(ctx, req.TargetInstanceID)
 	if err != nil {
-		return nil, fmt.Errorf("目标MQ实例不存在")
+		return nil, nil, nil, fmt.Errorf("目标MQ实例不存在")
 	}
-	req.ResourceType = strings.TrimSpace(req.ResourceType)
-	req.Namespace = strings.TrimSpace(req.Namespace)
-	req.ResourceName = strings.TrimSpace(req.ResourceName)
-	req.TargetNamespace = firstNonEmpty(strings.TrimSpace(req.TargetNamespace), req.Namespace)
-	req.TargetResourceName = firstNonEmpty(strings.TrimSpace(req.TargetResourceName), req.ResourceName)
+	normalizeConfigClonePlanRequest(req)
 	sourceResource := uc.findCloneResource(ctx, sourceInstance.ID, req.ResourceType, req.Namespace, req.ResourceName)
 	if sourceResource == nil {
-		return nil, fmt.Errorf("源资源不存在")
+		return nil, nil, nil, fmt.Errorf("源资源不存在")
 	}
 	targetResource := uc.findCloneResource(ctx, targetInstance.ID, req.ResourceType, req.TargetNamespace, req.TargetResourceName)
 	sourceSnapshot := resourceSnapshot(sourceResource)
 	targetSnapshot := resourceSnapshot(targetResource)
 	proposed := buildProposedCloneConfig(sourceInstance, sourceResource, req)
 	warnings, risk := configCloneWarnings(sourceInstance, targetInstance, targetResource)
+	action := cloneActionSuggestion(targetInstance.MQType, req.ResourceType, targetResource != nil)
 	plan := &ConfigClonePlanVO{
 		SourceInstanceID:   sourceInstance.ID,
 		SourceInstanceName: sourceInstance.Name,
@@ -197,21 +288,29 @@ func (uc *UseCase) BuildConfigClonePlan(ctx context.Context, sourceInstanceID ui
 		ResourceName:       req.ResourceName,
 		TargetNamespace:    req.TargetNamespace,
 		TargetResourceName: req.TargetResourceName,
-		Executable:         false,
 		RequiresApproval:   isProductionEnvironment(sourceInstance.Environment) || isProductionEnvironment(targetInstance.Environment),
 		RiskLevel:          risk,
-		Action:             cloneActionSuggestion(targetInstance.MQType, req.ResourceType, targetResource != nil),
+		Action:             action,
 		SourceSnapshot:     sourceSnapshot,
 		TargetSnapshot:     targetSnapshot,
 		ProposedConfig:     proposed,
 		Diff:               buildOperationDiff(targetSnapshot, proposed),
 		Warnings:           warnings,
 		Suggestions:        configCloneSuggestions(targetInstance.MQType, req.ResourceType, targetResource != nil),
-		Message:            "配置克隆计划已生成，当前不会直接修改目标集群或迁移消息",
 		GeneratedAt:        nowText(),
 	}
-	uc.auditConfigClonePlan(ctx, sourceInstance, targetInstance, plan, operator)
-	return plan, nil
+	if operationReq, err := configCloneOperationRequest(plan, nil); err == nil && operationReq != nil {
+		plan.Executable = true
+		plan.Message = "配置克隆计划已生成，可在确认资源名和原因后执行目标集群配置变更；不会迁移消息内容"
+	} else {
+		plan.Executable = false
+		plan.Message = "配置克隆计划已生成，仅用于人工复核；不会修改目标集群或迁移消息内容"
+		if err != nil {
+			plan.Warnings = appendUniqueString(plan.Warnings, "当前计划不可自动执行: "+err.Error())
+		}
+	}
+	applyConfigCloneExecutionWarnings(plan, proposed, targetResource != nil)
+	return plan, sourceInstance, targetInstance, nil
 }
 
 func (uc *UseCase) VerifyAuditChain(ctx context.Context, req *AuditChainVerifyRequest) (*AuditChainVerifyVO, error) {
@@ -338,7 +437,7 @@ func (uc *UseCase) auditConfigClonePlan(ctx context.Context, source, target *MQI
 		RiskLevel:          plan.RiskLevel,
 		Status:             AuditStatusSuccess,
 		RequestJSON:        mustJSON(map[string]any{"targetInstanceId": target.ID, "targetResourceName": plan.TargetResourceName, "targetNamespace": plan.TargetNamespace}),
-		ResultJSON:         mustJSON(map[string]any{"executable": false, "action": plan.Action, "targetInstanceName": target.Name}),
+		ResultJSON:         mustJSON(map[string]any{"executable": plan.Executable, "action": plan.Action, "targetInstanceName": target.Name}),
 		BeforeSnapshotJSON: mustJSON(plan.SourceSnapshot),
 		AfterSnapshotJSON:  mustJSON(plan.TargetSnapshot),
 		DiffJSON:           mustJSON(plan.Diff),
@@ -351,6 +450,270 @@ func (uc *UseCase) auditConfigClonePlan(ctx context.Context, source, target *MQI
 		FinishedAt:         ptrTime(time.Now()),
 		Message:            plan.Message,
 	})
+}
+
+func (uc *UseCase) auditConfigCloneApply(ctx context.Context, source, target *MQInstance, plan *ConfigClonePlanVO, validation *ResourceOperationValidationVO, status, message string, req *ConfigCloneApplyRequest, operator Operator) {
+	if uc.operationAuditRepo == nil || source == nil || target == nil || plan == nil {
+		return
+	}
+	now := time.Now()
+	reason := ""
+	confirmText := ""
+	idempotencyKey := ""
+	if req != nil {
+		reason = req.Reason
+		confirmText = req.ConfirmText
+		idempotencyKey = req.IdempotencyKey
+	}
+	riskLevel := firstNonEmpty(plan.RiskLevel, RiskLevelMedium)
+	if validation != nil && IsHighRiskLevel(validation.RiskLevel) {
+		riskLevel = validation.RiskLevel
+	}
+	_ = uc.operationAuditRepo.Create(ctx, &MQOperationAudit{
+		InstanceID:         source.ID,
+		InstanceName:       source.Name,
+		MQType:             source.MQType,
+		ResourceType:       plan.ResourceType,
+		ResourceName:       plan.ResourceName,
+		Namespace:          plan.Namespace,
+		Action:             AuditActionConfigCloneApply,
+		RiskLevel:          riskLevel,
+		Status:             status,
+		RequestJSON:        mustJSON(req),
+		ResultJSON:         mustJSON(map[string]any{"targetInstanceId": target.ID, "targetInstanceName": target.Name, "targetAction": plan.Action, "targetResourceName": plan.TargetResourceName}),
+		BeforeSnapshotJSON: mustJSON(plan.SourceSnapshot),
+		AfterSnapshotJSON:  mustJSON(plan.TargetSnapshot),
+		DiffJSON:           mustJSON(plan.Diff),
+		WarningsJSON:       mustJSON(plan.Warnings),
+		ImpactSummaryJSON:  mustJSON(plan.Suggestions),
+		ConfirmText:        strings.TrimSpace(confirmText),
+		IdempotencyKey:     strings.TrimSpace(idempotencyKey),
+		Reason:             trimText(reason, 500),
+		OperatorID:         operator.ID,
+		OperatorName:       operator.Username,
+		ClientIP:           operator.ClientIP,
+		StartedAt:          &now,
+		FinishedAt:         &now,
+		Message:            trimText(message, 500),
+	})
+}
+
+func normalizeConfigClonePlanRequest(req *ConfigClonePlanRequest) {
+	if req == nil {
+		return
+	}
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	req.Namespace = strings.TrimSpace(req.Namespace)
+	req.ResourceName = strings.TrimSpace(req.ResourceName)
+	req.TargetNamespace = firstNonEmpty(strings.TrimSpace(req.TargetNamespace), req.Namespace)
+	req.TargetResourceName = firstNonEmpty(strings.TrimSpace(req.TargetResourceName), req.ResourceName)
+}
+
+func (req *ConfigCloneApplyRequest) configClonePlanRequest() *ConfigClonePlanRequest {
+	if req == nil {
+		return nil
+	}
+	return &ConfigClonePlanRequest{
+		ResourceType:            req.ResourceType,
+		Namespace:               req.Namespace,
+		ResourceName:            req.ResourceName,
+		TargetInstanceID:        req.TargetInstanceID,
+		TargetNamespace:         req.TargetNamespace,
+		TargetResourceName:      req.TargetResourceName,
+		IncludeGovernanceFields: req.IncludeGovernanceFields,
+	}
+}
+
+func configCloneOperationRequest(plan *ConfigClonePlanVO, applyReq *ConfigCloneApplyRequest) (*ResourceOperationRequest, error) {
+	if plan == nil {
+		return nil, fmt.Errorf("配置克隆计划为空")
+	}
+	if NormalizeType(plan.SourceMQType) != NormalizeType(plan.TargetMQType) {
+		return nil, fmt.Errorf("源和目标 MQ 类型不同")
+	}
+	action := strings.TrimSpace(plan.Action)
+	if action == "" {
+		return nil, fmt.Errorf("目标适配器暂无可执行克隆动作")
+	}
+	params, err := configCloneOperationParams(plan)
+	if err != nil {
+		return nil, err
+	}
+	req := &ResourceOperationRequest{
+		Action:       action,
+		ResourceType: plan.ResourceType,
+		Namespace:    plan.TargetNamespace,
+		ResourceName: plan.TargetResourceName,
+		Confirmed:    true,
+		Params:       params,
+	}
+	if applyReq != nil {
+		req.Reason = strings.TrimSpace(applyReq.Reason)
+		req.ConfirmText = strings.TrimSpace(applyReq.ConfirmText)
+		req.Confirmed = applyReq.Confirmed
+		req.IdempotencyKey = strings.TrimSpace(applyReq.IdempotencyKey)
+	}
+	return req, nil
+}
+
+func configCloneOperationParams(plan *ConfigClonePlanVO) (map[string]any, error) {
+	config := cloneConfigMap(plan)
+	metadata := cloneMetadataMap(plan)
+	switch plan.Action {
+	case OperationActionKafkaTopicCreate:
+		partitions := intFromAny(plan.SourceSnapshot["partitionCount"], 1)
+		replicationFactor := intFromAny(plan.SourceSnapshot["replicaCount"], 1)
+		return map[string]any{
+			"topic":             plan.TargetResourceName,
+			"partitions":        partitions,
+			"replicationFactor": replicationFactor,
+			"configs":           kafkaCloneConfig(config),
+		}, nil
+	case OperationActionKafkaTopicConfigUpdate:
+		configs := kafkaCloneConfig(config)
+		if len(configs) == 0 {
+			return nil, fmt.Errorf("源 Topic 没有可自动同步的 Kafka 白名单配置")
+		}
+		return map[string]any{"topic": plan.TargetResourceName, "configs": configs}, nil
+	case OperationActionRabbitMQQueueUpsert:
+		arguments := anyMapFromAny(config["arguments"])
+		if len(arguments) == 0 {
+			arguments = anyMapFromAny(metadata["arguments"])
+		}
+		return map[string]any{
+			"queue":      plan.TargetResourceName,
+			"durable":    boolFromAny(plan.SourceSnapshot["durable"], true),
+			"autoDelete": boolFromAny(config["auto_delete"], false),
+			"arguments":  arguments,
+		}, nil
+	case OperationActionRabbitMQExchangeUpsert:
+		arguments := anyMapFromAny(config["arguments"])
+		if len(arguments) == 0 {
+			arguments = anyMapFromAny(metadata["arguments"])
+		}
+		return map[string]any{
+			"exchange":   plan.TargetResourceName,
+			"type":       firstNonEmpty(stringValue(config["type"]), "direct"),
+			"durable":    boolFromAny(plan.SourceSnapshot["durable"], true),
+			"autoDelete": boolFromAny(config["auto_delete"], false),
+			"internal":   boolFromAny(config["internal"], false),
+			"arguments":  arguments,
+		}, nil
+	case OperationActionPulsarRetentionUpdate:
+		retentionTime, hasRetentionTime := intFromMap(config, "retentionTimeInMinutes")
+		retentionSize, hasRetentionSize := intFromMap(config, "retentionSizeInMB")
+		if !hasRetentionTime || !hasRetentionSize {
+			return nil, fmt.Errorf("源 Namespace 没有 retentionTimeInMinutes/retentionSizeInMB 配置")
+		}
+		return map[string]any{"namespace": plan.TargetResourceName, "retentionTimeInMinutes": retentionTime, "retentionSizeInMB": retentionSize}, nil
+	default:
+		return nil, fmt.Errorf("动作 %s 暂不支持自动配置克隆", plan.Action)
+	}
+}
+
+func applyConfigCloneExecutionWarnings(plan *ConfigClonePlanVO, proposed map[string]any, targetExists bool) {
+	if plan == nil {
+		return
+	}
+	if plan.Action == OperationActionKafkaTopicConfigUpdate && targetExists {
+		plan.Warnings = appendUniqueString(plan.Warnings, "目标 Topic 已存在，自动执行只同步 Kafka 白名单配置；分区数和副本数差异不会在本次克隆中变更")
+	}
+	if plan.Action == OperationActionKafkaTopicCreate || plan.Action == OperationActionKafkaTopicConfigUpdate {
+		config := anyMapFromAny(proposed["config"])
+		allowed := kafkaCloneConfig(config)
+		if len(config) > len(allowed) {
+			plan.Warnings = appendUniqueString(plan.Warnings, "Kafka 非白名单配置不会自动下发，仅保留在计划中供人工复核")
+		}
+	}
+}
+
+func cloneConfigMap(plan *ConfigClonePlanVO) map[string]any {
+	if plan == nil || plan.ProposedConfig == nil {
+		return map[string]any{}
+	}
+	return anyMapFromAny(plan.ProposedConfig["config"])
+}
+
+func cloneMetadataMap(plan *ConfigClonePlanVO) map[string]any {
+	if plan == nil || plan.ProposedConfig == nil {
+		return map[string]any{}
+	}
+	return anyMapFromAny(plan.ProposedConfig["metadata"])
+}
+
+func kafkaCloneConfig(config map[string]any) map[string]string {
+	result := make(map[string]string)
+	for key, value := range config {
+		key = strings.TrimSpace(key)
+		if key == "" || !kafkaTopicConfigUpdateAllowed(key) {
+			continue
+		}
+		result[key] = stringValue(value)
+	}
+	return result
+}
+
+func anyMapFromAny(value any) map[string]any {
+	switch item := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(item))
+		for key, child := range item {
+			result[key] = child
+		}
+		return result
+	case map[string]string:
+		result := make(map[string]any, len(item))
+		for key, child := range item {
+			result[key] = child
+		}
+		return result
+	case string:
+		var result map[string]any
+		if err := json.Unmarshal([]byte(item), &result); err == nil {
+			return result
+		}
+	}
+	return map[string]any{}
+}
+
+func intFromMap(values map[string]any, key string) (int, bool) {
+	if values == nil {
+		return 0, false
+	}
+	value, ok := values[key]
+	if !ok {
+		return 0, false
+	}
+	return intFromAny(value, 0), true
+}
+
+func intFromAny(value any, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	if result := intValue(value); result != 0 {
+		return result
+	}
+	return fallback
+}
+
+func boolFromAny(value any, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	switch item := value.(type) {
+	case bool:
+		return item
+	case string:
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item == "true" || item == "1" || item == "yes" {
+			return true
+		}
+		if item == "false" || item == "0" || item == "no" {
+			return false
+		}
+	}
+	return boolValue(value)
 }
 
 func inferJSONSchema(value any) map[string]any {
@@ -582,7 +945,7 @@ func buildProposedCloneConfig(instance *MQInstance, resource *MQResource, req *C
 
 func configCloneWarnings(source, target *MQInstance, targetResource *MQResource) ([]string, string) {
 	warnings := []string{
-		"当前仅生成配置克隆计划，不执行目标集群变更，不迁移消息内容",
+		"配置克隆不会迁移消息内容，执行时仅下发受支持的配置变更",
 		"跨集群配置克隆前需要确认目标集群版本、权限、容量和业务幂等约束",
 	}
 	risk := RiskLevelMedium

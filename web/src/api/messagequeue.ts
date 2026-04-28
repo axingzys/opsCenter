@@ -254,6 +254,20 @@ export const buildMQConfigClonePlan = (id: number, data: {
   includeGovernanceFields?: boolean
 }) => request.post(`/api/v1/message-queues/instances/${id}/config-clone-plan`, data)
 
+export const applyMQConfigClone = (id: number, data: {
+  resourceType: string
+  namespace?: string
+  resourceName: string
+  targetInstanceId: number
+  targetNamespace?: string
+  targetResourceName?: string
+  includeGovernanceFields?: boolean
+  reason: string
+  confirmed: boolean
+  confirmText: string
+  idempotencyKey?: string
+}) => request.post(`/api/v1/message-queues/instances/${id}/config-clone-apply`, data)
+
 export const validateMQResourceOperation = (id: number, data: MQResourceOperationPayload) =>
   request.post(`/api/v1/message-queues/instances/${id}/operations/validate`, data)
 

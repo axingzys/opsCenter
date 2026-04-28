@@ -2473,6 +2473,8 @@ func actionText(action string) string {
 		return "巡检报告生成"
 	case AuditActionConfigClone:
 		return "配置克隆计划"
+	case AuditActionConfigCloneApply:
+		return "配置克隆执行"
 	case AuditActionPermissionSet:
 		return "实例权限保存"
 	case AuditActionPermissionDel:
