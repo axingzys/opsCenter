@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	backupRunningMessage = "逻辑备份执行中"
-	backupSuccessMessage = "逻辑备份完成"
+	backupRunningMessage = "备份执行中"
+	backupSuccessMessage = "备份完成"
 	backupQueuedMessage  = "备份任务已进入执行队列"
 	backupStaleMessage   = "备份进程已中断、心跳超时或超过任务最大运行时长，已自动标记失败"
 
@@ -66,15 +66,15 @@ func (uc *UseCase) CreateBackupTask(ctx context.Context, req *DatabaseBackupTask
 	item := &DatabaseBackupTask{
 		InstanceID:         req.InstanceID,
 		Name:               trimText(strings.TrimSpace(req.Name), 120),
-		BackupType:         normalizeBackupType(req.BackupType),
+		BackupType:         normalizeBackupTypeForMethod(req.BackupType, req.BackupMethod),
 		BackupMethod:       normalizeBackupMethod(req.BackupMethod),
 		BackupLevel:        normalizeBackupLevel(req.BackupLevel),
-		BackupEngine:       normalizeBackupEngine(req.BackupEngine, req.BackupMethod),
+		BackupEngine:       normalizeBackupEngineForInstance(req.BackupEngine, req.BackupMethod, instance),
 		SourceInstanceID:   normalizeBackupSourceInstanceID(req.SourceInstanceID, req.InstanceID),
 		SourceRole:         normalizeSourceRole(req.SourceRole),
 		StorageProfileID:   req.StorageProfileID,
 		SecretProfileID:    req.SecretProfileID,
-		BackupScope:        normalizeBackupScope(req.BackupScope),
+		BackupScope:        normalizeBackupScopeForMethod(req.BackupScope, req.BackupMethod),
 		ScopeConfig:        trimText(strings.TrimSpace(req.ScopeConfig), 4000),
 		RPOMinutes:         req.RPOMinutes,
 		RTOMinutes:         req.RTOMinutes,
@@ -83,10 +83,10 @@ func (uc *UseCase) CreateBackupTask(ctx context.Context, req *DatabaseBackupTask
 		StorageConfig:      trimText(strings.TrimSpace(req.StorageConfig), 2000),
 		RetentionDays:      normalizeBackupRetentionDays(req.RetentionDays, policy.DefaultRetentionDays),
 		MaxDurationMinutes: normalizeBackupMaxDurationMinutes(req.MaxDurationMinutes),
-		Compression:        normalizeBackupCompression(req.Compression, req.BackupType),
+		Compression:        normalizeBackupCompressionForMethod(req.Compression, req.BackupType, req.BackupMethod),
 		EncryptionEnabled:  req.EncryptionEnabled,
 		Enabled:            req.Enabled,
-		RestoreCapability:  DatabaseRestoreCapabilityLogicalRestoreOnly,
+		RestoreCapability:  restoreCapabilityForTaskMethod(req.BackupMethod),
 	}
 	if err := uc.backupTaskRepo.Create(ctx, item); err != nil {
 		return nil, err
@@ -116,15 +116,15 @@ func (uc *UseCase) UpdateBackupTask(ctx context.Context, id uint, req *DatabaseB
 
 	item.InstanceID = req.InstanceID
 	item.Name = trimText(strings.TrimSpace(req.Name), 120)
-	item.BackupType = normalizeBackupType(req.BackupType)
+	item.BackupType = normalizeBackupTypeForMethod(req.BackupType, req.BackupMethod)
 	item.BackupMethod = normalizeBackupMethod(req.BackupMethod)
 	item.BackupLevel = normalizeBackupLevel(req.BackupLevel)
-	item.BackupEngine = normalizeBackupEngine(req.BackupEngine, req.BackupMethod)
+	item.BackupEngine = normalizeBackupEngineForInstance(req.BackupEngine, req.BackupMethod, instance)
 	item.SourceInstanceID = normalizeBackupSourceInstanceID(req.SourceInstanceID, req.InstanceID)
 	item.SourceRole = normalizeSourceRole(req.SourceRole)
 	item.StorageProfileID = req.StorageProfileID
 	item.SecretProfileID = req.SecretProfileID
-	item.BackupScope = normalizeBackupScope(req.BackupScope)
+	item.BackupScope = normalizeBackupScopeForMethod(req.BackupScope, req.BackupMethod)
 	item.ScopeConfig = trimText(strings.TrimSpace(req.ScopeConfig), 4000)
 	item.RPOMinutes = req.RPOMinutes
 	item.RTOMinutes = req.RTOMinutes
@@ -133,10 +133,10 @@ func (uc *UseCase) UpdateBackupTask(ctx context.Context, id uint, req *DatabaseB
 	item.StorageConfig = trimText(strings.TrimSpace(req.StorageConfig), 2000)
 	item.RetentionDays = normalizeBackupRetentionDays(req.RetentionDays, policy.DefaultRetentionDays)
 	item.MaxDurationMinutes = normalizeBackupMaxDurationMinutes(req.MaxDurationMinutes)
-	item.Compression = normalizeBackupCompression(req.Compression, req.BackupType)
+	item.Compression = normalizeBackupCompressionForMethod(req.Compression, req.BackupType, req.BackupMethod)
 	item.EncryptionEnabled = req.EncryptionEnabled
 	item.Enabled = req.Enabled
-	item.RestoreCapability = normalizeRestoreCapability(item.RestoreCapability)
+	item.RestoreCapability = restoreCapabilityForTaskMethod(req.BackupMethod)
 	uc.applyBackupTaskNextRunAt(item, time.Now())
 
 	if err := uc.backupTaskRepo.Update(ctx, item); err != nil {
@@ -370,18 +370,36 @@ func (uc *UseCase) validateBackupTaskRequest(ctx context.Context, req *DatabaseB
 		return fmt.Errorf("数据库实例不存在")
 	}
 	if !supportsBackupTask(instance.DBType) {
-		return fmt.Errorf("%s 逻辑备份将在后续批次接入", DBTypeText(instance.DBType))
+		return fmt.Errorf("%s 备份将在后续批次接入", DBTypeText(instance.DBType))
 	}
 
-	backupType := normalizeBackupType(req.BackupType)
+	backupType := normalizeBackupTypeForMethod(req.BackupType, req.BackupMethod)
+	backupMethod := normalizeBackupMethod(req.BackupMethod)
 	if !supportsBackupType(instance.DBType, backupType) {
 		if backupType == DatabaseBackupTypeLogicalCustom {
 			return fmt.Errorf("%s 当前不支持 Custom 备份", DBTypeText(instance.DBType))
 		}
 		return fmt.Errorf("当前不支持备份类型 %s", backupType)
 	}
-	if method := normalizeBackupMethod(req.BackupMethod); method != DatabaseBackupMethodLogical {
-		return fmt.Errorf("P1 仅支持物理/外部备份记录登记，备份任务执行仍只支持逻辑备份")
+	if backupMethod == DatabaseBackupMethodPhysical {
+		if normalizeDBType(instance.DBType) != DBTypeMySQL && normalizeDBType(instance.DBType) != DBTypeMariaDB {
+			return fmt.Errorf("%s 暂不支持物理备份任务", DBTypeText(instance.DBType))
+		}
+		if uc.credentialResolver == nil {
+			return fmt.Errorf("连接凭据解析器未配置")
+		}
+		credential, err := uc.credentialResolver(ctx, instance.CredentialID)
+		if err != nil {
+			return fmt.Errorf("凭据不存在")
+		}
+		if _, err := validateMySQLPhysicalBackupCompatibility(ctx, instance, credential, req.BackupEngine); err != nil {
+			return err
+		}
+		if _, err := parsePhysicalBackupScopeConfig(req.ScopeConfig); err != nil {
+			return err
+		}
+	} else if backupMethod != DatabaseBackupMethodLogical {
+		return fmt.Errorf("外部备份任务执行暂不支持，请使用外部备份记录登记")
 	}
 	if req.SourceInstanceID > 0 {
 		if _, err := uc.instanceRepo.GetByID(ctx, req.SourceInstanceID); err != nil {
@@ -827,7 +845,9 @@ func supportsBackupType(dbType, backupType string) bool {
 	switch normalizeDBType(dbType) {
 	case DBTypePostgreSQL:
 		return backupType == DatabaseBackupTypeLogical || backupType == DatabaseBackupTypeLogicalCustom
-	case DBTypeMySQL, DBTypeMariaDB, DBTypeRedis:
+	case DBTypeMySQL, DBTypeMariaDB:
+		return backupType == DatabaseBackupTypeLogical || backupType == DatabaseBackupTypePhysical
+	case DBTypeRedis:
 		return backupType == DatabaseBackupTypeLogical
 	default:
 		return false
@@ -840,6 +860,51 @@ func normalizeBackupType(backupType string) string {
 		return DatabaseBackupTypeLogical
 	}
 	return backupType
+}
+
+func normalizeBackupTypeForMethod(backupType, method string) string {
+	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
+		return DatabaseBackupTypePhysical
+	}
+	return normalizeBackupType(backupType)
+}
+
+func normalizeBackupEngineForInstance(value, method string, instance *DatabaseInstance) string {
+	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
+		dbType := ""
+		version := ""
+		if instance != nil {
+			dbType = instance.DBType
+			version = instance.Version
+		}
+		return normalizeMySQLPhysicalBackupEngine(value, dbType, version)
+	}
+	return normalizeBackupEngine(value, method)
+}
+
+func normalizeBackupScopeForMethod(value, method string) string {
+	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
+		return "instance"
+	}
+	return normalizeBackupScope(value)
+}
+
+func normalizeBackupCompressionForMethod(value, backupType, method string) string {
+	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			return trimText(value, 30)
+		}
+		return "gzip"
+	}
+	return normalizeBackupCompression(value, backupType)
+}
+
+func restoreCapabilityForTaskMethod(method string) string {
+	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
+		return DatabaseRestoreCapabilityPhysicalRestore
+	}
+	return DatabaseRestoreCapabilityLogicalRestoreOnly
 }
 
 func normalizeRestoreCapability(value string) string {
@@ -1035,7 +1100,11 @@ func isBackupRecordStale(record *DatabaseBackupRecord, task *DatabaseBackupTask,
 
 func backupTaskStrategyText(task *DatabaseBackupTask) string {
 	if task != nil && normalizeBackupMethod(task.BackupMethod) != DatabaseBackupMethodLogical {
-		return fmt.Sprintf("%s%s，P1 仅支持登记和预校验", BackupMethodText(task.BackupMethod), BackupLevelText(task.BackupLevel))
+		engine := strings.TrimSpace(task.BackupEngine)
+		if engine != "" {
+			return fmt.Sprintf("%s%s（%s）", BackupMethodText(task.BackupMethod), BackupLevelText(task.BackupLevel), engine)
+		}
+		return fmt.Sprintf("%s%s", BackupMethodText(task.BackupMethod), BackupLevelText(task.BackupLevel))
 	}
 	if task != nil && normalizeBackupType(task.BackupType) == DatabaseBackupTypeLogicalCustom {
 		return "逻辑全量（PostgreSQL Custom），不支持 PITR"

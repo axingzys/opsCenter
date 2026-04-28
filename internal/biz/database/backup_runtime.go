@@ -1,10 +1,12 @@
 package database
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,7 @@ type backupCommandSpec struct {
 	FileExt      string
 	OutputMode   string
 	Runner       func(ctx context.Context, outputPath string) (int64, error)
+	ToolName     string
 }
 
 const (
@@ -148,6 +151,85 @@ func buildBackupCommandSpec(item *DatabaseInstance, credential *ConnectionCreden
 	}
 }
 
+func buildBackupCommandSpecForTask(item *DatabaseInstance, credential *ConnectionCredential, databaseName string, task *DatabaseBackupTask) (*backupCommandSpec, error) {
+	if task != nil && normalizeBackupMethod(task.BackupMethod) == DatabaseBackupMethodPhysical {
+		return buildMySQLPhysicalBackupCommandSpec(item, credential, task)
+	}
+	backupType := DatabaseBackupTypeLogical
+	if task != nil {
+		backupType = task.BackupType
+	}
+	return buildBackupCommandSpec(item, credential, databaseName, backupType)
+}
+
+func buildMySQLPhysicalBackupCommandSpec(item *DatabaseInstance, credential *ConnectionCredential, task *DatabaseBackupTask) (*backupCommandSpec, error) {
+	if item == nil {
+		return nil, fmt.Errorf("数据库实例不存在")
+	}
+	dbType := normalizeDBType(item.DBType)
+	if dbType != DBTypeMySQL && dbType != DBTypeMariaDB {
+		return nil, fmt.Errorf("%s 暂不支持物理备份任务", DBTypeText(item.DBType))
+	}
+	if credential == nil || strings.TrimSpace(credential.Username) == "" {
+		return nil, fmt.Errorf("凭据用户名不能为空")
+	}
+	if credential.Password == "" {
+		return nil, fmt.Errorf("凭据密码不能为空")
+	}
+	engine := normalizeMySQLPhysicalBackupEngine("", dbType, "")
+	if task != nil {
+		engine = normalizeMySQLPhysicalBackupEngine(task.BackupEngine, dbType, "")
+	}
+	command := mysqlPhysicalBackupCommand(engine, dbType)
+	if command == "" {
+		return nil, fmt.Errorf("不支持的 MySQL/MariaDB 物理备份引擎: %s", engine)
+	}
+	level := DatabaseBackupLevelFull
+	scopeConfig := ""
+	if task != nil {
+		level = normalizeBackupLevel(task.BackupLevel)
+		scopeConfig = task.ScopeConfig
+	}
+	physicalConfig, err := parsePhysicalBackupScopeConfig(scopeConfig)
+	if err != nil {
+		return nil, err
+	}
+	if level == DatabaseBackupLevelIncremental && strings.TrimSpace(physicalConfig.IncrementalBaseDir) == "" {
+		return nil, fmt.Errorf("增量物理备份需要在范围配置中提供 incrementalBaseDir")
+	}
+	host := strings.TrimSpace(item.Host)
+	port := fmt.Sprintf("%d", item.Port)
+	username := strings.TrimSpace(credential.Username)
+	return &backupCommandSpec{
+		Commands: []string{command},
+		Env:      []string{"MYSQL_PWD=" + credential.Password},
+		FileExt:  ".physical.tar.gz",
+		ToolName: command,
+		Runner: func(ctx context.Context, outputPath string) (int64, error) {
+			args := []string{
+				"--backup",
+				"--target-dir=" + outputPath + ".dir.partial",
+				"--host=" + host,
+				"--port=" + port,
+				"--user=" + username,
+			}
+			if dbType == DBTypeMariaDB {
+				args = append(args, "--password="+credential.Password)
+			} else {
+				args = append(args, "--password="+credential.Password)
+			}
+			if item.TLSEnabled {
+				args = append(args, "--ssl")
+			}
+			if level == DatabaseBackupLevelIncremental {
+				args = append(args, "--incremental-basedir="+strings.TrimSpace(physicalConfig.IncrementalBaseDir))
+			}
+			args = append(args, physicalConfig.ExtraArgs...)
+			return runPhysicalBackupCommand(ctx, []string{command}, args, nil, outputPath)
+		},
+	}, nil
+}
+
 func resolveBackupDatabaseName(item *DatabaseInstance, credential *ConnectionCredential) (string, error) {
 	if item == nil {
 		return "", fmt.Errorf("数据库实例不存在")
@@ -173,6 +255,16 @@ func resolveBackupDatabaseName(item *DatabaseInstance, credential *ConnectionCre
 	default:
 		return "", fmt.Errorf("%s 逻辑备份将在后续批次接入", DBTypeText(item.DBType))
 	}
+}
+
+func resolveBackupDatabaseNameForTask(item *DatabaseInstance, credential *ConnectionCredential, task *DatabaseBackupTask) (string, error) {
+	if task != nil && normalizeBackupMethod(task.BackupMethod) == DatabaseBackupMethodPhysical {
+		switch normalizeDBType(item.DBType) {
+		case DBTypeMySQL, DBTypeMariaDB:
+			return "instance", nil
+		}
+	}
+	return resolveBackupDatabaseName(item, credential)
 }
 
 func resolveBackupStorageRoot(policy *DatabaseBackupPolicy) (string, error) {
@@ -334,6 +426,89 @@ func runBackupCommand(ctx context.Context, spec *backupCommandSpec, outputPath s
 	return info.Size(), nil
 }
 
+func runPhysicalBackupCommand(ctx context.Context, commands []string, args []string, env []string, outputPath string) (int64, error) {
+	commandPath, err := findBackupCommand(commands)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return 0, fmt.Errorf("创建备份目录失败: %w", err)
+	}
+	targetDir := outputPath + ".dir.partial"
+	_ = os.RemoveAll(targetDir)
+	_ = os.Remove(outputPath + ".partial")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return 0, fmt.Errorf("创建物理备份临时目录失败: %w", err)
+	}
+	defer os.RemoveAll(targetDir)
+
+	var stderr bytes.Buffer
+	cmd := backupCommandFactory(ctx, commandPath, args...)
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return 0, fmt.Errorf("执行物理备份命令失败: %s", trimBackupCommandError(stderr.String(), err))
+	}
+	tmpPath := outputPath + ".partial"
+	if err := createTarGzipFromDir(targetDir, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, err
+	}
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return 0, fmt.Errorf("写入物理备份归档失败: %w", err)
+	}
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		return 0, fmt.Errorf("读取物理备份归档失败: %w", err)
+	}
+	return info.Size(), nil
+}
+
+func createTarGzipFromDir(sourceDir string, outputPath string) error {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("创建物理备份归档失败: %w", err)
+	}
+	defer file.Close()
+	gzipWriter := gzip.NewWriter(file)
+	defer gzipWriter.Close()
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	sourceDir = filepath.Clean(sourceDir)
+	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == sourceDir {
+			return nil
+		}
+		rel, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		_, err = io.Copy(tarWriter, input)
+		return err
+	})
+}
+
 func findBackupCommand(commands []string) (string, error) {
 	for _, command := range commands {
 		command = strings.TrimSpace(command)
@@ -392,6 +567,12 @@ func buildBackupRecordMessage(item *DatabaseBackupRecord) string {
 	}
 	switch strings.TrimSpace(item.Status) {
 	case DatabaseBackupStatusSuccess:
+		if normalizeBackupMethod(item.BackupMethod) == DatabaseBackupMethodPhysical {
+			if strings.TrimSpace(item.FileName) != "" {
+				return "物理备份完成，归档文件已生成"
+			}
+			return "物理备份完成"
+		}
 		if strings.TrimSpace(item.FileName) != "" {
 			return "逻辑备份完成，文件已生成"
 		}
@@ -399,12 +580,18 @@ func buildBackupRecordMessage(item *DatabaseBackupRecord) string {
 	case DatabaseBackupStatusQueued:
 		return "备份任务已进入执行队列"
 	case DatabaseBackupStatusRunning:
+		if normalizeBackupMethod(item.BackupMethod) == DatabaseBackupMethodPhysical {
+			return "物理备份执行中"
+		}
 		return "逻辑备份执行中"
 	case DatabaseBackupStatusCleaning:
 		return "备份保留策略清理中"
 	case DatabaseBackupStatusPending:
 		return "备份任务等待执行"
 	case DatabaseBackupStatusFailed:
+		if normalizeBackupMethod(item.BackupMethod) == DatabaseBackupMethodPhysical {
+			return "物理备份失败"
+		}
 		return "逻辑备份失败"
 	case DatabaseBackupStatusExpired:
 		return buildBackupPrunedMessage(item.FileName)

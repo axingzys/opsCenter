@@ -1594,10 +1594,10 @@
           <div class="backup-card">
             <div class="panel-title">
               <span>PITR 链路与恢复计划</span>
-              <el-tag size="small" type="success">P1</el-tag>
+              <el-tag size="small" type="success">P2</el-tag>
             </div>
             <el-alert
-              title="P1 只登记外部备份链、日志归档文件并做恢复计划预校验，不直接执行恢复。恢复执行和工具编排按后续 P2/P3 接入。"
+              title="P2 已接入 MySQL/MariaDB 物理备份任务入口、工具版本兼容校验、binlog 元数据和恢复计划证明；真正连续归档守护进程和恢复库编排仍建议先通过外部 Runner/登记链路纳管。"
               type="info"
               show-icon
               :closable="false"
@@ -2650,11 +2650,11 @@
     <el-dialog
       v-model="backupTaskDialogVisible"
       :title="backupTaskForm.id ? '编辑备份任务' : '新增备份任务'"
-      width="720px"
+      width="900px"
       @close="resetBackupTaskForm"
     >
       <el-alert
-        title="当前支持 MySQL / MariaDB / PostgreSQL / Redis 的逻辑备份任务配置。PostgreSQL 可选择 Plain SQL 或 Custom 格式；Custom 会生成 .dump 文件，恢复演练使用 pg_restore。"
+        title="MySQL / MariaDB 支持逻辑备份和物理备份任务；物理备份会按数据库版本校验 XtraBackup / mariadb-backup 兼容性。PostgreSQL / Redis 当前仍按逻辑备份配置。"
         type="warning"
         show-icon
         :closable="false"
@@ -2675,8 +2675,20 @@
           <el-input v-model="backupTaskForm.name" placeholder="如：app-db-nightly" />
         </el-form-item>
         <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="备份方法">
+              <el-select v-model="backupTaskForm.backupMethod" style="width: 100%;">
+                <el-option
+                  v-for="item in availableBackupMethodOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
           <el-col :span="12">
-            <el-form-item label="备份类型">
+            <el-form-item :label="isPhysicalBackupTaskForm ? '备份类型' : '备份格式'">
               <el-select v-model="backupTaskForm.backupType" style="width: 100%;">
                 <el-option
                   v-for="item in availableBackupTypeOptions"
@@ -2687,12 +2699,52 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :span="4">
+            <el-form-item label="级别">
+              <el-select v-model="backupTaskForm.backupLevel" :disabled="!isPhysicalBackupTaskForm" style="width: 100%;">
+                <el-option
+                  v-for="item in availableBackupLevelOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col v-if="isPhysicalBackupTaskForm" :span="12">
+            <el-form-item label="备份引擎">
+              <el-select v-model="backupTaskForm.backupEngine" style="width: 100%;">
+                <el-option
+                  v-for="item in availablePhysicalBackupEngineOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="isPhysicalBackupTaskForm ? 6 : 12">
+            <el-form-item label="备份范围">
+              <el-input v-model="backupTaskForm.backupScope" disabled />
+            </el-form-item>
+          </el-col>
+          <el-col :span="isPhysicalBackupTaskForm ? 6 : 12">
             <el-form-item label="存储类型">
               <el-input v-model="backupTaskForm.storageType" disabled />
             </el-form-item>
           </el-col>
         </el-row>
+        <el-form-item v-if="isPhysicalBackupTaskForm" label="范围配置">
+          <el-input
+            v-model="backupTaskForm.scopeConfig"
+            type="textarea"
+            :rows="4"
+            placeholder='全量可留空；增量示例：{"incrementalBaseDir":"/backup/mysql/base_20260428","extraArgs":["--parallel=4"]}'
+          />
+          <div class="field-tip">物理备份按实例/datadir 级别执行；extraArgs 不允许包含 password/secret。增量备份必须提供上一备份目录 incrementalBaseDir。</div>
+        </el-form-item>
         <el-form-item label="执行计划">
           <el-input
             v-model="backupTaskForm.schedule"
@@ -2718,8 +2770,8 @@
         </el-form-item>
         <el-form-item v-if="selectedBackupTaskInstance?.capacitySizeText" label="容量提示">
           <el-alert
-            :title="`当前实例容量 ${selectedBackupTaskInstance.capacitySizeText}，逻辑全量备份只适合作为小库、临时导出或演练能力。`"
-            :type="Number(selectedBackupTaskInstance.capacitySizeBytes || 0) >= 50 * 1024 * 1024 * 1024 ? 'error' : 'info'"
+            :title="backupCapacityTipTitle"
+            :type="backupCapacityTipType"
             show-icon
             :closable="false"
           />
@@ -2737,7 +2789,7 @@
     <el-dialog
       v-model="externalBackupDialogVisible"
       title="登记外部备份记录"
-      width="820px"
+      width="1080px"
       @close="resetExternalBackupForm"
     >
       <el-alert
@@ -2800,12 +2852,12 @@
           </el-col>
           <el-col :span="6">
             <el-form-item label="基础记录">
-              <el-input-number v-model="externalBackupForm.baseRecordId" :min="0" class="query-number" />
+              <el-input-number v-model="externalBackupForm.baseRecordId" :min="0" class="form-number-full" />
             </el-form-item>
           </el-col>
           <el-col :span="6">
             <el-form-item label="父记录">
-              <el-input-number v-model="externalBackupForm.parentRecordId" :min="0" class="query-number" />
+              <el-input-number v-model="externalBackupForm.parentRecordId" :min="0" class="form-number-full" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -2820,7 +2872,7 @@
           </el-col>
           <el-col :span="6">
             <el-form-item label="文件大小">
-              <el-input-number v-model="externalBackupForm.fileSize" :min="0" class="query-number" />
+              <el-input-number v-model="externalBackupForm.fileSize" :min="0" class="form-number-full" />
             </el-form-item>
           </el-col>
           <el-col :span="6">
@@ -3741,11 +3793,18 @@ const backupTaskForm = reactive<DatabaseBackupTaskPayload & { id?: number }>({
   instanceId: 0,
   name: '',
   backupType: 'logical',
+  backupMethod: 'logical',
+  backupLevel: 'full',
+  backupEngine: 'logical',
+  backupScope: 'database',
+  scopeConfig: '',
   schedule: '',
   storageType: 'local',
   storageConfig: '',
   retentionDays: 7,
   maxDurationMinutes: 1440,
+  compression: 'gzip',
+  encryptionEnabled: false,
   enabled: true
 })
 const backupTaskFormInstanceDbType = ref('')
@@ -4022,11 +4081,34 @@ const selectedBackupTaskDbType = computed(() =>
   selectedBackupTaskInstance.value?.dbType || backupTaskFormInstanceDbType.value
 )
 
+const isMySQLFamilyBackupTask = computed(() =>
+  ['mysql', 'mariadb'].includes(selectedBackupTaskDbType.value)
+)
+
+const isPhysicalBackupTaskForm = computed(() =>
+  backupTaskForm.backupMethod === 'physical'
+)
+
 const backupLargeWarnings = computed(() =>
   backupTasks.value.filter(item => item.largeDataWarning)
 )
 
+const availableBackupMethodOptions = computed(() => {
+  const options = [
+    { label: '逻辑备份', value: 'logical' }
+  ]
+  if (isMySQLFamilyBackupTask.value) {
+    options.push({ label: '物理备份', value: 'physical' })
+  }
+  return options
+})
+
 const availableBackupTypeOptions = computed(() => {
+  if (isPhysicalBackupTaskForm.value) {
+    return [
+      { label: '物理备份', value: 'physical' }
+    ]
+  }
   if (selectedBackupTaskDbType.value === 'postgresql') {
     return [
       { label: '逻辑备份（Plain SQL）', value: 'logical' },
@@ -4038,10 +4120,78 @@ const availableBackupTypeOptions = computed(() => {
   ]
 })
 
+const availableBackupLevelOptions = computed(() => {
+  if (isPhysicalBackupTaskForm.value) {
+    return [
+      { label: '全量', value: 'full' },
+      { label: '增量', value: 'incremental' }
+    ]
+  }
+  return [
+    { label: '全量', value: 'full' }
+  ]
+})
+
+const defaultPhysicalBackupEngine = () => {
+  if (selectedBackupTaskDbType.value === 'mariadb') return 'mariadb_backup'
+  const version = String(selectedBackupTaskInstance.value?.version || '')
+  const match = version.match(/(\d+)\.(\d+)/)
+  const major = match ? Number(match[1]) : 0
+  const minor = match ? Number(match[2]) : 0
+  if (major === 5) return 'xtrabackup_2_4'
+  if (major === 8 && minor >= 4) return 'xtrabackup_8_4'
+  return 'xtrabackup_8_0'
+}
+
+const availablePhysicalBackupEngineOptions = computed(() => {
+  if (selectedBackupTaskDbType.value === 'mariadb') {
+    return [
+      { label: 'mariadb-backup', value: 'mariadb_backup' }
+    ]
+  }
+  return [
+    { label: 'XtraBackup 8.0（MySQL 8.0.x）', value: 'xtrabackup_8_0' },
+    { label: 'XtraBackup 8.4（MySQL 8.4.x）', value: 'xtrabackup_8_4' },
+    { label: 'XtraBackup 2.4 legacy（MySQL 5.7）', value: 'xtrabackup_2_4' }
+  ]
+})
+
+const backupCapacityTipTitle = computed(() => {
+  const sizeText = selectedBackupTaskInstance.value?.capacitySizeText || '-'
+  if (isPhysicalBackupTaskForm.value) {
+    return `当前实例容量 ${sizeText}；物理备份适合作为大库主链路，PITR 还需要配套 binlog 归档和恢复演练。`
+  }
+  return `当前实例容量 ${sizeText}，逻辑全量备份只适合作为小库、临时导出或演练能力。`
+})
+
+const backupCapacityTipType = computed(() => {
+  if (isPhysicalBackupTaskForm.value) return 'warning'
+  return Number(selectedBackupTaskInstance.value?.capacitySizeBytes || 0) >= 50 * 1024 * 1024 * 1024 ? 'error' : 'info'
+})
+
 const normalizeBackupTaskFormBackupType = () => {
+  if (!availableBackupMethodOptions.value.some(item => item.value === backupTaskForm.backupMethod)) {
+    backupTaskForm.backupMethod = 'logical'
+  }
+  if (isPhysicalBackupTaskForm.value) {
+    backupTaskForm.backupType = 'physical'
+    backupTaskForm.backupScope = 'instance'
+    backupTaskForm.compression = backupTaskForm.compression || 'gzip'
+    if (!availableBackupLevelOptions.value.some(item => item.value === backupTaskForm.backupLevel)) {
+      backupTaskForm.backupLevel = 'full'
+    }
+    if (!availablePhysicalBackupEngineOptions.value.some(item => item.value === backupTaskForm.backupEngine)) {
+      backupTaskForm.backupEngine = defaultPhysicalBackupEngine()
+    }
+    return
+  }
   if (!availableBackupTypeOptions.value.some(item => item.value === backupTaskForm.backupType)) {
     backupTaskForm.backupType = 'logical'
   }
+  backupTaskForm.backupMethod = 'logical'
+  backupTaskForm.backupLevel = 'full'
+  backupTaskForm.backupEngine = 'logical'
+  backupTaskForm.backupScope = 'database'
 }
 
 const restoreTargetInstances = computed(() =>
@@ -4854,11 +5004,18 @@ const resetBackupTaskForm = () => {
   backupTaskForm.instanceId = 0
   backupTaskForm.name = ''
   backupTaskForm.backupType = 'logical'
+  backupTaskForm.backupMethod = 'logical'
+  backupTaskForm.backupLevel = 'full'
+  backupTaskForm.backupEngine = 'logical'
+  backupTaskForm.backupScope = 'database'
+  backupTaskForm.scopeConfig = ''
   backupTaskForm.schedule = ''
   backupTaskForm.storageType = 'local'
   backupTaskForm.storageConfig = ''
   backupTaskForm.retentionDays = 7
   backupTaskForm.maxDurationMinutes = 1440
+  backupTaskForm.compression = 'gzip'
+  backupTaskForm.encryptionEnabled = false
   backupTaskForm.enabled = true
   backupTaskFormInstanceDbType.value = ''
   backupTaskFormRef.value?.clearValidate()
@@ -4989,12 +5146,19 @@ const openBackupTaskDialog = (row?: DatabaseBackupTaskResult) => {
     backupTaskForm.instanceId = row.instanceId
     backupTaskForm.name = row.name || ''
     backupTaskForm.backupType = row.backupType || 'logical'
+    backupTaskForm.backupMethod = row.backupMethod || 'logical'
+    backupTaskForm.backupLevel = row.backupLevel || 'full'
+    backupTaskForm.backupEngine = row.backupEngine || 'logical'
+    backupTaskForm.backupScope = row.backupScope || 'database'
+    backupTaskForm.scopeConfig = row.scopeConfig || ''
     backupTaskFormInstanceDbType.value = row.instanceDbType || ''
     backupTaskForm.schedule = row.schedule || ''
     backupTaskForm.storageType = row.storageType || 'local'
     backupTaskForm.storageConfig = row.storageConfig || ''
     backupTaskForm.retentionDays = row.retentionDays || 7
     backupTaskForm.maxDurationMinutes = row.maxDurationMinutes || 1440
+    backupTaskForm.compression = row.compression || 'gzip'
+    backupTaskForm.encryptionEnabled = !!row.encryptionEnabled
     backupTaskForm.enabled = !!row.enabled
   } else if (supportedBackupInstances.value.length > 0) {
     backupTaskForm.instanceId = supportedBackupInstances.value[0].id
@@ -5014,11 +5178,18 @@ const submitBackupTaskForm = async () => {
       instanceId: backupTaskForm.instanceId,
       name: backupTaskForm.name.trim(),
       backupType: backupTaskForm.backupType || 'logical',
+      backupMethod: backupTaskForm.backupMethod || 'logical',
+      backupLevel: backupTaskForm.backupLevel || 'full',
+      backupEngine: backupTaskForm.backupEngine || 'logical',
+      backupScope: backupTaskForm.backupScope || 'database',
+      scopeConfig: backupTaskForm.scopeConfig?.trim(),
       schedule: (backupTaskForm.schedule || '').trim(),
       storageType: backupTaskForm.storageType || 'local',
       storageConfig: backupTaskForm.storageConfig?.trim(),
       retentionDays: backupTaskForm.retentionDays,
       maxDurationMinutes: backupTaskForm.maxDurationMinutes,
+      compression: backupTaskForm.compression,
+      encryptionEnabled: backupTaskForm.encryptionEnabled,
       enabled: backupTaskForm.enabled
     }
     if (backupTaskForm.id) {
@@ -6754,6 +6925,11 @@ watch(
 )
 
 watch(
+  () => backupTaskForm.backupMethod,
+  () => normalizeBackupTaskFormBackupType()
+)
+
+watch(
   () => logArchiveStreamForm.instanceId,
   (instanceId) => {
     logArchiveStreamForm.archiveType = archiveTypeForInstance(instanceId)
@@ -7537,6 +7713,10 @@ onBeforeUnmount(() => {
 
 .backup-dialog-alert {
   margin-bottom: 16px;
+}
+
+.form-number-full {
+  width: 100%;
 }
 
 .permission-mode-alert {

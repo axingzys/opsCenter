@@ -19,6 +19,29 @@
 
 后续 P2/P3 仍按本文继续推进：真实物理备份 Runner、连续 binlog/WAL 归档守护进程、工具版本兼容矩阵、恢复到隔离库、恢复证明和副本治理。
 
+### 2026-04-28 P2 第一版已落地
+
+本次 P2 已完成 MySQL/MariaDB 物理备份主链路的第一版可用能力。边界是：OpsHub 后端可以编排并执行 XtraBackup / mariadb-backup 命令、登记物理备份元数据、生成 PITR 恢复计划和恢复证明；真正“长期连续运行的 binlog 归档守护进程”和“自动停止/重建目标 MySQL 数据目录的隔离恢复 Runner”仍建议继续按后续 Runner 专项深化，或先通过外部工具执行后登记元数据。
+
+已落地内容：
+
+1. 备份任务支持 MySQL/MariaDB `physical` 方法，包含全量和增量配置入口。
+2. Runner 支持调用 `xtrabackup` 和 `mariadb-backup` 执行物理备份，并将结果打包为 `.physical.tar.gz`。
+3. 任务创建时按数据库类型和版本做工具兼容校验：MySQL 8.0.x 对应 XtraBackup 8.0，MySQL 8.4.x 对应 XtraBackup 8.4，MariaDB 默认且仅推荐 `mariadb-backup`。
+4. 物理备份完成后采集 `server_uuid/server_id/gtid/binlog_format/binlog_row_image` 等 MySQL/MariaDB 元数据。
+5. 物理备份归档中如存在 `xtrabackup_binlog_info` 或 `mariadb_backup_binlog_info`，优先读取其中的 binlog 文件、position 和 GTID 作为恢复起点。
+6. 物理备份完成后自动登记一条 binlog 元数据归档记录，用于恢复计划预校验；连续归档链仍可通过外部归档登记继续补齐。
+7. 恢复计划校验增加增量父链检查、binlog 文件链检查和 GTID 元数据缺口检查。
+8. 恢复计划新增 `proof_json`，包含 base backup、incremental chain、binlog 区间、checksum 摘要和恢复校验 SQL。
+9. 前端备份任务弹窗支持 MySQL/MariaDB 物理备份方法、备份级别和备份引擎选择；外部备份登记弹窗已放大并优化数字字段宽度。
+10. 新增单元测试覆盖工具兼容矩阵、增量父链缺失、binlog/GTID 缺口和恢复证明字段。
+
+后续 P2 深化项：
+
+1. 将 binlog 归档从“备份后元数据采样/外部登记”升级为长期运行的 `mysqlbinlog --read-from-remote-server` 或高频 Runner。
+2. 增加真正隔离恢复 Runner：准备物理备份、应用增量、按目标时间应用 binlog、启动隔离库并执行校验 SQL。
+3. 增加备份工具部署检测和 Runner 主机能力模型，避免要求 backend 容器直接承担所有数据库主机级操作。
+
 ## 文档定位
 
 本文是 OpsHub 数据库管理模块在“大库备份、日志归档、延迟副本、PITR 恢复演练”方向的长期改造基准。后续分期实施、表结构扩展、接口设计、前端页面、Runner 执行边界、权限和验收标准均以本文为准。

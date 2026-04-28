@@ -35,6 +35,7 @@ func (uc *UseCase) ListAllBackupTasks(ctx context.Context) ([]*DatabaseBackupTas
 type preparedBackupRun struct {
 	task         *DatabaseBackupTask
 	instance     *DatabaseInstance
+	credential   *ConnectionCredential
 	spec         *backupCommandSpec
 	audit        *DatabaseQueryAudit
 	record       *DatabaseBackupRecord
@@ -84,11 +85,11 @@ func (uc *UseCase) prepareBackupTaskRun(ctx context.Context, id uint, operator Q
 	if err != nil {
 		return nil, err
 	}
-	databaseName, err := resolveBackupDatabaseName(instance, credential)
+	databaseName, err := resolveBackupDatabaseNameForTask(instance, credential, task)
 	if err != nil {
 		return nil, err
 	}
-	spec, err := buildBackupCommandSpec(instance, credential, databaseName, task.BackupType)
+	spec, err := buildBackupCommandSpecForTask(instance, credential, databaseName, task)
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +155,7 @@ func (uc *UseCase) prepareBackupTaskRun(ctx context.Context, id uint, operator Q
 	return &preparedBackupRun{
 		task:         task,
 		instance:     instance,
+		credential:   credential,
 		spec:         spec,
 		audit:        audit,
 		record:       record,
@@ -196,6 +198,7 @@ func (uc *UseCase) executePreparedBackupRun(ctx context.Context, run *preparedBa
 		uc.finishBackupAudit(ctx, run.audit, DatabaseQueryStatusFailed, durationMs, err.Error())
 		return nil, err
 	}
+	uc.enrichPhysicalBackupRecordMetadata(ctx, record, run.instance, run.credential, run.spec, startedAt, finishedAt, run.outputPath, checksum)
 
 	recordMessage := buildBackupSuccessMessage(run.fileName, fileSize)
 	taskMessage := recordMessage

@@ -761,13 +761,14 @@ func (uc *UseCase) CreateRestorePlan(ctx context.Context, req *DatabaseRestorePl
 		return nil, err
 	}
 	base := selectRestoreBaseRecord(records, *targetTime)
-	result := uc.validateRestorePlan(ctx, source, base, *targetTime)
+	result := uc.validateRestorePlan(ctx, source, records, base, *targetTime)
 	finishedAt := time.Now()
 	mode := strings.TrimSpace(req.RestoreMode)
 	if mode == "" {
 		mode = "isolated_restore"
 	}
 	planJSON := marshalBackupPlanJSON(result)
+	proofJSON := buildRestoreProofJSON(source, target, result, *targetTime, operator, mode)
 	item := &DatabaseRestorePlan{
 		SourceInstanceID:        req.SourceInstanceID,
 		TargetInstanceID:        req.TargetInstanceID,
@@ -785,6 +786,7 @@ func (uc *UseCase) CreateRestorePlan(ctx context.Context, req *DatabaseRestorePl
 		ValidationStatus:        result.ValidationStatus,
 		RestoreStatus:           DatabaseRestoreStatusPlanned,
 		PlanJSON:                planJSON,
+		ProofJSON:               proofJSON,
 		OperatorID:              operator.ID,
 		OperatorName:            trimText(operator.Username, 120),
 		StartedAt:               &startedAt,
@@ -826,26 +828,68 @@ func (uc *UseCase) ListRestorePlans(ctx context.Context, req *DatabaseRestorePla
 }
 
 type restorePlanValidationResult struct {
-	BaseRecordID      uint     `json:"baseRecordId"`
-	BackupRecordIDs   []uint   `json:"backupRecordIds"`
-	LogArchiveIDs     []uint   `json:"logArchiveIds"`
-	BackupChainStatus string   `json:"backupChainStatus"`
-	LogChainStatus    string   `json:"logChainStatus"`
-	StorageStatus     string   `json:"storageStatus"`
-	ToolStatus        string   `json:"toolStatus"`
-	ValidationStatus  string   `json:"validationStatus"`
-	RecoverableFrom   string   `json:"recoverableFrom,omitempty"`
-	RecoverableUntil  string   `json:"recoverableUntil,omitempty"`
-	Messages          []string `json:"messages"`
+	BaseRecordID      uint                     `json:"baseRecordId"`
+	BackupRecordIDs   []uint                   `json:"backupRecordIds"`
+	LogArchiveIDs     []uint                   `json:"logArchiveIds"`
+	BackupChainStatus string                   `json:"backupChainStatus"`
+	LogChainStatus    string                   `json:"logChainStatus"`
+	StorageStatus     string                   `json:"storageStatus"`
+	ToolStatus        string                   `json:"toolStatus"`
+	ValidationStatus  string                   `json:"validationStatus"`
+	RecoverableFrom   string                   `json:"recoverableFrom,omitempty"`
+	RecoverableUntil  string                   `json:"recoverableUntil,omitempty"`
+	BackupProofs      []restoreProofBackup     `json:"backupProofs,omitempty"`
+	LogProofs         []restoreProofLogArchive `json:"logProofs,omitempty"`
+	ValidationSQL     []string                 `json:"validationSql,omitempty"`
+	Messages          []string                 `json:"messages"`
 }
 
-func (uc *UseCase) validateRestorePlan(ctx context.Context, instance *DatabaseInstance, base *DatabaseBackupRecord, targetTime time.Time) *restorePlanValidationResult {
+type restoreProofBackup struct {
+	ID               uint   `json:"id"`
+	BackupMethod     string `json:"backupMethod"`
+	BackupLevel      string `json:"backupLevel"`
+	BackupEngine     string `json:"backupEngine"`
+	FileName         string `json:"fileName"`
+	StorageURI       string `json:"storageUri"`
+	FileSize         int64  `json:"fileSize"`
+	ChecksumSHA256   string `json:"checksumSha256"`
+	RecoverableFrom  string `json:"recoverableFrom,omitempty"`
+	RecoverableUntil string `json:"recoverableUntil,omitempty"`
+	ToolName         string `json:"toolName,omitempty"`
+	ToolVersion      string `json:"toolVersion,omitempty"`
+	BinlogFile       string `json:"backupBinlogFile,omitempty"`
+	BinlogPos        int64  `json:"backupBinlogPos,omitempty"`
+	GTIDSet          string `json:"backupGtidSet,omitempty"`
+	ServerUUID       string `json:"serverUuid,omitempty"`
+	ServerID         string `json:"serverId,omitempty"`
+}
+
+type restoreProofLogArchive struct {
+	ID               uint   `json:"id"`
+	ArchiveType      string `json:"archiveType"`
+	FileName         string `json:"fileName"`
+	StorageURI       string `json:"storageUri"`
+	ChecksumSHA256   string `json:"checksumSha256"`
+	FirstEventTime   string `json:"firstEventTime,omitempty"`
+	LastEventTime    string `json:"lastEventTime,omitempty"`
+	StartPos         int64  `json:"startPos,omitempty"`
+	EndPos           int64  `json:"endPos,omitempty"`
+	StartGTIDSet     string `json:"startGtidSet,omitempty"`
+	EndGTIDSet       string `json:"endGtidSet,omitempty"`
+	PreviousFileName string `json:"previousFileName,omitempty"`
+	NextFileName     string `json:"nextFileName,omitempty"`
+	ServerUUID       string `json:"serverUuid,omitempty"`
+	ServerID         string `json:"serverId,omitempty"`
+}
+
+func (uc *UseCase) validateRestorePlan(ctx context.Context, instance *DatabaseInstance, records []*DatabaseBackupRecord, base *DatabaseBackupRecord, targetTime time.Time) *restorePlanValidationResult {
 	result := &restorePlanValidationResult{
 		BackupChainStatus: DatabaseBackupChainStatusMissingBase,
 		LogChainStatus:    DatabaseLogChainStatusUnsupported,
 		StorageStatus:     DatabaseStorageStatusUnsupported,
 		ToolStatus:        DatabaseToolStatusUnsupported,
 		ValidationStatus:  DatabasePlanValidationFailed,
+		ValidationSQL:     validationSQLForRestorePlan(instance),
 		Messages:          []string{},
 	}
 	if base == nil {
@@ -869,7 +913,8 @@ func (uc *UseCase) validateRestorePlan(ctx context.Context, instance *DatabaseIn
 		result.Messages = append(result.Messages, "逻辑备份不支持 PITR，只能做逻辑恢复或对象级回填")
 		return result
 	}
-	result.BackupChainStatus = DatabaseBackupChainStatusComplete
+	result.BackupChainStatus = validateIncrementalBackupChain(records, base, targetTime, &result.BackupRecordIDs, &result.Messages)
+	result.BackupProofs = buildSelectedBackupProofs(records, result.BackupRecordIDs)
 	result.StorageStatus = storageStatusForBackupRecord(base)
 	result.ToolStatus = toolStatusForBackupRecord(base)
 	if result.StorageStatus != DatabaseStorageStatusAvailable {
@@ -900,8 +945,16 @@ func (uc *UseCase) validateRestorePlan(ctx context.Context, instance *DatabaseIn
 				status, ids, message := validateLogArchiveCoverage(logs, archiveType, *logStart, targetTime)
 				result.LogChainStatus = status
 				result.LogArchiveIDs = ids
+				result.LogProofs = buildSelectedLogProofs(logs, ids)
 				if message != "" {
 					result.Messages = append(result.Messages, message)
+				}
+				if archiveType == DatabaseArchiveTypeBinlog && status == DatabaseLogChainStatusComplete {
+					mysqlStatus, mysqlMessage := validateMySQLRestoreLogMetadata(base, logs)
+					if mysqlStatus != DatabaseLogChainStatusComplete {
+						result.LogChainStatus = mysqlStatus
+						result.Messages = append(result.Messages, mysqlMessage)
+					}
 				}
 				for _, item := range logs {
 					if item != nil && item.Status == DatabaseLogArchiveStatusChecksumFailed {
@@ -924,6 +977,292 @@ func (uc *UseCase) validateRestorePlan(ctx context.Context, instance *DatabaseIn
 		result.Messages = append(result.Messages, "恢复计划预校验未通过")
 	}
 	return result
+}
+
+func buildSelectedBackupProofs(records []*DatabaseBackupRecord, ids []uint) []restoreProofBackup {
+	if len(records) == 0 || len(ids) == 0 {
+		return nil
+	}
+	byID := make(map[uint]*DatabaseBackupRecord, len(records))
+	for _, item := range records {
+		if item != nil {
+			byID[item.ID] = item
+		}
+	}
+	result := make([]restoreProofBackup, 0, len(ids))
+	seen := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if item := byID[id]; item != nil {
+			result = append(result, backupProofFromRecord(item))
+		}
+	}
+	return result
+}
+
+func backupProofFromRecord(item *DatabaseBackupRecord) restoreProofBackup {
+	if item == nil {
+		return restoreProofBackup{}
+	}
+	proof := restoreProofBackup{
+		ID:             item.ID,
+		BackupMethod:   item.BackupMethod,
+		BackupLevel:    item.BackupLevel,
+		BackupEngine:   item.BackupEngine,
+		FileName:       item.FileName,
+		StorageURI:     firstNonEmpty(item.StorageURI, item.FilePath),
+		FileSize:       item.FileSize,
+		ChecksumSHA256: item.ChecksumSHA256,
+		ToolName:       item.ToolName,
+		ToolVersion:    item.ToolVersion,
+		BinlogFile:     item.BackupBinlogFile,
+		BinlogPos:      item.BackupBinlogPos,
+		GTIDSet:        item.BackupGTIDSet,
+		ServerUUID:     item.ServerUUID,
+		ServerID:       item.ServerID,
+	}
+	if item.RecoverableFrom != nil {
+		proof.RecoverableFrom = item.RecoverableFrom.Format("2006-01-02 15:04:05")
+	}
+	if item.RecoverableUntil != nil {
+		proof.RecoverableUntil = item.RecoverableUntil.Format("2006-01-02 15:04:05")
+	}
+	return proof
+}
+
+func buildSelectedLogProofs(logs []*DatabaseLogArchive, ids []uint) []restoreProofLogArchive {
+	if len(logs) == 0 || len(ids) == 0 {
+		return nil
+	}
+	selected := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		selected[id] = struct{}{}
+	}
+	result := make([]restoreProofLogArchive, 0, len(ids))
+	for _, item := range logs {
+		if item == nil {
+			continue
+		}
+		if _, ok := selected[item.ID]; !ok {
+			continue
+		}
+		proof := restoreProofLogArchive{
+			ID:               item.ID,
+			ArchiveType:      item.ArchiveType,
+			FileName:         item.FileName,
+			StorageURI:       item.StorageURI,
+			ChecksumSHA256:   item.ChecksumSHA256,
+			StartPos:         item.StartPos,
+			EndPos:           item.EndPos,
+			StartGTIDSet:     item.StartGTIDSet,
+			EndGTIDSet:       item.EndGTIDSet,
+			PreviousFileName: item.PreviousFileName,
+			NextFileName:     item.NextFileName,
+			ServerUUID:       item.ServerUUID,
+			ServerID:         item.ServerID,
+		}
+		if item.FirstEventTime != nil {
+			proof.FirstEventTime = item.FirstEventTime.Format("2006-01-02 15:04:05")
+		}
+		if item.LastEventTime != nil {
+			proof.LastEventTime = item.LastEventTime.Format("2006-01-02 15:04:05")
+		}
+		result = append(result, proof)
+	}
+	return result
+}
+
+func validationSQLForRestorePlan(instance *DatabaseInstance) []string {
+	if instance == nil {
+		return []string{"SELECT 1 AS restore_probe"}
+	}
+	switch normalizeDBType(instance.DBType) {
+	case DBTypeMySQL, DBTypeMariaDB:
+		return []string{
+			"SELECT 1 AS restore_probe",
+			"SELECT @@version AS version",
+			"SHOW DATABASES",
+		}
+	case DBTypePostgreSQL:
+		return []string{
+			"SELECT 1 AS restore_probe",
+			"SELECT version()",
+			"SELECT datname FROM pg_database WHERE datistemplate = false",
+		}
+	default:
+		return []string{"SELECT 1 AS restore_probe"}
+	}
+}
+
+func buildRestoreProofJSON(source, target *DatabaseInstance, result *restorePlanValidationResult, targetTime time.Time, operator QueryOperator, mode string) string {
+	if result == nil {
+		return "{}"
+	}
+	proof := map[string]any{
+		"generatedAt":        time.Now().Format("2006-01-02 15:04:05"),
+		"sourceInstanceId":   uint(0),
+		"sourceInstanceName": "",
+		"targetInstanceId":   uint(0),
+		"targetInstanceName": "",
+		"restoreMode":        mode,
+		"restoreTargetType":  "time",
+		"restoreTargetValue": targetTime.Format("2006-01-02 15:04:05"),
+		"validationStatus":   result.ValidationStatus,
+		"backupChainStatus":  result.BackupChainStatus,
+		"logChainStatus":     result.LogChainStatus,
+		"storageStatus":      result.StorageStatus,
+		"toolStatus":         result.ToolStatus,
+		"baseBackup":         nil,
+		"incrementalChain":   []restoreProofBackup{},
+		"logArchiveRange":    result.LogProofs,
+		"checksum":           map[string]any{"backupRecords": backupChecksumProofs(result.BackupProofs), "logArchives": logChecksumProofs(result.LogProofs)},
+		"validationSql":      result.ValidationSQL,
+		"operatorId":         operator.ID,
+		"operatorName":       operator.Username,
+		"messages":           result.Messages,
+	}
+	if source != nil {
+		proof["sourceInstanceId"] = source.ID
+		proof["sourceInstanceName"] = source.Name
+	}
+	if target != nil {
+		proof["targetInstanceId"] = target.ID
+		proof["targetInstanceName"] = target.Name
+	}
+	if len(result.BackupProofs) > 0 {
+		proof["baseBackup"] = result.BackupProofs[0]
+		if len(result.BackupProofs) > 1 {
+			proof["incrementalChain"] = result.BackupProofs[1:]
+		}
+	}
+	return marshalBackupPlanJSON(proof)
+}
+
+func backupChecksumProofs(items []restoreProofBackup) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"id":             item.ID,
+			"fileName":       item.FileName,
+			"storageUri":     item.StorageURI,
+			"checksumSha256": item.ChecksumSHA256,
+		})
+	}
+	return result
+}
+
+func logChecksumProofs(items []restoreProofLogArchive) []map[string]any {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"id":             item.ID,
+			"fileName":       item.FileName,
+			"storageUri":     item.StorageURI,
+			"checksumSha256": item.ChecksumSHA256,
+		})
+	}
+	return result
+}
+
+func validateIncrementalBackupChain(records []*DatabaseBackupRecord, base *DatabaseBackupRecord, targetTime time.Time, selectedIDs *[]uint, messages *[]string) string {
+	if base == nil {
+		return DatabaseBackupChainStatusMissingBase
+	}
+	status := DatabaseBackupChainStatusComplete
+	incrementals := make([]*DatabaseBackupRecord, 0)
+	for _, item := range records {
+		if item == nil || item.ID == base.ID || item.Status != DatabaseBackupStatusSuccess {
+			continue
+		}
+		if normalizeBackupMethod(item.BackupMethod) != normalizeBackupMethod(base.BackupMethod) {
+			continue
+		}
+		if normalizeBackupLevel(item.BackupLevel) != DatabaseBackupLevelIncremental {
+			continue
+		}
+		if item.ChainID != "" && base.ChainID != "" && item.ChainID != base.ChainID {
+			continue
+		}
+		if item.FinishedAt != nil && item.FinishedAt.After(targetTime) {
+			continue
+		}
+		incrementals = append(incrementals, item)
+	}
+	sort.SliceStable(incrementals, func(i, j int) bool {
+		left := incrementals[i].FinishedAt
+		right := incrementals[j].FinishedAt
+		if left == nil {
+			return false
+		}
+		if right == nil {
+			return true
+		}
+		return left.Before(*right)
+	})
+	selected := map[uint]struct{}{base.ID: {}}
+	for _, item := range incrementals {
+		if item.ParentRecordID > 0 {
+			if _, ok := selected[item.ParentRecordID]; !ok {
+				if messages != nil {
+					*messages = append(*messages, fmt.Sprintf("增量备份 #%d 的父记录 #%d 不在当前链路内", item.ID, item.ParentRecordID))
+				}
+				status = DatabaseBackupChainStatusMissingIncremental
+			}
+		}
+		selected[item.ID] = struct{}{}
+		if selectedIDs != nil {
+			*selectedIDs = append(*selectedIDs, item.ID)
+		}
+	}
+	return status
+}
+
+func validateMySQLRestoreLogMetadata(base *DatabaseBackupRecord, logs []*DatabaseLogArchive) (string, string) {
+	if base == nil {
+		return DatabaseLogChainStatusMissingBinlog, "缺少 base backup"
+	}
+	if strings.TrimSpace(base.BackupBinlogFile) == "" && strings.TrimSpace(base.BackupGTIDSet) == "" {
+		return DatabaseLogChainStatusMissingBinlog, "base backup 缺少 backup_binlog_file/binlog_pos 或 GTID 起点"
+	}
+	gtidEnabled := strings.EqualFold(strings.TrimSpace(base.GTIDMode), "ON") ||
+		strings.Contains(strings.ToLower(base.GTIDMode), "mariadb") ||
+		strings.TrimSpace(base.BackupGTIDSet) != ""
+	if gtidEnabled && strings.TrimSpace(base.BackupGTIDSet) == "" && strings.TrimSpace(base.ExecutedGTIDSet) == "" {
+		return DatabaseLogChainStatusGTIDGap, "GTID 模式已开启，但 base backup 缺少 GTID 集合"
+	}
+	if len(logs) == 0 {
+		return DatabaseLogChainStatusMissingBinlog, "缺少 binlog 归档"
+	}
+	if strings.TrimSpace(base.BackupBinlogFile) != "" {
+		foundStart := false
+		for index, item := range logs {
+			if item == nil {
+				continue
+			}
+			if item.FileName == base.BackupBinlogFile || item.PreviousFileName == base.BackupBinlogFile {
+				foundStart = true
+			}
+			if index > 0 {
+				prev := logs[index-1]
+				if prev != nil && strings.TrimSpace(prev.NextFileName) != "" && prev.NextFileName != item.FileName {
+					return DatabaseLogChainStatusMissingBinlog, fmt.Sprintf("binlog 文件链断裂：%s 的下一个文件不是 %s", prev.FileName, item.FileName)
+				}
+				if prev != nil && strings.TrimSpace(item.PreviousFileName) != "" && item.PreviousFileName != prev.FileName {
+					return DatabaseLogChainStatusMissingBinlog, fmt.Sprintf("binlog 文件链断裂：%s 的上一个文件不是 %s", item.FileName, prev.FileName)
+				}
+			}
+			if gtidEnabled && strings.TrimSpace(item.StartGTIDSet) == "" && strings.TrimSpace(item.EndGTIDSet) == "" {
+				return DatabaseLogChainStatusGTIDGap, fmt.Sprintf("binlog %s 缺少 GTID 起止集合", item.FileName)
+			}
+		}
+		if !foundStart {
+			return DatabaseLogChainStatusMissingBinlog, "日志归档中未找到 base backup 对应的 binlog 起点"
+		}
+	}
+	return DatabaseLogChainStatusComplete, ""
 }
 
 func selectRestoreBaseRecord(records []*DatabaseBackupRecord, targetTime time.Time) *DatabaseBackupRecord {
