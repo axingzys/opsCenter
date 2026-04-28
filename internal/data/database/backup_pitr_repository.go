@@ -282,6 +282,61 @@ type runnerJobRepo struct {
 	db *gorm.DB
 }
 
+type runnerHostRepo struct {
+	db *gorm.DB
+}
+
+func NewRunnerHostRepo(db *gorm.DB) dbbiz.RunnerHostRepo {
+	return &runnerHostRepo{db: db}
+}
+
+func (r *runnerHostRepo) Create(ctx context.Context, item *dbbiz.DatabaseRunnerHost) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *runnerHostRepo) Update(ctx context.Context, item *dbbiz.DatabaseRunnerHost) error {
+	return r.db.WithContext(ctx).Save(item).Error
+}
+
+func (r *runnerHostRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseRunnerHost, error) {
+	var item dbbiz.DatabaseRunnerHost
+	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *runnerHostRepo) List(ctx context.Context, req *dbbiz.DatabaseRunnerHostListRequest) ([]*dbbiz.DatabaseRunnerHost, int64, error) {
+	var (
+		items []*dbbiz.DatabaseRunnerHost
+		total int64
+	)
+	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseRunnerHost{})
+	if req != nil {
+		if keyword := strings.TrimSpace(req.Keyword); keyword != "" {
+			like := "%" + keyword + "%"
+			query = query.Where("name LIKE ? OR host LIKE ?", like, like)
+		}
+		if runnerType := strings.TrimSpace(req.RunnerType); runnerType != "" {
+			query = query.Where("runner_type = ?", runnerType)
+		}
+		if status := strings.TrimSpace(req.Status); status != "" {
+			query = query.Where("status = ?", status)
+		}
+		if req.Enabled != "" {
+			query = query.Where("enabled = ?", req.Enabled == "true" || req.Enabled == "1")
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := normalizeRepoPage(reqPage(req), reqPageSize(req))
+	if err := query.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 func NewRunnerJobRepo(db *gorm.DB) dbbiz.RunnerJobRepo {
 	return &runnerJobRepo{db: db}
 }
@@ -309,6 +364,9 @@ func (r *runnerJobRepo) List(ctx context.Context, req *dbbiz.DatabaseRunnerJobLi
 	)
 	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseRunnerJob{})
 	if req != nil {
+		if req.RunnerHostID > 0 {
+			query = query.Where("runner_host_id = ?", req.RunnerHostID)
+		}
 		if req.SourceInstanceID > 0 {
 			query = query.Where("source_instance_id = ?", req.SourceInstanceID)
 		}
@@ -359,6 +417,8 @@ func reqPage(req any) int {
 		return item.Page
 	case *dbbiz.DatabaseSecretProfileListRequest:
 		return item.Page
+	case *dbbiz.DatabaseRunnerHostListRequest:
+		return item.Page
 	case *dbbiz.DatabaseRunnerJobListRequest:
 		return item.Page
 	default:
@@ -377,6 +437,8 @@ func reqPageSize(req any) int {
 	case *dbbiz.DatabaseStorageProfileListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseSecretProfileListRequest:
+		return item.PageSize
+	case *dbbiz.DatabaseRunnerHostListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseRunnerJobListRequest:
 		return item.PageSize

@@ -434,6 +434,78 @@ export interface DatabaseRestorePlanResult {
   updatedAt: string
 }
 
+export interface DatabaseRunnerHostPayload {
+  name: string
+  runnerType?: string
+  host?: string
+  port?: number
+  credentialId?: number
+  workDir?: string
+  storageMountPath?: string
+  maxConcurrentJobs?: number
+  cpuLimit?: string
+  ioLimit?: string
+  bandwidthLimit?: string
+  timeoutMinutes?: number
+  enabled: boolean
+  configJson?: string
+}
+
+export interface DatabaseRunnerHostResult {
+  id: number
+  name: string
+  runnerType: string
+  runnerTypeText: string
+  host: string
+  port: number
+  credentialId: number
+  workDir: string
+  storageMountPath: string
+  maxConcurrentJobs: number
+  cpuLimit: string
+  ioLimit: string
+  bandwidthLimit: string
+  timeoutMinutes: number
+  enabled: boolean
+  status: string
+  statusText: string
+  lastHeartbeatAt: string
+  lastTestAt: string
+  lastError: string
+  configJson: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseRunnerJobResult {
+  id: number
+  jobType: string
+  jobTypeText: string
+  runnerHostId: number
+  runnerHostName: string
+  runnerId: string
+  sourceInstanceId: number
+  targetInstanceId: number
+  status: string
+  statusText: string
+  allowedCommand: string
+  commandSummary: string
+  workDir: string
+  logPath: string
+  exitCode: number
+  operatorId: number
+  operatorName: string
+  requestJson: string
+  resultJson: string
+  heartbeatAt: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  errorMessage: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface DatabaseBackupRunResult {
   taskId: number
   taskName: string
@@ -802,6 +874,34 @@ export const listDatabaseRestorePlans = (params?: {
 
 export const createDatabaseRestorePlan = (data: DatabaseRestorePlanPayload) =>
   request.post('/api/v1/databases/restore-plans', data)
+
+export const listDatabaseRunnerHosts = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  runnerType?: string
+  status?: string
+  enabled?: string
+}) => request.get('/api/v1/databases/runner-hosts', { params })
+
+export const createDatabaseRunnerHost = (data: DatabaseRunnerHostPayload) =>
+  request.post('/api/v1/databases/runner-hosts', data)
+
+export const updateDatabaseRunnerHost = (id: number, data: DatabaseRunnerHostPayload) =>
+  request.put(`/api/v1/databases/runner-hosts/${id}`, data)
+
+export const testDatabaseRunnerHost = (id: number) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/test`)
+
+export const listDatabaseRunnerJobs = (params?: {
+  page?: number
+  pageSize?: number
+  runnerHostId?: number
+  jobType?: string
+  status?: string
+  sourceInstanceId?: number
+  targetInstanceId?: number
+}) => request.get('/api/v1/databases/runner-jobs', { params })
 
 export const listDatabaseInspectionReports = (params?: {
   page?: number

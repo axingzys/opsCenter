@@ -114,6 +114,28 @@ const (
 	DatabaseLogArchiveStreamStatusFailed   = "failed"
 	DatabaseLogArchiveStreamStatusDisabled = "disabled"
 
+	DatabaseRunnerTypeSSH   = "ssh"
+	DatabaseRunnerTypeLocal = "local"
+	DatabaseRunnerTypeAgent = "agent"
+
+	DatabaseRunnerHostStatusPending  = "pending"
+	DatabaseRunnerHostStatusOnline   = "online"
+	DatabaseRunnerHostStatusFailed   = "failed"
+	DatabaseRunnerHostStatusDisabled = "disabled"
+
+	DatabaseRunnerJobTypeProbe            = "runner_probe"
+	DatabaseRunnerJobTypePhysicalBackup   = "physical_backup"
+	DatabaseRunnerJobTypeBinlogArchive    = "binlog_archive"
+	DatabaseRunnerJobTypePhysicalRestore  = "physical_restore"
+	DatabaseRunnerJobTypeRestoreValidate  = "restore_validate"
+	DatabaseRunnerJobStatusQueued         = "queued"
+	DatabaseRunnerJobStatusRunning        = "running"
+	DatabaseRunnerJobStatusSuccess        = "success"
+	DatabaseRunnerJobStatusFailed         = "failed"
+	DatabaseRunnerJobStatusCancelled      = "cancelled"
+	DatabaseRunnerAllowedCommandProbe     = "runner_probe"
+	DatabaseRunnerAllowedCommandToolProbe = "tool_probe"
+
 	DatabaseBackupChainStatusComplete           = "complete"
 	DatabaseBackupChainStatusMissingBase        = "missing_base"
 	DatabaseBackupChainStatusMissingIncremental = "missing_incremental"
@@ -624,15 +646,49 @@ func (DatabaseSecretProfile) TableName() string {
 	return "database_secret_profiles"
 }
 
+// DatabaseRunnerHost Runner 执行主机配置，不保存明文凭据
+type DatabaseRunnerHost struct {
+	gorm.Model
+	Name              string     `gorm:"type:varchar(120);not null;comment:名称" json:"name"`
+	RunnerType        string     `gorm:"column:runner_type;type:varchar(30);default:'ssh';index;comment:ssh/local/agent" json:"runnerType"`
+	Host              string     `gorm:"type:varchar(255);comment:主机地址" json:"host"`
+	Port              int        `gorm:"type:int;default:22;comment:端口" json:"port"`
+	CredentialID      uint       `gorm:"column:credential_id;index;comment:资产凭据ID" json:"credentialId"`
+	WorkDir           string     `gorm:"column:work_dir;type:varchar(500);comment:工作目录" json:"workDir"`
+	StorageMountPath  string     `gorm:"column:storage_mount_path;type:varchar(500);comment:备份仓库挂载路径" json:"storageMountPath"`
+	MaxConcurrentJobs int        `gorm:"column:max_concurrent_jobs;type:int;default:1;comment:最大并发任务数" json:"maxConcurrentJobs"`
+	CPULimit          string     `gorm:"column:cpu_limit;type:varchar(60);comment:CPU限制摘要" json:"cpuLimit"`
+	IOLimit           string     `gorm:"column:io_limit;type:varchar(60);comment:IO限制摘要" json:"ioLimit"`
+	BandwidthLimit    string     `gorm:"column:bandwidth_limit;type:varchar(60);comment:带宽限制摘要" json:"bandwidthLimit"`
+	TimeoutMinutes    int        `gorm:"column:timeout_minutes;type:int;default:30;comment:默认超时分钟" json:"timeoutMinutes"`
+	Enabled           bool       `gorm:"default:true;comment:是否启用" json:"enabled"`
+	Status            string     `gorm:"type:varchar(30);default:'pending';index;comment:状态" json:"status"`
+	LastHeartbeatAt   *time.Time `gorm:"column:last_heartbeat_at;comment:最近心跳" json:"lastHeartbeatAt,omitempty"`
+	LastTestAt        *time.Time `gorm:"column:last_test_at;comment:最近测试时间" json:"lastTestAt,omitempty"`
+	LastError         string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误" json:"lastError"`
+	ConfigJSON        string     `gorm:"column:config_json;type:text;comment:非敏感配置摘要" json:"configJson"`
+}
+
+func (DatabaseRunnerHost) TableName() string {
+	return "database_runner_hosts"
+}
+
 // DatabaseRunnerJob Runner 长任务记录
 type DatabaseRunnerJob struct {
 	gorm.Model
 	JobType          string     `gorm:"column:job_type;type:varchar(60);not null;index;comment:任务类型" json:"jobType"`
+	RunnerHostID     uint       `gorm:"column:runner_host_id;index;comment:Runner主机ID" json:"runnerHostId"`
 	RunnerID         string     `gorm:"column:runner_id;type:varchar(120);index;comment:Runner标识" json:"runnerId"`
 	SourceInstanceID uint       `gorm:"column:source_instance_id;index;comment:来源实例ID" json:"sourceInstanceId"`
 	TargetInstanceID uint       `gorm:"column:target_instance_id;index;comment:目标实例ID" json:"targetInstanceId"`
 	Status           string     `gorm:"type:varchar(30);default:'queued';index;comment:状态" json:"status"`
 	AllowedCommand   string     `gorm:"column:allowed_command;type:varchar(120);comment:命令类别" json:"allowedCommand"`
+	CommandSummary   string     `gorm:"column:command_summary;type:varchar(500);comment:命令摘要" json:"commandSummary"`
+	WorkDir          string     `gorm:"column:work_dir;type:varchar(500);comment:工作目录" json:"workDir"`
+	LogPath          string     `gorm:"column:log_path;type:varchar(1000);comment:日志路径或URI" json:"logPath"`
+	ExitCode         int        `gorm:"column:exit_code;type:int;default:0;comment:退出码" json:"exitCode"`
+	OperatorID       uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
+	OperatorName     string     `gorm:"column:operator_name;type:varchar(120);comment:操作人" json:"operatorName"`
 	RequestJSON      string     `gorm:"column:request_json;type:text;comment:下发请求" json:"requestJson"`
 	ResultJSON       string     `gorm:"column:result_json;type:text;comment:回传结果" json:"resultJson"`
 	HeartbeatAt      *time.Time `gorm:"column:heartbeat_at;comment:最近心跳" json:"heartbeatAt,omitempty"`

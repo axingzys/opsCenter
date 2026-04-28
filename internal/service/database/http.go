@@ -844,6 +844,83 @@ func (s *Service) CreateSecretProfile(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) ListRunnerHosts(c *gin.Context) {
+	var req dbbiz.DatabaseRunnerHostListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListRunnerHosts(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) CreateRunnerHost(c *gin.Context) {
+	var req dbbiz.DatabaseRunnerHostRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.CreateRunnerHost(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) UpdateRunnerHost(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRunnerHostRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.UpdateRunnerHost(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) TestRunnerHost(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.TestRunnerHost(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "测试失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListRunnerJobs(c *gin.Context) {
+	var req dbbiz.DatabaseRunnerJobListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListRunnerJobs(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
 func (s *Service) ListLogArchiveStreams(c *gin.Context) {
 	var req dbbiz.DatabaseLogArchiveStreamListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {

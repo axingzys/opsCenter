@@ -1,6 +1,6 @@
 # OpsHub 大库备份与 PITR 长期改造方案
 
-更新日期：2026-04-28
+更新日期：2026-04-29
 
 ## 实施记录
 
@@ -41,6 +41,133 @@
 1. 将 binlog 归档从“备份后元数据采样/外部登记”升级为长期运行的 `mysqlbinlog --read-from-remote-server` 或高频 Runner。
 2. 增加真正隔离恢复 Runner：准备物理备份、应用增量、按目标时间应用 binlog、启动隔离库并执行校验 SQL。
 3. 增加备份工具部署检测和 Runner 主机能力模型，避免要求 backend 容器直接承担所有数据库主机级操作。
+
+### 2026-04-29 P2.1 + P2.2 实施边界
+
+本次继续完善 P2，但仍遵守一个关键边界：`opshub-api` 普通 backend 容器只负责编排、权限、审计、状态和短生命周期 SSH 调度；真正长期连续 binlog archiver、恢复目标 MySQL datadir 停止/清空/prepare/重建/启动等主机级动作，必须由 Runner 主机或后续 Agent 承载，不能简单塞进 HTTP 请求或 backend 容器内长期运行。
+
+#### P2.1：Runner Host 模型和 Runner Job 扩展
+
+目标是先把“哪些主机可以执行数据库备份/归档/恢复命令”建模清楚，让后续 binlog archiver、隔离恢复 Runner 和 PostgreSQL Barman/WAL-G Runner 都有统一入口。
+
+新增 `database_runner_hosts`：
+
+| 字段 | 类型建议 | 说明 |
+| --- | --- | --- |
+| `id` | bigint | 主键 |
+| `name` | varchar(120) | Runner 主机名称 |
+| `runner_type` | varchar(30) | `ssh / local / agent`，首版实现 `ssh`，预留 `local` 和 `agent` |
+| `host` | varchar(255) | SSH 主机或 Runner 地址 |
+| `port` | int | SSH 端口，默认 22 |
+| `credential_id` | bigint | 复用资产凭据，不在 Runner 表保存密码、私钥或 token |
+| `work_dir` | varchar(500) | Runner 工作目录，例如 `/var/lib/opshub/database-runner` |
+| `storage_mount_path` | varchar(500) | 备份仓库在 Runner 主机上的挂载点，例如 `/backup/opshub` |
+| `max_concurrent_jobs` | int | 单 Runner 最大并发，首版用于展示和后续调度约束 |
+| `cpu_limit` | varchar(60) | 资源策略摘要，例如 `2 cores`、`nice=10` |
+| `io_limit` | varchar(60) | IO 策略摘要，例如 `ionice=best-effort:7` |
+| `bandwidth_limit` | varchar(60) | 上传/拉取带宽限制摘要，例如 `50MB/s` |
+| `timeout_minutes` | int | 默认任务超时 |
+| `enabled` | bool | 是否允许调度 |
+| `status` | varchar(30) | `pending / online / failed / disabled` |
+| `last_heartbeat_at` | datetime | 后续 Agent 心跳；SSH Runner 首版可为空 |
+| `last_test_at` | datetime | 最近一次连通性测试时间 |
+| `last_error` | varchar(1000) | 最近错误 |
+| `config_json` | text | 非敏感配置摘要，禁止保存 password/secret/token/key 等明文 |
+
+扩展 `database_runner_jobs`：
+
+| 字段 | 类型建议 | 说明 |
+| --- | --- | --- |
+| `runner_host_id` | bigint | 关联 Runner Host |
+| `runner_id` | varchar(120) | 兼容旧字段，首版可写入 `ssh:<host>:<port>` |
+| `job_type` | varchar(60) | `runner_probe / physical_backup / binlog_archive / physical_restore / restore_validate` |
+| `allowed_command` | varchar(120) | 命令白名单类别，例如 `runner_probe`、`mysqlbinlog_probe` |
+| `command_summary` | varchar(500) | 命令摘要，不保存敏感参数 |
+| `work_dir` | varchar(500) | 本次任务工作目录 |
+| `log_path` | varchar(1000) | 远端日志路径或后续对象存储日志 URI |
+| `exit_code` | int | 进程退出码；SSH 无法稳定解析时失败统一记 1 |
+| `operator_id` | bigint | 操作人 |
+| `operator_name` | varchar(120) | 操作人 |
+| `request_json` | text | 下发请求，必须脱敏 |
+| `result_json` | text | 回传结果，包含 stdout/stderr 摘要、工具版本、manifest 摘要 |
+| `status` | varchar(30) | `queued / running / success / failed / cancelled` |
+| `heartbeat_at` | datetime | 长任务心跳 |
+| `started_at` | datetime | 开始时间 |
+| `finished_at` | datetime | 完成时间 |
+| `duration_ms` | bigint | 耗时 |
+| `error_message` | varchar(1000) | 错误摘要 |
+
+P2.1 后端接口：
+
+```text
+GET  /api/v1/databases/runner-hosts
+POST /api/v1/databases/runner-hosts
+PUT  /api/v1/databases/runner-hosts/{id}
+GET  /api/v1/databases/runner-jobs
+```
+
+P2.1 前端入口：
+
+1. 在数据库管理的“备份任务 / PITR 链路与恢复计划”区域增加 `Runner 主机` 与 `Runner任务` 标签页。
+2. Runner 主机列表展示主机、类型、凭据、工作目录、存储挂载点、并发、状态、最近测试和最近错误。
+3. 新增/编辑弹窗只允许选择已有凭据；不出现密码、私钥、对象存储密钥明文输入框。
+4. Runner Job 列表展示任务类型、Runner、来源实例、目标实例、状态、命令类别、耗时、退出码和错误。
+
+#### P2.2：SSH Runner 执行框架
+
+目标是先打通“Backend 下发一个白名单 Runner Job 到 SSH 主机、异步执行、回写结果”的通用闭环。它不是最终 binlog archiver，也不是最终物理恢复 Runner，但后续二者都必须复用这个执行框架。
+
+首版执行能力：
+
+1. `POST /api/v1/databases/runner-hosts/{id}/test` 创建 `runner_probe` Job。
+2. Job 通过 SSH 连接 Runner Host。
+3. 只执行内置探测脚本，不接受用户提交任意 shell：
+
+```sh
+set -e
+mkdir -p "$WORK_DIR"
+cd "$WORK_DIR"
+printf 'opshub-runner-ok\n'
+pwd
+whoami
+hostname
+command -v xtrabackup || true
+command -v mariadb-backup || true
+command -v mysqlbinlog || true
+command -v barman || true
+command -v wal-g || true
+```
+
+4. 采集 stdout/stderr、耗时、退出状态，写回 `database_runner_jobs.result_json`。
+5. 成功则把 Runner Host 标记为 `online`，失败标记为 `failed` 并记录 `last_error`。
+6. SSH 凭据从现有资产凭据解密读取，支持密码和私钥字段；Runner Host 表只保存 `credential_id`。
+7. `config_json`、`request_json` 和 `result_json` 必须做长度限制和敏感字段校验，不允许保存明文 `password`、`secret`、`token`、`private_key`、`access_key`。
+
+P2.2 明确不做：
+
+1. 不实现长期驻留的 `mysqlbinlog --stop-never` 守护进程。
+2. 不自动清空、重建、启动目标 MySQL datadir。
+3. 不开放用户自定义任意 shell 命令。
+4. 不把对象存储密钥写入 Runner Host 或 Runner Job 明文 JSON。
+5. 不承诺物理恢复已自动可执行，只形成后续可复用的执行底座。
+
+P2.2 验收标准：
+
+1. 页面可以新增 SSH Runner Host。
+2. 页面可以发起 Runner 连通性/工具探测。
+3. Runner Job 异步产生 queued、running、success/failed 状态。
+4. Runner Host 最近测试时间、状态和错误随 Job 结果更新。
+5. Runner Job 能展示 stdout 摘要、命令类别、耗时、退出码和错误。
+6. 后端单元测试覆盖 Runner Host 参数归一化、敏感 JSON 拦截、probe 命令生成和 Job 成功/失败状态回写。
+
+本次 P2.1 + P2.2 已落地内容：
+
+1. 新增 `database_runner_hosts` 模型、仓库、自动迁移和列表/创建/更新接口。
+2. 扩展 `database_runner_jobs`，增加 `runner_host_id`、`command_summary`、`work_dir`、`log_path`、`exit_code`、`operator_id`、`operator_name` 等字段。
+3. 新增 `POST /api/v1/databases/runner-hosts/{id}/test`，通过 SSH 执行固定白名单探测脚本，异步回写 Runner Job 和 Runner Host 状态。
+4. 现有资产凭据解析扩展到 SSH 私钥和 passphrase，Runner Host 只保存 `credential_id`。
+5. 前端 PITR 面板新增 `Runner主机` 和 `Runner任务` 标签页，支持 Runner 主机维护、探测任务下发、Job 状态和输出摘要查看。
+6. 新增 Runner 单元测试，覆盖默认值、敏感配置拦截、固定探测命令、请求脱敏、成功/失败状态回写。
 
 ## 文档定位
 

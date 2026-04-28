@@ -108,6 +108,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	restorePlanRepo := dbdata.NewRestorePlanRepo(db)
 	storageProfileRepo := dbdata.NewStorageProfileRepo(db)
 	secretProfileRepo := dbdata.NewSecretProfileRepo(db)
+	runnerHostRepo := dbdata.NewRunnerHostRepo(db)
 	runnerJobRepo := dbdata.NewRunnerJobRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
 	configRepo := systemdata.NewConfigRepo(db)
@@ -139,8 +140,10 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 				return nil, err
 			}
 			return &dbbiz.ConnectionCredential{
-				Username: credential.Username,
-				Password: credential.Password,
+				Username:   credential.Username,
+				Password:   credential.Password,
+				PrivateKey: credential.PrivateKey,
+				Passphrase: credential.Passphrase,
 			}, nil
 		},
 		func(ctx context.Context) (*dbbiz.DatabaseWritePolicy, error) {
@@ -177,6 +180,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		restorePlanRepo,
 		storageProfileRepo,
 		secretProfileRepo,
+		runnerHostRepo,
 		runnerJobRepo,
 	)
 
@@ -284,6 +288,11 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateStorageProfile)
 		databases.GET("/secret-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListSecretProfiles)
 		databases.POST("/secret-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateSecretProfile)
+		databases.GET("/runner-hosts", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListRunnerHosts)
+		databases.POST("/runner-hosts", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateRunnerHost)
+		databases.PUT("/runner-hosts/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateRunnerHost)
+		databases.POST("/runner-hosts/:id/test", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.TestRunnerHost)
+		databases.GET("/runner-jobs", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListRunnerJobs)
 		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
 		databases.POST("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionRun), s.service.GenerateInspectionReport)
 		databases.GET("/inspection-reports/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.GetInspectionReport)

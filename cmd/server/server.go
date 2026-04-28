@@ -230,6 +230,7 @@ func autoMigrate(db *gorm.DB) error {
 		&databasemodel.DatabaseRestorePlan{},
 		&databasemodel.DatabaseStorageProfile{},
 		&databasemodel.DatabaseSecretProfile{},
+		&databasemodel.DatabaseRunnerHost{},
 		&databasemodel.DatabaseRunnerJob{},
 		&databasemodel.DatabaseRestoreJob{},
 		&databasemodel.DatabaseCapacitySnapshot{},

@@ -307,6 +307,7 @@ type DatabaseRestorePlanVO struct {
 type DatabaseRunnerJobListRequest struct {
 	Page             int    `form:"page"`
 	PageSize         int    `form:"pageSize"`
+	RunnerHostID     uint   `form:"runnerHostId"`
 	JobType          string `form:"jobType"`
 	Status           string `form:"status"`
 	SourceInstanceID uint   `form:"sourceInstanceId"`

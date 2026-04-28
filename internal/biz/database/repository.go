@@ -140,6 +140,13 @@ type SecretProfileRepo interface {
 	List(ctx context.Context, req *DatabaseSecretProfileListRequest) ([]*DatabaseSecretProfile, int64, error)
 }
 
+type RunnerHostRepo interface {
+	Create(ctx context.Context, item *DatabaseRunnerHost) error
+	Update(ctx context.Context, item *DatabaseRunnerHost) error
+	GetByID(ctx context.Context, id uint) (*DatabaseRunnerHost, error)
+	List(ctx context.Context, req *DatabaseRunnerHostListRequest) ([]*DatabaseRunnerHost, int64, error)
+}
+
 type RunnerJobRepo interface {
 	Create(ctx context.Context, item *DatabaseRunnerJob) error
 	Update(ctx context.Context, item *DatabaseRunnerJob) error

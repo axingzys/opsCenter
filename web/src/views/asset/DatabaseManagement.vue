@@ -1597,7 +1597,7 @@
               <el-tag size="small" type="success">P2</el-tag>
             </div>
             <el-alert
-              title="P2 已接入 MySQL/MariaDB 物理备份任务入口、工具版本兼容校验、binlog 元数据和恢复计划证明；真正连续归档守护进程和恢复库编排仍建议先通过外部 Runner/登记链路纳管。"
+              title="P2.2 已增加 Runner 主机与 SSH 探测任务；当前仍只执行白名单探测脚本，长期连续 binlog 归档和隔离恢复 datadir 重建会继续放到后续 Runner 深化项。"
               type="info"
               show-icon
               :closable="false"
@@ -1617,13 +1617,169 @@
                 </el-button>
               </div>
               <div class="backup-toolbar-group">
-                <el-button :loading="logArchiveStreamLoading || logArchiveLoading || restorePlanLoading" @click="refreshPITRState">
+                <el-button :loading="runnerHostLoading || runnerJobLoading || logArchiveStreamLoading || logArchiveLoading || restorePlanLoading" @click="refreshPITRState">
                   刷新 PITR
                 </el-button>
               </div>
             </div>
 
             <el-tabs v-model="backupPitrTab" class="pitr-tabs">
+              <el-tab-pane label="Runner主机" name="runnerHosts">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="runnerHostQuery.keyword"
+                      placeholder="搜索 Runner / 主机"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadRunnerHosts"
+                      @clear="loadRunnerHosts"
+                    />
+                    <el-select v-model="runnerHostQuery.runnerType" placeholder="类型" clearable class="audit-select" @change="loadRunnerHosts">
+                      <el-option label="SSH Runner" value="ssh" />
+                      <el-option label="本地 Runner" value="local" />
+                      <el-option label="Agent Runner" value="agent" />
+                    </el-select>
+                    <el-select v-model="runnerHostQuery.status" placeholder="状态" clearable class="audit-select" @change="loadRunnerHosts">
+                      <el-option label="待测试" value="pending" />
+                      <el-option label="在线" value="online" />
+                      <el-option label="失败" value="failed" />
+                      <el-option label="已禁用" value="disabled" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetRunnerHostQuery">重置</el-button>
+                    <el-button type="primary" plain @click="openRunnerHostDialog">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      新增 Runner
+                    </el-button>
+                    <el-button type="primary" plain :loading="runnerHostLoading" @click="loadRunnerHosts">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="runnerHosts" v-loading="runnerHostLoading" stripe class="modern-table">
+                  <el-table-column label="名称" min-width="160">
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.name }}</span>
+                        <el-tag size="small" type="info">{{ row.runnerTypeText || row.runnerType }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="地址" min-width="170" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.host ? `${row.host}:${row.port || 22}` : '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="凭据" width="100" align="center">
+                    <template #default="{ row }">{{ row.credentialId ? `#${row.credentialId}` : '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="工作目录" min-width="230" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.workDir || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="挂载点" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.storageMountPath || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="并发/超时" width="120" align="center">
+                    <template #default="{ row }">{{ row.maxConcurrentJobs || 1 }} / {{ row.timeoutMinutes || 30 }}m</template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="100" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="runnerStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最近测试" width="170">
+                    <template #default="{ row }">{{ row.lastTestAt || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="错误" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.lastError || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="150" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button link type="primary" @click="openRunnerHostDialog(row)">编辑</el-button>
+                      <el-button link type="success" :loading="runnerHostTestingId === row.id" @click="handleTestRunnerHost(row)">测试</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="runnerHostQuery.page"
+                    v-model:page-size="runnerHostQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="runnerHostTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadRunnerHosts"
+                    @current-change="loadRunnerHosts"
+                  />
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="Runner任务" name="runnerJobs">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-select v-model="runnerJobQuery.runnerHostId" placeholder="Runner" clearable filterable class="audit-search-input" @change="loadRunnerJobs">
+                      <el-option v-for="item in runnerHostOptions" :key="item.id" :label="item.label" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="runnerJobQuery.jobType" placeholder="任务类型" clearable class="audit-select" @change="loadRunnerJobs">
+                      <el-option label="Runner 探测" value="runner_probe" />
+                      <el-option label="物理备份" value="physical_backup" />
+                      <el-option label="binlog 归档" value="binlog_archive" />
+                      <el-option label="物理恢复" value="physical_restore" />
+                    </el-select>
+                    <el-select v-model="runnerJobQuery.status" placeholder="状态" clearable class="audit-select" @change="loadRunnerJobs">
+                      <el-option label="排队中" value="queued" />
+                      <el-option label="运行中" value="running" />
+                      <el-option label="成功" value="success" />
+                      <el-option label="失败" value="failed" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetRunnerJobQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="runnerJobLoading" @click="loadRunnerJobs">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="runnerJobs" v-loading="runnerJobLoading" stripe class="modern-table">
+                  <el-table-column label="创建时间" prop="createdAt" width="170" />
+                  <el-table-column label="Runner" min-width="150">
+                    <template #default="{ row }">{{ row.runnerHostName || row.runnerId || `#${row.runnerHostId}` }}</template>
+                  </el-table-column>
+                  <el-table-column label="类型" width="120" align="center">
+                    <template #default="{ row }">{{ row.jobTypeText || row.jobType || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="100" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="runnerJobStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="命令类别" width="130">
+                    <template #default="{ row }">{{ row.allowedCommand || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="摘要" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.commandSummary || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="耗时" width="110" align="right">
+                    <template #default="{ row }">{{ row.durationMs ? `${row.durationMs} ms` : '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="退出码" width="90" align="center">
+                    <template #default="{ row }">{{ row.exitCode ?? '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="输出" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">{{ runnerJobOutputSummary(row) }}</template>
+                  </el-table-column>
+                  <el-table-column label="错误" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.errorMessage || '-' }}</template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="runnerJobQuery.page"
+                    v-model:page-size="runnerJobQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="runnerJobTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadRunnerJobs"
+                    @current-change="loadRunnerJobs"
+                  />
+                </div>
+              </el-tab-pane>
+
               <el-tab-pane label="归档流" name="streams">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
@@ -3139,6 +3295,119 @@
     </el-dialog>
 
     <el-dialog
+      v-model="runnerHostDialogVisible"
+      :title="runnerHostForm.id ? '编辑 Runner 主机' : '新增 Runner 主机'"
+      width="860px"
+      @close="resetRunnerHostForm"
+    >
+      <el-alert
+        title="P2.2 首版只执行内置探测脚本，不开放自定义 shell；凭据复用资产凭据，Runner 配置中不能保存密码、Token、私钥或对象存储密钥。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="runnerHostFormRef" :model="runnerHostForm" :rules="runnerHostRules" label-width="120px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="名称" prop="name">
+              <el-input v-model="runnerHostForm.name" placeholder="如：backup-runner-192.168.1.15" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Runner 类型" prop="runnerType">
+              <el-select v-model="runnerHostForm.runnerType" style="width: 100%;">
+                <el-option label="SSH Runner" value="ssh" />
+                <el-option label="本地 Runner（后续）" value="local" disabled />
+                <el-option label="Agent Runner（后续）" value="agent" disabled />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="14">
+            <el-form-item label="主机地址" prop="host">
+              <el-input v-model="runnerHostForm.host" placeholder="192.168.1.15" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="10">
+            <el-form-item label="SSH 端口">
+              <el-input-number v-model="runnerHostForm.port" :min="1" :max="65535" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="SSH 凭据" prop="credentialId">
+          <el-select v-model="runnerHostForm.credentialId" placeholder="请选择 SSH 凭据" filterable style="width: 100%;">
+            <el-option
+              v-for="item in sshCredentialOptions"
+              :key="item.id"
+              :label="`${item.name} (${item.username || '无用户名'})`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="工作目录">
+              <el-input v-model="runnerHostForm.workDir" placeholder="/var/lib/opshub/database-runner" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="仓库挂载点">
+              <el-input v-model="runnerHostForm.storageMountPath" placeholder="/backup/opshub，可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="最大并发">
+              <el-input-number v-model="runnerHostForm.maxConcurrentJobs" :min="1" :max="100" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="超时分钟">
+              <el-input-number v-model="runnerHostForm.timeoutMinutes" :min="1" :max="1440" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="状态">
+              <el-switch v-model="runnerHostForm.enabled" active-text="启用" inactive-text="禁用" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="CPU 策略">
+              <el-input v-model="runnerHostForm.cpuLimit" placeholder="如 nice=10" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="IO 策略">
+              <el-input v-model="runnerHostForm.ioLimit" placeholder="如 ionice=be:7" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="带宽策略">
+              <el-input v-model="runnerHostForm.bandwidthLimit" placeholder="如 50MB/s" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="配置 JSON">
+          <el-input
+            v-model="runnerHostForm.configJson"
+            type="textarea"
+            :rows="3"
+            placeholder='可选，仅保存非敏感摘要，例如 {"labels":["mysql-backup"],"network":"lan"}'
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="runnerHostDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="runnerHostSubmitting" @click="submitRunnerHost">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="restoreDialogVisible"
       title="发起恢复演练"
       width="640px"
@@ -3327,11 +3596,12 @@ import {
 } from '@element-plus/icons-vue'
 import { getCredentials } from '@/api/host'
 import {
-  DATABASE_PERMISSION,
-  createDatabaseLogArchiveStream,
-  createDatabaseRestorePlan,
-  createDatabaseBackupTask,
-  createDatabaseInstance,
+	  DATABASE_PERMISSION,
+	  createDatabaseLogArchiveStream,
+	  createDatabaseRestorePlan,
+	  createDatabaseRunnerHost,
+	  createDatabaseBackupTask,
+	  createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
@@ -3360,8 +3630,10 @@ import {
   listDatabaseInspectionReports,
   listDatabaseLogArchives,
   listDatabaseLogArchiveStreams,
-  listDatabaseRestoreJobs,
-  listDatabaseRestorePlans,
+	  listDatabaseRestoreJobs,
+	  listDatabaseRestorePlans,
+	  listDatabaseRunnerHosts,
+	  listDatabaseRunnerJobs,
   getDatabaseSupportedTypes,
   getDatabaseTableDDL,
   listDatabaseColumns,
@@ -3376,11 +3648,13 @@ import {
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
   runDatabaseBackupTask,
-  runDatabaseRestoreDryRun,
-  syncDatabaseMetadata,
-  testDatabaseInstance,
-  updateDatabaseBackupTask,
-  updateDatabaseInstance,
+	  runDatabaseRestoreDryRun,
+	  syncDatabaseMetadata,
+	  testDatabaseInstance,
+	  testDatabaseRunnerHost,
+	  updateDatabaseBackupTask,
+	  updateDatabaseInstance,
+	  updateDatabaseRunnerHost,
   upsertDatabaseInstancePermission,
   validateDatabaseDDLQuery,
   verifyDatabaseBackupRecord,
@@ -3400,10 +3674,13 @@ import {
   type DatabaseInspectionReportResult,
   type DatabaseInstancePayload,
   type DatabaseQueryPayload,
-  type DatabaseRestoreDryRunPayload,
-  type DatabaseRestoreJobResult,
-  type DatabaseRestorePlanPayload,
-  type DatabaseRestorePlanResult,
+	  type DatabaseRestoreDryRunPayload,
+	  type DatabaseRestoreJobResult,
+	  type DatabaseRestorePlanPayload,
+	  type DatabaseRestorePlanResult,
+	  type DatabaseRunnerHostPayload,
+	  type DatabaseRunnerHostResult,
+	  type DatabaseRunnerJobResult,
   type DatabaseSupportedType,
   type DatabaseTopologyResult,
   type DatabaseWriteExecuteResult,
@@ -3614,6 +3891,16 @@ const restorePlanTotal = ref(0)
 const restorePlanDialogVisible = ref(false)
 const restorePlanSubmitting = ref(false)
 const restorePlanFormRef = ref<FormInstance>()
+const runnerHostLoading = ref(false)
+const runnerHostSubmitting = ref(false)
+const runnerHostDialogVisible = ref(false)
+const runnerHostTestingId = ref(0)
+const runnerHostFormRef = ref<FormInstance>()
+const runnerHosts = ref<DatabaseRunnerHostResult[]>([])
+const runnerHostTotal = ref(0)
+const runnerJobLoading = ref(false)
+const runnerJobs = ref<DatabaseRunnerJobResult[]>([])
+const runnerJobTotal = ref(0)
 const backupPitrTab = ref('streams')
 const restoreJobLoading = ref(false)
 const restoreSubmitting = ref(false)
@@ -3744,6 +4031,23 @@ const restorePlanQuery = reactive({
   targetInstanceId: undefined as number | undefined,
   validationStatus: '',
   restoreStatus: ''
+})
+
+const runnerHostQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  runnerType: '',
+  status: '',
+  enabled: ''
+})
+
+const runnerJobQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  runnerHostId: undefined as number | undefined,
+  jobType: '',
+  status: ''
 })
 
 const restoreJobQuery = reactive({
@@ -3896,6 +4200,24 @@ const restorePlanForm = reactive<DatabaseRestorePlanPayload>({
   restoreTargetInclusive: true
 })
 
+const runnerHostForm = reactive<DatabaseRunnerHostPayload & { id?: number }>({
+  id: undefined,
+  name: '',
+  runnerType: 'ssh',
+  host: '',
+  port: 22,
+  credentialId: undefined,
+  workDir: '/var/lib/opshub/database-runner',
+  storageMountPath: '',
+  maxConcurrentJobs: 1,
+  cpuLimit: '',
+  ioLimit: '',
+  bandwidthLimit: '',
+  timeoutMinutes: 30,
+  enabled: true,
+  configJson: ''
+})
+
 const permissionForm = reactive({
   id: undefined as number | undefined,
   roleId: undefined as number | undefined,
@@ -3939,6 +4261,13 @@ const restorePlanRules: FormRules = {
   sourceInstanceId: [{ required: true, message: '请选择来源实例', trigger: 'change' }],
   restoreTargetType: [{ required: true, message: '请选择目标类型', trigger: 'change' }],
   restoreTargetValue: [{ required: true, message: '请选择恢复目标时间', trigger: 'change' }]
+}
+
+const runnerHostRules: FormRules = {
+  name: [{ required: true, message: '请输入 Runner 名称', trigger: 'blur' }],
+  runnerType: [{ required: true, message: '请选择 Runner 类型', trigger: 'change' }],
+  host: [{ required: true, message: '请输入 SSH 主机地址', trigger: 'blur' }],
+  credentialId: [{ required: true, message: '请选择 SSH 凭据', trigger: 'change' }]
 }
 
 const permissionRules: FormRules = {
@@ -4212,6 +4541,17 @@ const logArchiveStreamOptions = computed(() =>
     id: item.id,
     label: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveTypeText || item.archiveType} / ${item.archiveEngine || item.archiveMode || 'external'}`
   }))
+)
+
+const runnerHostOptions = computed(() =>
+  runnerHosts.value.map(item => ({
+    id: item.id,
+    label: `${item.name}（${item.runnerTypeText || item.runnerType}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`
+  }))
+)
+
+const sshCredentialOptions = computed(() =>
+  credentials.value.filter((item: any) => (item.protocol || 'ssh') === 'ssh')
 )
 
 const restoreTargetOptions = computed(() => {
@@ -4969,8 +5309,34 @@ const loadRestorePlans = async () => {
   }
 }
 
+const loadRunnerHosts = async () => {
+  runnerHostLoading.value = true
+  try {
+    const res: any = await listDatabaseRunnerHosts(runnerHostQuery)
+    runnerHosts.value = res.list || []
+    runnerHostTotal.value = res.total || 0
+    if (res.page) runnerHostQuery.page = res.page
+    if (res.pageSize) runnerHostQuery.pageSize = res.pageSize
+  } finally {
+    runnerHostLoading.value = false
+  }
+}
+
+const loadRunnerJobs = async () => {
+  runnerJobLoading.value = true
+  try {
+    const res: any = await listDatabaseRunnerJobs(runnerJobQuery)
+    runnerJobs.value = res.list || []
+    runnerJobTotal.value = res.total || 0
+    if (res.page) runnerJobQuery.page = res.page
+    if (res.pageSize) runnerJobQuery.pageSize = res.pageSize
+  } finally {
+    runnerJobLoading.value = false
+  }
+}
+
 const refreshPITRState = async () => {
-  await Promise.all([loadLogArchiveStreams(), loadLogArchives(), loadRestorePlans()])
+  await Promise.all([loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadRestorePlans()])
 }
 
 const loadRestoreJobs = async () => {
@@ -5130,6 +5496,25 @@ const resetRestorePlanForm = () => {
   restorePlanForm.restoreTargetValue = formatDateTimeInput()
   restorePlanForm.restoreTargetInclusive = true
   restorePlanFormRef.value?.clearValidate()
+}
+
+const resetRunnerHostForm = () => {
+  runnerHostForm.id = undefined
+  runnerHostForm.name = ''
+  runnerHostForm.runnerType = 'ssh'
+  runnerHostForm.host = ''
+  runnerHostForm.port = 22
+  runnerHostForm.credentialId = sshCredentialOptions.value[0]?.id
+  runnerHostForm.workDir = '/var/lib/opshub/database-runner'
+  runnerHostForm.storageMountPath = ''
+  runnerHostForm.maxConcurrentJobs = 1
+  runnerHostForm.cpuLimit = ''
+  runnerHostForm.ioLimit = ''
+  runnerHostForm.bandwidthLimit = ''
+  runnerHostForm.timeoutMinutes = 30
+  runnerHostForm.enabled = true
+  runnerHostForm.configJson = ''
+  runnerHostFormRef.value?.clearValidate()
 }
 
 const normalizeRestoreFormStrategy = () => {
@@ -5318,6 +5703,78 @@ const submitRestorePlan = async () => {
     await loadRestorePlans()
   } finally {
     restorePlanSubmitting.value = false
+  }
+}
+
+const openRunnerHostDialog = (row?: DatabaseRunnerHostResult) => {
+  resetRunnerHostForm()
+  if (row?.id) {
+    runnerHostForm.id = row.id
+    runnerHostForm.name = row.name || ''
+    runnerHostForm.runnerType = row.runnerType || 'ssh'
+    runnerHostForm.host = row.host || ''
+    runnerHostForm.port = row.port || 22
+    runnerHostForm.credentialId = row.credentialId || undefined
+    runnerHostForm.workDir = row.workDir || '/var/lib/opshub/database-runner'
+    runnerHostForm.storageMountPath = row.storageMountPath || ''
+    runnerHostForm.maxConcurrentJobs = row.maxConcurrentJobs || 1
+    runnerHostForm.cpuLimit = row.cpuLimit || ''
+    runnerHostForm.ioLimit = row.ioLimit || ''
+    runnerHostForm.bandwidthLimit = row.bandwidthLimit || ''
+    runnerHostForm.timeoutMinutes = row.timeoutMinutes || 30
+    runnerHostForm.enabled = !!row.enabled
+    runnerHostForm.configJson = row.configJson || ''
+  }
+  runnerHostDialogVisible.value = true
+}
+
+const submitRunnerHost = async () => {
+  if (!runnerHostFormRef.value) return
+  await runnerHostFormRef.value.validate()
+  runnerHostSubmitting.value = true
+  try {
+    const payload: DatabaseRunnerHostPayload = {
+      name: runnerHostForm.name.trim(),
+      runnerType: runnerHostForm.runnerType || 'ssh',
+      host: runnerHostForm.host?.trim(),
+      port: runnerHostForm.port || 22,
+      credentialId: runnerHostForm.credentialId || undefined,
+      workDir: runnerHostForm.workDir?.trim(),
+      storageMountPath: runnerHostForm.storageMountPath?.trim(),
+      maxConcurrentJobs: runnerHostForm.maxConcurrentJobs || 1,
+      cpuLimit: runnerHostForm.cpuLimit?.trim(),
+      ioLimit: runnerHostForm.ioLimit?.trim(),
+      bandwidthLimit: runnerHostForm.bandwidthLimit?.trim(),
+      timeoutMinutes: runnerHostForm.timeoutMinutes || 30,
+      enabled: runnerHostForm.enabled,
+      configJson: runnerHostForm.configJson?.trim()
+    }
+    if (runnerHostForm.id) {
+      await updateDatabaseRunnerHost(runnerHostForm.id, payload)
+      ElMessage.success('Runner 主机已更新')
+    } else {
+      await createDatabaseRunnerHost(payload)
+      ElMessage.success('Runner 主机已创建')
+    }
+    runnerHostDialogVisible.value = false
+    await loadRunnerHosts()
+  } finally {
+    runnerHostSubmitting.value = false
+  }
+}
+
+const handleTestRunnerHost = async (row: DatabaseRunnerHostResult) => {
+  runnerHostTestingId.value = row.id
+  try {
+    await testDatabaseRunnerHost(row.id)
+    ElMessage.success('Runner 探测任务已下发')
+    await Promise.all([loadRunnerHosts(), loadRunnerJobs()])
+    window.setTimeout(() => {
+      loadRunnerHosts()
+      loadRunnerJobs()
+    }, 2500)
+  } finally {
+    runnerHostTestingId.value = 0
   }
 }
 
@@ -6259,6 +6716,25 @@ const resetRestorePlanQuery = () => {
   loadRestorePlans()
 }
 
+const resetRunnerHostQuery = () => {
+  runnerHostQuery.page = 1
+  runnerHostQuery.pageSize = 10
+  runnerHostQuery.keyword = ''
+  runnerHostQuery.runnerType = ''
+  runnerHostQuery.status = ''
+  runnerHostQuery.enabled = ''
+  loadRunnerHosts()
+}
+
+const resetRunnerJobQuery = () => {
+  runnerJobQuery.page = 1
+  runnerJobQuery.pageSize = 10
+  runnerJobQuery.runnerHostId = undefined
+  runnerJobQuery.jobType = ''
+  runnerJobQuery.status = ''
+  loadRunnerJobs()
+}
+
 const resetRestoreJobQuery = () => {
   restoreJobQuery.page = 1
   restoreJobQuery.pageSize = 10
@@ -6791,6 +7267,44 @@ const restoreValidationStatusTag = (status?: string) => {
   }
 }
 
+const runnerStatusTag = (status?: string) => {
+  switch (status) {
+    case 'online':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'disabled':
+      return 'info'
+    default:
+      return 'warning'
+  }
+}
+
+const runnerJobStatusTag = (status?: string) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'running':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+const runnerJobOutputSummary = (row: DatabaseRunnerJobResult) => {
+  if (!row?.resultJson) return '-'
+  try {
+    const parsed = JSON.parse(row.resultJson)
+    const stdout = String(parsed.stdout || '').trim().replace(/\s+/g, ' ')
+    const stderr = String(parsed.stderr || '').trim().replace(/\s+/g, ' ')
+    return stdout || stderr || row.resultJson
+  } catch (_err) {
+    return row.resultJson
+  }
+}
+
 const recoverableWindowText = (row: DatabaseBackupRecordResult) => {
   if (!row.recoverableFrom && !row.recoverableUntil) return '-'
   return `${row.recoverableFrom || '-'} 至 ${row.recoverableUntil || '-'}`
@@ -6962,6 +7476,8 @@ watch(activeTab, async (tab) => {
     await Promise.all([
       loadBackupTasks(),
       loadBackupRecords(),
+      loadRunnerHosts(),
+      loadRunnerJobs(),
       loadLogArchiveStreams(),
       loadLogArchives(),
       loadRestorePlans(),

@@ -17,8 +17,10 @@ import (
 )
 
 type ConnectionCredential struct {
-	Username string
-	Password string
+	Username   string
+	Password   string
+	PrivateKey string
+	Passphrase string
 }
 
 type DatabaseWritePolicy struct {
@@ -58,6 +60,7 @@ type UseCase struct {
 	restorePlanRepo        RestorePlanRepo
 	storageProfileRepo     StorageProfileRepo
 	secretProfileRepo      SecretProfileRepo
+	runnerHostRepo         RunnerHostRepo
 	runnerJobRepo          RunnerJobRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
@@ -123,6 +126,7 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	restorePlanRepo RestorePlanRepo,
 	storageProfileRepo StorageProfileRepo,
 	secretProfileRepo SecretProfileRepo,
+	runnerHostRepo RunnerHostRepo,
 	runnerJobRepo RunnerJobRepo,
 ) {
 	if uc == nil {
@@ -133,6 +137,7 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	uc.restorePlanRepo = restorePlanRepo
 	uc.storageProfileRepo = storageProfileRepo
 	uc.secretProfileRepo = secretProfileRepo
+	uc.runnerHostRepo = runnerHostRepo
 	uc.runnerJobRepo = runnerJobRepo
 }
 
