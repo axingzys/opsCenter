@@ -43,14 +43,15 @@ const (
 )
 
 type agentConfig struct {
-	AgentID         string `json:"agentId"`
-	AccessToken     string `json:"accessToken"`
-	ReportURL       string `json:"reportUrl"`
-	IntervalSeconds int    `json:"intervalSeconds"`
-	ListenAddr      string `json:"listenAddr"`
-	Version         string `json:"version"`
-	HostID          uint   `json:"hostId"`
-	ServiceName     string `json:"serviceName"`
+	AgentID          string                 `json:"agentId"`
+	AccessToken      string                 `json:"accessToken"`
+	ReportURL        string                 `json:"reportUrl"`
+	IntervalSeconds  int                    `json:"intervalSeconds"`
+	ListenAddr       string                 `json:"listenAddr"`
+	Version          string                 `json:"version"`
+	HostID           uint                   `json:"hostId"`
+	ServiceName      string                 `json:"serviceName"`
+	DatabaseArchiver databaseArchiverConfig `json:"databaseArchiver"`
 }
 
 type reportPayload struct {
@@ -259,6 +260,11 @@ func runAgent(ctx context.Context, cfg *agentConfig) error {
 
 	if err := app.serveMetrics(ctx); err != nil {
 		return fmt.Errorf("serve metrics: %w", err)
+	}
+	if archiverCfg, err := resolveDatabaseArchiverConfig(cfg); err != nil {
+		return fmt.Errorf("database archiver config: %w", err)
+	} else if archiverCfg.Enabled {
+		go app.runDatabaseArchiver(ctx, archiverCfg)
 	}
 
 	app.run(ctx)

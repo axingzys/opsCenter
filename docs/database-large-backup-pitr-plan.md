@@ -806,6 +806,107 @@ curl -H "X-OpsHub-Runner-Auth: $AUTH" \
 6. `database_log_archive_events` 事件表。
 7. 前端展示 Agent 接入命令、hash 生成和最近 Agent 事件。
 
+#### 2026-04-29 P2.6.3 已落地范围
+
+本阶段把 P2.6.2 的 Runner Agent 协议接入到真实 `opshub-agent` 二进制，先落地可长期运行的 Agent 侧 binlog 归档循环。关键边界保持不变：`opshub-api` backend 不运行长期 `mysqlbinlog`，数据库密码不从公开接口下发，Agent 使用本机配置中的数据库凭据执行归档。
+
+已实现：
+
+1. `cmd/agent` 新增可选 `databaseArchiver` 配置：
+
+   ```json
+   {
+     "databaseArchiver": {
+       "enabled": true,
+       "baseUrl": "http://opshub.example.com",
+       "runnerId": "runner-host-1",
+       "runnerAuth": "本机保存的随机认证值",
+       "intervalSeconds": 30,
+       "leaseTtlSeconds": 90,
+       "maxFilesPerLoop": 5,
+       "includeCurrent": false,
+       "workDir": "/var/lib/opshub-agent",
+       "storageRoot": "/data/opshub-archives",
+       "credentials": [
+         {
+           "instanceId": 1,
+           "username": "repl_backup",
+           "password": "只保存在 Runner Agent 本机"
+         }
+       ]
+     }
+   }
+   ```
+
+2. Agent 启动后会并行运行原有资产监控上报和数据库 binlog archiver loop。
+3. Agent 每轮执行：
+   - 调用 Runner Agent 心跳接口。
+   - 拉取绑定给当前 Runner 的归档流。
+   - 自动获取或续租 stream lease。
+   - 按 stream 模式执行归档。
+   - 登记已完成归档文件。
+   - 回传 checkpoint、cursor、active file、source file、source pos 和错误状态。
+4. `polling` 模式：
+   - 连接源库执行 `SHOW BINARY LOGS` / `SHOW MASTER LOGS`。
+   - 默认只选择已轮转 binlog，不归档当前活跃文件。
+   - 根据 `last_archive_name` / `cursor_file` 继续追平。
+   - 如果 cursor 已被源库 purge，Agent 上报 `degraded`，不静默从最新文件继续。
+   - 每轮最多归档 `maxFilesPerLoop` 个文件，默认 5，最大 20。
+5. `streaming` 模式第一版采用安全 spool/finalize 语义：
+   - 每轮仍先归档已轮转文件。
+   - 当前活跃 binlog 只下载到 `spool/<file>.partial`。
+   - 活跃文件只通过 checkpoint 写入 `active_file`，不登记为 `database_log_archives`。
+   - 等源库 rotate 后，上一份文件进入 finalized 并登记为 PITR 可用归档。
+   - 这样可以避免把未闭合 active file 错当成完整恢复链。
+6. Agent 侧本地文件布局：
+
+   ```text
+   <storageRoot>/mysql-binlog/
+     instance-<instance_id>/
+       stream-<stream_id>/
+         finalized/
+           binlog.000001
+           binlog.000001.sha256
+           binlog.000001.manifest.json
+         spool/
+           binlog.000002.partial
+   ```
+
+7. 归档文件写入规则：
+   - 先下载到临时目录。
+   - `sha256` 计算成功后再原子提交到 finalized。
+   - 写入 `.sha256` 和 `.manifest.json` sidecar。
+   - `database_log_archives.storage_uri` 使用 `runner://runner-host-<id>/<path>` 指向 Runner 本地归档。
+8. Agent 侧使用 `mysqlbinlog` 或 `mariadb-binlog`：
+   - `--read-from-remote-server`
+   - `--raw`
+   - `--result-file=<staging_dir>/`
+9. Agent 本地解析 binlog 首尾事件时间：
+   - 使用本机 `mysqlbinlog --base64-output=decode-rows <file>`。
+   - 能解析则登记 `first_event_time / last_event_time`。
+   - 解析失败时不把文件内容上传到 backend，也不泄露 binlog 内容。
+10. 安全边界：
+   - 后端公开接口仍只返回源实例 host/port 等非敏感元数据。
+   - 数据库用户名和密码只保存在 Agent 本机配置。
+   - Agent 请求 backend 时只发送 `runnerAuth` 对应的认证头和归档元数据。
+   - 归档登记不包含数据库密码、连接串或临时 defaults 文件路径。
+11. 新增单元测试覆盖：
+   - `baseUrl` 从原 Agent `reportUrl` 推导。
+   - polling 默认跳过当前活跃 binlog。
+   - cursor purge 断链检测。
+   - 显式允许 includeCurrent 的选择逻辑。
+   - binlog 事件时间解析。
+   - stream 级凭据优先于 instance 级凭据。
+
+本阶段仍未实现，保留给 P2.6.4+：
+
+1. 真正长连接 `mysqlbinlog --stop-never` 子进程管理。
+2. streaming active spool 的增量续传和断点 resume。
+3. 对象存储 S3/MinIO staging key、checksum 后提交和远端不可变保留。
+4. `database_log_archive_events` 事件表。
+5. 前端展示 Agent 配置生成器、runnerAuth hash 生成和最近 Agent 事件。
+6. Agent 侧多 stream 并发度、带宽限制和失败退避策略。
+
 ### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
 
 目标：把 P1/P2 已有的“恢复计划和恢复证明预生成”升级为可执行的隔离恢复流程，真正把物理备份链和 binlog 归档链恢复到一个隔离 MySQL/MariaDB 实例，并执行校验 SQL。
