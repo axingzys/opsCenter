@@ -254,6 +254,805 @@
 11. 新增测试：
    - 覆盖 Schema 检查脱敏与审计、容量预测建议、配置克隆计划可执行判断、配置克隆执行目标操作和审计链篡改检测。
 
+## 七期规划：自动化治理、重放执行与合规运营
+七期建议作为六期之后的“生产级增强期”。一到六期已经完成纳管、诊断、受控变更、高危安全、任务中心、治理驾驶舱、DLQ 分析、Schema 检查、审计链和跨实例配置克隆。七期不应再盲目扩大危险按钮，而应把已经预留但尚未执行的高级能力做成可审批、可限速、可回滚建议、可审计、可合规导出的闭环。
+
+七期核心目标：
+
+1. 把“消息重放申请”升级为“可审批、可试跑、可限速、可审计的真实重放工作流”。
+2. 把“JSON Schema 检查”升级为“多格式 Schema 解码、注册中心对接和字段级 DLP 策略”。
+3. 把“配置克隆”升级为“跨集群批量计划、漂移修复、变更窗口和回滚包管理”。
+4. 把“治理报告”升级为“策略中心、豁免、整改任务和治理 SLA”。
+5. 把“审计 hash chain”升级为“可导出、可签名、可验证、可长期保留的合规审计能力”。
+6. 把“容量预测建议”升级为“容量预算、成本分析、自动整改建议和半自动执行审批”。
+
+七期明确不建议默认开放的内容：
+
+1. 不默认开放跨集群消息迁移。
+2. 不默认开放生产环境一键批量重放。
+3. 不默认开放自动 reset offset、自动 skip backlog、自动 purge 等破坏性修复。
+4. 不保存完整业务 payload 作为长期数据。
+5. 不绕过现有 RBAC、对象权限、高危开关、维护窗口和审计链。
+
+### 七期 P0：真实消息重放工作流
+六期只做了消息重放申请评估，不执行真实重放。七期 P0 可以把真实重放做成强约束工作流，但默认仍通过系统配置关闭。
+
+#### 目标能力
+1. 支持从 DLQ/Retry、指定 topic/queue、采样结果、时间范围或 offset 范围创建重放申请。
+2. 支持重放到原资源、指定目标资源或隔离验证资源。
+3. 支持小批量试跑，再进入正式执行。
+4. 支持速率限制、最大条数、最大字节数、最大耗时和失败熔断。
+5. 支持审批、维护窗口、冻结窗口和紧急绕过。
+6. 支持重放结果审计，但不保存完整 payload。
+
+#### 建议状态机
+重放申请建议从单次评估升级为状态机：
+
+1. `draft`：草稿，用户填写来源、目标、范围、限速、原因。
+2. `validated`：预检完成，生成影响分析和 DLP 结果。
+3. `pending_approval`：待审批。
+4. `approved`：审批通过，等待试跑或执行。
+5. `trial_running`：小批量试跑中。
+6. `trial_success`：试跑成功。
+7. `trial_failed`：试跑失败。
+8. `ready_to_execute`：可正式执行。
+9. `running`：正式重放中。
+10. `paused`：人工暂停。
+11. `success`：执行成功。
+12. `partial_success`：部分成功，存在失败消息或后置同步失败。
+13. `failed`：执行失败。
+14. `cancelled`：申请取消或任务取消。
+15. `expired`：审批或执行窗口过期。
+
+#### 建议新增表
+`mq_replay_requests`
+
+- `id`
+- `request_no`
+- `source_instance_id`
+- `source_mq_type`
+- `source_resource_type`
+- `source_namespace`
+- `source_resource_name`
+- `source_consumer_group`
+- `source_subscription`
+- `target_instance_id`
+- `target_resource_type`
+- `target_namespace`
+- `target_resource_name`
+- `replay_mode`：`dlq`、`range`、`sample`、`offset`、`timestamp`
+- `range_json`：时间、offset、partition、message id、selector 等范围条件。
+- `filter_json`：header、key、tag、properties、payload 条件。
+- `dlp_policy_id`
+- `schema_policy_id`
+- `max_messages`
+- `max_bytes`
+- `rate_limit_per_second`
+- `trial_max_messages`
+- `status`
+- `risk_level`
+- `requires_approval`
+- `approval_id`
+- `reason`
+- `impact_summary_json`
+- `dlp_summary_json`
+- `schema_summary_json`
+- `idempotency_warning`
+- `created_by`
+- `approved_by`
+- `created_at`
+- `approved_at`
+- `started_at`
+- `finished_at`
+- `expires_at`
+
+`mq_replay_tasks`
+
+- `id`
+- `request_id`
+- `job_id`
+- `status`
+- `progress_current`
+- `progress_total`
+- `success_count`
+- `failed_count`
+- `skipped_count`
+- `source_cursor_json`
+- `target_result_json`
+- `error_summary_json`
+- `started_at`
+- `finished_at`
+
+`mq_replay_message_results`
+
+- `id`
+- `request_id`
+- `task_id`
+- `source_partition`
+- `source_offset`
+- `source_message_id`
+- `source_key_hash`
+- `payload_hash`
+- `payload_bytes`
+- `target_partition`
+- `target_offset`
+- `target_message_id`
+- `status`
+- `error_code`
+- `error_message`
+- `created_at`
+
+注意：`mq_replay_message_results` 不保存完整 payload，只保存 hash、大小、来源定位和目标定位。
+
+#### 后端接口建议
+1. `POST /api/v1/message-queues/instances/:id/messages/replay-requests`
+   - 保留六期接口语义，但返回正式申请 ID。
+2. `POST /api/v1/message-queues/replay-requests/:id/validate`
+   - 重新预检范围、目标、权限、DLP、Schema、速率和维护窗口。
+3. `POST /api/v1/message-queues/replay-requests/:id/submit`
+   - 提交审批。
+4. `POST /api/v1/message-queues/replay-requests/:id/approve`
+   - 审批通过。
+5. `POST /api/v1/message-queues/replay-requests/:id/reject`
+   - 审批拒绝。
+6. `POST /api/v1/message-queues/replay-requests/:id/trial`
+   - 创建试跑任务，默认限制较小条数。
+7. `POST /api/v1/message-queues/replay-requests/:id/execute`
+   - 正式执行，要求审批通过、试跑成功、维护窗口有效。
+8. `POST /api/v1/message-queues/replay-tasks/:id/pause`
+   - 暂停任务。
+9. `POST /api/v1/message-queues/replay-tasks/:id/resume`
+   - 恢复任务。
+10. `POST /api/v1/message-queues/replay-tasks/:id/cancel`
+   - 取消任务。
+11. `GET /api/v1/message-queues/replay-requests`
+   - 列表查询申请。
+12. `GET /api/v1/message-queues/replay-requests/:id`
+   - 查看申请详情、影响分析、审批和任务状态。
+13. `GET /api/v1/message-queues/replay-tasks/:id/results`
+   - 查询重放结果，默认只展示摘要和错误。
+
+#### MQ 类型实现策略
+RabbitMQ：
+
+1. DLQ/Retry 重放优先从 DLQ queue 读取并写入目标 exchange/queue。
+2. 必须明确 `ack` 策略：
+   - 试跑默认不删除 DLQ 源消息。
+   - 正式执行可配置成功写入目标后是否 ack 源消息。
+   - 默认建议“复制式重放”，不删除源消息。
+3. 必须支持 `requeue` 和失败回滚策略。
+4. 目标写入优先使用 exchange + routing key，而不是直接写 queue。
+5. 需要记录每条消息的 payload hash 和目标 publish 结果。
+
+Kafka：
+
+1. 重放读取必须使用独立 group 或直接 partition reader，不提交业务消费组 offset。
+2. 支持按 topic、partition、offset range、timestamp range 选择消息。
+3. 目标写入支持同 topic、不同 topic、不同实例 topic。
+4. 支持保留 key、headers、timestamp，也支持替换 header 标记 `x-opshub-replay=true`。
+5. 需要限制 `max.in.flight`、batch size、linger 和 rate limit，避免冲垮目标集群。
+6. 如果目标 topic 分区数不同，必须提示 key 分布和顺序风险。
+
+Pulsar：
+
+1. 使用 reader 或独立 subscription 读取，不能影响业务 subscription cursor。
+2. 支持按 message id、publish time、subscription backlog 范围创建重放。
+3. 目标写入支持同 topic、不同 topic、不同实例。
+4. 需要保留 properties，并追加重放标记。
+5. 对 partitioned topic 必须记录分区映射。
+
+RocketMQ：
+
+1. 七期建议先做 PoC，不强行开放生产重放。
+2. 若使用 admin/consumer API 可稳定读取，先支持按 topic、queue、offset range 试跑。
+3. 重放到生产 topic 默认关闭，必须强审批。
+
+ActiveMQ：
+
+1. Classic 和 Artemis 拆开能力矩阵。
+2. 如果 Jolokia/JMS browse 能稳定读取，先支持 queue browse + copy 模式。
+3. purge/delete destination 不和重放放在同一个工作流里。
+
+#### 风险控制
+1. 系统配置默认关闭：`messageQueueReplayExecutionEnabled=false`。
+2. 生产环境必须审批。
+3. 申请人与审批人不能相同。
+4. 正式执行前必须完成试跑，除非管理员紧急绕过。
+5. 目标为生产资源时必须在维护窗口内。
+6. 单任务最大消息数、最大字节数、最大速率必须有全局上限。
+7. 重放任务必须进入 `mq_jobs`，支持进度、暂停、取消和失败重试。
+8. 所有重放必须写入消息审计和操作审计。
+9. 原始 payload 不落库，错误样本默认只保留 hash 和摘要。
+
+### 七期 P0：Schema Registry 和多格式消息解码
+六期已支持 JSON payload 的格式化、字段推断和 JSON Schema 基础校验。七期建议补齐 Avro、Protobuf、Schema Registry 和业务 Schema 版本治理。
+
+#### 目标能力
+1. 支持 JSON Schema、Avro Schema、Protobuf descriptor。
+2. 支持 Confluent Schema Registry、Apicurio、Pulsar Schema Registry。
+3. 支持按 topic/namespace/resource 绑定默认 schema。
+4. 支持采样消息自动识别 schema id、magic byte、content-type 或 header。
+5. 支持 Schema 版本差异对比和兼容性检查。
+6. 支持基于 Schema 的字段级脱敏，比纯字段名和正则更准确。
+
+#### 建议新增表
+`mq_schema_registries`
+
+- `id`
+- `name`
+- `registry_type`：`confluent`、`apicurio`、`pulsar`、`manual`
+- `endpoint`
+- `credential_id`
+- `tls_enabled`
+- `connection_params`
+- `status`
+- `last_test_at`
+- `created_by`
+- `created_at`
+- `updated_at`
+
+`mq_message_schemas`
+
+- `id`
+- `registry_id`
+- `mq_type`
+- `instance_id`
+- `resource_type`
+- `namespace`
+- `resource_name`
+- `subject`
+- `schema_type`：`json_schema`、`avro`、`protobuf`
+- `schema_id`
+- `schema_version`
+- `schema_json`
+- `descriptor_base64`
+- `fingerprint`
+- `compatibility`
+- `status`
+- `created_at`
+- `updated_at`
+
+`mq_schema_bindings`
+
+- `id`
+- `instance_id`
+- `resource_type`
+- `namespace`
+- `resource_name`
+- `schema_id`
+- `match_rule_json`
+- `enabled`
+- `created_by`
+- `created_at`
+
+#### 后端接口建议
+1. `POST /api/v1/message-queues/schema-registries`
+2. `GET /api/v1/message-queues/schema-registries`
+3. `POST /api/v1/message-queues/schema-registries/:id/test`
+4. `POST /api/v1/message-queues/schema-registries/:id/sync`
+5. `GET /api/v1/message-queues/schemas`
+6. `GET /api/v1/message-queues/schemas/:id`
+7. `POST /api/v1/message-queues/schemas/:id/compatibility-check`
+8. `POST /api/v1/message-queues/instances/:id/schema-bindings`
+9. `POST /api/v1/message-queues/instances/:id/messages/decode`
+10. `POST /api/v1/message-queues/instances/:id/messages/schema-inspect`
+    - 保留六期接口，增加 schema binding 自动匹配。
+
+#### 解码策略
+JSON：
+
+1. 默认自动 pretty print。
+2. 支持 JSON Schema 校验。
+3. 支持 strict mode。
+4. 支持字段级 DLP。
+
+Avro：
+
+1. Confluent wire format 支持 magic byte + schema id。
+2. 支持手动指定 schema。
+3. 支持 schema evolution 检查。
+4. 失败时返回二进制摘要，不展示乱码。
+
+Protobuf：
+
+1. 支持上传 `.proto` 或 descriptor set。
+2. 支持按 message type 解码。
+3. 支持从 header 或 topic binding 推断 message type。
+4. 未识别 schema 时只展示 payload hash 和大小。
+
+Pulsar Schema：
+
+1. 优先使用 Pulsar Admin API 读取 topic schema。
+2. 支持 JSON、Avro、KeyValue schema。
+3. 解码失败不影响采样审计写入。
+
+#### 权限
+1. `messagequeue:schema:view`
+2. `messagequeue:schema:manage`
+3. `messagequeue:schema-registry:manage`
+4. `messagequeue:message:decode`
+5. 原文解码仍不能绕过 `MESSAGE_READ` 和 DLP 权限。
+
+### 七期 P0：DLP 策略中心和原文查看闭环
+六期已有默认 DLP 脱敏，但规则还不是完整平台能力。七期建议把 DLP 做成可管理、可测试、可审计、可按资源绑定的策略中心。
+
+#### 建议新增表
+`mq_dlp_policies`
+
+- `id`
+- `name`
+- `description`
+- `scope_type`：`global`、`instance`、`resource`
+- `instance_id`
+- `resource_type`
+- `namespace`
+- `resource_name`
+- `enabled`
+- `default_action`：`mask`、`hash`、`drop`、`deny_raw`
+- `created_by`
+- `updated_by`
+- `created_at`
+- `updated_at`
+
+`mq_dlp_rules`
+
+- `id`
+- `policy_id`
+- `rule_type`：`field_name`、`json_path`、`regex`、`schema_path`、`header`
+- `pattern`
+- `action`：`mask`、`partial_mask`、`hash`、`remove`
+- `replacement`
+- `severity`
+- `enabled`
+- `priority`
+
+`mq_raw_payload_accesses`
+
+- `id`
+- `instance_id`
+- `resource_type`
+- `namespace`
+- `resource_name`
+- `sample_audit_id`
+- `reason`
+- `approved_by`
+- `expires_at`
+- `accessed_by`
+- `accessed_at`
+- `payload_hash`
+- `status`
+
+#### 功能要求
+1. DLP 规则支持预览，用样例 payload 测试命中字段和脱敏效果。
+2. 策略可以绑定到全局、实例或资源。
+3. 资源策略优先级高于实例策略，实例策略高于全局策略。
+4. 原文查看必须走单独权限和审批。
+5. 原文查看授权建议短时有效，例如 10 分钟或 30 分钟。
+6. 原文查看也不应把 payload 写入审计，只记录 hash、大小、资源、理由和访问人。
+7. 前端默认永远展示脱敏内容，原文入口隐藏在高权限操作里。
+
+### 七期 P1：配置克隆升级为跨集群治理工作台
+六期已支持单资源跨实例配置克隆计划和受控执行。七期建议扩展为跨集群治理工作台，但仍然只克隆配置，不迁移消息。
+
+#### 目标能力
+1. 支持批量扫描源实例和目标实例的配置差异。
+2. 支持按业务系统、环境、标签、资源类型选择资源范围。
+3. 支持生成批量 clone plan，但执行仍需逐项或分组审批。
+4. 支持配置漂移整改：从基线模板、源集群或金丝雀资源生成目标配置。
+5. 支持回滚包下载，用于人工恢复资源配置。
+6. 支持执行前检查目标集群容量、版本、权限、命名冲突和维护窗口。
+
+#### 建议新增表
+`mq_config_clone_batches`
+
+- `id`
+- `batch_no`
+- `source_instance_id`
+- `target_instance_id`
+- `scope_json`
+- `status`
+- `risk_level`
+- `resource_count`
+- `executable_count`
+- `blocked_count`
+- `created_by`
+- `created_at`
+- `approved_by`
+- `approved_at`
+- `started_at`
+- `finished_at`
+
+`mq_config_clone_items`
+
+- `id`
+- `batch_id`
+- `source_resource_type`
+- `source_namespace`
+- `source_resource_name`
+- `target_resource_type`
+- `target_namespace`
+- `target_resource_name`
+- `action`
+- `risk_level`
+- `executable`
+- `blocked_reason`
+- `before_snapshot_json`
+- `target_snapshot_json`
+- `proposed_config_json`
+- `diff_json`
+- `backup_json`
+- `rollback_hint_json`
+- `status`
+- `operation_audit_id`
+
+#### 后端接口建议
+1. `POST /api/v1/message-queues/config-clone-batches/plan`
+2. `GET /api/v1/message-queues/config-clone-batches`
+3. `GET /api/v1/message-queues/config-clone-batches/:id`
+4. `POST /api/v1/message-queues/config-clone-batches/:id/approve`
+5. `POST /api/v1/message-queues/config-clone-batches/:id/apply`
+6. `POST /api/v1/message-queues/config-clone-items/:id/apply`
+7. `GET /api/v1/message-queues/config-clone-items/:id/rollback-package`
+
+#### 执行策略
+1. 批量计划可以一次生成，但默认不一次性全量执行。
+2. 生产环境批量执行需要审批和维护窗口。
+3. 单批次执行需要并发限制，例如每次最多 3 个资源。
+4. 失败后停止、继续或跳过必须由用户选择。
+5. 所有 item 都必须可追溯到对应 operation audit。
+
+### 七期 P1：治理策略中心、豁免和整改任务
+五期已有治理报告 MVP。七期建议从“内置规则报告”升级为“治理策略中心”。
+
+#### 建议新增表
+`mq_governance_policies`
+
+- `id`
+- `name`
+- `mq_type`
+- `resource_type`
+- `environment`
+- `business_system`
+- `enabled`
+- `severity`
+- `description`
+- `rule_json`
+- `created_by`
+- `updated_by`
+
+`mq_governance_violations`
+
+- `id`
+- `policy_id`
+- `instance_id`
+- `resource_type`
+- `namespace`
+- `resource_name`
+- `severity`
+- `status`
+- `finding_json`
+- `first_seen_at`
+- `last_seen_at`
+- `resolved_at`
+
+`mq_governance_exemptions`
+
+- `id`
+- `policy_id`
+- `instance_id`
+- `resource_type`
+- `namespace`
+- `resource_name`
+- `reason`
+- `expires_at`
+- `approved_by`
+- `created_by`
+
+`mq_remediation_tasks`
+
+- `id`
+- `violation_id`
+- `task_type`
+- `suggestion_json`
+- `status`
+- `owner`
+- `due_at`
+- `operation_plan_json`
+- `operation_audit_id`
+
+#### 策略类型
+1. 命名规范策略。
+2. owner/业务系统必填策略。
+3. 生产 Kafka topic 副本数、ISR、retention、cleanup.policy 策略。
+4. RabbitMQ durable、DLX、TTL、quorum queue 策略。
+5. Pulsar namespace retention、TTL、backlog quota 策略。
+6. DLQ backlog 不为 0 的治理策略。
+7. 长期无消费者或无生产消费资源策略。
+8. 未配置告警阈值策略。
+9. 凭据即将过期策略。
+10. 审计链异常策略。
+
+#### 前端页面建议
+1. `治理策略`：规则列表、启停、优先级、适用范围。
+2. `违规列表`：按实例、业务、负责人、级别过滤。
+3. `豁免管理`：豁免原因、审批人、过期时间。
+4. `整改任务`：负责人、截止时间、处理状态、关联操作。
+5. `整改建议`：展示可执行 plan，但默认不自动执行。
+
+### 七期 P1：告警闭环增强
+五期规划已有告警 UI，七期建议把告警和治理、任务、巡检、审批串起来。
+
+#### 能力要求
+1. 告警规则支持模板和实例级覆盖。
+2. 告警可以关联治理策略。
+3. 告警触发后可一键生成巡检任务。
+4. 告警可以创建整改任务。
+5. 告警恢复自动记录恢复时间。
+6. 告警静默和维护窗口共享系统变更窗口配置。
+7. 告警升级支持负责人、业务系统、值班组。
+8. 告警处理备注进入审计。
+
+#### 建议接口
+1. `GET /api/v1/message-queues/alert-rules`
+2. `POST /api/v1/message-queues/alert-rules`
+3. `PUT /api/v1/message-queues/alert-rules/:id`
+4. `POST /api/v1/message-queues/alert-rules/:id/enable`
+5. `POST /api/v1/message-queues/alert-rules/:id/disable`
+6. `GET /api/v1/message-queues/alerts`
+7. `POST /api/v1/message-queues/alerts/:id/ack`
+8. `POST /api/v1/message-queues/alerts/:id/resolve`
+9. `POST /api/v1/message-queues/alerts/:id/create-inspection`
+10. `POST /api/v1/message-queues/alerts/:id/create-remediation-task`
+
+### 七期 P1：审计导出、签名和长期保留
+六期已具备审计 hash chain 校验。七期建议补齐合规审计导出。
+
+#### 功能要求
+1. 支持按时间、实例、动作、风险等级、操作人导出审计。
+2. 导出文件包含审计内容、hash、previous hash、导出时间、导出人。
+3. 导出包生成签名文件。
+4. 支持导出后离线校验。
+5. 支持审计保留策略，操作审计、消息审计、原文访问审计分别配置保留周期。
+6. 支持管理员配置变更审计，包括系统配置、权限、DLP、Schema、治理策略、告警规则。
+
+#### 建议新增表
+`mq_audit_exports`
+
+- `id`
+- `export_no`
+- `audit_type`
+- `filter_json`
+- `record_count`
+- `file_path`
+- `file_sha256`
+- `signature`
+- `status`
+- `created_by`
+- `created_at`
+- `finished_at`
+
+`mq_audit_retention_policies`
+
+- `id`
+- `audit_type`
+- `retention_days`
+- `archive_enabled`
+- `archive_path`
+- `enabled`
+- `updated_by`
+- `updated_at`
+
+### 七期 P2：容量预算、成本分析和半自动整改
+六期已有容量预测建议，但还不是预算和成本治理。七期 P2 可以补容量预算和半自动整改。
+
+#### 能力要求
+1. 按实例、业务系统、负责人、环境统计 topic/queue 数量、partition 数、backlog、消息速率。
+2. 估算 Kafka partition 成本、RabbitMQ queue 成本、Pulsar namespace/topic 成本。
+3. 识别长期空闲资源和可归档资源。
+4. 给出扩分区、扩消费者、调整 retention、清理 DLQ、绑定 owner、补告警等建议。
+5. 整改建议默认只生成 plan，不自动执行。
+6. 非生产环境可允许低风险自动整改，例如补标签、补 owner、创建告警规则。
+
+#### 建议接口
+1. `GET /api/v1/message-queues/capacity-budget`
+2. `GET /api/v1/message-queues/cost-analysis`
+3. `GET /api/v1/message-queues/remediation-suggestions`
+4. `POST /api/v1/message-queues/remediation-suggestions/:id/plan`
+5. `POST /api/v1/message-queues/remediation-suggestions/:id/apply`
+
+### 七期 P2：Adapter 插件化和合约测试
+七期可以把 Adapter 能力从代码内置逐步演进为可扩展架构，但不建议一开始就做完整插件市场。
+
+#### 合约测试要求
+每个 Adapter 至少满足：
+
+1. `TestConnection` 返回标准状态和标准错误码。
+2. `DiscoverMetadata` 不覆盖人工治理字段。
+3. `CollectMetrics` 或等效方法返回统一指标模型。
+4. `ValidateOperation` 返回风险、warnings、impact、diff 和 normalized params。
+5. `ApplyOperation` 返回明确结果、资源标识和错误码。
+6. `SampleMessages` 不提交业务 offset，不默认删除消息。
+7. `ReplayMessages` 如果实现，必须支持限速、取消和审计回调。
+8. 超时、鉴权失败、权限不足、版本不支持必须可区分。
+
+#### 插件化阶段
+1. 阶段一：保留内置 Adapter，但补 contract test。
+2. 阶段二：Adapter capabilities 从代码常量转为注册描述。
+3. 阶段三：允许外部 Adapter 以 Go plugin 或独立 sidecar 接入。
+4. 阶段四：支持 Adapter 版本、兼容性、健康状态和禁用。
+
+### 七期前端信息架构建议
+七期功能会明显增多，建议把当前 `MessageQueueManagement.vue` 继续拆分，否则单文件会越来越难维护。
+
+建议页面结构：
+
+1. `实例管理`
+2. `治理驾驶舱`
+3. `资源管理`
+4. `消费诊断`
+5. `DLQ治理`
+6. `消息治理`
+   - 消息采样
+   - Schema 检查
+   - 重放申请
+   - 重放任务
+7. `配置治理`
+   - 配置克隆
+   - 批量克隆
+   - 漂移检测
+   - 回滚包
+8. `策略中心`
+   - DLP 策略
+   - Schema Registry
+   - 治理策略
+   - 告警规则
+9. `任务中心`
+10. `操作审计`
+11. `实例权限`
+
+建议前端拆分组件：
+
+1. `MessageQueueInstancesPanel.vue`
+2. `MessageQueueDashboardPanel.vue`
+3. `MessageQueueResourcesPanel.vue`
+4. `MessageQueueDiagnosisPanel.vue`
+5. `MessageQueueDLQPanel.vue`
+6. `MessageQueueReplayPanel.vue`
+7. `MessageQueueSchemaPanel.vue`
+8. `MessageQueueConfigClonePanel.vue`
+9. `MessageQueuePolicyPanel.vue`
+10. `MessageQueueJobsPanel.vue`
+11. `MessageQueueAuditsPanel.vue`
+12. `MessageQueuePermissionsPanel.vue`
+
+### 七期权限建议
+新增菜单权限：
+
+1. `messagequeue:replay:view`
+2. `messagequeue:replay:apply`
+3. `messagequeue:replay:approve`
+4. `messagequeue:schema:view`
+5. `messagequeue:schema:manage`
+6. `messagequeue:dlp:view`
+7. `messagequeue:dlp:manage`
+8. `messagequeue:policy:view`
+9. `messagequeue:policy:manage`
+10. `messagequeue:audit:export`
+11. `messagequeue:config-clone:batch`
+12. `messagequeue:remediation:apply`
+
+对象级权限建议：
+
+1. `MESSAGE_REPLAY_REQUEST`
+2. `MESSAGE_REPLAY_EXECUTE`
+3. `MESSAGE_REPLAY_APPROVE`
+4. `MESSAGE_RAW_READ`
+5. `SCHEMA_MANAGE`
+6. `DLP_MANAGE`
+7. `POLICY_MANAGE`
+8. `AUDIT_EXPORT`
+9. `CONFIG_CLONE_BATCH`
+10. `REMEDIATION_APPLY`
+
+### 七期系统配置建议
+1. `messageQueueReplayExecutionEnabled=false`
+2. `messageQueueReplayRequireApproval=true`
+3. `messageQueueReplayRequireTrial=true`
+4. `messageQueueReplayMaxMessages=1000`
+5. `messageQueueReplayMaxBytes=104857600`
+6. `messageQueueReplayRateLimitPerSecond=100`
+7. `messageQueueReplayAllowProductionTarget=false`
+8. `messageQueueReplayAllowSameResourceTarget=false`
+9. `messageQueueRawPayloadAccessEnabled=false`
+10. `messageQueueRawPayloadAccessTTLMinutes=30`
+11. `messageQueueAuditExportEnabled=true`
+12. `messageQueueAuditExportSignEnabled=true`
+13. `messageQueueConfigCloneBatchEnabled=false`
+14. `messageQueueRemediationAutoApplyEnabled=false`
+15. `messageQueueSchemaRegistrySyncEnabled=true`
+
+### 七期测试验收标准
+P0 必须覆盖：
+
+1. 重放申请未开启系统开关时不能执行。
+2. 生产重放没有审批不能执行。
+3. 申请人不能审批自己的重放申请。
+4. 未试跑不能正式执行。
+5. 超过最大条数、最大字节数、最大速率时被拒绝。
+6. 目标资源名确认不一致时被拒绝。
+7. 重放任务可暂停、恢复、取消。
+8. Kafka 重放不提交业务 group offset。
+9. RabbitMQ 复制式重放默认不删除 DLQ 源消息。
+10. Pulsar reader 重放不影响业务 subscription cursor。
+11. DLP 规则命中后默认只展示脱敏 payload。
+12. 原文查看没有单独权限不能执行。
+13. Schema Registry 连接失败返回标准错误码。
+14. Avro/Protobuf 解码失败不展示乱码，只展示摘要。
+15. 审计导出包含 hash chain 并可离线验证。
+16. 批量配置克隆只生成 plan，不默认执行。
+17. 治理策略豁免过期后重新产生违规。
+18. 整改建议默认只生成 plan，不自动执行生产变更。
+
+集成测试建议：
+
+1. RabbitMQ DLQ copy replay。
+2. Kafka offset range replay 到目标 topic。
+3. Pulsar reader replay 到目标 topic。
+4. Schema Registry mock server。
+5. DLP 策略预览和采样联动。
+6. 审计导出签名和校验。
+7. 批量配置克隆 dry-run。
+8. 大量 replay result 分页查询。
+
+压测建议：
+
+1. 10 万条 replay result 写入和分页。
+2. 1 万 topic 配置漂移扫描。
+3. 100 万操作审计导出。
+4. 1000 条 DLP 规则匹配性能。
+5. 100 个并发 replay 申请的锁和限流。
+
+### 七期交付顺序建议
+第一阶段：安全底座。
+
+1. 重放状态机表结构。
+2. 重放申请详情和审批接口。
+3. 试跑任务和任务中心集成。
+4. DLP 策略中心。
+5. 原文查看权限和审计。
+
+第二阶段：真实重放。
+
+1. RabbitMQ copy replay。
+2. Kafka range replay。
+3. Pulsar reader replay。
+4. 限速、暂停、取消、失败熔断。
+5. 重放结果分页和错误摘要。
+
+第三阶段：Schema 和合规。
+
+1. Schema Registry 管理。
+2. Avro 解码。
+3. Protobuf descriptor 解码。
+4. 审计导出签名。
+5. 审计保留策略。
+
+第四阶段：治理自动化。
+
+1. 配置批量克隆计划。
+2. 治理策略中心。
+3. 豁免和整改任务。
+4. 告警闭环。
+5. 容量预算和成本分析。
+
+第五阶段：扩展和压测。
+
+1. Adapter contract test。
+2. RocketMQ/ActiveMQ replay PoC。
+3. 大集群压测。
+4. 前端组件拆分。
+5. 七期验收和发布回滚文档。
+
 ## 生产化优化补充清单
 以下内容为结合当前一二三期落地状态、现有代码结构和后续四期目标整理出的优化项。除上文“落地状态”明确说明的能力外，本节均表示后续建议，不代表当前已全部实现。
 
