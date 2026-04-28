@@ -169,6 +169,104 @@ P2.2 验收标准：
 5. 前端 PITR 面板新增 `Runner主机` 和 `Runner任务` 标签页，支持 Runner 主机维护、探测任务下发、Job 状态和输出摘要查看。
 6. 新增 Runner 单元测试，覆盖默认值、敏感配置拦截、固定探测命令、请求脱敏、成功/失败状态回写。
 
+### 2026-04-29 P2.3 + P2.4 实施边界
+
+P2.1 + P2.2 已经打通了 Runner 主机管理和 SSH 白名单探测，但真正要支撑 PITR，还需要把 binlog 归档从“外部登记/备份后元数据采样”推进到“由 Runner 受控拉取一个真实 binlog 文件”。本阶段继续保持低风险边界：只做一次性归档任务，不做后台常驻守护进程，不自动停止或重建任何数据库 datadir。
+
+#### P2.3：Runner 能力探测增强
+
+目标是让 Runner 探测结果不只是展示原始 stdout，而是逐步沉淀成后续调度可用的能力输入。
+
+能力范围：
+
+1. 继续使用 `runner_probe` 白名单命令探测 Runner 主机。
+2. 探测内容覆盖 `xtrabackup`、`mariadb-backup`、`mysqlbinlog`、`mariadb-binlog`、`barman`、`wal-g` 等工具是否存在。
+3. 探测结果仍写入 `database_runner_jobs.result_json`，前端 Runner 任务列表展示 stdout 摘要。
+4. 本阶段不新增单独的 `database_runner_capabilities` 表，避免过早固化工具版本模型；等 P2.5/P3 接入长期 archiver 或 PostgreSQL WAL-G/Barman 时再把能力表拆出来。
+
+验收标准：
+
+1. Runner 探测任务仍只能执行内置脚本。
+2. 探测输出能看出目标主机是否具备 `mysqlbinlog` / `mariadb-binlog`。
+3. 后续一次性 binlog 归档任务可以复用同一 SSH 执行底座。
+
+#### P2.4：一次性 MySQL/MariaDB binlog 归档 Runner
+
+目标是增加一个“安全、短生命周期、可审计”的 binlog 拉取任务，作为长期连续归档守护进程前的第一版真实归档能力。
+
+新增后端接口：
+
+```text
+POST /api/v1/databases/log-archive-streams/{id}/run-once
+```
+
+请求参数：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `runnerHostId` | bigint | 是 | 执行归档的 Runner Host |
+| `fileName` | string | 否 | 指定要拉取的 binlog 文件；为空时由 OpsHub 根据归档流最近文件和源库 `SHOW BINARY LOGS` 自动选择 |
+
+执行流程：
+
+1. 读取日志归档流，要求 `archive_type=binlog`，数据库类型必须是 MySQL 或 MariaDB。
+2. 读取归档来源实例，使用实例凭据连接源库执行 `SHOW BINARY LOGS` / `SHOW MASTER LOGS`，获取当前 binlog 文件列表和大小。
+3. 选择待归档文件：
+   - 如果请求指定 `fileName`，必须在源库当前 binlog 列表中存在。
+   - 如果未指定且归档流有 `last_archive_name`，优先选择它后面的下一个文件。
+   - 如果未指定且没有下一个文件，选择当前最新 binlog 文件。
+4. 创建 `database_runner_jobs`，`job_type=binlog_archive`，`allowed_command=mysqlbinlog_archive_once`。
+5. 通过 SSH Runner 执行固定脚本，不接受前端传入 shell。
+6. Runner 脚本在远端创建临时 `defaults-extra-file`，用实例凭据连接源库，执行：
+
+```sh
+mysqlbinlog --defaults-extra-file=/tmp/opshub.cnf \
+  --read-from-remote-server \
+  --raw \
+  --result-file="$DEST_DIR/" \
+  "$BINLOG_FILE"
+```
+
+7. Runner 对拉取到的 binlog 文件计算大小和 SHA256，并用本地 `mysqlbinlog` 解码文件头尾事件行，输出可解析的元数据。
+8. 后端解析 Runner 输出，登记 `database_log_archives`：
+   - `file_name`
+   - `storage_uri`
+   - `file_size`
+   - `checksum_sha256`
+   - `first_event_time`
+   - `last_event_time`
+   - `start_pos`
+   - `end_pos`
+   - `previous_file_name`
+   - `next_file_name`
+9. 更新 `database_log_archive_streams.last_archived_at`、`last_archive_name`、`status` 和 `last_error`。
+10. 更新 Runner Job 的状态、退出码、耗时、stdout/stderr 摘要和错误。
+
+安全边界：
+
+1. 前端和 API 不允许提交任意 shell。
+2. `database_runner_jobs.request_json` 不保存数据库密码、Runner 密码、私钥或 token。
+3. `database_runner_jobs.command_summary` 只保存命令类别和 binlog 文件名，不保存连接串。
+4. 数据库密码只通过 SSH stdin 中的临时脚本写入 Runner 主机的临时 option file；脚本退出后立即删除。
+5. 不使用 `MYSQL_PWD`，不在远端进程参数中出现 `--password=...`。
+6. 本阶段只拉取一个 binlog 文件，不常驻 `mysqlbinlog --stop-never`。
+7. 本阶段不自动 purge 源库 binlog，不修改源库复制配置。
+
+前端入口：
+
+1. 在 `归档流` 表格操作列新增“归档一次”。
+2. 点击后弹出确认框，选择 Runner Host，可选指定 binlog 文件名。
+3. 下发成功后自动刷新 Runner 任务和日志归档列表。
+4. `Runner任务` 中可以看到 `binlog 归档` 类型任务，输出摘要包含 binlog 文件、大小和 SHA256。
+
+P2.4 验收标准：
+
+1. 可以对 MySQL/MariaDB binlog 归档流发起一次性归档。
+2. 成功后新增一条 `database_log_archives` 记录，归档流最近文件和状态更新。
+3. 失败时 Runner Job 失败，归档流标记 degraded/failed 并记录错误。
+4. 生成恢复计划时可以利用新登记的真实 binlog 文件元数据参与日志链校验。
+5. 单元测试覆盖 binlog 文件选择、事件时间解析、脚本安全约束和 request_json 脱敏。
+
 ## 文档定位
 
 本文是 OpsHub 数据库管理模块在“大库备份、日志归档、延迟副本、PITR 恢复演练”方向的长期改造基准。后续分期实施、表结构扩展、接口设计、前端页面、Runner 执行边界、权限和验收标准均以本文为准。

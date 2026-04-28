@@ -390,6 +390,11 @@ export interface DatabaseLogArchiveResult {
   updatedAt: string
 }
 
+export interface DatabaseRunLogArchiveOncePayload {
+  runnerHostId: number
+  fileName?: string
+}
+
 export interface DatabaseRestorePlanPayload {
   sourceInstanceId: number
   targetInstanceId?: number
@@ -850,6 +855,9 @@ export const listDatabaseLogArchiveStreams = (params?: {
 
 export const createDatabaseLogArchiveStream = (data: DatabaseLogArchiveStreamPayload) =>
   request.post('/api/v1/databases/log-archive-streams', data)
+
+export const runDatabaseLogArchiveOnce = (id: number, data: DatabaseRunLogArchiveOncePayload) =>
+  request.post(`/api/v1/databases/log-archive-streams/${id}/run-once`, data)
 
 export const listDatabaseLogArchives = (params?: {
   page?: number

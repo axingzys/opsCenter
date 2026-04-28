@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -346,6 +347,14 @@ func (uc *UseCase) runRunnerProbeCommand(ctx context.Context, host *DatabaseRunn
 }
 
 func executeSSHRunnerCommand(ctx context.Context, host string, port int, credential *ConnectionCredential, command string, timeout time.Duration) (string, string, int, error) {
+	return executeSSHRunnerSession(ctx, host, port, credential, command, nil, timeout)
+}
+
+func executeSSHRunnerScript(ctx context.Context, host string, port int, credential *ConnectionCredential, script string, timeout time.Duration) (string, string, int, error) {
+	return executeSSHRunnerSession(ctx, host, port, credential, "sh -s", strings.NewReader(script), timeout)
+}
+
+func executeSSHRunnerSession(ctx context.Context, host string, port int, credential *ConnectionCredential, command string, stdin io.Reader, timeout time.Duration) (string, string, int, error) {
 	if credential == nil {
 		return "", "", 1, fmt.Errorf("连接凭据不能为空")
 	}
@@ -397,6 +406,9 @@ func executeSSHRunnerCommand(ctx context.Context, host string, port int, credent
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
 	session.Stderr = &stderr
+	if stdin != nil {
+		session.Stdin = stdin
+	}
 	done := make(chan error, 1)
 	go func() {
 		done <- session.Run(command)

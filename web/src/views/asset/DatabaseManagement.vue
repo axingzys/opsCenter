@@ -1833,6 +1833,18 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
+                  <el-table-column label="操作" width="120" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button
+                        link
+                        type="primary"
+                        :disabled="row.archiveType !== 'binlog' || !row.enabled"
+                        @click="openRunLogArchiveOnceDialog(row)"
+                      >
+                        归档一次
+                      </el-button>
+                    </template>
+                  </el-table-column>
                 </el-table>
                 <div class="pagination-container">
                   <el-pagination
@@ -3238,6 +3250,47 @@
     </el-dialog>
 
     <el-dialog
+      v-model="runLogArchiveOnceDialogVisible"
+      title="一次性 binlog 归档"
+      width="640px"
+      @close="resetRunLogArchiveOnceForm"
+    >
+      <el-alert
+        title="该操作只通过 Runner 拉取一个 binlog 文件并登记元数据，不会常驻运行，也不会修改源库 binlog 保留策略。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="runLogArchiveOnceFormRef" :model="runLogArchiveOnceForm" :rules="runLogArchiveOnceRules" label-width="120px">
+        <el-form-item label="归档流">
+          <el-input
+            :model-value="runLogArchiveOnceStream ? `${runLogArchiveOnceStream.instanceName || `#${runLogArchiveOnceStream.instanceId}`} / ${runLogArchiveOnceStream.archiveTypeText || runLogArchiveOnceStream.archiveType}` : '-'"
+            disabled
+          />
+        </el-form-item>
+        <el-form-item label="Runner 主机" prop="runnerHostId">
+          <el-select v-model="runLogArchiveOnceForm.runnerHostId" placeholder="请选择 Runner" filterable style="width: 100%;">
+            <el-option
+              v-for="item in runnerHosts.filter(host => host.enabled)"
+              :key="item.id"
+              :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="指定文件">
+          <el-input v-model="runLogArchiveOnceForm.fileName" placeholder="可选，例如 binlog.000123；为空则自动选择下一份或最新 binlog" />
+          <div class="field-tip">文件名必须存在于源库当前 binlog 列表中。为空时后端根据归档流最近文件自动选择。</div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="runLogArchiveOnceDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="runLogArchiveOnceSubmitting" @click="submitRunLogArchiveOnce">下发归档任务</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="restorePlanDialogVisible"
       title="生成 PITR 恢复计划"
       width="680px"
@@ -3648,6 +3701,7 @@ import {
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
   runDatabaseBackupTask,
+	  runDatabaseLogArchiveOnce,
 	  runDatabaseRestoreDryRun,
 	  syncDatabaseMetadata,
 	  testDatabaseInstance,
@@ -3674,11 +3728,12 @@ import {
   type DatabaseInspectionReportResult,
   type DatabaseInstancePayload,
   type DatabaseQueryPayload,
-	  type DatabaseRestoreDryRunPayload,
-	  type DatabaseRestoreJobResult,
-	  type DatabaseRestorePlanPayload,
-	  type DatabaseRestorePlanResult,
-	  type DatabaseRunnerHostPayload,
+  type DatabaseRestoreDryRunPayload,
+  type DatabaseRestoreJobResult,
+  type DatabaseRestorePlanPayload,
+  type DatabaseRestorePlanResult,
+  type DatabaseRunLogArchiveOncePayload,
+  type DatabaseRunnerHostPayload,
 	  type DatabaseRunnerHostResult,
 	  type DatabaseRunnerJobResult,
   type DatabaseSupportedType,
@@ -3885,6 +3940,10 @@ const logArchiveTotal = ref(0)
 const logArchiveDialogVisible = ref(false)
 const logArchiveSubmitting = ref(false)
 const logArchiveFormRef = ref<FormInstance>()
+const runLogArchiveOnceDialogVisible = ref(false)
+const runLogArchiveOnceSubmitting = ref(false)
+const runLogArchiveOnceFormRef = ref<FormInstance>()
+const runLogArchiveOnceStream = ref<DatabaseLogArchiveStreamResult>()
 const restorePlanLoading = ref(false)
 const restorePlans = ref<DatabaseRestorePlanResult[]>([])
 const restorePlanTotal = ref(0)
@@ -4191,6 +4250,11 @@ const logArchiveForm = reactive<DatabaseExternalLogArchivePayload>({
   timelineHistoryUri: ''
 })
 
+const runLogArchiveOnceForm = reactive<DatabaseRunLogArchiveOncePayload>({
+  runnerHostId: 0,
+  fileName: ''
+})
+
 const restorePlanForm = reactive<DatabaseRestorePlanPayload>({
   sourceInstanceId: 0,
   targetInstanceId: undefined,
@@ -4255,6 +4319,10 @@ const logArchiveRules: FormRules = {
   storageUri: [{ required: true, message: '请输入存储 URI', trigger: 'blur' }],
   firstEventTime: [{ required: true, message: '请选择起始时间', trigger: 'change' }],
   lastEventTime: [{ required: true, message: '请选择结束时间', trigger: 'change' }]
+}
+
+const runLogArchiveOnceRules: FormRules = {
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }]
 }
 
 const restorePlanRules: FormRules = {
@@ -5488,6 +5556,13 @@ const resetLogArchiveForm = () => {
   logArchiveFormRef.value?.clearValidate()
 }
 
+const resetRunLogArchiveOnceForm = () => {
+  runLogArchiveOnceStream.value = undefined
+  runLogArchiveOnceForm.runnerHostId = runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id || runnerHosts.value.find(item => item.enabled)?.id || 0
+  runLogArchiveOnceForm.fileName = ''
+  runLogArchiveOnceFormRef.value?.clearValidate()
+}
+
 const resetRestorePlanForm = () => {
   restorePlanForm.sourceInstanceId = pitrBackupInstances.value[0]?.id || 0
   restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== restorePlanForm.sourceInstanceId)?.id
@@ -5677,6 +5752,51 @@ const submitLogArchive = async () => {
     await Promise.all([loadLogArchives(), loadLogArchiveStreams()])
   } finally {
     logArchiveSubmitting.value = false
+  }
+}
+
+const openRunLogArchiveOnceDialog = async (row: DatabaseLogArchiveStreamResult) => {
+  if (!runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  if (!runnerHosts.value.some(item => item.enabled)) {
+    ElMessage.warning('请先配置并启用 Runner 主机')
+    return
+  }
+  resetRunLogArchiveOnceForm()
+  runLogArchiveOnceStream.value = row
+  runLogArchiveOnceDialogVisible.value = true
+}
+
+const submitRunLogArchiveOnce = async () => {
+  if (!runLogArchiveOnceFormRef.value || !runLogArchiveOnceStream.value?.id) return
+  await runLogArchiveOnceFormRef.value.validate()
+  try {
+    await ElMessageBox.confirm(
+      `确定通过 Runner 拉取归档流「${runLogArchiveOnceStream.value.instanceName || `#${runLogArchiveOnceStream.value.instanceId}`}」的一份 binlog 吗？`,
+      '一次性 binlog 归档确认',
+      { type: 'warning' }
+    )
+  } catch (_err) {
+    return
+  }
+  runLogArchiveOnceSubmitting.value = true
+  try {
+    const payload: DatabaseRunLogArchiveOncePayload = {
+      runnerHostId: runLogArchiveOnceForm.runnerHostId,
+      fileName: runLogArchiveOnceForm.fileName?.trim() || undefined
+    }
+    await runDatabaseLogArchiveOnce(runLogArchiveOnceStream.value.id, payload)
+    runLogArchiveOnceDialogVisible.value = false
+    ElMessage.success('binlog 归档任务已下发')
+    await Promise.all([loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives()])
+    window.setTimeout(() => {
+      loadRunnerJobs()
+      loadLogArchiveStreams()
+      loadLogArchives()
+    }, 3000)
+  } finally {
+    runLogArchiveOnceSubmitting.value = false
   }
 }
 
@@ -7297,6 +7417,12 @@ const runnerJobOutputSummary = (row: DatabaseRunnerJobResult) => {
   if (!row?.resultJson) return '-'
   try {
     const parsed = JSON.parse(row.resultJson)
+    if (parsed.binlog?.fileName) {
+      const parts = [parsed.binlog.fileName]
+      if (parsed.binlog.fileSize) parts.push(formatBytes(Number(parsed.binlog.fileSize)))
+      if (parsed.binlog.checksumSha256) parts.push(String(parsed.binlog.checksumSha256).slice(0, 12))
+      return parts.join(' / ')
+    }
     const stdout = String(parsed.stdout || '').trim().replace(/\s+/g, ' ')
     const stderr = String(parsed.stderr || '').trim().replace(/\s+/g, ' ')
     return stdout || stderr || row.resultJson
