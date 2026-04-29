@@ -4112,6 +4112,35 @@ WAL 状态页面：
 4. 校验断言失败时 proof 记录 expected/actual。
 5. cleanup 开启时失败后清理隔离容器。
 
+2026-04-29 已落地：
+
+1. Barman restore Runner 增加 `postgresStartInstance` 开关：
+   - `true`：恢复到隔离目录后启动 PostgreSQL 容器。
+   - `false`：只恢复到 Runner 隔离目录。
+2. Restore job 自动生成隔离容器元数据：
+   - `container_name=opshub-pg-restore-<job_id>`
+   - `container_image=postgres:<source major>`，无法识别时使用 `postgres:latest`
+   - `listen_host=127.0.0.1`
+   - `listen_port` 沿用隔离恢复端口自动分配逻辑
+3. Runner 脚本受控执行：
+   - `barman restore` 仍固定写入 Runner work root 下的 `restore/job-<id>/pgdata`
+   - 启动容器前校验 `PG_VERSION/global/base`
+   - 使用 `docker run -d -p 127.0.0.1:<port>:5432 -v <pgdata>:/var/lib/postgresql/data`
+   - 失败清理支持删除隔离容器和恢复目录
+4. 校验 SQL 支持 PostgreSQL：
+   - 默认校验包含 `SELECT 1`、`SELECT version()` 和数据库列表。
+   - 允许用户追加只读 SQL。
+   - 复用 P2.7 断言：`expectedRows`、`expectedContains`、`expectedScalar`。
+   - proof 记录断言状态、实际行数、实际标量和失败原因。
+5. 前端恢复执行弹窗：
+   - PostgreSQL 可选择是否启动隔离实例。
+   - 可配置容器镜像、监听端口、target timeline、target action、`--get-wal`。
+   - PostgreSQL 启动隔离实例时显示校验 SQL 和断言表单。
+6. 单元测试覆盖：
+   - Barman restore 脚本的 target 参数约束。
+   - 隔离 PostgreSQL 容器启动命令。
+   - PostgreSQL 校验断言输出解析。
+
 ##### P3.8：pg_basebackup 轻量备用
 
 目标：在没有 Barman 的轻量环境下支持 PostgreSQL 原生 base backup。
@@ -4133,6 +4162,50 @@ WAL 状态页面：
 2. incremental 未满足版本条件时不能选择。
 3. incremental 恢复计划包含 `pg_combinebackup`。
 4. 缺依赖备份时恢复计划失败。
+
+2026-04-29 已落地：
+
+1. 备份任务支持 PostgreSQL `physical + pg_basebackup`：
+   - 后端校验 `backup_scope=cluster`。
+   - 第一版可执行任务仅支持 `backup_level=full`。
+   - `scope_config` 必须提供 SSH Runner：`{"runnerHostId":1}`。
+   - `extraArgs` 可透传给 `pg_basebackup`，但禁止包含 password/secret。
+2. 手动触发和定时触发均走 Runner Job：
+   - `job_type=pg_basebackup`
+   - `allowed_command=pg_basebackup`
+   - request/result 不保存数据库密码，只在 SSH 脚本执行环境中传入。
+3. Runner 脚本能力：
+   - 执行 `pg_basebackup -Fp -X stream --checkpoint=fast --progress`
+   - 产物打包为 `tar.gz`
+   - 记录 artifact 路径、大小、SHA256、工具版本
+   - 尝试读取 `PG_VERSION`、`pg_controldata`、`backup_manifest` 摘要
+   - storage URI 使用 `runner://runner-host-<id>/<path>`，后续恢复 Runner 可校验归属
+4. 备份记录写入：
+   - `backup_engine=pg_basebackup`
+   - `backup_method=physical`
+   - `backup_level=full`
+   - `backup_scope=cluster`
+   - `tool_name=pg_basebackup`
+   - `pg_system_identifier / timeline_id / end_lsn / wal_end / backup_manifest_checksum`
+5. PITR 恢复计划识别：
+   - PostgreSQL base backup 选择支持 `barman` 和 `pg_basebackup`。
+   - `pg_basebackup` 不再强依赖 Barman Server catalog。
+   - WAL catalog 仍按 system identifier、timeline、时间或 LSN 覆盖检查。
+   - 如果链路包含 `pg_basebackup` 增量记录，计划 JSON 必须包含 `pg_combinebackup` 步骤和 required tool。
+6. 前端入口：
+   - PostgreSQL 物理备份引擎可选 `Barman` 或 `pg_basebackup`。
+   - `pg_basebackup` 任务级别限制为 full。
+   - 范围配置提示展示 `runnerHostId` 示例。
+7. 单元测试覆盖：
+   - `pg_basebackup` SSH 脚本命令和重定向拼接。
+   - artifact metadata 输出。
+   - 含增量记录的 PostgreSQL 恢复计划会包含 `pg_combinebackup`。
+
+未做边界：
+
+1. 第一版不自动执行 `pg_basebackup` 产物的隔离恢复；P3.8 先提供备份和恢复计划输入。
+2. PostgreSQL 原生 incremental 不在 UI 中开放执行；可通过外部记录登记纳管，恢复计划负责链路校验和 `pg_combinebackup` 步骤证明。
+3. WAL-G 仍在 P3.9 按 external metadata registration 处理。
 
 ##### P3.9：WAL-G / pgBackRest external 纳管
 

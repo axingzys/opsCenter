@@ -14,6 +14,9 @@ func (uc *UseCase) RunScheduledBackupTask(ctx context.Context, id uint) (*Databa
 	if vo, handled, err := uc.runBarmanBackupTaskIfNeeded(ctx, id, scheduledBackupOperator(), DatabaseBackupTriggerSchedule); handled || err != nil {
 		return vo, err
 	}
+	if vo, handled, err := uc.runPgBaseBackupTaskIfNeeded(ctx, id, scheduledBackupOperator(), DatabaseBackupTriggerSchedule); handled || err != nil {
+		return vo, err
+	}
 	run, err := uc.prepareBackupTaskRun(ctx, id, scheduledBackupOperator(), DatabaseBackupTriggerSchedule)
 	if err != nil {
 		return nil, err

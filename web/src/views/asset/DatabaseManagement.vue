@@ -1823,6 +1823,7 @@
                       <el-option label="Barman WAL 同步" value="barman_wal_sync" />
                       <el-option label="Barman 备份" value="barman_backup" />
                       <el-option label="Barman 恢复" value="barman_restore" />
+                      <el-option label="pg_basebackup" value="pg_basebackup" />
                     </el-select>
                     <el-select v-model="runnerJobQuery.status" placeholder="状态" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="排队中" value="queued" />
@@ -3307,10 +3308,10 @@
             v-model="backupTaskForm.scopeConfig"
             type="textarea"
             :rows="4"
-            placeholder='全量可留空；增量示例：{"incrementalBaseDir":"/backup/mysql/base_20260428","extraArgs":["--parallel=4"]}'
+            :placeholder="selectedBackupTaskDbType === 'postgresql' ? 'Barman: barmanServerId=1；pg_basebackup: runnerHostId=1, extraArgs=[--wal-method=stream]' : '全量可留空；增量配置可填写 incrementalBaseDir 和 extraArgs'"
           />
           <div class="field-tip">物理备份按实例/datadir 级别执行；extraArgs 不允许包含 password/secret。增量备份必须提供上一备份目录 incrementalBaseDir。</div>
-          <div v-if="selectedBackupTaskDbType === 'postgresql'" class="field-tip">PostgreSQL 物理备份是 cluster 级。示例：{"barmanServerId":1}，后续手动/调度触发会下发受控 barman backup Runner 任务。</div>
+          <div v-if="selectedBackupTaskDbType === 'postgresql'" class="field-tip">PostgreSQL 物理备份是 cluster 级。Barman 使用 {"barmanServerId":1}；pg_basebackup 使用 {"runnerHostId":1}，full base backup 会下发受控 SSH Runner 任务。</div>
         </el-form-item>
         <el-form-item label="执行计划">
           <el-input
@@ -4058,7 +4059,7 @@
       @close="resetRestorePlanRunForm"
     >
       <el-alert
-        :title="isPostgreSQLRestoreRun ? 'P3.6 只执行 Barman restore 到 Runner 隔离目录，不启动 PostgreSQL 实例、不覆盖生产库。' : 'P2.7 只恢复到 Runner 主机上的隔离容器，不覆盖生产库、不切换业务连接、不自动回填数据。'"
+        :title="isPostgreSQLRestoreRun ? 'P3.7 可执行 Barman restore 到 Runner 隔离目录，并可启动隔离 PostgreSQL 实例做校验；不会覆盖生产库。' : 'P2.7 只恢复到 Runner 主机上的隔离容器，不覆盖生产库、不切换业务连接、不自动回填数据。'"
         type="warning"
         show-icon
         :closable="false"
@@ -4078,10 +4079,10 @@
             />
           </el-select>
         </el-form-item>
-        <el-row v-if="!isPostgreSQLRestoreRun" :gutter="16">
+        <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="容器镜像">
-              <el-input v-model="restorePlanRunForm.containerImage" placeholder="mysql:8.0 / mysql:8.4 / mariadb:latest" />
+              <el-input v-model="restorePlanRunForm.containerImage" :placeholder="isPostgreSQLRestoreRun ? 'postgres:16 / postgres:15 / postgres:latest' : 'mysql:8.0 / mysql:8.4 / mariadb:latest'" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -4092,12 +4093,17 @@
           </el-col>
         </el-row>
         <el-row v-if="isPostgreSQLRestoreRun" :gutter="16">
-          <el-col :span="8">
+          <el-col :span="6">
+            <el-form-item label="启动实例">
+              <el-switch v-model="restorePlanRunForm.postgresStartInstance" active-text="启动" inactive-text="仅目录" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
             <el-form-item label="目标 Timeline">
               <el-input v-model="restorePlanRunForm.targetTimelineId" placeholder="可选" />
             </el-form-item>
           </el-col>
-          <el-col :span="8">
+          <el-col :span="6">
             <el-form-item label="目标动作">
               <el-select v-model="restorePlanRunForm.targetAction" style="width: 100%;">
                 <el-option label="pause" value="pause" />
@@ -4106,7 +4112,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8">
+          <el-col :span="6">
             <el-form-item label="Get WAL">
               <el-switch v-model="restorePlanRunForm.barmanGetWal" active-text="--get-wal" inactive-text="--no-get-wal" />
             </el-form-item>
@@ -4122,21 +4128,21 @@
             <el-form-item label="失败后清理">
               <el-switch
                 v-model="restorePlanRunForm.cleanupOnFailure"
-                :active-text="isPostgreSQLRestoreRun ? '清理目录' : '清理容器'"
+                :active-text="isPostgreSQLRestoreRun ? '清理目录/容器' : '清理容器'"
                 inactive-text="保留现场"
               />
             </el-form-item>
           </el-col>
         </el-row>
-        <el-form-item v-if="!isPostgreSQLRestoreRun" label="额外校验 SQL">
+        <el-form-item v-if="!isPostgreSQLRestoreRun || restorePlanRunForm.postgresStartInstance !== false" label="额外校验 SQL">
           <el-input
             v-model="restorePlanRunForm.validationSqlText"
             type="textarea"
             :rows="5"
-            placeholder="每行一条，只允许 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN"
+            :placeholder="isPostgreSQLRestoreRun ? '每行一条 PostgreSQL 只读 SQL，例如 SELECT COUNT(*) FROM public.orders' : '每行一条，只允许 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN'"
           />
         </el-form-item>
-        <el-form-item v-if="!isPostgreSQLRestoreRun" label="断言校验">
+        <el-form-item v-if="!isPostgreSQLRestoreRun || restorePlanRunForm.postgresStartInstance !== false" label="断言校验">
           <div class="restore-assertions">
             <div class="restore-assertions-header">
               <span class="field-tip">expectedRows 校验结果行数；expectedScalar 校验首行首列；expectedContains 校验输出中包含固定文本。</span>
@@ -4174,7 +4180,7 @@
         </el-form-item>
         <el-form-item label="风险确认" prop="confirmIsolated">
           <el-checkbox v-model="restorePlanRunForm.confirmIsolated">
-            {{ isPostgreSQLRestoreRun ? '我确认本次只恢复到 Runner 隔离目录，不覆盖生产数据。' : '我确认本次只恢复到隔离库，不覆盖生产数据。' }}
+            {{ isPostgreSQLRestoreRun ? '我确认本次只恢复到 Runner 隔离目录或隔离 PostgreSQL 实例，不覆盖生产数据。' : '我确认本次只恢复到隔离库，不覆盖生产数据。' }}
           </el-checkbox>
         </el-form-item>
       </el-form>
@@ -5411,6 +5417,7 @@ const restorePlanRunForm = reactive<DatabaseRestorePlanRunPayload & { validation
   validationAssertions: [],
   validationSqlText: '',
   cleanupOnFailure: false,
+  postgresStartInstance: true,
   targetTimelineId: '',
   targetAction: 'pause',
   barmanGetWal: true,
@@ -5809,6 +5816,11 @@ const availableBackupTypeOptions = computed(() => {
 
 const availableBackupLevelOptions = computed(() => {
   if (isPhysicalBackupTaskForm.value) {
+    if (selectedBackupTaskDbType.value === 'postgresql' && backupTaskForm.backupEngine === 'pg_basebackup') {
+      return [
+        { label: '全量', value: 'full' }
+      ]
+    }
     return [
       { label: '全量', value: 'full' },
       { label: '增量', value: 'incremental' }
@@ -5834,7 +5846,8 @@ const defaultPhysicalBackupEngine = () => {
 const availablePhysicalBackupEngineOptions = computed(() => {
   if (selectedBackupTaskDbType.value === 'postgresql') {
     return [
-      { label: 'Barman（cluster 级）', value: 'barman' }
+      { label: 'Barman（cluster 级）', value: 'barman' },
+      { label: 'pg_basebackup（轻量原生 full）', value: 'pg_basebackup' }
     ]
   }
   if (selectedBackupTaskDbType.value === 'mariadb') {
@@ -7451,7 +7464,10 @@ const submitRestorePlan = async () => {
 const defaultRestoreImageForPlan = (row?: DatabaseRestorePlanResult) => {
   const source = instances.value.find(item => item.id === row?.sourceInstanceId)
   const version = String(source?.version || '')
-  if (source?.dbType === 'postgresql') return ''
+  if (source?.dbType === 'postgresql') {
+    const match = version.match(/(\d+)/)
+    return match ? `postgres:${match[1]}` : 'postgres:latest'
+  }
   if (source?.dbType === 'mariadb') {
     const versionTag = version.split('-')[0]?.split(' ')[0] || ''
     return versionTag ? `mariadb:${versionTag}` : 'mariadb:latest'
@@ -7484,6 +7500,7 @@ const openRunRestorePlanDialog = (row: DatabaseRestorePlanResult) => {
   restorePlanRunForm.validationSql = []
   restorePlanRunForm.validationAssertions = []
   restorePlanRunForm.cleanupOnFailure = false
+  restorePlanRunForm.postgresStartInstance = true
   restorePlanRunForm.confirmIsolated = false
   restorePlanRunDialogVisible.value = true
 }
@@ -7501,6 +7518,7 @@ const resetRestorePlanRunForm = () => {
   restorePlanRunForm.validationSql = []
   restorePlanRunForm.validationAssertions = []
   restorePlanRunForm.cleanupOnFailure = false
+  restorePlanRunForm.postgresStartInstance = true
   restorePlanRunForm.confirmIsolated = false
   restorePlanRunFormRef.value?.clearValidate()
 }
@@ -7542,11 +7560,12 @@ const submitRunRestorePlan = async () => {
       ))
     const payload: DatabaseRestorePlanRunPayload = {
       runnerHostId: restorePlanRunForm.runnerHostId,
-      containerImage: isPostgreSQLRestoreRun.value ? undefined : (restorePlanRunForm.containerImage || undefined),
-      listenPort: isPostgreSQLRestoreRun.value ? undefined : (restorePlanRunForm.listenPort || undefined),
+      containerImage: (restorePlanRunForm.containerImage || undefined),
+      listenPort: restorePlanRunForm.listenPort || undefined,
       expiresInHours: restorePlanRunForm.expiresInHours || 24,
-      validationSql: isPostgreSQLRestoreRun.value ? [] : validationSql,
-      validationAssertions: isPostgreSQLRestoreRun.value ? [] : validationAssertions,
+      validationSql: (!isPostgreSQLRestoreRun.value || restorePlanRunForm.postgresStartInstance !== false) ? validationSql : [],
+      validationAssertions: (!isPostgreSQLRestoreRun.value || restorePlanRunForm.postgresStartInstance !== false) ? validationAssertions : [],
+      postgresStartInstance: isPostgreSQLRestoreRun.value ? restorePlanRunForm.postgresStartInstance !== false : undefined,
       targetTimelineId: isPostgreSQLRestoreRun.value ? (restorePlanRunForm.targetTimelineId || undefined) : undefined,
       targetAction: isPostgreSQLRestoreRun.value ? (restorePlanRunForm.targetAction || 'pause') : undefined,
       barmanGetWal: isPostgreSQLRestoreRun.value ? restorePlanRunForm.barmanGetWal !== false : undefined,
@@ -9818,6 +9837,11 @@ watch(
 
 watch(
   () => backupTaskForm.backupMethod,
+  () => normalizeBackupTaskFormBackupType()
+)
+
+watch(
+  () => backupTaskForm.backupEngine,
   () => normalizeBackupTaskFormBackupType()
 )
 

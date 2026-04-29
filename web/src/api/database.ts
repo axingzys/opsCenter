@@ -543,6 +543,7 @@ export interface DatabaseRestorePlanRunPayload {
   validationSql?: string[]
   validationAssertions?: DatabaseRestoreValidationAssertionPayload[]
   cleanupOnFailure?: boolean
+  postgresStartInstance?: boolean
   targetTimelineId?: string
   targetAction?: string
   barmanGetWal?: boolean

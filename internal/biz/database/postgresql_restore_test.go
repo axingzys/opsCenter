@@ -71,3 +71,66 @@ func TestBuildBarmanRestoreScriptIsConstrained(t *testing.T) {
 		t.Fatalf("script should pass decimal target timeline to barman:\n%s", script)
 	}
 }
+
+func TestBuildBarmanRestoreScriptCanStartIsolatedPostgreSQLAndValidate(t *testing.T) {
+	expectedRows := 1
+	expectedScalar := "1"
+	script, err := buildBarmanRestoreScript(barmanRestoreScriptInput{
+		RestoreJobID:     12,
+		RestorePlanID:    7,
+		RunnerHostID:     3,
+		WorkRoot:         "/var/lib/opshub/database-runner",
+		ContainerName:    "opshub-pg-restore-12",
+		ContainerImage:   "postgres:16",
+		ListenPort:       25432,
+		DatabaseName:     "postgres",
+		DBUsername:       "postgres",
+		DBPassword:       "secret",
+		BarmanServerName: "pg-main",
+		BackupID:         "20260429T010203",
+		TargetType:       "time",
+		TargetValue:      "2026-04-29 10:00:00",
+		TargetAction:     "pause",
+		GetWAL:           true,
+		StartInstance:    true,
+		ValidationChecks: []restoreValidationCheck{
+			{SQL: "SELECT 1", ExpectedRows: &expectedRows, ExpectedScalar: &expectedScalar},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+	for _, want := range []string{
+		`START_INSTANCE=1`,
+		`"$DOCKER_BIN" run -d --name "$CONTAINER_NAME"`,
+		`-p "127.0.0.1:$LISTEN_PORT:5432"`,
+		`run_pg_validation 1 'SELECT 1' '1' '1' '0' '' '1' '1'`,
+		`OPSHUB_VALIDATION_STATUS=passed`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestParseBarmanRestoreOutputIncludesPostgreSQLValidationAssertions(t *testing.T) {
+	stdout := strings.Join([]string{
+		"OPSHUB_CONTAINER_NAME=opshub-pg-restore-12",
+		"OPSHUB_CONTAINER_IMAGE=postgres:16",
+		"OPSHUB_LISTEN_HOST=127.0.0.1",
+		"OPSHUB_LISTEN_PORT=25432",
+		"OPSHUB_VALIDATION_STATUS=passed",
+		"OPSHUB_RECOVERY_SUMMARY=t|0/3000000",
+		"OPSHUB_RESTORE_VALIDATION=1|success|abcdef|MQo=|passed|1|MQ==|",
+	}, "\n")
+	result := parseBarmanRestoreOutput(stdout)
+	if result.ContainerName != "opshub-pg-restore-12" || result.ListenPort != 25432 {
+		t.Fatalf("container metadata not parsed: %+v", result)
+	}
+	if result.ValidationStatus != "passed" || len(result.ValidationResults) != 1 {
+		t.Fatalf("validation not parsed: %+v", result)
+	}
+	if result.ValidationResults[0].AssertionStatus != "passed" || result.ValidationResults[0].ActualScalar != "1" {
+		t.Fatalf("assertion metadata not parsed: %+v", result.ValidationResults[0])
+	}
+}

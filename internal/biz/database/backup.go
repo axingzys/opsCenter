@@ -156,6 +156,9 @@ func (uc *UseCase) RunBackupTask(ctx context.Context, id uint, operator QueryOpe
 	if vo, handled, err := uc.runBarmanBackupTaskIfNeeded(ctx, id, operator, DatabaseBackupTriggerManual); handled || err != nil {
 		return vo, err
 	}
+	if vo, handled, err := uc.runPgBaseBackupTaskIfNeeded(ctx, id, operator, DatabaseBackupTriggerManual); handled || err != nil {
+		return vo, err
+	}
 	run, err := uc.prepareBackupTaskRun(ctx, id, operator, DatabaseBackupTriggerManual)
 	if err != nil {
 		return nil, err
@@ -404,22 +407,46 @@ func (uc *UseCase) validateBackupTaskRequest(ctx context.Context, req *DatabaseB
 				return err
 			}
 		case DBTypePostgreSQL:
-			if strings.TrimSpace(req.BackupEngine) != "barman" {
-				return fmt.Errorf("PostgreSQL 物理备份第一版仅支持 Barman")
-			}
 			if normalizeBackupScope(req.BackupScope) != "cluster" {
 				return fmt.Errorf("PostgreSQL 物理备份必须是 cluster 级")
 			}
-			serverID, err := barmanServerIDFromBackupTask(&DatabaseBackupTask{ScopeConfig: req.ScopeConfig})
-			if err != nil {
-				return err
-			}
-			if uc.barmanServerRepo == nil {
-				return fmt.Errorf("Barman Server 仓库未配置")
-			}
-			server, err := uc.barmanServerRepo.GetByID(ctx, serverID)
-			if err != nil || server == nil || server.SourceInstanceID != req.InstanceID {
-				return fmt.Errorf("Barman Server 不存在或不属于当前 PostgreSQL 实例")
+			engine := normalizePostgreSQLPhysicalBackupEngine(req.BackupEngine)
+			switch engine {
+			case "barman":
+				serverID, err := barmanServerIDFromBackupTask(&DatabaseBackupTask{ScopeConfig: req.ScopeConfig})
+				if err != nil {
+					return err
+				}
+				if uc.barmanServerRepo == nil {
+					return fmt.Errorf("Barman Server 仓库未配置")
+				}
+				server, err := uc.barmanServerRepo.GetByID(ctx, serverID)
+				if err != nil || server == nil || server.SourceInstanceID != req.InstanceID {
+					return fmt.Errorf("Barman Server 不存在或不属于当前 PostgreSQL 实例")
+				}
+			case BackupEnginePgBaseBackup:
+				if normalizeBackupLevel(req.BackupLevel) != DatabaseBackupLevelFull {
+					return fmt.Errorf("pg_basebackup 执行任务第一版仅支持 full base backup；增量备份可通过外部记录登记纳管")
+				}
+				scope, err := parsePgBaseBackupScopeConfig(req.ScopeConfig)
+				if err != nil {
+					return err
+				}
+				if scope.RunnerHostID == 0 {
+					return fmt.Errorf("pg_basebackup 需要在范围配置中提供 {\"runnerHostId\": 1}")
+				}
+				if uc.runnerHostRepo == nil {
+					return fmt.Errorf("Runner 主机仓库未配置")
+				}
+				host, err := uc.runnerHostRepo.GetByID(ctx, scope.RunnerHostID)
+				if err != nil || host == nil {
+					return fmt.Errorf("Runner 主机不存在")
+				}
+				if err := validateBarmanRunnerHost(host); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("PostgreSQL 物理备份仅支持 Barman 或 pg_basebackup")
 			}
 		default:
 			return fmt.Errorf("%s 暂不支持物理备份任务", DBTypeText(instance.DBType))
@@ -901,10 +928,7 @@ func normalizeBackupTypeForMethod(backupType, method string) string {
 func normalizeBackupEngineForInstance(value, method string, instance *DatabaseInstance) string {
 	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
 		if instance != nil && normalizeDBType(instance.DBType) == DBTypePostgreSQL {
-			if strings.TrimSpace(value) == "" {
-				return "barman"
-			}
-			return trimText(strings.TrimSpace(value), 60)
+			return normalizePostgreSQLPhysicalBackupEngine(value)
 		}
 		dbType := ""
 		version := ""
@@ -915,6 +939,20 @@ func normalizeBackupEngineForInstance(value, method string, instance *DatabaseIn
 		return normalizeMySQLPhysicalBackupEngine(value, dbType, version)
 	}
 	return normalizeBackupEngine(value, method)
+}
+
+func normalizePostgreSQLPhysicalBackupEngine(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, ".", "_")
+	switch value {
+	case "", "barman":
+		return "barman"
+	case "pg_basebackup", "pgbasebackup":
+		return BackupEnginePgBaseBackup
+	default:
+		return trimText(value, 60)
+	}
 }
 
 func normalizeBackupScopeForMethod(value, method string) string {

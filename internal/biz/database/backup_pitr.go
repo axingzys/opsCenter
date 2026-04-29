@@ -1182,7 +1182,7 @@ func (uc *UseCase) createPostgreSQLRestorePlan(ctx context.Context, req *Databas
 	if err != nil {
 		return nil, err
 	}
-	base := selectPostgreSQLBarmanBaseRecord(records, restoreTarget)
+	base := selectPostgreSQLPhysicalBaseRecord(records, restoreTarget)
 	result := uc.validatePostgreSQLRestorePlan(ctx, source, records, base, restoreTarget)
 	finishedAt := time.Now()
 	mode := strings.TrimSpace(req.RestoreMode)
@@ -1264,6 +1264,25 @@ func normalizePostgreSQLRestoreTarget(targetType, value, timelineID string) (pos
 	}
 }
 
+func selectPostgreSQLPhysicalBaseRecord(records []*DatabaseBackupRecord, target postgreSQLRestoreTarget) *DatabaseBackupRecord {
+	for _, item := range records {
+		if !isPostgreSQLPhysicalBaseRecord(item) {
+			continue
+		}
+		if target.Type != "lsn" {
+			return item
+		}
+		if lsnText := strings.TrimSpace(item.EndLSN); lsnText != "" {
+			if endLSN, err := pgwal.ParseLSN(lsnText); err == nil && endLSN <= target.LSN {
+				return item
+			}
+			continue
+		}
+		return item
+	}
+	return nil
+}
+
 func selectPostgreSQLBarmanBaseRecord(records []*DatabaseBackupRecord, target postgreSQLRestoreTarget) *DatabaseBackupRecord {
 	for _, item := range records {
 		if !isPostgreSQLBarmanBaseRecord(item) {
@@ -1283,11 +1302,27 @@ func selectPostgreSQLBarmanBaseRecord(records []*DatabaseBackupRecord, target po
 	return nil
 }
 
+func isPostgreSQLPhysicalBaseRecord(item *DatabaseBackupRecord) bool {
+	if item == nil ||
+		normalizeBackupMethod(item.BackupMethod) != DatabaseBackupMethodPhysical ||
+		normalizeBackupLevel(item.BackupLevel) != DatabaseBackupLevelFull {
+		return false
+	}
+	switch normalizePostgreSQLPhysicalBackupEngine(item.BackupEngine) {
+	case "barman":
+		return strings.TrimSpace(item.ExternalBackupID) != ""
+	case BackupEnginePgBaseBackup:
+		return strings.TrimSpace(item.StorageURI) != "" || strings.TrimSpace(item.FilePath) != ""
+	default:
+		return false
+	}
+}
+
 func isPostgreSQLBarmanBaseRecord(item *DatabaseBackupRecord) bool {
 	return item != nil &&
 		normalizeBackupMethod(item.BackupMethod) == DatabaseBackupMethodPhysical &&
 		normalizeBackupLevel(item.BackupLevel) == DatabaseBackupLevelFull &&
-		strings.EqualFold(strings.TrimSpace(item.BackupEngine), "barman") &&
+		normalizePostgreSQLPhysicalBackupEngine(item.BackupEngine) == "barman" &&
 		strings.TrimSpace(item.ExternalBackupID) != ""
 }
 
@@ -1306,13 +1341,17 @@ func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *
 		result.TargetLSN = target.Value
 	}
 	if base == nil {
-		result.Messages = append(result.Messages, "未找到目标点之前可用的 PostgreSQL Barman full backup")
+		result.Messages = append(result.Messages, "未找到目标点之前可用的 PostgreSQL 物理 full backup")
 		return result
 	}
 	result.BaseRecordID = base.ID
 	result.BackupRecordIDs = []uint{base.ID}
+	targetTime := time.Now().AddDate(100, 0, 0)
+	if target.Time != nil {
+		targetTime = *target.Time
+	}
+	result.BackupChainStatus = validateIncrementalBackupChain(records, base, targetTime, &result.BackupRecordIDs, &result.Messages)
 	result.BackupProofs = buildSelectedBackupProofs(records, result.BackupRecordIDs)
-	result.BackupChainStatus = DatabaseBackupChainStatusComplete
 	result.StorageStatus = storageStatusForBackupRecord(base)
 	result.ToolStatus = toolStatusForBackupRecord(base)
 	if result.StorageStatus != DatabaseStorageStatusAvailable {
@@ -1321,17 +1360,31 @@ func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *
 	if result.ToolStatus != DatabaseToolStatusCompatible {
 		result.Messages = append(result.Messages, ToolStatusText(result.ToolStatus))
 	}
-	server, serverErr := uc.findBarmanServerForBackup(ctx, base)
-	if serverErr != nil {
-		result.ToolStatus = DatabaseToolStatusMissingTool
-		result.Messages = append(result.Messages, serverErr.Error())
-	} else if server != nil {
-		result.RunnerHostID = server.RunnerHostID
-		result.BarmanServerID = server.ID
-		result.BarmanServerName = server.BarmanServerName
-		if strings.TrimSpace(server.LastCheckStatus) == DatabaseRunnerJobStatusFailed {
-			result.ToolStatus = DatabaseToolStatusIncompatibleVersion
-			result.Messages = append(result.Messages, "Barman Server 最近检查失败，请先执行 Barman 检查")
+	backupEngine := normalizePostgreSQLPhysicalBackupEngine(base.BackupEngine)
+	var server *DatabaseBarmanServer
+	switch backupEngine {
+	case "barman":
+		server, serverErr := uc.findBarmanServerForBackup(ctx, base)
+		if serverErr != nil {
+			result.ToolStatus = DatabaseToolStatusMissingTool
+			result.Messages = append(result.Messages, serverErr.Error())
+		} else if server != nil {
+			result.RunnerHostID = server.RunnerHostID
+			result.BarmanServerID = server.ID
+			result.BarmanServerName = server.BarmanServerName
+			if strings.TrimSpace(server.LastCheckStatus) == DatabaseRunnerJobStatusFailed {
+				result.ToolStatus = DatabaseToolStatusIncompatibleVersion
+				result.Messages = append(result.Messages, "Barman Server 最近检查失败，请先执行 Barman 检查")
+			}
+		}
+	case BackupEnginePgBaseBackup:
+		if runnerHostID := runnerHostIDFromRunnerStorageURI(base.StorageURI); runnerHostID > 0 {
+			result.RunnerHostID = runnerHostID
+		} else if runnerHostID := runnerHostIDFromRunnerStorageURI(base.FilePath); runnerHostID > 0 {
+			result.RunnerHostID = runnerHostID
+		} else {
+			result.ToolStatus = DatabaseToolStatusMissingTool
+			result.Messages = append(result.Messages, "pg_basebackup 记录未包含 runner://runner-host-N 存储 URI，恢复执行前需登记 Runner 可读 artifact")
 		}
 	}
 	serverSystemID := ""
@@ -1358,7 +1411,11 @@ func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *
 		result.Messages = append(result.Messages, "读取 PostgreSQL WAL catalog 失败: "+err.Error())
 		return finalizePostgreSQLRestoreValidation(result)
 	}
-	logs = filterPostgreSQLWALArchives(logs, expectedSystemID, expectedTimeline, base.ExternalServerName)
+	externalServerName := ""
+	if backupEngine == "barman" {
+		externalServerName = base.ExternalServerName
+	}
+	logs = filterPostgreSQLWALArchives(logs, expectedSystemID, expectedTimeline, externalServerName)
 	if expectedSystemID != "" {
 		for _, item := range logs {
 			if item == nil || strings.TrimSpace(item.PGSystemIdentifier) == "" {
@@ -1416,14 +1473,42 @@ func finalizePostgreSQLRestoreValidation(result *restorePlanValidationResult) *r
 		result.StorageStatus == DatabaseStorageStatusAvailable &&
 		result.ToolStatus == DatabaseToolStatusCompatible {
 		result.ValidationStatus = DatabasePlanValidationPassed
-		result.Messages = append(result.Messages, "PostgreSQL Barman PITR 恢复计划预校验通过，可下发 barman restore 到隔离目录")
+		if postgreSQLPlanBackupEngine(result) == BackupEnginePgBaseBackup {
+			result.Messages = append(result.Messages, "PostgreSQL pg_basebackup PITR 恢复计划预校验通过，可作为后续隔离恢复 Runner 输入")
+		} else {
+			result.Messages = append(result.Messages, "PostgreSQL Barman PITR 恢复计划预校验通过，可下发 barman restore 到隔离目录或隔离实例")
+		}
 		return result
 	}
 	result.ValidationStatus = DatabasePlanValidationFailed
 	if len(result.Messages) == 0 {
-		result.Messages = append(result.Messages, "PostgreSQL Barman PITR 恢复计划预校验未通过")
+		result.Messages = append(result.Messages, "PostgreSQL PITR 恢复计划预校验未通过")
 	}
 	return result
+}
+
+func postgreSQLPlanBackupEngine(result *restorePlanValidationResult) string {
+	if result == nil || len(result.BackupProofs) == 0 {
+		return "barman"
+	}
+	return normalizePostgreSQLPhysicalBackupEngine(result.BackupProofs[0].BackupEngine)
+}
+
+func runnerHostIDFromRunnerStorageURI(value string) uint {
+	value = strings.TrimSpace(value)
+	const prefix = "runner://runner-host-"
+	if !strings.HasPrefix(value, prefix) {
+		return 0
+	}
+	rest := strings.TrimPrefix(value, prefix)
+	if idx := strings.Index(rest, "/"); idx >= 0 {
+		rest = rest[:idx]
+	}
+	id, err := strconv.ParseUint(rest, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return uint(id)
 }
 
 func (uc *UseCase) findBarmanServerForBackup(ctx context.Context, base *DatabaseBackupRecord) (*DatabaseBarmanServer, error) {
@@ -1849,6 +1934,7 @@ func buildPostgreSQLRestorePlanJSON(source *DatabaseInstance, result *restorePla
 	if result == nil {
 		return "{}"
 	}
+	backupEngine := postgreSQLPlanBackupEngine(result)
 	var base any
 	incrementals := []restoreProofBackup{}
 	if len(result.BackupProofs) > 0 {
@@ -1857,9 +1943,19 @@ func buildPostgreSQLRestorePlanJSON(source *DatabaseInstance, result *restorePla
 			incrementals = result.BackupProofs[1:]
 		}
 	}
+	requiredTools := []string{"barman", "docker", "psql"}
+	restoreSteps := []string{"barman restore", "start isolated PostgreSQL container", "run validation SQL", "generate proof"}
+	if backupEngine == BackupEnginePgBaseBackup {
+		requiredTools = []string{"pg_basebackup"}
+		restoreSteps = []string{"restore pg_basebackup artifact to isolated directory", "apply WAL to target", "generate proof"}
+		if len(incrementals) > 0 {
+			requiredTools = append(requiredTools, "pg_combinebackup")
+			restoreSteps = append([]string{"pg_combinebackup synthetic full"}, restoreSteps...)
+		}
+	}
 	payload := map[string]any{
 		"engine":       DBTypePostgreSQL,
-		"backupEngine": "barman",
+		"backupEngine": backupEngine,
 		"backupScope":  "cluster",
 		"restoreMode":  mode,
 		"sourceInstanceId": func() uint {
@@ -1893,8 +1989,8 @@ func buildPostgreSQLRestorePlanJSON(source *DatabaseInstance, result *restorePla
 			"tool":             result.ToolStatus,
 			"validationStatus": result.ValidationStatus,
 		},
-		"requiredTools": []string{"barman"},
-		"restoreSteps":  []string{"barman restore", "check restored PGDATA directory", "generate proof"},
+		"requiredTools": requiredTools,
+		"restoreSteps":  restoreSteps,
 		"messages":      result.Messages,
 	}
 	return marshalBackupPlanJSON(payload)
@@ -1915,6 +2011,7 @@ func buildPostgreSQLRestoreProofJSON(source, targetInstance *DatabaseInstance, r
 		"restoreTargetValue": target.Value,
 		"targetTimelineId":   result.TargetTimelineID,
 		"targetLsn":          result.TargetLSN,
+		"backupEngine":       postgreSQLPlanBackupEngine(result),
 		"validationStatus":   result.ValidationStatus,
 		"backupChainStatus":  result.BackupChainStatus,
 		"logChainStatus":     result.LogChainStatus,
@@ -1924,6 +2021,7 @@ func buildPostgreSQLRestoreProofJSON(source, targetInstance *DatabaseInstance, r
 		"barmanServerName":   result.BarmanServerName,
 		"runnerHostId":       result.RunnerHostID,
 		"baseBackup":         nil,
+		"incrementalChain":   []restoreProofBackup{},
 		"walArchiveRange":    result.LogProofs,
 		"validationSql":      result.ValidationSQL,
 		"operatorId":         operator.ID,
@@ -1940,6 +2038,9 @@ func buildPostgreSQLRestoreProofJSON(source, targetInstance *DatabaseInstance, r
 	}
 	if len(result.BackupProofs) > 0 {
 		proof["baseBackup"] = result.BackupProofs[0]
+		if len(result.BackupProofs) > 1 {
+			proof["incrementalChain"] = result.BackupProofs[1:]
+		}
 	}
 	return marshalBackupPlanJSON(proof)
 }
@@ -1983,7 +2084,17 @@ func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanV
 		tools = append(tools, map[string]any{"name": "mysqlbinlog", "requiredBy": "pitr_log_replay"})
 		tools = append(tools, map[string]any{"name": "mysql", "requiredBy": "validation_sql"})
 	} else if engine == DBTypePostgreSQL {
-		tools = append(tools, map[string]any{"name": "barman", "requiredBy": "barman_restore"})
+		backupEngine := postgreSQLPlanBackupEngine(result)
+		if backupEngine == BackupEnginePgBaseBackup {
+			tools = append(tools, map[string]any{"name": "pg_basebackup", "requiredBy": "physical_backup"})
+			if len(result.BackupProofs) > 1 {
+				tools = append(tools, map[string]any{"name": "pg_combinebackup", "requiredBy": "incremental_combine"})
+			}
+		} else {
+			tools = append(tools, map[string]any{"name": "barman", "requiredBy": "barman_restore"})
+			tools = append(tools, map[string]any{"name": "docker", "requiredBy": "isolated_postgresql"})
+			tools = append(tools, map[string]any{"name": "psql", "requiredBy": "validation_sql"})
+		}
 	}
 	data, _ := json.Marshal(tools)
 	return string(data)
@@ -2103,6 +2214,9 @@ func validateIncrementalBackupChain(records []*DatabaseBackupRecord, base *Datab
 			continue
 		}
 		if normalizeBackupMethod(item.BackupMethod) != normalizeBackupMethod(base.BackupMethod) {
+			continue
+		}
+		if strings.TrimSpace(item.BackupEngine) != "" && strings.TrimSpace(base.BackupEngine) != "" && !strings.EqualFold(strings.TrimSpace(item.BackupEngine), strings.TrimSpace(base.BackupEngine)) {
 			continue
 		}
 		if normalizeBackupLevel(item.BackupLevel) != DatabaseBackupLevelIncremental {
