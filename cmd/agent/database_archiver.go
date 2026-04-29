@@ -42,6 +42,8 @@ const (
 	defaultDatabaseArchiverMaxConcurrent   = 2
 	defaultDatabaseArchiverBackoffSeconds  = 30
 	defaultDatabaseArchiverMaxBackoffSec   = 300
+	defaultDatabaseArchiverLogMaxBytes     = 10 * 1024 * 1024
+	defaultDatabaseArchiverLogMaxFiles     = 5
 )
 
 type databaseArchiverConfig struct {
@@ -55,6 +57,9 @@ type databaseArchiverConfig struct {
 	MaxConcurrentStreams     int                          `json:"maxConcurrentStreams"`
 	FailureBackoffSeconds    int                          `json:"failureBackoffSeconds"`
 	MaxFailureBackoffSeconds int                          `json:"maxFailureBackoffSeconds"`
+	StopNeverEnabled         bool                         `json:"stopNeverEnabled"`
+	StreamingLogMaxBytes     int64                        `json:"streamingLogMaxBytes"`
+	StreamingLogMaxFiles     int                          `json:"streamingLogMaxFiles"`
 	IncludeCurrent           bool                         `json:"includeCurrent"`
 	WorkDir                  string                       `json:"workDir"`
 	StorageRoot              string                       `json:"storageRoot"`
@@ -98,6 +103,9 @@ type resolvedDatabaseArchiverConfig struct {
 	MaxConcurrentStreams int
 	FailureBackoff       time.Duration
 	MaxFailureBackoff    time.Duration
+	StopNeverEnabled     bool
+	StreamingLogMaxBytes int64
+	StreamingLogMaxFiles int
 	IncludeCurrent       bool
 	WorkDir              string
 	StorageRoot          string
@@ -255,6 +263,48 @@ type agentSpoolResult struct {
 	Reused     bool
 }
 
+type agentStreamingProcess struct {
+	StreamID     uint
+	ActiveFile   string
+	PID          int
+	process      *os.Process
+	OutputDir    string
+	StdoutLog    string
+	StderrLog    string
+	StartedAt    time.Time
+	RestartCount int
+	Command      string
+	cancel       context.CancelFunc
+	done         chan error
+	expectedStop bool
+}
+
+type agentStreamingProcessExit struct {
+	StreamID     uint
+	ActiveFile   string
+	PID          int
+	StartedAt    time.Time
+	RestartCount int
+	OutputDir    string
+	StdoutLog    string
+	StderrLog    string
+	Err          error
+	ExpectedStop bool
+}
+
+type agentStreamingProcessStatus struct {
+	Running      bool
+	Started      bool
+	PID          int
+	ActiveFile   string
+	OutputDir    string
+	StdoutLog    string
+	StderrLog    string
+	StartedAt    time.Time
+	RestartCount int
+	Exit         *agentStreamingProcessExit
+}
+
 type agentBinlogPurgeGapError struct {
 	LastArchived   string
 	FirstAvailable string
@@ -336,6 +386,26 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 	if maxBackoffSeconds > 3600 {
 		maxBackoffSeconds = 3600
 	}
+	streamingLogMaxBytes := raw.StreamingLogMaxBytes
+	if streamingLogMaxBytes <= 0 {
+		streamingLogMaxBytes = defaultDatabaseArchiverLogMaxBytes
+	}
+	if streamingLogMaxBytes < 1024*1024 {
+		streamingLogMaxBytes = 1024 * 1024
+	}
+	if streamingLogMaxBytes > 1024*1024*1024 {
+		streamingLogMaxBytes = 1024 * 1024 * 1024
+	}
+	streamingLogMaxFiles := raw.StreamingLogMaxFiles
+	if streamingLogMaxFiles <= 0 {
+		streamingLogMaxFiles = defaultDatabaseArchiverLogMaxFiles
+	}
+	if streamingLogMaxFiles < 1 {
+		streamingLogMaxFiles = 1
+	}
+	if streamingLogMaxFiles > 50 {
+		streamingLogMaxFiles = 50
+	}
 	workDir := strings.TrimSpace(raw.WorkDir)
 	if workDir == "" {
 		workDir = defaultDatabaseArchiverWorkDir
@@ -361,6 +431,9 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 		MaxConcurrentStreams: maxConcurrent,
 		FailureBackoff:       time.Duration(backoffSeconds) * time.Second,
 		MaxFailureBackoff:    time.Duration(maxBackoffSeconds) * time.Second,
+		StopNeverEnabled:     raw.StopNeverEnabled,
+		StreamingLogMaxBytes: streamingLogMaxBytes,
+		StreamingLogMaxFiles: streamingLogMaxFiles,
 		IncludeCurrent:       raw.IncludeCurrent,
 		WorkDir:              workDir,
 		StorageRoot:          storageRoot,
@@ -445,6 +518,7 @@ func trimKnownAgentPath(value string) string {
 
 func (a *agentApp) runDatabaseArchiver(ctx context.Context, cfg *resolvedDatabaseArchiverConfig) {
 	log.Printf("database binlog archiver started: runner=%s interval=%s endpoint=%s", cfg.RunnerID, cfg.Interval, cfg.EndpointBaseURL)
+	defer a.stopAllDatabaseArchiverStreamingProcesses(context.Background(), cfg, "agent stopped")
 	a.runDatabaseArchiverOnce(ctx, cfg)
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
@@ -462,13 +536,22 @@ func (a *agentApp) runDatabaseArchiver(ctx context.Context, cfg *resolvedDatabas
 func (a *agentApp) runDatabaseArchiverOnce(ctx context.Context, cfg *resolvedDatabaseArchiverConfig) {
 	if err := a.databaseArchiverHeartbeat(ctx, cfg, "online", "", 0); err != nil {
 		log.Printf("database archiver heartbeat failed: %v", err)
+		a.stopAllDatabaseArchiverStreamingProcesses(ctx, cfg, "heartbeat failed")
 		return
 	}
 	streams, err := a.databaseArchiverListStreams(ctx, cfg)
 	if err != nil {
 		log.Printf("database archiver list streams failed: %v", err)
+		a.stopAllDatabaseArchiverStreamingProcesses(ctx, cfg, "list streams failed")
 		return
 	}
+	activeStreamIDs := map[uint]bool{}
+	for _, stream := range streams.Streams {
+		if stream.Stream.ID > 0 {
+			activeStreamIDs[stream.Stream.ID] = true
+		}
+	}
+	a.stopDatabaseArchiverStreamingProcessesNotIn(ctx, cfg, activeStreamIDs, "stream no longer assigned to this runner")
 	running := 0
 	var wg sync.WaitGroup
 	maxConcurrent := cfg.MaxConcurrentStreams
@@ -565,6 +648,274 @@ func (a *agentApp) databaseArchiverMarkSuccess(streamID uint) {
 	defer a.databaseArchiverBackoffMu.Unlock()
 	delete(a.databaseArchiverFailures, streamID)
 	delete(a.databaseArchiverBackoffUntil, streamID)
+}
+
+func (a *agentApp) ensureDatabaseArchiverStreamingProcess(
+	ctx context.Context,
+	cfg *resolvedDatabaseArchiverConfig,
+	item databaseArchiverAssignedStream,
+	credential databaseArchiverCredential,
+	tool string,
+	activeFile string,
+) (agentStreamingProcessStatus, error) {
+	status := agentStreamingProcessStatus{}
+	if exit := a.collectDatabaseArchiverStreamingExit(item.Stream.ID); exit != nil {
+		status.Exit = exit
+	}
+	if !isSafeAgentBinlogFileName(activeFile) {
+		return status, fmt.Errorf("binlog 文件名不合法: %s", activeFile)
+	}
+	if running := a.databaseArchiverStreamingProcessStatus(item.Stream.ID); running.Running {
+		running.Exit = status.Exit
+		return running, nil
+	}
+	started, err := a.startDatabaseArchiverStreamingProcess(ctx, cfg, item, credential, tool, activeFile)
+	started.Exit = status.Exit
+	if err != nil {
+		return started, err
+	}
+	return started, nil
+}
+
+func (a *agentApp) databaseArchiverStreamingProcessStatus(streamID uint) agentStreamingProcessStatus {
+	a.databaseArchiverProcessMu.Lock()
+	defer a.databaseArchiverProcessMu.Unlock()
+	if a.databaseArchiverProcesses == nil {
+		return agentStreamingProcessStatus{}
+	}
+	proc := a.databaseArchiverProcesses[streamID]
+	if proc == nil {
+		return agentStreamingProcessStatus{}
+	}
+	return agentStreamingProcessStatus{
+		Running:      true,
+		PID:          proc.PID,
+		ActiveFile:   proc.ActiveFile,
+		OutputDir:    proc.OutputDir,
+		StdoutLog:    proc.StdoutLog,
+		StderrLog:    proc.StderrLog,
+		StartedAt:    proc.StartedAt,
+		RestartCount: proc.RestartCount,
+	}
+}
+
+func (a *agentApp) collectDatabaseArchiverStreamingExit(streamID uint) *agentStreamingProcessExit {
+	a.databaseArchiverProcessMu.Lock()
+	defer a.databaseArchiverProcessMu.Unlock()
+	if a.databaseArchiverProcesses == nil {
+		return nil
+	}
+	proc := a.databaseArchiverProcesses[streamID]
+	if proc == nil || proc.done == nil {
+		return nil
+	}
+	select {
+	case err := <-proc.done:
+		delete(a.databaseArchiverProcesses, streamID)
+		return &agentStreamingProcessExit{
+			StreamID:     proc.StreamID,
+			ActiveFile:   proc.ActiveFile,
+			PID:          proc.PID,
+			StartedAt:    proc.StartedAt,
+			RestartCount: proc.RestartCount,
+			OutputDir:    proc.OutputDir,
+			StdoutLog:    proc.StdoutLog,
+			StderrLog:    proc.StderrLog,
+			Err:          err,
+			ExpectedStop: proc.expectedStop,
+		}
+	default:
+		return nil
+	}
+}
+
+func (a *agentApp) startDatabaseArchiverStreamingProcess(
+	ctx context.Context,
+	cfg *resolvedDatabaseArchiverConfig,
+	item databaseArchiverAssignedStream,
+	credential databaseArchiverCredential,
+	tool string,
+	activeFile string,
+) (agentStreamingProcessStatus, error) {
+	outputDir := agentBinlogStreamingSpoolDir(cfg, item)
+	logDir := agentBinlogProcessLogDir(cfg, item)
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return agentStreamingProcessStatus{}, err
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return agentStreamingProcessStatus{}, err
+	}
+	defaultsFile, err := writeAgentMySQLDefaultsFile(cfg.WorkDir, item.SourceInstance, credential)
+	if err != nil {
+		return agentStreamingProcessStatus{}, err
+	}
+	stdoutPath := filepath.Join(logDir, "mysqlbinlog.stdout.log")
+	stderrPath := filepath.Join(logDir, "mysqlbinlog.stderr.log")
+	stdoutLog, err := newAgentRollingLogWriter(stdoutPath, cfg.StreamingLogMaxBytes, cfg.StreamingLogMaxFiles)
+	if err != nil {
+		_ = os.Remove(defaultsFile)
+		return agentStreamingProcessStatus{}, err
+	}
+	stderrLog, err := newAgentRollingLogWriter(stderrPath, cfg.StreamingLogMaxBytes, cfg.StreamingLogMaxFiles)
+	if err != nil {
+		_ = stdoutLog.Close()
+		_ = os.Remove(defaultsFile)
+		return agentStreamingProcessStatus{}, err
+	}
+	processCtx, cancel := context.WithCancel(ctx)
+	args := []string{
+		"--defaults-extra-file=" + defaultsFile,
+		"--read-from-remote-server",
+		"--raw",
+		"--stop-never",
+		"--result-file=" + ensureTrailingPathSeparator(outputDir),
+		activeFile,
+	}
+	cmd := exec.CommandContext(processCtx, tool, args...)
+	cmd.Stdout = stdoutLog
+	cmd.Stderr = stderrLog
+	if err := cmd.Start(); err != nil {
+		cancel()
+		_ = stdoutLog.Close()
+		_ = stderrLog.Close()
+		_ = os.Remove(defaultsFile)
+		return agentStreamingProcessStatus{}, fmt.Errorf("启动 mysqlbinlog --stop-never 失败: %w", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		_ = stdoutLog.Close()
+		_ = stderrLog.Close()
+		_ = os.Remove(defaultsFile)
+		done <- err
+	}()
+	a.databaseArchiverProcessMu.Lock()
+	if a.databaseArchiverProcesses == nil {
+		a.databaseArchiverProcesses = map[uint]*agentStreamingProcess{}
+	}
+	if a.databaseArchiverProcessStarts == nil {
+		a.databaseArchiverProcessStarts = map[uint]int{}
+	}
+	restartCount := a.databaseArchiverProcessStarts[item.Stream.ID]
+	a.databaseArchiverProcessStarts[item.Stream.ID] = restartCount + 1
+	proc := &agentStreamingProcess{
+		StreamID:     item.Stream.ID,
+		ActiveFile:   activeFile,
+		PID:          cmd.Process.Pid,
+		process:      cmd.Process,
+		OutputDir:    outputDir,
+		StdoutLog:    stdoutPath,
+		StderrLog:    stderrPath,
+		StartedAt:    time.Now(),
+		RestartCount: restartCount,
+		Command:      strings.Join(append([]string{filepath.Base(tool)}, args[1:]...), " "),
+		cancel:       cancel,
+		done:         done,
+	}
+	a.databaseArchiverProcesses[item.Stream.ID] = proc
+	a.databaseArchiverProcessMu.Unlock()
+	return agentStreamingProcessStatus{
+		Running:      true,
+		Started:      true,
+		PID:          proc.PID,
+		ActiveFile:   proc.ActiveFile,
+		OutputDir:    proc.OutputDir,
+		StdoutLog:    proc.StdoutLog,
+		StderrLog:    proc.StderrLog,
+		StartedAt:    proc.StartedAt,
+		RestartCount: proc.RestartCount,
+	}, nil
+}
+
+func (a *agentApp) stopDatabaseArchiverStreamingProcessesNotIn(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, active map[uint]bool, reason string) {
+	for _, streamID := range a.databaseArchiverStreamingProcessIDs() {
+		if !active[streamID] {
+			a.stopDatabaseArchiverStreamingProcess(ctx, cfg, streamID, reason)
+		}
+	}
+}
+
+func (a *agentApp) stopAllDatabaseArchiverStreamingProcesses(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, reason string) {
+	for _, streamID := range a.databaseArchiverStreamingProcessIDs() {
+		a.stopDatabaseArchiverStreamingProcess(ctx, cfg, streamID, reason)
+	}
+}
+
+func (a *agentApp) databaseArchiverStreamingProcessIDs() []uint {
+	a.databaseArchiverProcessMu.Lock()
+	defer a.databaseArchiverProcessMu.Unlock()
+	ids := make([]uint, 0, len(a.databaseArchiverProcesses))
+	for id := range a.databaseArchiverProcesses {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (a *agentApp) stopDatabaseArchiverStreamingProcess(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, streamID uint, reason string) {
+	proc := a.detachDatabaseArchiverStreamingProcess(streamID)
+	if proc == nil {
+		return
+	}
+	proc.expectedStop = true
+	if proc.cancel != nil {
+		proc.cancel()
+	}
+	var waitErr error
+	timedOut := false
+	select {
+	case waitErr = <-proc.done:
+	case <-time.After(10 * time.Second):
+		if proc.process != nil {
+			_ = proc.process.Kill()
+		}
+		select {
+		case waitErr = <-proc.done:
+		case <-time.After(5 * time.Second):
+			waitErr = errors.New("停止 mysqlbinlog --stop-never 进程超时")
+			timedOut = true
+		}
+	}
+	level := "info"
+	message := "mysqlbinlog --stop-never 进程已停止"
+	if strings.TrimSpace(reason) != "" {
+		message += ": " + strings.TrimSpace(reason)
+	}
+	if timedOut && waitErr != nil {
+		level = "warning"
+	}
+	item := databaseArchiverAssignedStream{Stream: databaseArchiverStream{ID: streamID}}
+	_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+		EventType:  "agent_message",
+		Level:      level,
+		Message:    message,
+		ActiveFile: proc.ActiveFile,
+		PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
+			"pid":          proc.PID,
+			"activeFile":   proc.ActiveFile,
+			"outputDir":    proc.OutputDir,
+			"stdoutLog":    proc.StdoutLog,
+			"stderrLog":    proc.StderrLog,
+			"startedAt":    proc.StartedAt.Format(time.RFC3339),
+			"restartCount": proc.RestartCount,
+			"reason":       strings.TrimSpace(reason),
+		}),
+		OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
+	})
+}
+
+func (a *agentApp) detachDatabaseArchiverStreamingProcess(streamID uint) *agentStreamingProcess {
+	a.databaseArchiverProcessMu.Lock()
+	defer a.databaseArchiverProcessMu.Unlock()
+	if a.databaseArchiverProcesses == nil {
+		return nil
+	}
+	proc := a.databaseArchiverProcesses[streamID]
+	if proc == nil {
+		return nil
+	}
+	proc.expectedStop = true
+	delete(a.databaseArchiverProcesses, streamID)
+	return proc
 }
 
 func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream) (err error) {
@@ -691,38 +1042,104 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 		})
 		return err
 	}
+	if mode != "streaming" || !cfg.StopNeverEnabled {
+		a.stopDatabaseArchiverStreamingProcess(ctx, cfg, item.Stream.ID, "streaming process disabled or mode changed")
+	}
 	if mode == "streaming" && current.Name != "" {
-		spool, err := spoolAgentActiveBinlog(ctx, cfg, item, credential, tool, current.Name, current.Size)
-		if err != nil {
-			_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
-				DaemonStatus:        "degraded",
-				ActiveFile:          current.Name,
-				LastSourceFile:      firstNonEmptyString(status.File, current.Name),
-				LastSourcePos:       firstNonZeroInt64Agent(status.Position, current.Size),
-				LastError:           "active binlog spool 失败: " + err.Error(),
-				ConsecutiveFailures: 1,
-				LeaseTTLSeconds:     cfg.LeaseTTLSeconds,
+		if cfg.StopNeverEnabled {
+			processStatus, processErr := a.ensureDatabaseArchiverStreamingProcess(ctx, cfg, item, credential, tool, current.Name)
+			if processStatus.Exit != nil {
+				level := "warning"
+				message := "mysqlbinlog --stop-never 进程异常退出，等待自动重启"
+				if processStatus.Exit.ExpectedStop {
+					level = "info"
+					message = "mysqlbinlog --stop-never 进程已停止"
+				}
+				if processStatus.Exit.Err != nil && !processStatus.Exit.ExpectedStop {
+					message += ": " + processStatus.Exit.Err.Error()
+				}
+				_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+					EventType:  "agent_message",
+					Level:      level,
+					Message:    message,
+					ActiveFile: processStatus.Exit.ActiveFile,
+					PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
+						"pid":          processStatus.Exit.PID,
+						"activeFile":   processStatus.Exit.ActiveFile,
+						"outputDir":    processStatus.Exit.OutputDir,
+						"stdoutLog":    processStatus.Exit.StdoutLog,
+						"stderrLog":    processStatus.Exit.StderrLog,
+						"startedAt":    processStatus.Exit.StartedAt.Format(time.RFC3339),
+						"restartCount": processStatus.Exit.RestartCount,
+						"expectedStop": processStatus.Exit.ExpectedStop,
+						"exitError":    agentErrorString(processStatus.Exit.Err),
+					}),
+					OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
+				})
+			}
+			if processErr != nil {
+				_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
+					DaemonStatus:        "degraded",
+					ActiveFile:          current.Name,
+					LastSourceFile:      firstNonEmptyString(status.File, current.Name),
+					LastSourcePos:       firstNonZeroInt64Agent(status.Position, current.Size),
+					LastError:           "stop-never streaming 进程失败: " + processErr.Error(),
+					ConsecutiveFailures: 1,
+					LeaseTTLSeconds:     cfg.LeaseTTLSeconds,
+				})
+				return processErr
+			}
+			if processStatus.Started {
+				_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+					EventType:  "agent_message",
+					Level:      "info",
+					Message:    "mysqlbinlog --stop-never 进程已启动",
+					ActiveFile: processStatus.ActiveFile,
+					PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
+						"pid":          processStatus.PID,
+						"activeFile":   processStatus.ActiveFile,
+						"outputDir":    processStatus.OutputDir,
+						"stdoutLog":    processStatus.StdoutLog,
+						"stderrLog":    processStatus.StderrLog,
+						"startedAt":    processStatus.StartedAt.Format(time.RFC3339),
+						"restartCount": processStatus.RestartCount,
+					}),
+					OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
+				})
+			}
+		} else {
+			spool, err := spoolAgentActiveBinlog(ctx, cfg, item, credential, tool, current.Name, current.Size)
+			if err != nil {
+				_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
+					DaemonStatus:        "degraded",
+					ActiveFile:          current.Name,
+					LastSourceFile:      firstNonEmptyString(status.File, current.Name),
+					LastSourcePos:       firstNonZeroInt64Agent(status.Position, current.Size),
+					LastError:           "active binlog spool 失败: " + err.Error(),
+					ConsecutiveFailures: 1,
+					LeaseTTLSeconds:     cfg.LeaseTTLSeconds,
+				})
+				return err
+			}
+			message := "active binlog spool 已更新"
+			if spool.Reused {
+				message = "active binlog spool 未变化，跳过重复拉取"
+			}
+			_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+				EventType:  "spool_updated",
+				Level:      "info",
+				Message:    message,
+				ActiveFile: current.Name,
+				PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
+					"activeFile": current.Name,
+					"sourcePos":  firstNonZeroInt64Agent(status.Position, current.Size),
+					"sourceSize": spool.SourceSize,
+					"spoolSize":  spool.Size,
+					"reused":     spool.Reused,
+				}),
+				OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
 			})
-			return err
 		}
-		message := "active binlog spool 已更新"
-		if spool.Reused {
-			message = "active binlog spool 未变化，跳过重复拉取"
-		}
-		_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
-			EventType:  "spool_updated",
-			Level:      "info",
-			Message:    message,
-			ActiveFile: current.Name,
-			PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
-				"activeFile": current.Name,
-				"sourcePos":  firstNonZeroInt64Agent(status.Position, current.Size),
-				"sourceSize": spool.SourceSize,
-				"spoolSize":  spool.Size,
-				"reused":     spool.Reused,
-			}),
-			OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
-		})
 	}
 	var lastArtifact *agentBinlogArtifact
 	for _, selection := range selections {
@@ -1186,6 +1603,138 @@ func replaceAgentBinlogFile(tmpPath, finalPath string) error {
 	return os.Chmod(finalPath, 0o600)
 }
 
+type agentRollingLogWriter struct {
+	mu       sync.Mutex
+	path     string
+	maxBytes int64
+	maxFiles int
+	file     *os.File
+	size     int64
+}
+
+func newAgentRollingLogWriter(path string, maxBytes int64, maxFiles int) (*agentRollingLogWriter, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("log path is empty")
+	}
+	if maxBytes <= 0 {
+		maxBytes = defaultDatabaseArchiverLogMaxBytes
+	}
+	if maxFiles <= 0 {
+		maxFiles = defaultDatabaseArchiverLogMaxFiles
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	writer := &agentRollingLogWriter{path: path, maxBytes: maxBytes, maxFiles: maxFiles}
+	if err := writer.openLocked(); err != nil {
+		return nil, err
+	}
+	return writer, nil
+}
+
+func (w *agentRollingLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	written := 0
+	for len(p) > 0 {
+		if err := w.openLocked(); err != nil {
+			return written, err
+		}
+		if w.maxBytes > 0 && w.size >= w.maxBytes {
+			if err := w.rotateLocked(); err != nil {
+				return written, err
+			}
+			continue
+		}
+		chunk := p
+		if w.maxBytes > 0 {
+			remaining := w.maxBytes - w.size
+			if remaining <= 0 {
+				if err := w.rotateLocked(); err != nil {
+					return written, err
+				}
+				continue
+			}
+			if int64(len(chunk)) > remaining {
+				chunk = chunk[:remaining]
+			}
+		}
+		n, err := w.file.Write(chunk)
+		w.size += int64(n)
+		written += n
+		p = p[n:]
+		if err != nil {
+			return written, err
+		}
+		if n == 0 {
+			return written, io.ErrShortWrite
+		}
+	}
+	return written, nil
+}
+
+func (w *agentRollingLogWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.file == nil {
+		return nil
+	}
+	err := w.file.Close()
+	w.file = nil
+	w.size = 0
+	return err
+}
+
+func (w *agentRollingLogWriter) openLocked() error {
+	if w.file != nil {
+		return nil
+	}
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	w.file = file
+	w.size = info.Size()
+	if w.maxBytes > 0 && w.size >= w.maxBytes {
+		return w.rotateLocked()
+	}
+	return nil
+}
+
+func (w *agentRollingLogWriter) rotateLocked() error {
+	if w.file != nil {
+		_ = w.file.Close()
+		w.file = nil
+	}
+	if w.maxFiles <= 1 {
+		_ = os.Remove(w.path)
+	} else {
+		_ = os.Remove(fmt.Sprintf("%s.%d", w.path, w.maxFiles))
+		for i := w.maxFiles - 1; i >= 1; i-- {
+			oldPath := fmt.Sprintf("%s.%d", w.path, i)
+			newPath := fmt.Sprintf("%s.%d", w.path, i+1)
+			if _, err := os.Stat(oldPath); err == nil {
+				_ = os.Rename(oldPath, newPath)
+			}
+		}
+		if _, err := os.Stat(w.path); err == nil {
+			_ = os.Rename(w.path, w.path+".1")
+		}
+	}
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	w.file = file
+	w.size = 0
+	return nil
+}
+
 func buildAgentBinlogArtifact(ctx context.Context, tool, path string, selection agentBinlogArchiveSelection, item databaseArchiverAssignedStream) (agentBinlogArtifact, error) {
 	checksum, err := sha256File(path)
 	if err != nil {
@@ -1449,6 +1998,14 @@ func agentBinlogFinalDir(cfg *resolvedDatabaseArchiverConfig, item databaseArchi
 
 func agentBinlogSpoolDir(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream) string {
 	return filepath.Join(cfg.StorageRoot, "mysql-binlog", fmt.Sprintf("instance-%d", item.Stream.InstanceID), fmt.Sprintf("stream-%d", item.Stream.ID), "spool")
+}
+
+func agentBinlogStreamingSpoolDir(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream) string {
+	return filepath.Join(agentBinlogSpoolDir(cfg, item), "streaming")
+}
+
+func agentBinlogProcessLogDir(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream) string {
+	return filepath.Join(cfg.StorageRoot, "mysql-binlog", fmt.Sprintf("instance-%d", item.Stream.InstanceID), fmt.Sprintf("stream-%d", item.Stream.ID), "logs")
 }
 
 func agentStorageURI(runnerHostID uint, path string) string {
@@ -1762,6 +2319,13 @@ func databaseArchiverEventPayloadJSON(value any) string {
 		return text[:4000]
 	}
 	return text
+}
+
+func agentErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func isSafeAgentBinlogFileName(value string) bool {

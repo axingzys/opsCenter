@@ -196,12 +196,15 @@ type agentMetrics struct {
 }
 
 type agentApp struct {
-	cfg                          *agentConfig
-	httpClient                   *http.Client
-	metrics                      *agentMetrics
-	databaseArchiverBackoffMu    sync.Mutex
-	databaseArchiverFailures     map[uint]int
-	databaseArchiverBackoffUntil map[uint]time.Time
+	cfg                           *agentConfig
+	httpClient                    *http.Client
+	metrics                       *agentMetrics
+	databaseArchiverBackoffMu     sync.Mutex
+	databaseArchiverFailures      map[uint]int
+	databaseArchiverBackoffUntil  map[uint]time.Time
+	databaseArchiverProcessMu     sync.Mutex
+	databaseArchiverProcesses     map[uint]*agentStreamingProcess
+	databaseArchiverProcessStarts map[uint]int
 }
 
 func main() {
@@ -257,11 +260,13 @@ func parseConfigPath(args []string) (string, error) {
 
 func runAgent(ctx context.Context, cfg *agentConfig) error {
 	app := &agentApp{
-		cfg:                          cfg,
-		httpClient:                   &http.Client{Timeout: 20 * time.Second},
-		metrics:                      newAgentMetrics(),
-		databaseArchiverFailures:     map[uint]int{},
-		databaseArchiverBackoffUntil: map[uint]time.Time{},
+		cfg:                           cfg,
+		httpClient:                    &http.Client{Timeout: 20 * time.Second},
+		metrics:                       newAgentMetrics(),
+		databaseArchiverFailures:      map[uint]int{},
+		databaseArchiverBackoffUntil:  map[uint]time.Time{},
+		databaseArchiverProcesses:     map[uint]*agentStreamingProcess{},
+		databaseArchiverProcessStarts: map[uint]int{},
 	}
 
 	if err := app.serveMetrics(ctx); err != nil {

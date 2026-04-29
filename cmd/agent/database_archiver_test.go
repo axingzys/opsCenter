@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,6 +44,12 @@ func TestResolveDatabaseArchiverConfigDerivesBaseURL(t *testing.T) {
 	if resolved.FailureBackoff != defaultDatabaseArchiverBackoffSeconds*time.Second || resolved.MaxFailureBackoff != defaultDatabaseArchiverMaxBackoffSec*time.Second {
 		t.Fatalf("unexpected backoff: %s/%s", resolved.FailureBackoff, resolved.MaxFailureBackoff)
 	}
+	if resolved.StopNeverEnabled {
+		t.Fatalf("stop-never should require explicit opt-in")
+	}
+	if resolved.StreamingLogMaxBytes != defaultDatabaseArchiverLogMaxBytes || resolved.StreamingLogMaxFiles != defaultDatabaseArchiverLogMaxFiles {
+		t.Fatalf("unexpected streaming log settings: %d/%d", resolved.StreamingLogMaxBytes, resolved.StreamingLogMaxFiles)
+	}
 }
 
 func TestResolveDatabaseArchiverConfigClampsConcurrencyAndBackoff(t *testing.T) {
@@ -54,6 +62,8 @@ func TestResolveDatabaseArchiverConfigClampsConcurrencyAndBackoff(t *testing.T) 
 			MaxConcurrentStreams:     99,
 			FailureBackoffSeconds:    1,
 			MaxFailureBackoffSeconds: 2,
+			StreamingLogMaxBytes:     1024,
+			StreamingLogMaxFiles:     99,
 		},
 	}
 	resolved, err := resolveDatabaseArchiverConfig(cfg)
@@ -65,6 +75,9 @@ func TestResolveDatabaseArchiverConfigClampsConcurrencyAndBackoff(t *testing.T) 
 	}
 	if resolved.FailureBackoff != 5*time.Second || resolved.MaxFailureBackoff != 5*time.Second {
 		t.Fatalf("unexpected backoff clamp: %s/%s", resolved.FailureBackoff, resolved.MaxFailureBackoff)
+	}
+	if resolved.StreamingLogMaxBytes != 1024*1024 || resolved.StreamingLogMaxFiles != 50 {
+		t.Fatalf("unexpected log clamp: %d/%d", resolved.StreamingLogMaxBytes, resolved.StreamingLogMaxFiles)
 	}
 }
 
@@ -260,6 +273,86 @@ func TestSpoolAgentActiveBinlogReusesUnchangedPartial(t *testing.T) {
 	}
 	if !result.Reused || result.Size != 100 || result.SourceSize != 80 {
 		t.Fatalf("unexpected spool result: %#v", result)
+	}
+}
+
+func TestAgentRollingLogWriterRotates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mysqlbinlog.stderr.log")
+	writer, err := newAgentRollingLogWriter(path, 10, 3)
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
+	if _, err := writer.Write([]byte("1234567890abc")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read current: %v", err)
+	}
+	if string(current) != "abc" {
+		t.Fatalf("unexpected current log: %q", current)
+	}
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("read rotated: %v", err)
+	}
+	if string(rotated) != "1234567890" {
+		t.Fatalf("unexpected rotated log: %q", rotated)
+	}
+}
+
+func TestDatabaseArchiverStreamingProcessLifecycle(t *testing.T) {
+	root := t.TempDir()
+	tool := filepath.Join(root, "fake-mysqlbinlog")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatalf("write fake tool: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"message":"ok","data":null}`))
+	}))
+	defer server.Close()
+	app := &agentApp{
+		httpClient:                    server.Client(),
+		databaseArchiverProcesses:     map[uint]*agentStreamingProcess{},
+		databaseArchiverProcessStarts: map[uint]int{},
+	}
+	cfg := &resolvedDatabaseArchiverConfig{
+		EndpointBaseURL:      server.URL,
+		RunnerAuth:           "runner-auth",
+		WorkDir:              filepath.Join(root, "work"),
+		StorageRoot:          filepath.Join(root, "storage"),
+		StreamingLogMaxBytes: 1024 * 1024,
+		StreamingLogMaxFiles: 2,
+	}
+	item := databaseArchiverAssignedStream{
+		Stream:         databaseArchiverStream{ID: 7, InstanceID: 3},
+		SourceInstance: databaseArchiverSource{ID: 3, Host: "127.0.0.1", Port: 3306},
+	}
+	credential := databaseArchiverCredential{Username: "replica", Password: "secret"}
+	status, err := app.ensureDatabaseArchiverStreamingProcess(context.Background(), cfg, item, credential, tool, "binlog.000001")
+	if err != nil {
+		t.Fatalf("ensure streaming process: %v", err)
+	}
+	if !status.Started || !status.Running || status.PID <= 0 {
+		t.Fatalf("unexpected status after start: %#v", status)
+	}
+	if _, err := os.Stat(agentBinlogStreamingSpoolDir(cfg, item)); err != nil {
+		t.Fatalf("streaming spool dir missing: %v", err)
+	}
+	second, err := app.ensureDatabaseArchiverStreamingProcess(context.Background(), cfg, item, credential, tool, "binlog.000001")
+	if err != nil {
+		t.Fatalf("ensure existing process: %v", err)
+	}
+	if !second.Running || second.Started || second.PID != status.PID {
+		t.Fatalf("expected existing process to be reused, got %#v", second)
+	}
+	app.stopDatabaseArchiverStreamingProcess(context.Background(), cfg, item.Stream.ID, "test stop")
+	if len(app.databaseArchiverStreamingProcessIDs()) != 0 {
+		t.Fatalf("streaming process should be detached")
 	}
 }
 

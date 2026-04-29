@@ -1087,6 +1087,205 @@ curl -H "X-OpsHub-Runner-Auth: $AUTH" \
 4. 事件压缩/归档，把高频 `checkpoint/spool_updated` 合并为小时级摘要。
 5. 对象存储版本化、不可变保留、KMS、bucket policy 的只读检测和 UI 风险提示。
 
+### 2026-04-29 P2.6.7：`mysqlbinlog --stop-never` 进程托管
+
+目标：把 P2.6.6 的 `streaming` 归档流从“每轮安全重拉 active binlog 的伪 streaming”推进到“Agent 本地托管长期 `mysqlbinlog --stop-never` 子进程”。本阶段仍不做 active spool append/resume，也不把 active spool 纳入 PITR 恢复证明；重点是进程生命周期、租约安全、健康检查、自动重启和本地日志滚动。
+
+#### P2.6.7 为什么必须单独拆
+
+`mysqlbinlog --stop-never` 是长期进程，不适合放在 backend 容器，也不适合绑定一次 HTTP 请求或 SSH session。它会持续连接源库、持续写 spool 文件，并且可能跨 binlog 轮转运行数天到数月。如果进程托管不可靠，会出现几类高风险问题：
+
+1. 用户在 OpsHub 暂停/停止归档流后，Runner 主机上旧进程仍在运行。
+2. backend 租约过期后，旧 Agent 和新 Agent 同时拉同一个 stream，造成重复 spool、误报健康状态或对象存储竞争。
+3. Agent 崩溃重启后，不知道旧进程是否还存在，也不知道 active spool 是否可信。
+4. `mysqlbinlog` 异常退出后无人重启，UI 仍显示归档流 running。
+5. stdout/stderr 无界写入，Runner 本地磁盘被日志打满。
+
+因此 P2.6.7 的原则是：**先把长期进程管住，再讨论 spool 文件如何 finalize，最后才讨论 append/resume**。
+
+#### P2.6.7 前置条件
+
+1. Runner Agent 必须以长期服务方式运行。
+   - 推荐 systemd、Docker restart policy 或后续专用 Agent supervisor。
+   - 不推荐用临时 shell、一次性 SSH session 或 backend 容器内进程运行。
+2. Runner Host 必须有稳定工作目录。
+   - `workDir` 用于临时 option file、运行态文件。
+   - `storageRoot` 用于 `mysql-binlog/instance-{id}/stream-{id}/spool`、`finalized`、`logs`。
+   - 需要预留足够磁盘，后续 P2.6.10 再加最小剩余空间和 spool 容量水位保护。
+3. 源库账号必须具备远程读取 binlog 的权限。
+   - MySQL/MariaDB 版本差异会影响权限名称，但至少要能执行 `SHOW BINARY LOGS` / `SHOW BINARY LOG STATUS` 或兼容语句。
+   - `mysqlbinlog --read-from-remote-server --raw --stop-never` 必须能连接源库。
+4. 源库必须开启 binlog。
+   - `log_bin=ON`。
+   - binlog 保留时间必须覆盖 Agent 故障恢复窗口，否则会出现 purge gap。
+5. 系统时间要同步。
+   - Agent、backend、数据库时间漂移会影响 `last_event_time`、归档延迟和 RPO 判断。
+6. 先接受本阶段不做 append/resume。
+   - active spool 是运行态证据，不是 finalized archive。
+   - PITR 恢复计划只允许使用 `database_log_archives` 中已登记的 finalized 文件。
+
+#### P2.6.7 落地范围
+
+1. Agent 本地配置扩展：
+   - `stopNeverEnabled`：是否允许 `streaming` 归档流启用长期 `mysqlbinlog --stop-never` 子进程。
+   - `streamingLogMaxBytes`：单个 stdout/stderr 日志文件最大字节数。
+   - `streamingLogMaxFiles`：每个 stream 每类日志最多保留多少个滚动文件。
+2. Agent 进程表：
+   - Agent 内存维护 `stream_id -> process_state`。
+   - 每个状态记录：
+     - `stream_id`
+     - `pid`
+     - `active_file`
+     - `started_at`
+     - `restart_count`
+     - `output_dir`
+     - `stdout_log`
+     - `stderr_log`
+     - `last_exit_error`
+3. 每轮 reconcile：
+   - Agent 先 heartbeat。
+   - 从 backend 获取当前分配给本 Runner 的 runnable streams。
+   - 对不在返回列表里的本地 streaming 进程执行停止。
+   - 如果 heartbeat 或 list streams 失败，本阶段选择安全优先：停止本地 streaming 进程，避免租约失效后双 Agent 同时拉取。
+4. stream 处理：
+   - 只有 `archive_mode=streaming` 且 `stopNeverEnabled=true` 时启动长期进程。
+   - `archive_mode=polling` 或配置关闭时，确保该 stream 不存在残留长期进程。
+   - 已有进程存活时不重复启动。
+   - 子进程退出后下一轮自动拉起，重启受 Agent 已有失败退避约束保护。
+5. 启动命令：
+
+   ```bash
+   mysqlbinlog \
+     --defaults-extra-file=<agent-temporary-option-file> \
+     --read-from-remote-server \
+     --raw \
+     --stop-never \
+     --result-file=<streaming-spool-dir>/ \
+     <current-binlog-file>
+   ```
+
+   约束：
+   - `--defaults-extra-file` 放在第一个参数位置。
+   - option file 权限 `0600`。
+   - 不使用 `MYSQL_PWD`。
+   - 不在命令行参数中出现明文密码。
+   - option file 在子进程退出后删除。
+6. spool 目录：
+   - 长期进程写入独立目录：
+
+     ```text
+     <storageRoot>/mysql-binlog/instance-{id}/stream-{id}/spool/streaming/
+     ```
+
+   - 该目录中的文件是 active streaming 输出，不等于 finalized archive。
+   - 本阶段不登记 `database_log_archives`。
+   - 本阶段不参与 PITR 计划。
+7. stdout/stderr 日志滚动：
+   - 日志目录：
+
+     ```text
+     <storageRoot>/mysql-binlog/instance-{id}/stream-{id}/logs/
+     ```
+
+   - 文件：
+     - `mysqlbinlog.stdout.log`
+     - `mysqlbinlog.stderr.log`
+   - 超过 `streamingLogMaxBytes` 后滚动：
+     - `.1`
+     - `.2`
+     - ...
+   - 最多保留 `streamingLogMaxFiles` 份历史。
+8. 健康检查：
+   - 进程是否仍在运行。
+   - pid 是否存在。
+   - 子进程退出错误。
+   - output dir 是否存在。
+   - stdout/stderr log path 是否可写。
+   - 最近一轮 checkpoint 仍写入源库当前 binlog 文件和 position。
+9. 事件：
+   - 启动成功写 `agent_message`。
+   - 子进程退出写 `agent_message`，异常退出为 warning。
+   - 因 pause/stop/租约不可刷新而停止写 `agent_message`。
+   - payload 只保存 pid、目录、日志路径、active file、restart count，不保存密码和 option file 内容。
+10. 失败策略：
+    - 启动失败或异常退出后，stream 本轮返回失败。
+    - 外层 P2.6.6 的 failure backoff 负责限制重启频率。
+    - 成功运行后清空对应 stream 的本地失败退避。
+
+#### P2.6.7 不做的事
+
+1. 不把 streaming spool 文件改名成 finalized archive。
+2. 不从 streaming spool 生成 `database_log_archives` 记录。
+3. 不做 `.partial` 文件二进制 append。
+4. 不解析 binlog event 边界。
+5. 不校验 event checksum。
+6. 不实现上传重试队列。
+7. 不做带宽或 IO 限速。
+8. 不自动 kill Agent 进程外历史遗留的孤儿 `mysqlbinlog`；后续需要用 pidfile + command fingerprint 谨慎处理。
+
+#### P2.6.7 验收标准
+
+1. streaming 归档流启动后，Runner 本地存在且只存在一个对应 stream 的 `mysqlbinlog --stop-never` 子进程。
+2. 同一 stream 下一轮不会重复启动第二个长期进程。
+3. 用户暂停/停止归档流后，下一轮 Agent reconcile 会停止本地长期进程。
+4. backend heartbeat/list streams 失败时，本地长期进程会被停止，避免租约失效后双写。
+5. 子进程异常退出后会产生事件，并在下一轮按退避策略自动重启。
+6. stdout/stderr 日志会滚动，不会无限增长。
+7. 数据库密码不会出现在：
+   - command summary
+   - event payload
+   - stdout/stderr 路径
+   - backend JSON
+8. PITR 计划仍只使用 finalized archive，不会误用 active streaming spool。
+
+#### 2026-04-29 P2.6.7 已落地范围
+
+本次实现按上面的安全边界落地，不改变 PITR 可用链路的定义：`database_log_archives` 仍只登记 finalized 文件，`spool/streaming` 仍只是长期进程输出目录。
+
+已实现：
+
+1. Agent 配置新增：
+   - `stopNeverEnabled`
+   - `streamingLogMaxBytes`
+   - `streamingLogMaxFiles`
+2. `streaming + stopNeverEnabled=true` 时，Agent 启动并托管 `mysqlbinlog --stop-never` 子进程。
+3. Agent 内存维护 per-stream 进程表，避免同一 stream 重复启动多个长期进程。
+4. 每轮从 backend 获取 runnable streams 后执行 reconcile：
+   - 不再分配给当前 Runner 的 stream 会停止本地长期进程。
+   - heartbeat 或 list streams 失败时，停止本地长期进程，优先避免租约失效后的双进程拉取。
+5. `polling` 模式或 `stopNeverEnabled=false` 时，会清理同 stream 残留长期进程，并继续使用 P2.6.6 的安全 active spool 逻辑。
+6. 长期进程 stdout/stderr 使用本地滚动日志：
+   - `mysqlbinlog.stdout.log`
+   - `mysqlbinlog.stderr.log`
+7. 启动、异常退出、手动停止都会写入 `agent_message` 事件，payload 只保存 pid、目录、日志路径、active file、restart count 和错误摘要。
+8. 前端 Runner Agent 配置模板默认生成 `stopNeverEnabled: true`，但 Agent 运行时仍要求本地配置显式开启，不对旧配置自动启用。
+9. 单元测试覆盖：
+   - 配置默认值和边界裁剪。
+   - 滚动日志。
+   - stop-never 子进程启动、复用和停止。
+
+#### P2.6.8+ 后续衔接
+
+P2.6.7 完成后，后续顺序保持：
+
+1. P2.6.8：streaming spool 轮转 finalize。
+   - 当 `binlog.000123` 不再是 active file 且 streaming 输出完整时，校验后转入 finalized。
+   - 校验失败时回退到当前已存在的完整拉取逻辑。
+2. P2.6.9：active spool append/resume 前置验证。
+   - 独立 `binlogvalidator` 包。
+   - 校验 binlog magic header、event header、event length、end_log_pos、checksum。
+   - 只在严格验证通过后 append。
+3. P2.6.10：上传重试队列、带宽限制和 IO 限速。
+   - 本地 durable queue。
+   - staging key 后提交。
+   - 对象存储临时不可用时不丢 finalized archive。
+4. P2.6.11：事件 rollup。
+   - 高频 `checkpoint/spool_updated/agent_message` 聚合到小时级摘要。
+   - error/warning/state_changed/archive_success 保留原始事件。
+5. P2.6.12：对象存储安全姿态检测。
+   - S3/MinIO 版本化、对象锁、默认加密、KMS、bucket policy 只读检测。
+   - UI 展示登记值和检测值差异。
+
 ### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
 
 目标：把 P1/P2 已有的“恢复计划和恢复证明预生成”升级为可执行的隔离恢复流程，真正把物理备份链和 binlog 归档链恢复到一个隔离 MySQL/MariaDB 实例，并执行校验 SQL。
