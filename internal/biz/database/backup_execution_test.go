@@ -27,6 +27,10 @@ func (r *testBackupRecordRepo) GetByID(context.Context, uint) (*DatabaseBackupRe
 	return nil, nil
 }
 
+func (r *testBackupRecordRepo) GetByExternalBackup(context.Context, uint, string, string, string) (*DatabaseBackupRecord, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+
 func (r *testBackupRecordRepo) List(context.Context, *DatabaseBackupRecordListRequest) ([]*DatabaseBackupRecord, int64, error) {
 	return nil, 0, nil
 }

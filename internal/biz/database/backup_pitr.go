@@ -299,6 +299,9 @@ type DatabaseExternalBackupRecordRequest struct {
 	BackupMethod           string `json:"backupMethod" binding:"omitempty,max=30"`
 	BackupLevel            string `json:"backupLevel" binding:"omitempty,max=30"`
 	BackupEngine           string `json:"backupEngine" binding:"omitempty,max=60"`
+	ExternalBackupID       string `json:"externalBackupId" binding:"omitempty,max=120"`
+	ExternalServerName     string `json:"externalServerName" binding:"omitempty,max=120"`
+	BackupScope            string `json:"backupScope" binding:"omitempty,max=30"`
 	ToolName               string `json:"toolName" binding:"omitempty,max=60"`
 	ToolVersion            string `json:"toolVersion" binding:"omitempty,max=120"`
 	StorageProfileID       uint   `json:"storageProfileId"`
@@ -792,6 +795,9 @@ func (uc *UseCase) RegisterExternalBackupRecord(ctx context.Context, req *Databa
 		BackupMethod:           backupMethod,
 		BackupLevel:            backupLevel,
 		BackupEngine:           normalizeBackupEngine(req.BackupEngine, backupMethod),
+		ExternalBackupID:       trimText(strings.TrimSpace(req.ExternalBackupID), 120),
+		ExternalServerName:     trimText(strings.TrimSpace(req.ExternalServerName), 120),
+		BackupScope:            normalizeBackupScope(req.BackupScope),
 		ToolName:               trimText(strings.TrimSpace(req.ToolName), 60),
 		ToolVersion:            trimText(strings.TrimSpace(req.ToolVersion), 120),
 		SourceInstanceID:       sourceID,

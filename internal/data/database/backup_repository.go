@@ -128,6 +128,19 @@ func (r *backupRecordRepo) GetByID(ctx context.Context, id uint) (*dbbiz.Databas
 	return &item, nil
 }
 
+func (r *backupRecordRepo) GetByExternalBackup(ctx context.Context, instanceID uint, backupEngine, externalServerName, externalBackupID string) (*dbbiz.DatabaseBackupRecord, error) {
+	var item dbbiz.DatabaseBackupRecord
+	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseBackupRecord{}).
+		Where("instance_id = ?", instanceID).
+		Where("backup_engine = ?", strings.TrimSpace(backupEngine)).
+		Where("external_server_name = ?", strings.TrimSpace(externalServerName)).
+		Where("external_backup_id = ?", strings.TrimSpace(externalBackupID))
+	if err := query.First(&item).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 func (r *backupRecordRepo) List(ctx context.Context, req *dbbiz.DatabaseBackupRecordListRequest) ([]*dbbiz.DatabaseBackupRecord, int64, error) {
 	var (
 		items []*dbbiz.DatabaseBackupRecord
@@ -148,6 +161,9 @@ func (r *backupRecordRepo) List(ctx context.Context, req *dbbiz.DatabaseBackupRe
 		}
 		if triggerType := strings.TrimSpace(req.TriggerType); triggerType != "" {
 			query = query.Where("trigger_type = ?", triggerType)
+		}
+		if backupEngine := strings.TrimSpace(req.BackupEngine); backupEngine != "" {
+			query = query.Where("backup_engine = ?", backupEngine)
 		}
 		if dateFrom := strings.TrimSpace(req.DateFrom); dateFrom != "" {
 			query = query.Where("created_at >= ?", dateFrom)

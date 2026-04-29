@@ -1617,7 +1617,7 @@
                 </el-button>
               </div>
               <div class="backup-toolbar-group">
-                <el-button :loading="storageProfileLoading || runnerHostLoading || runnerJobLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
+                <el-button :loading="storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
                   刷新 PITR
                 </el-button>
               </div>
@@ -1818,6 +1818,8 @@
                       <el-option label="物理备份" value="physical_backup" />
                       <el-option label="binlog 归档" value="binlog_archive" />
                       <el-option label="物理恢复" value="physical_restore" />
+                      <el-option label="Barman 检查" value="barman_check" />
+                      <el-option label="Barman Catalog 同步" value="barman_catalog_sync" />
                     </el-select>
                     <el-select v-model="runnerJobQuery.status" placeholder="状态" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="排队中" value="queued" />
@@ -1872,6 +1874,108 @@
                     layout="total, sizes, prev, pager, next, jumper"
                     @size-change="loadRunnerJobs"
                     @current-change="loadRunnerJobs"
+                  />
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="Barman Server" name="barmanServers">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="barmanServerQuery.keyword"
+                      placeholder="搜索名称 / Barman server"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadBarmanServers"
+                      @clear="loadBarmanServers"
+                    />
+                    <el-select v-model="barmanServerQuery.sourceInstanceId" placeholder="PostgreSQL实例" clearable filterable class="audit-search-input" @change="loadBarmanServers">
+                      <el-option v-for="item in postgresqlBackupInstances" :key="item.id" :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="barmanServerQuery.runnerHostId" placeholder="Runner" clearable filterable class="audit-search-input" @change="loadBarmanServers">
+                      <el-option v-for="item in runnerHostOptions" :key="item.id" :label="item.label" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="barmanServerQuery.status" placeholder="状态" clearable class="audit-select" @change="loadBarmanServers">
+                      <el-option label="待检测" value="pending" />
+                      <el-option label="健康" value="healthy" />
+                      <el-option label="降级" value="degraded" />
+                      <el-option label="失败" value="failed" />
+                      <el-option label="已禁用" value="disabled" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetBarmanServerQuery">重置</el-button>
+                    <el-button type="primary" plain @click="openBarmanServerDialog">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      新增 Barman
+                    </el-button>
+                    <el-button type="primary" plain :loading="barmanServerLoading" @click="loadBarmanServers">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="barmanServers" v-loading="barmanServerLoading" stripe class="modern-table">
+                  <el-table-column label="名称" min-width="180">
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.name }}</span>
+                        <el-tag size="small" type="info">{{ row.barmanServerName }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="PostgreSQL 实例" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.sourceInstanceName || `#${row.sourceInstanceId}` }}</template>
+                  </el-table-column>
+                  <el-table-column label="Runner" min-width="160" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.runnerHostName || `#${row.runnerHostId}` }}</template>
+                  </el-table-column>
+                  <el-table-column label="保留/方法" min-width="190" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.retentionPolicy || '-' }} / {{ row.backupMethod || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="WAL归档" width="150">
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" :type="row.archiverEnabled ? 'success' : 'info'">archive {{ row.archiverEnabled ? '开' : '关' }}</el-tag>
+                        <el-tag size="small" :type="row.streamingArchiverEnabled ? 'success' : 'info'">stream {{ row.streamingArchiverEnabled ? '开' : '关' }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="PG元数据" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ row.pgSystemIdentifier || '-' }}
+                      <span v-if="row.pgVersion" class="muted-text"> / {{ row.pgVersion }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="100" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="barmanStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最近检查" width="170">
+                    <template #default="{ row }">{{ row.lastCheckAt || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="最近同步" width="170">
+                    <template #default="{ row }">{{ row.lastCatalogSyncAt || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="错误" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.lastError || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="260" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button link type="primary" @click="openBarmanServerDialog(row)">编辑</el-button>
+                      <el-button link type="success" :loading="barmanCheckingId === row.id" @click="handleCheckBarmanServer(row)">检查</el-button>
+                      <el-button link type="warning" :loading="barmanCatalogSyncingId === row.id" @click="handleSyncBarmanCatalog(row)">同步</el-button>
+                      <el-button link type="danger" @click="handleDeleteBarmanServer(row)">删除</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="barmanServerQuery.page"
+                    v-model:page-size="barmanServerQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="barmanServerTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadBarmanServers"
+                    @current-change="loadBarmanServers"
                   />
                 </div>
               </el-tab-pane>
@@ -4145,6 +4249,120 @@
     </el-dialog>
 
     <el-dialog
+      v-model="barmanServerDialogVisible"
+      :title="barmanServerForm.id ? '编辑 Barman Server' : '新增 Barman Server'"
+      width="920px"
+      @close="resetBarmanServerForm"
+    >
+      <el-alert
+        title="P3.1/P3.2 只纳管 Runner 主机上已有的 Barman 配置，并通过白名单 barman check / list-backup / show-backup 同步 catalog；物理备份触发、WAL 状态采集和隔离恢复在后续 P3 阶段继续做。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="barmanServerFormRef" :model="barmanServerForm" :rules="barmanServerRules" label-width="135px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="PostgreSQL实例" prop="sourceInstanceId">
+              <el-select v-model="barmanServerForm.sourceInstanceId" placeholder="请选择 PostgreSQL 实例" filterable style="width: 100%;">
+                <el-option
+                  v-for="item in postgresqlBackupInstances"
+                  :key="item.id"
+                  :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Runner主机" prop="runnerHostId">
+              <el-select v-model="barmanServerForm.runnerHostId" placeholder="请选择 Runner 主机" filterable style="width: 100%;">
+                <el-option v-for="item in runnerHostOptions" :key="item.id" :label="item.label" :value="item.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="名称" prop="name">
+              <el-input v-model="barmanServerForm.name" placeholder="如：pg-prod-barman" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Barman server" prop="barmanServerName">
+              <el-input v-model="barmanServerForm.barmanServerName" placeholder="barman.conf 里的 server name" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="配置文件">
+              <el-input v-model="barmanServerForm.configPath" placeholder="/etc/barman.conf，可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Barman home">
+              <el-input v-model="barmanServerForm.barmanHome" placeholder="/var/lib/barman，可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="保留策略">
+              <el-input v-model="barmanServerForm.retentionPolicy" placeholder="REDUNDANCY 2 / RECOVERY WINDOW" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="备份方法">
+              <el-input v-model="barmanServerForm.backupMethod" placeholder="postgres / rsync" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="复制 Slot">
+              <el-input v-model="barmanServerForm.slotName" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="archive_command">
+              <el-switch v-model="barmanServerForm.archiverEnabled" active-text="启用" inactive-text="关闭" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="streaming">
+              <el-switch v-model="barmanServerForm.streamingArchiverEnabled" active-text="启用" inactive-text="关闭" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="状态">
+              <el-select v-model="barmanServerForm.status" style="width: 100%;">
+                <el-option label="待检测" value="pending" />
+                <el-option label="健康" value="healthy" />
+                <el-option label="降级" value="degraded" />
+                <el-option label="失败" value="failed" />
+                <el-option label="已禁用" value="disabled" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="配置 JSON">
+          <el-input
+            v-model="barmanServerForm.configJson"
+            type="textarea"
+            :rows="3"
+            placeholder='可选，只保存非敏感摘要，例如 {"notes":"catalog only","environment":"prod"}'
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="barmanServerDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="barmanServerSubmitting" @click="submitBarmanServer">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="runnerAgentConfigDialogVisible"
       title="Agent 归档配置"
       width="920px"
@@ -4374,8 +4592,10 @@ import {
 import { getCredentials } from '@/api/host'
 import {
   DATABASE_PERMISSION,
+  checkDatabaseBarmanServer,
   checkDatabaseStorageProfilePosture,
   cleanupDatabaseRestoreJob,
+  createDatabaseBarmanServer,
   createDatabaseLogArchiveStream,
   createDatabaseRestorePlan,
   createDatabaseRunnerHost,
@@ -4383,6 +4603,7 @@ import {
   createDatabaseBackupTask,
   createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
+  deleteDatabaseBarmanServer,
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
   deleteDatabaseInstancePermission,
@@ -4407,6 +4628,7 @@ import {
   formatDatabaseQuery,
   listDatabaseBackupRecords,
   listDatabaseBackupTasks,
+  listDatabaseBarmanServers,
   listDatabaseDiagnosisSessions,
   listDatabaseInspectionReports,
   listDatabaseLogArchiveEvents,
@@ -4439,10 +4661,12 @@ import {
   runDatabaseRestorePlan,
   startDatabaseLogArchiveStream,
   stopDatabaseLogArchiveStream,
+  syncDatabaseBarmanCatalog,
   syncDatabaseMetadata,
   testDatabaseInstance,
   testDatabaseRunnerHost,
   updateDatabaseBackupTask,
+  updateDatabaseBarmanServer,
   updateDatabaseInstance,
   updateDatabaseRunnerHost,
   upsertDatabaseInstancePermission,
@@ -4452,6 +4676,8 @@ import {
   type DatabaseBackupRunResult,
   type DatabaseBackupTaskPayload,
   type DatabaseBackupTaskResult,
+  type DatabaseBarmanServerPayload,
+  type DatabaseBarmanServerResult,
   type DatabaseCapacityCollectResult,
   type DatabaseCapacityTrendResult,
   type DatabaseDDLValidateResult,
@@ -4739,6 +4965,14 @@ const runnerAgentConfigJson = ref('')
 const runnerJobLoading = ref(false)
 const runnerJobs = ref<DatabaseRunnerJobResult[]>([])
 const runnerJobTotal = ref(0)
+const barmanServerLoading = ref(false)
+const barmanServerSubmitting = ref(false)
+const barmanServerDialogVisible = ref(false)
+const barmanServerFormRef = ref<FormInstance>()
+const barmanServers = ref<DatabaseBarmanServerResult[]>([])
+const barmanServerTotal = ref(0)
+const barmanCheckingId = ref(0)
+const barmanCatalogSyncingId = ref(0)
 const backupPitrTab = ref('streams')
 const restoreJobLoading = ref(false)
 const restoreSubmitting = ref(false)
@@ -4903,6 +5137,15 @@ const runnerJobQuery = reactive({
   pageSize: 10,
   runnerHostId: undefined as number | undefined,
   jobType: '',
+  status: ''
+})
+
+const barmanServerQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  sourceInstanceId: undefined as number | undefined,
+  runnerHostId: undefined as number | undefined,
   status: ''
 })
 
@@ -5128,6 +5371,23 @@ const runnerHostForm = reactive<DatabaseRunnerHostPayload & { id?: number }>({
   configJson: ''
 })
 
+const barmanServerForm = reactive<DatabaseBarmanServerPayload & { id?: number }>({
+  id: undefined,
+  sourceInstanceId: 0,
+  runnerHostId: 0,
+  name: '',
+  barmanServerName: '',
+  barmanHome: '',
+  configPath: '',
+  retentionPolicy: '',
+  backupMethod: '',
+  streamingArchiverEnabled: false,
+  archiverEnabled: false,
+  slotName: '',
+  status: 'pending',
+  configJson: ''
+})
+
 const permissionForm = reactive({
   id: undefined as number | undefined,
   roleId: undefined as number | undefined,
@@ -5256,6 +5516,27 @@ const runnerHostRules: FormRules = {
       callback()
     },
     trigger: 'change'
+  }]
+}
+
+const barmanServerRules: FormRules = {
+  sourceInstanceId: [{ required: true, message: '请选择 PostgreSQL 实例', trigger: 'change' }],
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
+  name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
+  barmanServerName: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      const text = String(value || '').trim()
+      if (!text) {
+        callback(new Error('请输入 Barman server name'))
+        return
+      }
+      if (!/^[A-Za-z0-9_.:-]+$/.test(text)) {
+        callback(new Error('只能包含字母、数字、下划线、点、冒号和短横线'))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur'
   }]
 }
 
@@ -5389,6 +5670,10 @@ const supportedBackupInstances = computed(() =>
 
 const pitrBackupInstances = computed(() =>
   instances.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
+)
+
+const postgresqlBackupInstances = computed(() =>
+  instances.value.filter(item => item.dbType === 'postgresql' && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
 const selectedBackupTaskInstance = computed(() =>
@@ -5954,6 +6239,9 @@ const loadInstances = async () => {
     if (logArchiveQuery.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveQuery.instanceId)) {
       logArchiveQuery.instanceId = undefined
     }
+    if (barmanServerQuery.sourceInstanceId && !postgresqlBackupInstances.value.some(item => item.id === barmanServerQuery.sourceInstanceId)) {
+      barmanServerQuery.sourceInstanceId = undefined
+    }
     if (restorePlanQuery.sourceInstanceId && !instances.value.some(item => item.id === restorePlanQuery.sourceInstanceId)) {
       restorePlanQuery.sourceInstanceId = undefined
     }
@@ -5977,6 +6265,9 @@ const loadInstances = async () => {
     }
     if (logArchiveStreamForm.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveStreamForm.instanceId)) {
       logArchiveStreamForm.instanceId = 0
+    }
+    if (barmanServerForm.sourceInstanceId && !postgresqlBackupInstances.value.some(item => item.id === barmanServerForm.sourceInstanceId)) {
+      barmanServerForm.sourceInstanceId = 0
     }
     if (restorePlanForm.sourceInstanceId && !pitrBackupInstances.value.some(item => item.id === restorePlanForm.sourceInstanceId)) {
       restorePlanForm.sourceInstanceId = 0
@@ -6371,8 +6662,21 @@ const loadRunnerJobs = async () => {
   }
 }
 
+const loadBarmanServers = async () => {
+  barmanServerLoading.value = true
+  try {
+    const res: any = await listDatabaseBarmanServers(barmanServerQuery)
+    barmanServers.value = res.list || []
+    barmanServerTotal.value = res.total || 0
+    if (res.page) barmanServerQuery.page = res.page
+    if (res.pageSize) barmanServerQuery.pageSize = res.pageSize
+  } finally {
+    barmanServerLoading.value = false
+  }
+}
+
 const refreshPITRState = async () => {
-  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs()])
+  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs()])
 }
 
 const loadRestoreJobs = async () => {
@@ -6603,6 +6907,24 @@ const resetRunnerHostForm = () => {
   runnerHostForm.enabled = true
   runnerHostForm.configJson = ''
   runnerHostFormRef.value?.clearValidate()
+}
+
+const resetBarmanServerForm = () => {
+  barmanServerForm.id = undefined
+  barmanServerForm.sourceInstanceId = postgresqlBackupInstances.value[0]?.id || 0
+  barmanServerForm.runnerHostId = runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id || runnerHosts.value.find(item => item.enabled)?.id || 0
+  barmanServerForm.name = ''
+  barmanServerForm.barmanServerName = ''
+  barmanServerForm.barmanHome = ''
+  barmanServerForm.configPath = ''
+  barmanServerForm.retentionPolicy = ''
+  barmanServerForm.backupMethod = ''
+  barmanServerForm.streamingArchiverEnabled = false
+  barmanServerForm.archiverEnabled = false
+  barmanServerForm.slotName = ''
+  barmanServerForm.status = 'pending'
+  barmanServerForm.configJson = ''
+  barmanServerFormRef.value?.clearValidate()
 }
 
 const normalizeRestoreFormStrategy = () => {
@@ -7035,7 +7357,10 @@ const submitRestorePlan = async () => {
 const defaultRestoreImageForPlan = (row?: DatabaseRestorePlanResult) => {
   const source = instances.value.find(item => item.id === row?.sourceInstanceId)
   const version = String(source?.version || '')
-  if (source?.dbType === 'mariadb') return version ? `mariadb:${version.split('-')[0].split(' ')[0]}` : 'mariadb:latest'
+  if (source?.dbType === 'mariadb') {
+    const versionTag = version.split('-')[0]?.split(' ')[0] || ''
+    return versionTag ? `mariadb:${versionTag}` : 'mariadb:latest'
+  }
   if (/8\.4/.test(version)) return 'mysql:8.4'
   if (/5\.7/.test(version)) return 'mysql:5.7'
   return 'mysql:8.0'
@@ -7225,6 +7550,103 @@ const handleTestRunnerHost = async (row: DatabaseRunnerHostResult) => {
   } finally {
     runnerHostTestingId.value = 0
   }
+}
+
+const openBarmanServerDialog = (row?: DatabaseBarmanServerResult) => {
+  resetBarmanServerForm()
+  if (row?.id) {
+    barmanServerForm.id = row.id
+    barmanServerForm.sourceInstanceId = row.sourceInstanceId || 0
+    barmanServerForm.runnerHostId = row.runnerHostId || 0
+    barmanServerForm.name = row.name || ''
+    barmanServerForm.barmanServerName = row.barmanServerName || ''
+    barmanServerForm.barmanHome = row.barmanHome || ''
+    barmanServerForm.configPath = row.configPath || ''
+    barmanServerForm.retentionPolicy = row.retentionPolicy || ''
+    barmanServerForm.backupMethod = row.backupMethod || ''
+    barmanServerForm.streamingArchiverEnabled = !!row.streamingArchiverEnabled
+    barmanServerForm.archiverEnabled = !!row.archiverEnabled
+    barmanServerForm.slotName = row.slotName || ''
+    barmanServerForm.status = row.status || 'pending'
+    barmanServerForm.configJson = row.configJson || ''
+  }
+  barmanServerDialogVisible.value = true
+}
+
+const submitBarmanServer = async () => {
+  if (!barmanServerFormRef.value) return
+  await barmanServerFormRef.value.validate()
+  barmanServerSubmitting.value = true
+  try {
+    const payload: DatabaseBarmanServerPayload = {
+      sourceInstanceId: barmanServerForm.sourceInstanceId,
+      runnerHostId: barmanServerForm.runnerHostId,
+      name: barmanServerForm.name.trim(),
+      barmanServerName: barmanServerForm.barmanServerName.trim(),
+      barmanHome: barmanServerForm.barmanHome?.trim(),
+      configPath: barmanServerForm.configPath?.trim(),
+      retentionPolicy: barmanServerForm.retentionPolicy?.trim(),
+      backupMethod: barmanServerForm.backupMethod?.trim(),
+      streamingArchiverEnabled: !!barmanServerForm.streamingArchiverEnabled,
+      archiverEnabled: !!barmanServerForm.archiverEnabled,
+      slotName: barmanServerForm.slotName?.trim(),
+      status: barmanServerForm.status || 'pending',
+      configJson: barmanServerForm.configJson?.trim()
+    }
+    if (barmanServerForm.id) {
+      await updateDatabaseBarmanServer(barmanServerForm.id, payload)
+      ElMessage.success('Barman Server 已更新')
+    } else {
+      await createDatabaseBarmanServer(payload)
+      ElMessage.success('Barman Server 已创建')
+    }
+    barmanServerDialogVisible.value = false
+    await loadBarmanServers()
+  } finally {
+    barmanServerSubmitting.value = false
+  }
+}
+
+const handleCheckBarmanServer = async (row: DatabaseBarmanServerResult) => {
+  barmanCheckingId.value = row.id
+  try {
+    await checkDatabaseBarmanServer(row.id)
+    ElMessage.success('Barman 检查任务已下发')
+    await Promise.all([loadBarmanServers(), loadRunnerJobs()])
+    window.setTimeout(() => {
+      loadBarmanServers()
+      loadRunnerJobs()
+    }, 2500)
+  } finally {
+    barmanCheckingId.value = 0
+  }
+}
+
+const handleSyncBarmanCatalog = async (row: DatabaseBarmanServerResult) => {
+  barmanCatalogSyncingId.value = row.id
+  try {
+    await syncDatabaseBarmanCatalog(row.id)
+    ElMessage.success('Barman catalog 同步任务已下发')
+    await Promise.all([loadBarmanServers(), loadRunnerJobs(), loadBackupRecords()])
+    window.setTimeout(() => {
+      loadBarmanServers()
+      loadRunnerJobs()
+      loadBackupRecords()
+    }, 3000)
+  } finally {
+    barmanCatalogSyncingId.value = 0
+  }
+}
+
+const handleDeleteBarmanServer = async (row: DatabaseBarmanServerResult) => {
+  await ElMessageBox.confirm(`确认删除 Barman Server「${row.name}」？已同步的备份记录不会被删除。`, '删除 Barman Server', {
+    confirmButtonText: '删除',
+    cancelButtonText: '取消',
+    type: 'warning'
+  })
+  await deleteDatabaseBarmanServer(row.id)
+  ElMessage.success('Barman Server 已删除')
+  await loadBarmanServers()
 }
 
 const runnerAgentIDForHost = (row: DatabaseRunnerHostResult) => `runner-host-${row.id}`
@@ -8392,6 +8814,16 @@ const resetRunnerJobQuery = () => {
   loadRunnerJobs()
 }
 
+const resetBarmanServerQuery = () => {
+  barmanServerQuery.page = 1
+  barmanServerQuery.pageSize = 10
+  barmanServerQuery.keyword = ''
+  barmanServerQuery.sourceInstanceId = undefined
+  barmanServerQuery.runnerHostId = undefined
+  barmanServerQuery.status = ''
+  loadBarmanServers()
+}
+
 const resetRestoreJobQuery = () => {
   restoreJobQuery.page = 1
   restoreJobQuery.pageSize = 10
@@ -9039,6 +9471,21 @@ const runnerJobStatusTag = (status?: string) => {
   }
 }
 
+const barmanStatusTag = (status?: string) => {
+  switch (status) {
+    case 'healthy':
+      return 'success'
+    case 'degraded':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    case 'disabled':
+      return 'info'
+    default:
+      return 'warning'
+  }
+}
+
 const restoreStatusTag = (status?: string) => {
   switch (status) {
     case 'verified':
@@ -9254,6 +9701,7 @@ watch(activeTab, async (tab) => {
       loadStorageProfiles(),
       loadRunnerHosts(),
       loadRunnerJobs(),
+      loadBarmanServers(),
       loadLogArchiveStreams(),
       loadLogArchives(),
       loadLogArchiveEvents(),

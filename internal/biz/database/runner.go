@@ -642,6 +642,10 @@ func RunnerJobTypeText(value string) string {
 		return "物理恢复"
 	case DatabaseRunnerJobTypeRestoreValidate:
 		return "恢复校验"
+	case DatabaseRunnerJobTypeBarmanCheck:
+		return "Barman 检查"
+	case DatabaseRunnerJobTypeBarmanCatalogSync:
+		return "Barman Catalog 同步"
 	default:
 		return "Runner 探测"
 	}

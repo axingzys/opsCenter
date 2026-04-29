@@ -63,6 +63,7 @@ type UseCase struct {
 	secretProfileRepo      SecretProfileRepo
 	runnerHostRepo         RunnerHostRepo
 	runnerJobRepo          RunnerJobRepo
+	barmanServerRepo       BarmanServerRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
 	writePolicyResolver    func(ctx context.Context) (*DatabaseWritePolicy, error)
@@ -130,6 +131,7 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	secretProfileRepo SecretProfileRepo,
 	runnerHostRepo RunnerHostRepo,
 	runnerJobRepo RunnerJobRepo,
+	barmanServerRepo BarmanServerRepo,
 ) {
 	if uc == nil {
 		return
@@ -142,6 +144,7 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	uc.secretProfileRepo = secretProfileRepo
 	uc.runnerHostRepo = runnerHostRepo
 	uc.runnerJobRepo = runnerJobRepo
+	uc.barmanServerRepo = barmanServerRepo
 }
 
 type DatabaseInstanceRequest struct {
@@ -205,6 +208,7 @@ type DatabaseBackupRecordListRequest struct {
 	InstanceID         uint   `form:"instanceId"`
 	Status             string `form:"status"`
 	TriggerType        string `form:"triggerType"`
+	BackupEngine       string `form:"backupEngine"`
 	DateFrom           string `form:"dateFrom"`
 	DateTo             string `form:"dateTo"`
 	RestrictToAllowed  bool   `form:"-" json:"-"`
@@ -598,6 +602,9 @@ type DatabaseBackupRecordVO struct {
 	BackupLevel           string `json:"backupLevel"`
 	BackupLevelText       string `json:"backupLevelText"`
 	BackupEngine          string `json:"backupEngine"`
+	ExternalBackupID      string `json:"externalBackupId"`
+	ExternalServerName    string `json:"externalServerName"`
+	BackupScope           string `json:"backupScope"`
 	ToolName              string `json:"toolName"`
 	ToolVersion           string `json:"toolVersion"`
 	SourceInstanceID      uint   `json:"sourceInstanceId"`
@@ -1857,6 +1864,7 @@ func normalizeBackupRecordListRequest(req *DatabaseBackupRecordListRequest) {
 	}
 	req.Status = strings.TrimSpace(req.Status)
 	req.TriggerType = strings.TrimSpace(req.TriggerType)
+	req.BackupEngine = strings.TrimSpace(req.BackupEngine)
 	req.DateFrom = strings.TrimSpace(req.DateFrom)
 	req.DateTo = strings.TrimSpace(req.DateTo)
 }

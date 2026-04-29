@@ -3324,19 +3324,686 @@ P2 完成度判定：
 
 目标：接入 PostgreSQL 大库主链路。第一版深接 Barman。
 
-范围：
+P3 的核心判断：
 
-1. Barman server 登记。
-2. Barman catalog 同步。
-3. Barman backup 触发。
-4. Barman WAL 状态采集。
-5. Barman restore 到隔离目录或隔离实例。
-6. timeline、LSN、system_identifier 校验。
-7. pg_basebackup 作为轻量备用。
-8. WAL-G 先支持 external metadata registration，后续再深接。
-9. pgBackRest 仅 legacy external，不作为默认推荐。
+1. PostgreSQL 物理备份和 PITR 是 cluster 级能力，不是单 database/schema/table 能力。
+2. 第一版深接 Barman，不同时深接 Barman、WAL-G、pg_basebackup 三套引擎。
+3. WAL-G 先只做 external metadata registration，后续独立阶段再深接。
+4. pgBackRest 只作为 legacy external 纳管，不作为新方案默认推荐。
+5. `pg_basebackup` 作为轻量备用方案，但原生增量必须按 PostgreSQL 版本和 `pg_combinebackup` 能力门控。
+6. PostgreSQL 恢复计划必须校验 `pg_system_identifier`、timeline、timeline history、WAL segment 连续性和 LSN 覆盖范围。
+7. Barman restore 和隔离 PostgreSQL 启动要分阶段实现：先恢复到隔离目录，再启动隔离实例并执行校验 SQL。
+
+#### P3 技术边界
+
+本阶段做：
+
+1. Barman server 登记和健康检查。
+2. Barman backup catalog 同步到 OpsHub 备份记录。
+3. Barman WAL 状态和 WAL catalog 同步到 OpsHub 日志归档记录。
+4. Barman 物理备份任务触发。
+5. PostgreSQL PITR 恢复计划生成和预校验。
+6. Barman restore 到隔离目录。
+7. 隔离 PostgreSQL 实例启动、target time / target LSN 恢复、校验 SQL 和恢复证明。
+8. `pg_basebackup` 轻量备用方案的记录、触发和计划步骤。
+9. WAL-G / pgBackRest 外部元数据登记和 UI 风险提示。
+
+本阶段不做：
+
+1. 不做生产库自动切换。
+2. 不做 PostgreSQL 表级物理恢复。
+3. 不做 WAL-G 深度执行链路。
+4. 不把 pgBackRest 作为新建策略推荐。
+5. 不在 backend 容器里直接跑 Barman/pg_basebackup/pg_ctl；这类命令仍走 Runner 主机。
+6. 不承诺所有 PostgreSQL 版本都支持原生增量。
+7. 不默认支持复杂 tablespace remap；检测到 tablespace 且没有明确 remap 配置时，恢复计划应阻断。
+
+#### P3 数据模型补充
+
+现有 `database_backup_records`、`database_log_archive_streams`、`database_log_archives`、`database_restore_plans` 已经具备 P1/P2 的大部分字段，P3 不重建一套备份系统，只补 PostgreSQL/Barman 必需模型。
+
+新增表：
+
+```text
+database_barman_servers
+```
+
+建议字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `source_instance_id` | 关联的 PostgreSQL 生产实例 |
+| `runner_host_id` | 执行 Barman 命令的 Runner 主机 |
+| `name` | OpsHub 内部展示名称 |
+| `barman_server_name` | Barman 配置里的 server name |
+| `barman_home` | Barman home/catalog 根目录，可选 |
+| `config_path` | Barman 配置路径，可选 |
+| `retention_policy` | Barman retention policy 展示值 |
+| `backup_method` | Barman 配置中的 backup method 摘要 |
+| `streaming_archiver_enabled` | 是否启用 WAL streaming |
+| `archiver_enabled` | 是否启用 archive_command/put-wal 链路 |
+| `slot_name` | 物理复制 slot 名称，可选 |
+| `barman_version` | Barman 版本 |
+| `pg_version` | 源 PostgreSQL 版本 |
+| `pg_system_identifier` | PostgreSQL cluster system identifier |
+| `wal_segment_size` | WAL segment size |
+| `status` | pending / healthy / degraded / failed / disabled |
+| `last_check_at` | 最近一次 `barman check` 时间 |
+| `last_check_status` | 最近一次 check 结果 |
+| `last_catalog_sync_at` | 最近 catalog 同步时间 |
+| `last_wal_sync_at` | 最近 WAL 同步时间 |
+| `last_error` | 最近错误 |
+| `config_json` | 脱敏配置摘要，不保存明文密钥 |
+
+`database_backup_records` 建议补充字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `external_backup_id` | Barman backup ID / WAL-G backup name / pg_basebackup id |
+| `external_server_name` | Barman server name 或外部工具 server name |
+| `backup_scope` | `cluster / database / schema / table`，PostgreSQL 物理备份固定为 `cluster` |
+
+已有 PostgreSQL 字段继续使用：
+
+1. `pg_system_identifier`
+2. `timeline_id`
+3. `timeline_history_file`
+4. `wal_segment_size`
+5. `start_lsn`
+6. `end_lsn`
+7. `wal_start`
+8. `wal_end`
+9. `backup_label_json`
+10. `backup_manifest_checksum`
+
+`database_log_archives` 建议补充字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `wal_segment_size` | WAL segment size，便于 LSN 到 segment 覆盖计算 |
+| `external_server_name` | Barman server name |
+
+已有 PostgreSQL 字段继续使用：
+
+1. `pg_system_identifier`
+2. `timeline_id`
+3. `start_lsn`
+4. `end_lsn`
+5. `segment_no`
+6. `timeline_history_uri`
+
+#### P3 API 设计
+
+Barman server：
+
+```text
+GET    /api/v1/databases/barman-servers
+POST   /api/v1/databases/barman-servers
+PUT    /api/v1/databases/barman-servers/:id
+DELETE /api/v1/databases/barman-servers/:id
+POST   /api/v1/databases/barman-servers/:id/check
+POST   /api/v1/databases/barman-servers/:id/sync-catalog
+POST   /api/v1/databases/barman-servers/:id/sync-wal
+```
+
+Barman backup：
+
+```text
+POST /api/v1/databases/barman-servers/:id/backup
+```
+
+也可以复用现有备份任务手动触发接口，但任务配置里要能选择：
+
+1. `backup_method=physical`
+2. `backup_engine=barman`
+3. `backup_scope=cluster`
+4. `barman_server_id`
+
+PostgreSQL PITR 计划：
+
+```text
+POST /api/v1/databases/restore-plans
+POST /api/v1/databases/restore-plans/:id/run
+```
+
+P3 要扩展 `restoreTargetType`：
+
+1. `time`
+2. `lsn`
+
+后续再扩展：
+
+1. `xid`
+2. `restore_point`
+3. `immediate`
+
+#### P3 Runner 命令边界
+
+Barman Runner 允许命令：
+
+```text
+barman --version
+barman check <server>
+barman status <server>
+barman list-backups <server>
+barman show-backup <server> <backup_id>
+barman backup <server>
+barman check-backup <server> <backup_id>
+barman restore <server> <backup_id|auto> <destination_dir> [target options]
+barman receive-wal <server> --create-slot --if-not-exists
+barman receive-wal <server> --reset
+barman terminate-process <server> receive-wal
+```
+
+首版不建议直接开放任意命令输入。所有命令由 OpsHub 生成，参数必须白名单校验：
+
+1. `server` 只能来自已登记 Barman server。
+2. `backup_id` 只能来自已同步 catalog，或在恢复阶段使用 `auto`。
+3. `destination_dir` 必须位于 Runner 配置的 work root 下。
+4. `target_time` 必须是可解析时间，且必须在可恢复窗口内。
+5. `target_lsn` 必须符合 PostgreSQL LSN 格式。
+6. `target_tli` 必须来自计划选择或 catalog 已知 timeline。
+
+#### P3 PostgreSQL WAL 解析和校验
+
+需要新增 PostgreSQL WAL 工具包，建议包名：
+
+```text
+internal/biz/database/pgwal
+```
+
+职责：
+
+1. 解析 WAL segment 文件名。
+2. 解析 timeline ID。
+3. 计算 segment 序号。
+4. 校验 segment 文件名合法性。
+5. 比较 segment 连续性。
+6. 比较 LSN 大小。
+7. 根据 WAL segment size 判断 LSN 是否落在某个 segment 范围内。
+8. 识别 `.history` timeline history 文件。
+
+恢复计划校验必须覆盖：
+
+| 校验项 | 失败状态 |
+| --- | --- |
+| base backup 缺失 | `missing_base` |
+| 原生增量依赖缺失 | `missing_incremental` |
+| `pg_system_identifier` 不一致 | `system_identifier_mismatch` |
+| timeline 不匹配 | `timeline_mismatch` |
+| timeline history 缺失 | `timeline_gap` |
+| WAL segment 不连续 | `missing_wal` |
+| target LSN 不在 WAL 覆盖范围内 | `lsn_not_covered` |
+| target time 不在 WAL 时间窗口内 | `time_not_covered` |
+| storage object 缺失 | `missing_object` |
+| checksum 不匹配 | `checksum_failed` |
+| Barman/pg tools 不兼容 | `incompatible_tool` |
+
+#### P3 恢复计划内容
+
+`plan_json` 需要包含：
+
+```json
+{
+  "engine": "postgresql",
+  "backupEngine": "barman",
+  "backupScope": "cluster",
+  "barmanServerId": 1,
+  "barmanServerName": "prod-pg",
+  "target": {
+    "type": "time",
+    "value": "2026-04-29 02:30:00",
+    "inclusive": true,
+    "timelineId": "1"
+  },
+  "baseBackup": {
+    "recordId": 100,
+    "externalBackupId": "20260429T010001",
+    "pgSystemIdentifier": "7400000000000000000",
+    "timelineId": "1",
+    "startLsn": "0/3000028",
+    "endLsn": "0/5000000",
+    "walStart": "000000010000000000000003",
+    "walEnd": "000000010000000000000005"
+  },
+  "walChain": {
+    "status": "complete",
+    "archiveIds": [201, 202, 203],
+    "timelineHistoryRequired": false,
+    "coverage": {
+      "fromLsn": "0/5000000",
+      "toLsn": "0/9000000"
+    }
+  },
+  "checks": {
+    "systemIdentifier": "passed",
+    "timeline": "passed",
+    "walContinuity": "passed",
+    "storage": "passed",
+    "tool": "passed"
+  },
+  "restoreSteps": [
+    "barman restore",
+    "start isolated postgres",
+    "wait recovery target",
+    "run validation sql",
+    "generate proof"
+  ]
+}
+```
+
+如使用 `pg_basebackup --incremental`，`restoreSteps` 必须包含：
+
+```text
+pg_combinebackup
+```
+
+且 `plan_json` 必须列出 full + incremental 依赖链。
+
+#### P3 前端改造
+
+PostgreSQL 物理备份任务页面：
+
+1. 明确显示“PostgreSQL 物理备份是 cluster 级，不能选择单库/Schema/表”。
+2. 当选择 PostgreSQL + physical 时，只允许 `backup_scope=cluster`。
+3. `backup_engine` 首选 Barman。
+4. `pg_basebackup` 显示为轻量备用。
+5. WAL-G 显示为 external registration。
+6. pgBackRest 显示 legacy external，并提示“不作为新方案默认推荐”。
+
+Barman server 页面：
+
+1. Barman server 列表。
+2. server 健康状态。
+3. 最近 `barman check` 结果。
+4. retention policy。
+5. streaming archiver / archive_command 状态。
+6. 最近 catalog sync 时间。
+7. 最近 WAL sync 时间。
+8. 最近错误。
+
+Barman catalog 页面：
+
+1. backup ID。
+2. backup 状态。
+3. backup 开始/结束时间。
+4. PostgreSQL 版本。
+5. system identifier。
+6. timeline。
+7. start/end LSN。
+8. WAL start/end。
+9. backup size。
+10. retention 状态。
+11. 是否已同步到 OpsHub backup record。
+
+WAL 状态页面：
+
+1. WAL archive stream。
+2. timeline。
+3. segment 起止。
+4. LSN 起止。
+5. 最近归档时间。
+6. gap 状态。
+7. RPO 风险提示。
+
+恢复计划页面：
+
+1. PostgreSQL 支持 `target time` 和 `target LSN`。
+2. 展示 cluster 级恢复提示。
+3. 展示 base backup。
+4. 展示 WAL chain。
+5. 展示 timeline/system identifier 校验。
+6. timeline mismatch / WAL gap 时明确失败原因。
+7. 恢复执行前要求选择 Runner 主机、隔离端口、容器镜像或本机 PostgreSQL 路径。
+
+#### P3 测试矩阵
+
+单元测试：
+
+1. WAL segment 文件名解析。
+2. timeline ID 解析。
+3. LSN 比较。
+4. LSN 到 WAL segment 覆盖判断。
+5. WAL segment 连续性判断。
+6. timeline mismatch 阻断恢复计划。
+7. `pg_system_identifier` mismatch 阻断恢复计划。
+8. 缺 WAL segment 阻断恢复计划。
+9. target LSN 超出覆盖范围阻断恢复计划。
+10. 原生增量依赖缺失阻断恢复计划。
+11. `pg_combinebackup` 步骤生成。
+12. Barman `list-backups` / `show-backup` 输出解析。
+
+集成测试：
+
+1. PostgreSQL + Barman server 登记。
+2. `barman check` 成功和失败。
+3. 触发 Barman backup。
+4. 同步 Barman backup catalog。
+5. 同步 WAL catalog。
+6. 手工制造 WAL gap 后恢复计划失败。
+7. 手工制造 timeline mismatch 后恢复计划失败。
+8. 按 target time 恢复到隔离 PostgreSQL。
+9. 按 target LSN 恢复到隔离 PostgreSQL。
+10. 校验 SQL 通过。
+11. 校验 SQL 断言失败时恢复证明记录 actual/expected。
+
+真实环境演练：
+
+1. 准备一个 PostgreSQL 主库。
+2. 准备一个 Barman server。
+3. 生成测试表和测试数据。
+4. 做 Barman full backup。
+5. 插入 backup 之后的数据。
+6. 确认 WAL 被归档。
+7. 选择插入后时间点恢复。
+8. 选择指定 LSN 恢复。
+9. 启动隔离 PostgreSQL。
+10. 执行 SQL 断言。
+11. 生成恢复证明。
+
+#### P3 分期拆分
+
+##### P3.0：P3 设计和兼容矩阵
+
+目标：把 PostgreSQL 物理备份边界、工具矩阵、测试拓扑和风险提示固化。
+
+实现内容：
+
+1. 补充 P3 文档。
+2. 补充 Barman / pg_basebackup / WAL-G / pgBackRest 选择说明。
+3. 明确 PostgreSQL 物理备份 cluster 级 UI 文案。
+4. 明确 Runner 工具探测字段：
+   - `barman --version`
+   - `pg_basebackup --version`
+   - `pg_combinebackup --version`
+   - `pg_ctl --version`
+   - `postgres --version`
+   - `psql --version`
+5. 明确测试环境和验收脚本。
 
 验收：
+
+1. 文档能直接指导 P3.1-P3.10 实施。
+2. 不修改线上行为。
+
+##### P3.1：Barman server 登记和健康检查
+
+目标：OpsHub 能登记 Barman server，并通过 Runner 执行 `barman check`。
+
+当前落地状态（2026-04-29）：
+
+1. 已落地 `database_barman_servers` 模型、仓库和 AutoMigrate。
+2. 已新增 Barman server CRUD API 与前端管理页签。
+3. 已新增 `barman_check` Runner job 类型和白名单命令。
+4. 已通过 SSH Runner 执行受控脚本：
+   - `barman --version`
+   - `barman -f json check <server>`
+   - `barman check <server>`
+   - `barman -f json status <server>`
+5. 已解析 `barman_version`、`retention_policy`、`backup_method`、`slot_name`、`pg_version`、`pg_system_identifier`、`wal_segment_size`、archiver/streaming 状态。
+6. 已校验 Barman server name 只能使用安全字符，命令参数不接受前端自由拼接。
+
+实现内容：
+
+1. 新增 `database_barman_servers` 模型、仓库、迁移。
+2. 新增 Barman server CRUD API。
+3. 新增 `check` API。
+4. Runner job 新增 `barman_check` 类型。
+5. 后端生成受控脚本执行：
+   - `barman --version`
+   - `barman check <server>`
+   - 可选 `barman status <server>`
+6. 解析 check 输出，写入：
+   - `status`
+   - `last_check_at`
+   - `last_check_status`
+   - `last_error`
+   - `barman_version`
+   - `pg_version`
+7. 前端增加 Barman server 管理页面。
+
+验收：
+
+1. 能创建 Barman server。
+2. 能手动触发 check。
+3. check 成功显示 healthy。
+4. check 失败显示失败项和错误。
+5. 无效 server name 不会进入命令行。
+
+##### P3.2：Barman backup catalog 同步
+
+目标：把 Barman catalog 同步成 OpsHub backup record。
+
+当前落地状态（2026-04-29）：
+
+1. 已新增 `barman_catalog_sync` Runner job 类型和白名单命令。
+2. 已通过 SSH Runner 执行受控脚本：
+   - `barman -f json list-backup <server>`，失败时兼容 `list-backups`
+   - `barman list-backup <server>`，用于提取 backup ID，失败时兼容 `list-backups`
+   - `barman -f json show-backup <server> <backup_id>`
+3. 已解析 Barman backup ID、状态、开始/结束时间、大小、PostgreSQL system identifier、timeline、WAL segment、LSN。
+4. 已按 `source_instance_id + backup_engine + external_server_name + external_backup_id` 幂等 upsert `database_backup_records`。
+5. 已写入 `backup_method=physical`、`backup_engine=barman`、`backup_scope=cluster`、`storage_uri=barman://<server>/<backup_id>`。
+6. 已在前端 Barman Server 页签提供“检查”和“同步”操作，并在 Runner 任务里展示 Barman 任务类型。
+
+实现内容：
+
+1. Runner 执行：
+   - `barman list-backups <server>`
+   - `barman show-backup <server> <backup_id>`
+2. 解析 Barman backup ID、状态、开始/结束时间、大小、WAL 范围、timeline、LSN。
+3. 写入或更新 `database_backup_records`：
+   - `backup_method=physical`
+   - `backup_engine=barman`
+   - `backup_scope=cluster`
+   - `external_backup_id=<barman backup id>`
+   - `external_server_name=<barman server name>`
+   - `pg_system_identifier`
+   - `timeline_id`
+   - `start_lsn`
+   - `end_lsn`
+   - `wal_start`
+   - `wal_end`
+4. 同步幂等：同一个 Barman server + backup ID 不重复创建。
+5. 前端 catalog 页面显示“已同步/未同步”。
+
+验收：
+
+1. Barman 备份记录能同步到 OpsHub。
+2. 重复同步不会产生重复记录。
+3. 备份记录显示 cluster 级。
+4. 缺关键元数据时标记 degraded，不当作 PITR 可用。
+
+##### P3.3：Barman WAL 状态和 WAL catalog 同步
+
+目标：OpsHub 能看到 PostgreSQL WAL 链路，并识别 WAL gap。
+
+实现内容：
+
+1. 自动创建或绑定 `database_log_archive_streams`：
+   - `engine=postgresql`
+   - `archive_type=wal`
+   - `archive_engine=barman`
+2. 同步 Barman WAL catalog 或 xlog metadata。
+3. 解析 WAL segment 文件名和 timeline。
+4. 写入 `database_log_archives`。
+5. 记录 timeline history 文件。
+6. 计算归档窗口和 gap 状态。
+7. 前端显示 WAL 状态。
+
+验收：
+
+1. WAL segment 能登记到 OpsHub。
+2. 连续 WAL 显示 complete。
+3. 删除一个中间 segment 后恢复计划能识别 `missing_wal`。
+4. timeline history 缺失时恢复计划能识别 `timeline_gap`。
+
+##### P3.4：Barman backup 触发
+
+目标：OpsHub 能触发 PostgreSQL cluster 级 Barman 物理备份。
+
+实现内容：
+
+1. 备份任务支持 PostgreSQL + physical + Barman。
+2. API 校验 PostgreSQL 物理备份必须 `backup_scope=cluster`。
+3. Runner job 新增 `barman_backup` 类型。
+4. Runner 执行：
+   - `barman backup <server>`
+   - 可选 `barman check-backup <server> <backup_id>`
+5. 备份完成后自动触发 catalog sync。
+6. 前端禁用 database/schema/table 选择。
+
+验收：
+
+1. PostgreSQL 物理备份任务页面明确显示 cluster 级。
+2. 能手动触发 Barman backup。
+3. 完成后能同步出 backup record。
+4. Barman backup 失败时记录 Runner job、错误和审计。
+
+##### P3.5：PostgreSQL PITR 恢复计划校验
+
+目标：恢复计划能针对 PostgreSQL 做真实预校验。
+
+实现内容：
+
+1. `CreateRestorePlan` 支持 PostgreSQL `targetType=time|lsn`。
+2. 选择合适 base backup。
+3. 校验 system identifier。
+4. 校验 timeline。
+5. 校验 timeline history。
+6. 校验 WAL segment 连续性。
+7. 校验 target LSN/time 覆盖。
+8. 校验 storage object 和 checksum。
+9. 生成 PostgreSQL 专用 plan_json、required_tool_json、required_artifact_json。
+
+验收：
+
+1. WAL 缺口能被恢复计划识别。
+2. timeline 不匹配时恢复计划失败。
+3. system identifier 不匹配时恢复计划失败。
+4. target LSN 超出范围时恢复计划失败。
+5. 正常链路恢复计划为 validated。
+
+##### P3.6：Barman restore 到隔离目录
+
+目标：Runner 能执行 Barman restore，把 PGDATA 恢复到隔离目录。
+
+实现内容：
+
+1. Runner job 新增 `barman_restore` 类型。
+2. 后端生成 `barman restore` 脚本。
+3. 支持：
+   - `--target-time`
+   - `--target-lsn`
+   - `--target-tli`
+   - `--target-action pause|shutdown|promote`
+   - `--get-wal` / `--no-get-wal`
+4. destination_dir 固定在 Runner work root。
+5. 校验恢复后的目录结构。
+6. 记录恢复目录、日志、命令摘要到 proof。
+
+验收：
+
+1. 能恢复到隔离目录。
+2. 目录不与生产 PGDATA 重叠。
+3. target 参数受控。
+4. Barman restore 失败时 proof 记录失败步骤。
+
+##### P3.7：隔离 PostgreSQL 实例启动和验证
+
+目标：能把恢复目录启动为隔离 PostgreSQL，并执行校验 SQL。
+
+实现内容：
+
+1. 根据源 PostgreSQL major version 选择容器镜像或本机 postgres。
+2. 配置隔离端口和 listen address。
+3. 修正 PGDATA 权限。
+4. 启动隔离 PostgreSQL。
+5. 等待 recovery 到目标点。
+6. 查询恢复状态。
+7. 执行 validation SQL。
+8. 支持 P2.7 已有断言：
+   - `expectedRows`
+   - `expectedContains`
+   - `expectedScalar`
+9. 生成恢复证明。
+10. 支持失败清理和手动保留隔离库。
+
+验收：
+
+1. 能恢复到指定 target time 的隔离 PostgreSQL 实例。
+2. 能恢复到指定 target LSN 的隔离 PostgreSQL 实例。
+3. 校验 SQL 成功时 plan/job 标记成功。
+4. 校验断言失败时 proof 记录 expected/actual。
+5. cleanup 开启时失败后清理隔离容器。
+
+##### P3.8：pg_basebackup 轻量备用
+
+目标：在没有 Barman 的轻量环境下支持 PostgreSQL 原生 base backup。
+
+实现内容：
+
+1. 备份任务支持 PostgreSQL + physical + `pg_basebackup`。
+2. 明确 cluster 级。
+3. 支持 full base backup。
+4. 记录 backup manifest。
+5. 支持外部 WAL archive 配合 PITR。
+6. 原生 incremental 只在 PostgreSQL 17+ 且客户端工具支持时开放。
+7. 使用 incremental 时恢复计划必须包含 `pg_combinebackup`。
+8. 任一依赖备份缺失时恢复计划失败。
+
+验收：
+
+1. full pg_basebackup 可登记为 physical backup。
+2. incremental 未满足版本条件时不能选择。
+3. incremental 恢复计划包含 `pg_combinebackup`。
+4. 缺依赖备份时恢复计划失败。
+
+##### P3.9：WAL-G / pgBackRest external 纳管
+
+目标：支持已有 PostgreSQL 外部备份链路纳管，但不深接执行。
+
+实现内容：
+
+1. 外部备份登记支持 `backup_engine=walg`。
+2. 外部 WAL 登记支持 `archive_engine=walg`。
+3. 外部备份登记支持 `backup_engine=pgbackrest`。
+4. pgBackRest UI 标注 legacy external。
+5. 新建策略默认不推荐 pgBackRest。
+6. 只记录元数据、恢复演练结果和风险提示。
+
+验收：
+
+1. WAL-G 外部记录能进入恢复计划。
+2. pgBackRest 记录可登记但有 legacy warning。
+3. 不出现“新建 pgBackRest 深接入策略”的默认入口。
+
+##### P3.10：P3 联调、回归和恢复演练
+
+目标：把 P3 做成可证明恢复的闭环。
+
+实现内容：
+
+1. 准备 PostgreSQL + Barman 测试环境。
+2. 准备真实备份、WAL、恢复脚本。
+3. 编写单元测试。
+4. 编写集成测试。
+5. 执行 target time 恢复演练。
+6. 执行 target LSN 恢复演练。
+7. 执行 WAL gap 失败演练。
+8. 执行 timeline mismatch 失败演练。
+9. 更新文档和操作手册。
+
+验收：
+
+1. Barman 备份记录能同步到 OpsHub。
+2. WAL 缺口能被恢复计划识别。
+3. timeline 不匹配时恢复计划失败。
+4. 能恢复到指定 target time 的隔离 PostgreSQL 实例。
+5. 能恢复到指定 target LSN 的隔离 PostgreSQL 实例。
+6. 如使用原生增量，恢复计划必须包含 `pg_combinebackup` 步骤。
+
+#### P3 总体验收
 
 1. PostgreSQL 物理备份任务页面明确显示 cluster 级。
 2. Barman 备份记录能同步到 OpsHub。

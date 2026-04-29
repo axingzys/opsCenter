@@ -81,6 +81,7 @@ type BackupRecordRepo interface {
 	Create(ctx context.Context, item *DatabaseBackupRecord) error
 	Update(ctx context.Context, item *DatabaseBackupRecord) error
 	GetByID(ctx context.Context, id uint) (*DatabaseBackupRecord, error)
+	GetByExternalBackup(ctx context.Context, instanceID uint, backupEngine, externalServerName, externalBackupID string) (*DatabaseBackupRecord, error)
 	List(ctx context.Context, req *DatabaseBackupRecordListRequest) ([]*DatabaseBackupRecord, int64, error)
 	ListExpiredSuccessByTask(ctx context.Context, taskID uint, before time.Time) ([]*DatabaseBackupRecord, error)
 	ListSuccessfulForRestore(ctx context.Context, instanceID uint, targetTime *time.Time) ([]*DatabaseBackupRecord, error)
@@ -163,4 +164,12 @@ type RunnerJobRepo interface {
 	Update(ctx context.Context, item *DatabaseRunnerJob) error
 	GetByID(ctx context.Context, id uint) (*DatabaseRunnerJob, error)
 	List(ctx context.Context, req *DatabaseRunnerJobListRequest) ([]*DatabaseRunnerJob, int64, error)
+}
+
+type BarmanServerRepo interface {
+	Create(ctx context.Context, item *DatabaseBarmanServer) error
+	Update(ctx context.Context, item *DatabaseBarmanServer) error
+	Delete(ctx context.Context, id uint) error
+	GetByID(ctx context.Context, id uint) (*DatabaseBarmanServer, error)
+	List(ctx context.Context, req *DatabaseBarmanServerListRequest) ([]*DatabaseBarmanServer, int64, error)
 }

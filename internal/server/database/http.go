@@ -111,6 +111,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	secretProfileRepo := dbdata.NewSecretProfileRepo(db)
 	runnerHostRepo := dbdata.NewRunnerHostRepo(db)
 	runnerJobRepo := dbdata.NewRunnerJobRepo(db)
+	barmanServerRepo := dbdata.NewBarmanServerRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
 	configRepo := systemdata.NewConfigRepo(db)
 	loginAttemptRepo := systemdata.NewLoginAttemptRepo(db)
@@ -184,6 +185,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		secretProfileRepo,
 		runnerHostRepo,
 		runnerJobRepo,
+		barmanServerRepo,
 	)
 
 	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
@@ -309,6 +311,12 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.PUT("/runner-hosts/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateRunnerHost)
 		databases.POST("/runner-hosts/:id/test", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.TestRunnerHost)
 		databases.GET("/runner-jobs", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListRunnerJobs)
+		databases.GET("/barman-servers", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBarmanServers)
+		databases.POST("/barman-servers", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateBarmanServer)
+		databases.PUT("/barman-servers/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateBarmanServer)
+		databases.DELETE("/barman-servers/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBarmanServer)
+		databases.POST("/barman-servers/:id/check", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.CheckBarmanServer)
+		databases.POST("/barman-servers/:id/sync-catalog", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.SyncBarmanCatalog)
 		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
 		databases.POST("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionRun), s.service.GenerateInspectionReport)
 		databases.GET("/inspection-reports/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.GetInspectionReport)

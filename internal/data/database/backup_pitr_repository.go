@@ -576,6 +576,66 @@ func (r *runnerJobRepo) List(ctx context.Context, req *dbbiz.DatabaseRunnerJobLi
 	return items, total, nil
 }
 
+type barmanServerRepo struct {
+	db *gorm.DB
+}
+
+func NewBarmanServerRepo(db *gorm.DB) dbbiz.BarmanServerRepo {
+	return &barmanServerRepo{db: db}
+}
+
+func (r *barmanServerRepo) Create(ctx context.Context, item *dbbiz.DatabaseBarmanServer) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *barmanServerRepo) Update(ctx context.Context, item *dbbiz.DatabaseBarmanServer) error {
+	return r.db.WithContext(ctx).Save(item).Error
+}
+
+func (r *barmanServerRepo) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Delete(&dbbiz.DatabaseBarmanServer{}, id).Error
+}
+
+func (r *barmanServerRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseBarmanServer, error) {
+	var item dbbiz.DatabaseBarmanServer
+	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *barmanServerRepo) List(ctx context.Context, req *dbbiz.DatabaseBarmanServerListRequest) ([]*dbbiz.DatabaseBarmanServer, int64, error) {
+	var (
+		items []*dbbiz.DatabaseBarmanServer
+		total int64
+	)
+	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseBarmanServer{})
+	if req != nil {
+		query = applyAllowedInstanceFilter(query, "source_instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
+		if req.SourceInstanceID > 0 {
+			query = query.Where("source_instance_id = ?", req.SourceInstanceID)
+		}
+		if req.RunnerHostID > 0 {
+			query = query.Where("runner_host_id = ?", req.RunnerHostID)
+		}
+		if status := strings.TrimSpace(req.Status); status != "" {
+			query = query.Where("status = ?", status)
+		}
+		if keyword := strings.TrimSpace(req.Keyword); keyword != "" {
+			like := "%" + keyword + "%"
+			query = query.Where("name LIKE ? OR barman_server_name LIKE ?", like, like)
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := normalizeRepoPage(reqPage(req), reqPageSize(req))
+	if err := query.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 type pageable interface {
 	GetPage() int
 	GetPageSize() int
@@ -609,6 +669,8 @@ func reqPage(req any) int {
 		return item.Page
 	case *dbbiz.DatabaseRunnerJobListRequest:
 		return item.Page
+	case *dbbiz.DatabaseBarmanServerListRequest:
+		return item.Page
 	default:
 		return 1
 	}
@@ -631,6 +693,8 @@ func reqPageSize(req any) int {
 	case *dbbiz.DatabaseRunnerHostListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseRunnerJobListRequest:
+		return item.PageSize
+	case *dbbiz.DatabaseBarmanServerListRequest:
 		return item.PageSize
 	default:
 		return 10

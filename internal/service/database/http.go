@@ -245,6 +245,9 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseRestorePlanListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseBarmanServerListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseInspectionReportListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
@@ -948,6 +951,133 @@ func (s *Service) ListRunnerJobs(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) ListBarmanServers(c *gin.Context) {
+	var req dbbiz.DatabaseBarmanServerListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListBarmanServers(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
+func (s *Service) CreateBarmanServer(c *gin.Context) {
+	var req dbbiz.DatabaseBarmanServerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.SourceInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.CreateBarmanServer(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) UpdateBarmanServer(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Barman Server ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseBarmanServerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.SourceInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.UpdateBarmanServer(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) DeleteBarmanServer(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Barman Server ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBarmanServerSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if err := s.useCase.DeleteBarmanServer(c.Request.Context(), id); err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+func (s *Service) CheckBarmanServer(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Barman Server ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBarmanServerSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "检测失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.CheckBarmanServer(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "检测失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) SyncBarmanCatalog(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Barman Server ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBarmanServerSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "同步失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.SyncBarmanCatalog(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "同步失败: ", err)
+		return
+	}
+	response.Success(c, item)
 }
 
 func (s *Service) ListLogArchiveStreams(c *gin.Context) {

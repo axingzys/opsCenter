@@ -224,6 +224,9 @@ export interface DatabaseBackupRecordResult {
   backupLevel?: string
   backupLevelText?: string
   backupEngine?: string
+  externalBackupId?: string
+  externalServerName?: string
+  backupScope?: string
   toolName?: string
   toolVersion?: string
   sourceInstanceId?: number
@@ -271,6 +274,9 @@ export interface DatabaseExternalBackupRecordPayload {
   backupMethod?: string
   backupLevel?: string
   backupEngine?: string
+  externalBackupId?: string
+  externalServerName?: string
+  backupScope?: string
   toolName?: string
   toolVersion?: string
   storageProfileId?: number
@@ -643,6 +649,54 @@ export interface DatabaseRunnerJobResult {
   updatedAt: string
 }
 
+export interface DatabaseBarmanServerPayload {
+  sourceInstanceId: number
+  runnerHostId: number
+  name: string
+  barmanServerName: string
+  barmanHome?: string
+  configPath?: string
+  retentionPolicy?: string
+  backupMethod?: string
+  streamingArchiverEnabled?: boolean
+  archiverEnabled?: boolean
+  slotName?: string
+  status?: string
+  configJson?: string
+}
+
+export interface DatabaseBarmanServerResult {
+  id: number
+  sourceInstanceId: number
+  sourceInstanceName: string
+  runnerHostId: number
+  runnerHostName: string
+  name: string
+  barmanServerName: string
+  barmanHome: string
+  configPath: string
+  retentionPolicy: string
+  backupMethod: string
+  streamingArchiverEnabled: boolean
+  archiverEnabled: boolean
+  slotName: string
+  barmanVersion: string
+  pgVersion: string
+  pgSystemIdentifier: string
+  walSegmentSize: number
+  status: string
+  statusText: string
+  lastCheckAt: string
+  lastCheckStatus: string
+  lastCheckStatusText: string
+  lastCatalogSyncAt: string
+  lastWalSyncAt: string
+  lastError: string
+  configJson: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface DatabaseBackupRunResult {
   taskId: number
   taskName: string
@@ -971,6 +1025,7 @@ export const listDatabaseBackupRecords = (params?: {
   instanceId?: number
   status?: string
   triggerType?: string
+  backupEngine?: string
   dateFrom?: string
   dateTo?: string
 }) => request.get('/api/v1/databases/backup-records', { params })
@@ -1118,6 +1173,30 @@ export const listDatabaseRunnerJobs = (params?: {
   sourceInstanceId?: number
   targetInstanceId?: number
 }) => request.get('/api/v1/databases/runner-jobs', { params })
+
+export const listDatabaseBarmanServers = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  sourceInstanceId?: number
+  runnerHostId?: number
+  status?: string
+}) => request.get('/api/v1/databases/barman-servers', { params })
+
+export const createDatabaseBarmanServer = (data: DatabaseBarmanServerPayload) =>
+  request.post('/api/v1/databases/barman-servers', data)
+
+export const updateDatabaseBarmanServer = (id: number, data: DatabaseBarmanServerPayload) =>
+  request.put(`/api/v1/databases/barman-servers/${id}`, data)
+
+export const deleteDatabaseBarmanServer = (id: number) =>
+  request.delete(`/api/v1/databases/barman-servers/${id}`)
+
+export const checkDatabaseBarmanServer = (id: number) =>
+  request.post(`/api/v1/databases/barman-servers/${id}/check`)
+
+export const syncDatabaseBarmanCatalog = (id: number) =>
+  request.post(`/api/v1/databases/barman-servers/${id}/sync-catalog`)
 
 export const listDatabaseInspectionReports = (params?: {
   page?: number
