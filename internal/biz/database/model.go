@@ -167,6 +167,7 @@ const (
 	DatabaseRunnerJobTypeBarmanBackup                = "barman_backup"
 	DatabaseRunnerJobTypeBarmanRestore               = "barman_restore"
 	DatabaseRunnerJobTypePgBaseBackup                = "pg_basebackup"
+	DatabaseRunnerJobTypePgBaseBackupRestore         = "pg_basebackup_restore"
 	DatabaseRunnerJobStatusQueued                    = "queued"
 	DatabaseRunnerJobStatusRunning                   = "running"
 	DatabaseRunnerJobStatusSuccess                   = "success"
@@ -183,6 +184,7 @@ const (
 	DatabaseRunnerAllowedCommandBarmanBackup         = "barman_backup"
 	DatabaseRunnerAllowedCommandBarmanRestore        = "barman_restore"
 	DatabaseRunnerAllowedCommandPgBaseBackup         = "pg_basebackup"
+	DatabaseRunnerAllowedCommandPgBaseBackupRestore  = "pg_basebackup_restore"
 
 	DatabaseBarmanServerStatusPending  = "pending"
 	DatabaseBarmanServerStatusHealthy  = "healthy"

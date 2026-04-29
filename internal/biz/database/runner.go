@@ -654,6 +654,8 @@ func RunnerJobTypeText(value string) string {
 		return "Barman 恢复"
 	case DatabaseRunnerJobTypePgBaseBackup:
 		return "pg_basebackup"
+	case DatabaseRunnerJobTypePgBaseBackupRestore:
+		return "pg_basebackup 恢复"
 	default:
 		return "Runner 探测"
 	}

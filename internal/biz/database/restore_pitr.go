@@ -216,7 +216,18 @@ func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *Databas
 	}
 	dbType := normalizeDBType(source.DBType)
 	if dbType == DBTypePostgreSQL {
-		return uc.runPostgreSQLBarmanRestorePlan(ctx, plan, source, req, operator)
+		base, err := uc.backupRecordRepo.GetByID(ctx, plan.SelectedBaseRecordID)
+		if err != nil || base == nil {
+			return nil, fmt.Errorf("恢复计划缺少 base backup")
+		}
+		switch normalizePostgreSQLPhysicalBackupEngine(base.BackupEngine) {
+		case "barman":
+			return uc.runPostgreSQLBarmanRestorePlan(ctx, plan, source, req, operator)
+		case BackupEnginePgBaseBackup:
+			return uc.runPostgreSQLPgBaseBackupRestorePlan(ctx, plan, source, base, req, operator)
+		default:
+			return nil, fmt.Errorf("PostgreSQL 恢复暂不支持备份引擎: %s", base.BackupEngine)
+		}
 	}
 	if dbType != DBTypeMySQL && dbType != DBTypeMariaDB {
 		return nil, fmt.Errorf("P2.7 首版仅支持 MySQL/MariaDB 物理备份隔离恢复")

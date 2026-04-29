@@ -1824,6 +1824,7 @@
                       <el-option label="Barman 备份" value="barman_backup" />
                       <el-option label="Barman 恢复" value="barman_restore" />
                       <el-option label="pg_basebackup" value="pg_basebackup" />
+                      <el-option label="pg_basebackup 恢复" value="pg_basebackup_restore" />
                     </el-select>
                     <el-select v-model="runnerJobQuery.status" placeholder="状态" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="排队中" value="queued" />
@@ -4059,7 +4060,7 @@
       @close="resetRestorePlanRunForm"
     >
       <el-alert
-        :title="isPostgreSQLRestoreRun ? 'P3.7 可执行 Barman restore 到 Runner 隔离目录，并可启动隔离 PostgreSQL 实例做校验；不会覆盖生产库。' : 'P2.7 只恢复到 Runner 主机上的隔离容器，不覆盖生产库、不切换业务连接、不自动回填数据。'"
+        :title="isPostgreSQLRestoreRun ? postgresqlRestoreRunAlertTitle : 'P2.7 只恢复到 Runner 主机上的隔离容器，不覆盖生产库、不切换业务连接、不自动回填数据。'"
         type="warning"
         show-icon
         :closable="false"
@@ -4112,9 +4113,14 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="6">
+          <el-col v-if="isBarmanRestoreRun" :span="6">
             <el-form-item label="Get WAL">
               <el-switch v-model="restorePlanRunForm.barmanGetWal" active-text="--get-wal" inactive-text="--no-get-wal" />
+            </el-form-item>
+          </el-col>
+          <el-col v-else-if="isPgBaseBackupRestoreRun" :span="6">
+            <el-form-item label="WAL 来源">
+              <el-tag type="info">恢复计划选择</el-tag>
             </el-form-item>
           </el-col>
         </el-row>
@@ -5766,6 +5772,34 @@ const restoreRunSourceDbType = computed(() =>
 const isPostgreSQLRestoreRun = computed(() =>
   restoreRunSourceDbType.value === 'postgresql'
 )
+
+const restoreRunPlanPayload = computed(() => {
+  if (!restorePlanRunSource.value?.planJson) return {} as Record<string, any>
+  try {
+    return JSON.parse(restorePlanRunSource.value.planJson) as Record<string, any>
+  } catch {
+    return {} as Record<string, any>
+  }
+})
+
+const restoreRunBackupEngine = computed(() =>
+  String(restoreRunPlanPayload.value?.backupEngine || restoreRunPlanPayload.value?.baseBackup?.backupEngine || '').trim()
+)
+
+const isBarmanRestoreRun = computed(() =>
+  isPostgreSQLRestoreRun.value && restoreRunBackupEngine.value === 'barman'
+)
+
+const isPgBaseBackupRestoreRun = computed(() =>
+  isPostgreSQLRestoreRun.value && restoreRunBackupEngine.value === 'pg_basebackup'
+)
+
+const postgresqlRestoreRunAlertTitle = computed(() => {
+  if (isPgBaseBackupRestoreRun.value) {
+    return 'P3.8 可执行 pg_basebackup artifact 恢复到 Runner 隔离目录，也可结合计划中的 WAL 启动隔离 PostgreSQL 实例做校验；不会覆盖生产库。'
+  }
+  return 'P3.7 可执行 Barman restore 到 Runner 隔离目录，并可启动隔离 PostgreSQL 实例做校验；不会覆盖生产库。'
+})
 
 const selectedBackupTaskInstance = computed(() =>
   instances.value.find(item => item.id === backupTaskForm.instanceId)
@@ -7568,7 +7602,7 @@ const submitRunRestorePlan = async () => {
       postgresStartInstance: isPostgreSQLRestoreRun.value ? restorePlanRunForm.postgresStartInstance !== false : undefined,
       targetTimelineId: isPostgreSQLRestoreRun.value ? (restorePlanRunForm.targetTimelineId || undefined) : undefined,
       targetAction: isPostgreSQLRestoreRun.value ? (restorePlanRunForm.targetAction || 'pause') : undefined,
-      barmanGetWal: isPostgreSQLRestoreRun.value ? restorePlanRunForm.barmanGetWal !== false : undefined,
+      barmanGetWal: isBarmanRestoreRun.value ? restorePlanRunForm.barmanGetWal !== false : undefined,
       cleanupOnFailure: restorePlanRunForm.cleanupOnFailure === true
     }
     await runDatabaseRestorePlan(restorePlanRunSource.value.id, payload)

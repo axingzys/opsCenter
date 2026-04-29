@@ -4201,11 +4201,377 @@ WAL 状态页面：
    - artifact metadata 输出。
    - 含增量记录的 PostgreSQL 恢复计划会包含 `pg_combinebackup`。
 
-未做边界：
+P3.8.0 阶段未做边界：
 
-1. 第一版不自动执行 `pg_basebackup` 产物的隔离恢复；P3.8 先提供备份和恢复计划输入。
+1. 第一版不自动执行 `pg_basebackup` 产物的隔离恢复；P3.8.1/P3.8.2 负责继续补齐。
 2. PostgreSQL 原生 incremental 不在 UI 中开放执行；可通过外部记录登记纳管，恢复计划负责链路校验和 `pg_combinebackup` 步骤证明。
 3. WAL-G 仍在 P3.9 按 external metadata registration 处理。
+
+##### P3.8+：pg_basebackup 自动隔离恢复深化拆分
+
+定位：
+
+`pg_basebackup` 自动隔离恢复继续归入 P3.8 深化项，不放入 P3.9 或 P3.10。
+
+原因：
+
+1. P3.8 的主题就是 PostgreSQL 原生 `pg_basebackup` 轻量备用链路。
+2. P3.9 只处理 WAL-G / pgBackRest external 纳管，不应该混入原生恢复 Runner。
+3. P3.10 负责 P3 总体联调、回归和恢复演练，应该验证 P3.8 已实现能力，而不是承载主要实现。
+
+整体目标：
+
+把 P3.8 从“能生成 pg_basebackup 备份记录和 PITR 计划输入”深化为“能用 pg_basebackup artifact + WAL catalog 自动恢复到隔离 PostgreSQL，并生成可验证 proof”。
+
+通用前置条件：
+
+1. Runner 主机可通过 SSH 执行受控脚本。
+2. Runner 主机安装：
+   - `docker`
+   - `psql`
+   - `postgres` 客户端工具
+   - `tar`
+   - `sha256sum`
+   - 如涉及增量：`pg_combinebackup`
+3. Runner 主机能读取备份 artifact：
+   - `runner://runner-host-<id>/<path>`
+   - 或后续对象存储下载到 Runner 本地 staging 目录
+4. `database_backup_records` 中 base backup 必须具备：
+   - `backup_engine=pg_basebackup`
+   - `backup_method=physical`
+   - `backup_scope=cluster`
+   - `backup_level=full`
+   - `storage_uri` 或 `file_path`
+   - `checksum_sha256`
+   - `pg_system_identifier`
+   - `timeline_id`
+   - `end_lsn` 或 `wal_end`
+5. PITR 目标点超出 base backup 自身范围时，必须存在连续 WAL catalog：
+   - `archive_type=wal`
+   - `status in ('archived','verified')`
+   - `pg_system_identifier` 一致
+   - `timeline_id` 一致或具备 timeline history
+   - 时间范围或 LSN 范围覆盖目标点
+6. 恢复全程只允许写入 Runner work root：
+   - 不允许 destination 指向生产 PGDATA
+   - 不允许覆盖现有运行容器
+   - 不允许默认删除原始 backup/WAL artifact
+
+###### P3.8.1：pg_basebackup 隔离目录恢复
+
+目标：
+
+先把 `pg_basebackup` artifact 恢复到 Runner 隔离目录，并证明目录结构和备份元数据可用；不启动 PostgreSQL，不 replay WAL。
+
+实现内容：
+
+1. 新增 `pg_basebackup_restore` Runner 执行分支，或复用 restore job 的 PostgreSQL native strategy。
+2. 根据 restore plan 找到 selected base backup。
+3. 校验 base backup：
+   - storage URI 属于当前 Runner 或可下载到当前 Runner。
+   - 文件存在。
+   - 文件大小匹配。
+   - SHA256 匹配。
+   - `backup_engine=pg_basebackup`。
+4. 在 Runner work root 创建隔离目录：
+
+   ```text
+   <runner_work_root>/restore/job-<restore_job_id>/
+     artifacts/
+       base.tar.gz
+     pgdata/
+     proof.json
+     restore.log
+   ```
+
+5. 解压 base artifact 到 `pgdata/`。
+6. 校验目录结构：
+   - `PG_VERSION`
+   - `global/`
+   - `base/`
+   - `pg_wal/` 或 `pg_xlog/`
+   - `backup_manifest` 如存在则记录 checksum
+7. 如可用，执行 `pg_verifybackup`：
+   - 工具不存在时只记录 warning，不阻断第一版恢复。
+   - 工具存在但校验失败时标记 restore job failed。
+8. 生成 proof：
+   - base record ID
+   - artifact URI
+   - checksum 校验结果
+   - PG_VERSION
+   - backup manifest checksum
+   - pgdata path
+   - restore step 列表
+
+不做：
+
+1. 不启动 PostgreSQL。
+2. 不写 `recovery.signal`。
+3. 不应用 WAL。
+4. 不执行 validation SQL。
+
+验收：
+
+1. `pg_basebackup` full artifact 能恢复到隔离目录。
+2. checksum 错误时任务失败，不生成成功 proof。
+3. 目录缺少 `PG_VERSION/global/base` 时任务失败。
+4. proof 能证明 base artifact、pgdata path 和校验结果。
+5. cleanup 开启时失败后删除本次 `pgdata/`，不删除原始 artifact。
+
+###### P3.8.2：pg_basebackup + WAL PITR 隔离实例
+
+目标：
+
+在 P3.8.1 的基础上，把 base backup 配合 WAL catalog 恢复到指定 target time / target LSN / timeline，并启动隔离 PostgreSQL 容器执行校验 SQL。
+
+实现内容：
+
+1. 读取 restore plan：
+   - base backup
+   - selected WAL archives
+   - target type：`time / lsn`
+   - target value
+   - target timeline
+2. 校验 WAL 链：
+   - system identifier 一致
+   - timeline 一致
+   - timeline > 1 时必须有 `.history`
+   - segment 连续
+   - 时间或 LSN 覆盖目标点
+   - checksum 可用
+3. 将 WAL artifact staged 到 Runner：
+
+   ```text
+   <runner_work_root>/restore/job-<id>/wal/
+     000000010000000000000001
+     000000010000000000000002
+     00000002.history
+   ```
+
+4. 生成隔离恢复配置：
+   - 写入 `recovery.signal`
+   - 写入 `postgresql.auto.conf` 或 append 受控配置
+   - `restore_command='cp <wal_dir>/%f %p'`
+   - target time：`recovery_target_time`
+   - target LSN：`recovery_target_lsn`
+   - target timeline：`recovery_target_timeline`
+   - target action：默认 `pause`
+5. 启动隔离 PostgreSQL 容器：
+   - 容器名：`opshub-pgbase-restore-<job_id>`
+   - 绑定：`127.0.0.1:<listen_port>:5432`
+   - 挂载：`pgdata:/var/lib/postgresql/data`
+   - 镜像：默认 `postgres:<source major>`，不能识别时 `postgres:latest`
+6. 等待恢复：
+   - `SELECT pg_is_in_recovery()`
+   - `SELECT pg_last_wal_replay_lsn()`
+   - `SELECT pg_last_xact_replay_timestamp()`
+   - 对 target LSN 校验 replay LSN 是否达到目标
+   - 对 target time 校验 replay timestamp 是否不晚于目标，且容器可查询
+7. 执行 validation SQL：
+   - 默认 `SELECT 1`
+   - 默认 `SELECT version()`
+   - 用户自定义只读 SQL
+   - `expectedRows`
+   - `expectedContains`
+   - `expectedScalar`
+8. 生成 proof：
+   - base backup proof
+   - WAL chain proof
+   - recovery config 摘要
+   - replay LSN / replay timestamp
+   - validation SQL result
+   - assertion expected/actual
+   - container name、image、listen port
+
+安全边界：
+
+1. `restore_command` 只能指向本次 job 的 WAL staging 目录。
+2. 不允许 `restore_command` 由用户自由输入。
+3. 不允许容器监听 `0.0.0.0`，默认只绑定 `127.0.0.1`。
+4. 不允许将生产连接串写入 proof。
+5. validation SQL 必须走只读白名单。
+
+验收：
+
+1. 可恢复到指定 target time 的隔离 PostgreSQL。
+2. 可恢复到指定 target LSN 的隔离 PostgreSQL。
+3. WAL 缺段时恢复计划或执行前校验失败。
+4. timeline 不匹配时拒绝执行。
+5. 校验 SQL 成功时 restore plan/job 标记 verified。
+6. 断言失败时 restore job 保留为 restored 或 failed，并在 proof 记录 expected/actual。
+7. cleanup 开启时失败后删除隔离容器和本次 pgdata。
+
+2026-04-29 P3.8.1/P3.8.2 已落地：
+
+1. 后端恢复计划执行支持按 PostgreSQL 备份引擎分派：
+   - `backup_engine=barman` 继续走 P3.7 的 Barman restore。
+   - `backup_engine=pg_basebackup` 走新的 `pg_basebackup_restore` Runner Job。
+   - `job_type=pg_basebackup_restore`
+   - `allowed_command=pg_basebackup_restore`
+2. P3.8.1 隔离目录恢复：
+   - 从 `restore plan` 读取 selected base backup。
+   - 强制校验 base record 为 `physical + full + pg_basebackup`。
+   - 强制 artifact 属于所选 `runner://runner-host-<id>`，避免跨 Runner 读错文件。
+   - Runner 脚本复制 artifact 到本次 job `artifacts/`。
+   - 校验文件大小和 SHA256。
+   - 解压到 `<work_root>/restore/job-<id>/pgdata/`。
+   - 校验 `PG_VERSION / global / base / pg_wal|pg_xlog`。
+   - 如存在 `backup_manifest` 且 Runner 有 `pg_verifybackup`，执行校验；工具不存在时记录 `not_available`。
+   - 支持失败后清理本次 `pgdata/`，不删除原始 artifact。
+3. P3.8.2 PITR 隔离实例：
+   - 执行前重新调用 PostgreSQL PITR 校验，复检 base、WAL catalog、timeline、system identifier 和覆盖范围。
+   - 根据 `selected_log_archive_ids` staged WAL 到本次 job `wal/`。
+   - `restore_command` 由系统生成，只指向本次 job WAL 目录，不接受用户自由输入。
+   - 支持 `recovery_target_time` 和 `recovery_target_lsn`。
+   - 支持 `recovery_target_timeline`，内部把 8 位 timeline 转为 PostgreSQL 配置可用的十进制值。
+   - 默认 `recovery_target_action=pause`，也保留 `shutdown/promote` 入口。
+   - 启动隔离 PostgreSQL 容器：`opshub-pgbase-restore-<job_id>`，仅绑定 `127.0.0.1:<port>:5432`。
+   - 对 target LSN 执行 `pg_wal_lsn_diff(pg_last_wal_replay_lsn(), target) >= 0` 到达性检查。
+4. 校验和 proof：
+   - 复用 P2.7/P3.7 的 validation SQL 断言模型。
+   - 支持 `expectedRows / expectedContains / expectedScalar`。
+   - proof 记录 base record、WAL archive IDs、pgdata 路径、容器信息、PG_VERSION、backup manifest checksum、`pg_verifybackup` 状态、recovery summary、步骤、校验结果和 expected/actual。
+   - 校验通过时计划和任务标记 `verified`。
+   - 不启动实例时标记 `restored`，validation 状态记录为 `warning`。
+5. 前端入口：
+   - 执行隔离恢复弹窗自动识别 `backupEngine=pg_basebackup`。
+   - `pg_basebackup` 恢复不再展示 Barman 专用 `--get-wal` 开关，显示 WAL 来源为恢复计划选择。
+   - Runner 任务筛选新增 `pg_basebackup 恢复`。
+6. 测试覆盖：
+   - `pg_basebackup_restore` 目录恢复脚本生成。
+   - `pg_basebackup + WAL` PITR 容器脚本生成。
+   - Runner 输出解析，包括 proof 元数据、步骤和断言校验结果。
+
+当前边界：
+
+1. P3.8.1/P3.8.2 只支持 OpsHub `pg_basebackup` full artifact 的自动恢复；原生 incremental 仍进入 P3.8.3。
+2. artifact 读取首版依赖 Runner 本地可读 `runner://` 路径；对象存储直接下载到 Runner staging 可在后续存储增强中补齐。
+3. 自动隔离恢复不会修改生产实例、不会切换业务连接、不会自动回填数据。
+4. `target_action=shutdown/promote` 会改变容器后续校验行为；长期默认建议仍使用 `pause` 做恢复证明。
+
+###### P3.8.3：pg_basebackup incremental / pg_combinebackup
+
+目标：
+
+支持 PostgreSQL 原生增量备份链路的恢复准备。增量不能直接启动，需要先使用 `pg_combinebackup` 合成可用 full backup，再进入 P3.8.2。
+
+版本门控：
+
+1. PostgreSQL server 版本必须支持原生 incremental base backup。
+2. Runner 上 `pg_basebackup` 和 `pg_combinebackup` 版本必须兼容。
+3. backup manifest 必须存在并可用于校验依赖关系。
+4. 不满足条件时：
+   - UI 不展示原生增量执行入口。
+   - 外部登记的增量记录仍可纳管，但恢复计划必须标记 tool/version 风险。
+
+实现内容：
+
+1. 备份记录层面区分：
+   - `backup_level=full`
+   - `backup_level=incremental`
+   - `base_record_id`
+   - `parent_record_id`
+2. 恢复计划校验增量链：
+   - full base 存在
+   - 每个 incremental 的 parent 存在
+   - 依赖顺序完整
+   - 任一缺失则 `backup_chain_status=missing_incremental`
+3. Runner 执行：
+
+   ```text
+   pg_combinebackup <full_dir> <inc1_dir> <inc2_dir> ... -o <synthetic_full_dir>
+   ```
+
+4. 合成 full 后校验：
+   - `PG_VERSION`
+   - `global/`
+   - `base/`
+   - manifest checksum
+5. synthetic full 作为 P3.8.2 的输入继续执行 WAL PITR。
+6. proof 记录：
+   - full backup ID
+   - incremental backup IDs
+   - combine order
+   - pg_combinebackup version
+   - synthetic full path
+   - synthetic full checksum/manifest 摘要
+
+不做：
+
+1. 不把 synthetic full 自动登记为新的长期 backup record，第一版仅作为 restore job 中间产物。
+2. 不跨实例混合增量链。
+3. 不在链路不完整时尝试“跳过某个 incremental”。
+
+验收：
+
+1. 含完整增量链的计划包含 `pg_combinebackup` 步骤。
+2. 缺 parent incremental 时恢复计划失败。
+3. Runner 缺少 `pg_combinebackup` 时 tool status 失败。
+4. synthetic full 生成失败时不启动 PostgreSQL。
+5. synthetic full 成功后可进入 P3.8.2 执行 PITR。
+
+###### P3.8.4：pg_basebackup 恢复演练模板
+
+目标：
+
+把 pg_basebackup 的恢复执行固化为可重复演练模板，方便后续 P3.10 做全链路演练。
+
+实现内容：
+
+1. 前端增加“从 pg_basebackup 生成恢复演练”入口。
+2. 用户选择：
+   - base backup record
+   - target time / target LSN
+   - target timeline
+   - Runner host
+   - 是否启动隔离实例
+   - 校验 SQL/断言模板
+3. 后端生成 restore plan：
+   - 自动选择 base backup
+   - 自动选择 WAL archive
+   - 自动判断是否需要 `pg_combinebackup`
+   - 自动估算 restore bytes / minutes
+4. 执行完成后生成演练记录：
+   - restore job
+   - proof JSON
+   - backup record `restore_tested_at`
+   - backup record `restore_test_status`
+5. 前端展示：
+   - 最近恢复演练时间
+   - 演练结果
+   - 可恢复窗口
+   - proof 下载/查看
+
+验收：
+
+1. 能从任一 pg_basebackup full record 直接发起演练。
+2. 演练 proof 能展示 base、WAL、timeline、target、validation、container。
+3. 演练失败能明确区分：
+   - backup artifact 不可读
+   - WAL 缺口
+   - timeline mismatch
+   - 工具缺失
+   - 容器启动失败
+   - 校验 SQL/断言失败
+4. 演练成功会更新 restore test 状态。
+
+建议执行顺序：
+
+1. P3.8.1：先恢复目录，验证 artifact 可用。
+2. P3.8.2：再接 WAL PITR 和隔离 PostgreSQL。
+3. P3.8.3：最后接原生增量和 `pg_combinebackup`。
+4. P3.8.4：把执行流程产品化为演练模板。
+
+与 P3.10 的关系：
+
+P3.10 不再重新设计 pg_basebackup 恢复逻辑，只负责用真实 PostgreSQL 测试环境验证：
+
+1. Barman restore 到 target time。
+2. Barman restore 到 target LSN。
+3. pg_basebackup full + WAL restore 到 target time。
+4. pg_basebackup full + WAL restore 到 target LSN。
+5. pg_basebackup incremental + pg_combinebackup + WAL restore。
+6. WAL gap / timeline mismatch / checksum failed 的失败证明。
 
 ##### P3.9：WAL-G / pgBackRest external 纳管
 

@@ -134,3 +134,136 @@ func TestParseBarmanRestoreOutputIncludesPostgreSQLValidationAssertions(t *testi
 		t.Fatalf("assertion metadata not parsed: %+v", result.ValidationResults[0])
 	}
 }
+
+func TestBuildPgBaseBackupRestoreScriptDirectoryOnly(t *testing.T) {
+	script, err := buildPgBaseBackupRestoreScript(pgBaseBackupRestoreScriptInput{
+		RestoreJobID:  21,
+		RestorePlanID: 9,
+		RunnerHostID:  3,
+		WorkRoot:      "/var/lib/opshub/database-runner",
+		Base: physicalRestoreArtifact{
+			Kind:           "base",
+			FileName:       "pg-base.tar.gz",
+			SourcePath:     "/var/lib/opshub/database-runner/backup/pg-base.tar.gz",
+			ChecksumSHA256: strings.Repeat("a", 64),
+			FileSize:       1024,
+		},
+		TargetType:       "time",
+		TargetValue:      "2026-04-29 10:00:00",
+		TargetTimelineID: "1",
+		StartInstance:    false,
+		CleanupOnFailure: true,
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+	for _, want := range []string{
+		`START_INSTANCE=0`,
+		`CLEANUP_ON_FAILURE=1`,
+		`copy_artifact 'base' '/var/lib/opshub/database-runner/backup/pg-base.tar.gz' "$ARTIFACT_DIR/base.pg_basebackup.tar.gz"`,
+		`tar -xzf "$ARTIFACT_DIR/base.pg_basebackup.tar.gz" -C "$PGDATA_DIR"`,
+		`PG_VERIFYBACKUP="$(command -v pg_verifybackup || true)"`,
+		`printf 'OPSHUB_VALIDATION_STATUS=warning\n'`,
+		`OPSHUB_ARTIFACT_URI=runner://runner-host-3`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, `run_pg_validation 1`) {
+		t.Fatalf("directory-only restore should not schedule validation SQL:\n%s", script)
+	}
+}
+
+func TestBuildPgBaseBackupRestoreScriptStartsPITRContainerAndValidates(t *testing.T) {
+	expectedRows := 1
+	expectedScalar := "1"
+	script, err := buildPgBaseBackupRestoreScript(pgBaseBackupRestoreScriptInput{
+		RestoreJobID:     22,
+		RestorePlanID:    10,
+		RunnerHostID:     3,
+		WorkRoot:         "/var/lib/opshub/database-runner",
+		ContainerName:    "opshub-pgbase-restore-22",
+		ContainerImage:   "postgres:16",
+		ListenPort:       25433,
+		DatabaseName:     "postgres",
+		DBUsername:       "postgres",
+		DBPassword:       "secret",
+		TargetType:       "lsn",
+		TargetValue:      "0/3000000",
+		TargetTimelineID: "00000003",
+		TargetAction:     "pause",
+		StartInstance:    true,
+		Base: physicalRestoreArtifact{
+			Kind:           "base",
+			FileName:       "pg-base.tar.gz",
+			SourcePath:     "/var/lib/opshub/database-runner/backup/pg-base.tar.gz",
+			ChecksumSHA256: strings.Repeat("b", 64),
+			FileSize:       1024,
+		},
+		Logs: []physicalRestoreArtifact{
+			{
+				Kind:           "wal",
+				FileName:       "000000030000000000000001",
+				SourcePath:     "/var/lib/opshub/database-runner/wal/000000030000000000000001",
+				ChecksumSHA256: strings.Repeat("c", 64),
+				FileSize:       16 * 1024 * 1024,
+			},
+		},
+		ValidationChecks: []restoreValidationCheck{
+			{SQL: "SELECT 1", ExpectedRows: &expectedRows, ExpectedScalar: &expectedScalar},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+	for _, want := range []string{
+		`START_INSTANCE=1`,
+		`WAL_COUNT=1`,
+		`copy_artifact 'wal_1' '/var/lib/opshub/database-runner/wal/000000030000000000000001' "$WAL_DIR/000000030000000000000001"`,
+		`restore_command = 'cp ''%s/%%f'' ''%%p'''`,
+		`recovery_target_lsn = '%s'`,
+		`recovery_target_timeline = '%s'`,
+		`"$DOCKER_BIN" run -d --name "$CONTAINER_NAME"`,
+		`-p "127.0.0.1:$LISTEN_PORT:5432"`,
+		`pg_wal_lsn_diff(pg_last_wal_replay_lsn(), '$TARGET_VALUE') >= 0`,
+		`run_pg_validation 1 'SELECT 1' '1' '1' '0' '' '1' '1'`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestParsePgBaseBackupRestoreOutputIncludesProofAndValidation(t *testing.T) {
+	stdout := strings.Join([]string{
+		"OPSHUB_WORK_DIR=/var/lib/opshub/database-runner/restore/job-22",
+		"OPSHUB_PREPARED_DATADIR=/var/lib/opshub/database-runner/restore/job-22/pgdata",
+		"OPSHUB_CONTAINER_NAME=opshub-pgbase-restore-22",
+		"OPSHUB_CONTAINER_IMAGE=postgres:16",
+		"OPSHUB_LISTEN_HOST=127.0.0.1",
+		"OPSHUB_LISTEN_PORT=25433",
+		"OPSHUB_PG_VERSION=16",
+		"OPSHUB_VERIFYBACKUP_STATUS=success",
+		"OPSHUB_VALIDATION_STATUS=passed",
+		"OPSHUB_RECOVERY_SUMMARY=t|0/3000000|2026-04-29 10:00:00+08",
+		"OPSHUB_RESTORE_STEP=verify_pgdata|success|2026-04-29 10:00:00",
+		"OPSHUB_RESTORE_VALIDATION=1|success|abcdef|MQo=|passed|1|MQ==|",
+	}, "\n")
+	result := parsePgBaseBackupRestoreOutput(stdout)
+	if result.ContainerName != "opshub-pgbase-restore-22" || result.ListenPort != 25433 {
+		t.Fatalf("container metadata not parsed: %+v", result)
+	}
+	if result.PGVersion != "16" || result.VerifyBackupStatus != "success" {
+		t.Fatalf("backup verification metadata not parsed: %+v", result)
+	}
+	if result.ValidationStatus != "passed" || len(result.ValidationResults) != 1 {
+		t.Fatalf("validation not parsed: %+v", result)
+	}
+	if result.ValidationResults[0].AssertionStatus != "passed" || result.ValidationResults[0].ActualScalar != "1" {
+		t.Fatalf("assertion metadata not parsed: %+v", result.ValidationResults[0])
+	}
+	if len(result.Steps) != 1 || result.Steps[0].Name != "verify_pgdata" {
+		t.Fatalf("steps not parsed: %+v", result.Steps)
+	}
+}
