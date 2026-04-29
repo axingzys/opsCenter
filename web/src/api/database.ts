@@ -524,6 +524,7 @@ export interface DatabaseRestorePlanPayload {
   restoreMode?: string
   restoreTargetType?: string
   restoreTargetValue: string
+  targetTimelineId?: string
   restoreTargetInclusive?: boolean
 }
 
@@ -542,6 +543,9 @@ export interface DatabaseRestorePlanRunPayload {
   validationSql?: string[]
   validationAssertions?: DatabaseRestoreValidationAssertionPayload[]
   cleanupOnFailure?: boolean
+  targetTimelineId?: string
+  targetAction?: string
+  barmanGetWal?: boolean
 }
 
 export interface DatabaseRestorePlanResult {

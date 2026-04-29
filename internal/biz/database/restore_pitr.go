@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ydcloud-dy/opshub/internal/biz/database/pgwal"
 )
 
 const (
@@ -26,6 +28,9 @@ type DatabaseRestorePlanRunRequest struct {
 	ValidationSQL        []string                             `json:"validationSql" binding:"omitempty,max=20"`
 	ValidationAssertions []DatabaseRestoreValidationAssertion `json:"validationAssertions" binding:"omitempty,max=20"`
 	CleanupOnFailure     bool                                 `json:"cleanupOnFailure"`
+	TargetTimelineID     string                               `json:"targetTimelineId" binding:"omitempty,max=60"`
+	TargetAction         string                               `json:"targetAction" binding:"omitempty,max=30"`
+	BarmanGetWAL         *bool                                `json:"barmanGetWal,omitempty"`
 }
 
 type DatabaseRestoreValidationAssertion struct {
@@ -119,6 +124,49 @@ type physicalRestoreRunnerResult struct {
 	Error              string                            `json:"error,omitempty"`
 }
 
+type barmanRestoreScriptInput struct {
+	RestoreJobID     uint
+	RestorePlanID    uint
+	RunnerHostID     uint
+	WorkRoot         string
+	BarmanServerName string
+	ConfigPath       string
+	BackupID         string
+	TargetType       string
+	TargetValue      string
+	TargetTimelineID string
+	TargetAction     string
+	GetWAL           bool
+	CleanupOnFailure bool
+}
+
+type barmanRestoreRunnerResult struct {
+	RestoreJobID     uint                  `json:"restoreJobId"`
+	RestorePlanID    uint                  `json:"restorePlanId"`
+	RunnerHostID     uint                  `json:"runnerHostId"`
+	RunnerID         string                `json:"runnerId"`
+	BarmanServerName string                `json:"barmanServerName"`
+	BackupID         string                `json:"backupId"`
+	WorkDir          string                `json:"workDir"`
+	PreparedDatadir  string                `json:"preparedDatadir"`
+	LogPath          string                `json:"logPath"`
+	ProofPath        string                `json:"proofPath"`
+	ArtifactURI      string                `json:"artifactUri"`
+	TargetType       string                `json:"targetType"`
+	TargetValue      string                `json:"targetValue"`
+	TargetTimelineID string                `json:"targetTimelineId"`
+	TargetAction     string                `json:"targetAction"`
+	GetWAL           bool                  `json:"getWal"`
+	Steps            []physicalRestoreStep `json:"steps"`
+	Stdout           string                `json:"stdout"`
+	Stderr           string                `json:"stderr"`
+	ExitCode         int                   `json:"exitCode"`
+	StartedAt        string                `json:"startedAt"`
+	FinishedAt       string                `json:"finishedAt"`
+	DurationMs       int64                 `json:"durationMs"`
+	Error            string                `json:"error,omitempty"`
+}
+
 func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *DatabaseRestorePlanRunRequest, operator QueryOperator) (*DatabaseRestoreJobVO, error) {
 	if uc.restorePlanRepo == nil || uc.restoreJobRepo == nil || uc.runnerHostRepo == nil || uc.runnerJobRepo == nil || uc.backupRecordRepo == nil {
 		return nil, fmt.Errorf("PITR 恢复 Runner 仓库未配置")
@@ -150,6 +198,9 @@ func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *Databas
 		return nil, fmt.Errorf("来源实例不存在")
 	}
 	dbType := normalizeDBType(source.DBType)
+	if dbType == DBTypePostgreSQL {
+		return uc.runPostgreSQLBarmanRestorePlan(ctx, plan, source, req, operator)
+	}
 	if dbType != DBTypeMySQL && dbType != DBTypeMariaDB {
 		return nil, fmt.Errorf("P2.7 首版仅支持 MySQL/MariaDB 物理备份隔离恢复")
 	}
@@ -265,6 +316,131 @@ func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *Databas
 	_ = uc.restorePlanRepo.Update(ctx, plan)
 
 	go uc.executePhysicalRestoreJob(context.Background(), plan.ID, job.ID, runnerJob.ID, validationChecks, req.CleanupOnFailure)
+	return uc.toRestoreJobVO(job, source.Name, "", "", host.Name), nil
+}
+
+func (uc *UseCase) runPostgreSQLBarmanRestorePlan(ctx context.Context, plan *DatabaseRestorePlan, source *DatabaseInstance, req *DatabaseRestorePlanRunRequest, operator QueryOperator) (*DatabaseRestoreJobVO, error) {
+	if uc.barmanServerRepo == nil {
+		return nil, fmt.Errorf("Barman Server 仓库未配置")
+	}
+	base, err := uc.backupRecordRepo.GetByID(ctx, plan.SelectedBaseRecordID)
+	if err != nil || base == nil {
+		return nil, fmt.Errorf("恢复计划缺少 base backup")
+	}
+	if !isPostgreSQLBarmanBaseRecord(base) {
+		return nil, fmt.Errorf("PostgreSQL P3.6 仅支持 Barman full backup 恢复")
+	}
+	target, err := normalizePostgreSQLRestoreTarget(plan.RestoreTargetType, plan.RestoreTargetValue, req.TargetTimelineID)
+	if err != nil {
+		return nil, err
+	}
+	server, err := uc.findBarmanServerForBackup(ctx, base)
+	if err != nil {
+		return nil, err
+	}
+	if server.RunnerHostID == 0 {
+		return nil, fmt.Errorf("Barman Server 缺少 Runner 主机")
+	}
+	if req.RunnerHostID != server.RunnerHostID {
+		return nil, fmt.Errorf("Barman restore 必须在登记的 Barman Runner 上执行：runnerHostId=%d", server.RunnerHostID)
+	}
+	host, err := uc.runnerHostRepo.GetByID(ctx, req.RunnerHostID)
+	if err != nil {
+		return nil, fmt.Errorf("Runner 主机不存在")
+	}
+	if !host.Enabled || host.Status == DatabaseRunnerHostStatusDisabled {
+		return nil, fmt.Errorf("Runner 主机已禁用")
+	}
+	if host.RunnerType != DatabaseRunnerTypeSSH {
+		return nil, fmt.Errorf("P3.6 首版仅支持 SSH Runner 执行 Barman restore")
+	}
+	records, err := uc.backupRecordRepo.ListSuccessfulForRestore(ctx, plan.SourceInstanceID, target.Time)
+	if err != nil {
+		return nil, err
+	}
+	recheck := uc.validatePostgreSQLRestorePlan(ctx, source, records, base, target)
+	if recheck.ValidationStatus != DatabasePlanValidationPassed {
+		plan.ValidationStatus = recheck.ValidationStatus
+		plan.BackupChainStatus = recheck.BackupChainStatus
+		plan.LogChainStatus = recheck.LogChainStatus
+		plan.StorageStatus = recheck.StorageStatus
+		plan.ToolStatus = recheck.ToolStatus
+		plan.ErrorMessage = trimText(strings.Join(recheck.Messages, "；"), 1000)
+		_ = uc.restorePlanRepo.Update(ctx, plan)
+		return nil, fmt.Errorf("执行前 PostgreSQL 恢复计划复检未通过: %s", plan.ErrorMessage)
+	}
+	expiresHours := req.ExpiresInHours
+	if expiresHours <= 0 {
+		expiresHours = defaultRestoreJobExpiresHours
+	}
+	if expiresHours > maxRestoreJobExpiresHours {
+		expiresHours = maxRestoreJobExpiresHours
+	}
+	expiresAt := time.Now().Add(time.Duration(expiresHours) * time.Hour)
+	workRoot := firstNonEmpty(host.StorageMountPath, host.WorkDir, defaultRunnerWorkDir)
+	job := &DatabaseRestoreJob{
+		BackupRecordID:     base.ID,
+		RestorePlanID:      plan.ID,
+		RunnerHostID:       host.ID,
+		SourceInstanceID:   plan.SourceInstanceID,
+		TargetInstanceID:   plan.TargetInstanceID,
+		RestoreMode:        DatabaseRestoreModeIsolatedRestore,
+		RestoreStrategy:    "barman_restore_directory",
+		RestoreTargetType:  plan.RestoreTargetType,
+		RestoreTargetValue: plan.RestoreTargetValue,
+		Status:             DatabaseBackupStatusQueued,
+		FileName:           base.FileName,
+		FileSize:           base.FileSize,
+		WorkDir:            filepath.Join(workRoot, "restore", fmt.Sprintf("job-%d", time.Now().UnixNano())),
+		PreparedDatadir:    "",
+		LogPath:            "",
+		ExpiresAt:          &expiresAt,
+		CleanupStatus:      "pending",
+		OperatorID:         operator.ID,
+		OperatorName:       trimText(operator.Username, 100),
+		ErrorMessage:       "Barman restore 任务已排队，等待 Runner 执行",
+	}
+	if err := uc.restoreJobRepo.Create(ctx, job); err != nil {
+		return nil, fmt.Errorf("创建恢复任务失败: %w", err)
+	}
+	job.WorkDir = filepath.Join(workRoot, "restore", fmt.Sprintf("job-%d", job.ID))
+	job.PreparedDatadir = filepath.Join(job.WorkDir, "pgdata")
+	job.LogPath = filepath.Join(job.WorkDir, "restore.log")
+	job.ArtifactURI = fmt.Sprintf("runner://runner-host-%d%s", host.ID, filepath.ToSlash(filepath.Join(job.WorkDir, "proof.json")))
+	_ = uc.restoreJobRepo.Update(ctx, job)
+
+	runnerJob := &DatabaseRunnerJob{
+		JobType:          DatabaseRunnerJobTypeBarmanRestore,
+		RunnerHostID:     host.ID,
+		RunnerID:         runnerIDForHost(host),
+		SourceInstanceID: plan.SourceInstanceID,
+		TargetInstanceID: plan.TargetInstanceID,
+		Status:           DatabaseRunnerJobStatusQueued,
+		AllowedCommand:   DatabaseRunnerAllowedCommandBarmanRestore,
+		CommandSummary:   fmt.Sprintf("Barman restore %s 到隔离目录", firstNonEmpty(base.ExternalBackupID, base.FileName)),
+		WorkDir:          job.WorkDir,
+		LogPath:          job.LogPath,
+		OperatorID:       operator.ID,
+		OperatorName:     trimText(operator.Username, 120),
+		RequestJSON:      barmanRestoreRequestJSON(plan, job, host, server, base, req, operator),
+	}
+	if err := uc.runnerJobRepo.Create(ctx, runnerJob); err != nil {
+		job.Status = DatabaseBackupStatusFailed
+		job.ErrorMessage = trimText("创建 Runner Job 失败: "+err.Error(), 500)
+		_ = uc.restoreJobRepo.Update(ctx, job)
+		return nil, err
+	}
+	job.RunnerJobID = runnerJob.ID
+	_ = uc.restoreJobRepo.Update(ctx, job)
+	plan.RestoreStatus = DatabaseRestoreStatusQueued
+	plan.RunnerHostID = host.ID
+	plan.ErrorMessage = "Barman restore 任务已下发 Runner"
+	_ = uc.restorePlanRepo.Update(ctx, plan)
+	getWAL := true
+	if req.BarmanGetWAL != nil {
+		getWAL = *req.BarmanGetWAL
+	}
+	go uc.executeBarmanRestoreJob(context.Background(), plan.ID, job.ID, runnerJob.ID, req.CleanupOnFailure, pgwal.NormalizeTimelineID(firstNonEmpty(req.TargetTimelineID, recheck.TargetTimelineID)), normalizeBarmanRestoreTargetAction(req.TargetAction), getWAL)
 	return uc.toRestoreJobVO(job, source.Name, "", "", host.Name), nil
 }
 
@@ -491,6 +667,84 @@ func (uc *UseCase) executePhysicalRestoreJob(ctx context.Context, planID, restor
 	}
 }
 
+func (uc *UseCase) executeBarmanRestoreJob(ctx context.Context, planID, restoreJobID, runnerJobID uint, cleanupOnFailure bool, targetTimelineID, targetAction string, getWAL bool) {
+	plan, planErr := uc.restorePlanRepo.GetByID(ctx, planID)
+	restoreJob, restoreErr := uc.restoreJobRepo.GetByID(ctx, restoreJobID)
+	runnerJob, runnerErr := uc.runnerJobRepo.GetByID(ctx, runnerJobID)
+	if planErr != nil || restoreErr != nil || runnerErr != nil || plan == nil || restoreJob == nil || runnerJob == nil {
+		return
+	}
+	started := time.Now()
+	restoreJob.Status = DatabaseBackupStatusRunning
+	restoreJob.StartedAt = &started
+	restoreJob.ErrorMessage = "Barman restore Runner 执行中"
+	runnerJob.Status = DatabaseRunnerJobStatusRunning
+	runnerJob.StartedAt = &started
+	runnerJob.HeartbeatAt = &started
+	plan.RestoreStatus = DatabaseRestoreStatusRunning
+	plan.StartedAt = &started
+	_ = uc.restoreJobRepo.Update(ctx, restoreJob)
+	_ = uc.runnerJobRepo.Update(ctx, runnerJob)
+	_ = uc.restorePlanRepo.Update(ctx, plan)
+
+	result, exitCode, runErr := uc.runBarmanRestoreRunnerScript(ctx, plan, restoreJob, cleanupOnFailure, targetTimelineID, targetAction, getWAL, started)
+	finished := time.Now()
+	status := DatabaseBackupStatusSuccess
+	restoreStatus := DatabaseRestoreStatusRestored
+	message := "Barman restore 已恢复到隔离目录"
+	if runErr != nil {
+		status = DatabaseBackupStatusFailed
+		restoreStatus = DatabaseRestoreStatusFailed
+		message = runErr.Error()
+	}
+	result.ExitCode = exitCode
+	result.FinishedAt = finished.Format("2006-01-02 15:04:05")
+	result.DurationMs = finished.Sub(started).Milliseconds()
+	if runErr != nil {
+		result.Error = runErr.Error()
+	}
+	resultJSON, _ := json.Marshal(result)
+	proofJSON := buildBarmanRestoreProofJSON(plan, restoreJob, result, status, message)
+
+	restoreJob.Status = status
+	restoreJob.FinishedAt = &finished
+	restoreJob.DurationMs = finished.Sub(started).Milliseconds()
+	restoreJob.ErrorMessage = trimText(message, 500)
+	restoreJob.WorkDir = firstNonEmpty(result.WorkDir, restoreJob.WorkDir)
+	restoreJob.PreparedDatadir = firstNonEmpty(result.PreparedDatadir, restoreJob.PreparedDatadir)
+	restoreJob.LogPath = firstNonEmpty(result.LogPath, restoreJob.LogPath)
+	restoreJob.ArtifactURI = firstNonEmpty(result.ArtifactURI, restoreJob.ArtifactURI)
+	restoreJob.StepJSON = marshalBackupPlanJSON(result.Steps)
+	restoreJob.ValidationJSON = "[]"
+	restoreJob.ProofJSON = proofJSON
+	runnerJob.Status = runnerStatusForRestoreStatus(status)
+	runnerJob.ExitCode = exitCode
+	runnerJob.FinishedAt = &finished
+	runnerJob.DurationMs = finished.Sub(started).Milliseconds()
+	runnerJob.HeartbeatAt = &finished
+	runnerJob.ResultJSON = trimText(string(resultJSON), maxRunnerJSONLength)
+	runnerJob.ErrorMessage = ""
+	if runErr != nil {
+		runnerJob.ErrorMessage = trimText(runErr.Error(), 1000)
+	}
+	plan.RestoreStatus = restoreStatus
+	plan.FinishedAt = &finished
+	plan.DurationMs = finished.Sub(started).Milliseconds()
+	plan.ProofJSON = proofJSON
+	plan.ErrorMessage = trimText(message, 1000)
+	_ = uc.restoreJobRepo.Update(ctx, restoreJob)
+	_ = uc.runnerJobRepo.Update(ctx, runnerJob)
+	_ = uc.restorePlanRepo.Update(ctx, plan)
+	if status == DatabaseBackupStatusSuccess && uc.backupRecordRepo != nil {
+		if base, err := uc.backupRecordRepo.GetByID(ctx, restoreJob.BackupRecordID); err == nil && base != nil {
+			now := finished
+			base.RestoreTestedAt = &now
+			base.RestoreTestStatus = DatabaseRestoreStatusRestored
+			_ = uc.backupRecordRepo.Update(ctx, base)
+		}
+	}
+}
+
 func (uc *UseCase) runPhysicalRestoreRunnerScript(ctx context.Context, plan *DatabaseRestorePlan, restoreJob *DatabaseRestoreJob, validationChecks []restoreValidationCheck, cleanupOnFailure bool, started time.Time) (physicalRestoreRunnerResult, int, error) {
 	result := physicalRestoreRunnerResult{
 		RestorePlanID:    plan.ID,
@@ -582,6 +836,229 @@ func (uc *UseCase) runPhysicalRestoreRunnerScript(ctx context.Context, plan *Dat
 		return parsed, exitCode, fmt.Errorf("隔离恢复 Runner 执行失败: %s", trimText(firstNonEmpty(stderr, runErr.Error()), 1000))
 	}
 	return parsed, exitCode, nil
+}
+
+func (uc *UseCase) runBarmanRestoreRunnerScript(ctx context.Context, plan *DatabaseRestorePlan, restoreJob *DatabaseRestoreJob, cleanupOnFailure bool, targetTimelineID, targetAction string, getWAL bool, started time.Time) (barmanRestoreRunnerResult, int, error) {
+	result := barmanRestoreRunnerResult{
+		RestorePlanID:   plan.ID,
+		RestoreJobID:    restoreJob.ID,
+		RunnerHostID:    restoreJob.RunnerHostID,
+		WorkDir:         restoreJob.WorkDir,
+		PreparedDatadir: restoreJob.PreparedDatadir,
+		LogPath:         restoreJob.LogPath,
+		ArtifactURI:     restoreJob.ArtifactURI,
+		TargetType:      plan.RestoreTargetType,
+		TargetValue:     plan.RestoreTargetValue,
+		StartedAt:       started.Format("2006-01-02 15:04:05"),
+	}
+	host, err := uc.runnerHostRepo.GetByID(ctx, restoreJob.RunnerHostID)
+	if err != nil {
+		return result, 1, fmt.Errorf("Runner 主机不存在")
+	}
+	runnerCredential, err := uc.credentialResolver(ctx, host.CredentialID)
+	if err != nil {
+		return result, 1, fmt.Errorf("解析 Runner 凭据失败: %w", err)
+	}
+	base, err := uc.backupRecordRepo.GetByID(ctx, restoreJob.BackupRecordID)
+	if err != nil || base == nil {
+		return result, 1, fmt.Errorf("base backup 不存在")
+	}
+	server, err := uc.findBarmanServerForBackup(ctx, base)
+	if err != nil {
+		return result, 1, err
+	}
+	targetTimelineID = pgwal.NormalizeTimelineID(firstNonEmpty(targetTimelineID, extractTargetTimelineFromPlan(plan)))
+	targetAction = normalizeBarmanRestoreTargetAction(targetAction)
+	input := barmanRestoreScriptInput{
+		RestoreJobID:     restoreJob.ID,
+		RestorePlanID:    plan.ID,
+		RunnerHostID:     restoreJob.RunnerHostID,
+		WorkRoot:         filepath.Dir(filepath.Dir(restoreJob.WorkDir)),
+		BarmanServerName: server.BarmanServerName,
+		ConfigPath:       server.ConfigPath,
+		BackupID:         base.ExternalBackupID,
+		TargetType:       plan.RestoreTargetType,
+		TargetValue:      plan.RestoreTargetValue,
+		TargetTimelineID: targetTimelineID,
+		TargetAction:     targetAction,
+		GetWAL:           getWAL,
+		CleanupOnFailure: cleanupOnFailure,
+	}
+	script, err := buildBarmanRestoreScript(input)
+	if err != nil {
+		return result, 1, err
+	}
+	stdout, stderr, exitCode, runErr := executeSSHRunnerScript(ctx, host.Host, host.Port, runnerCredential, script, time.Duration(normalizeRunnerTimeoutMinutes(host.TimeoutMinutes))*time.Minute)
+	parsed := parseBarmanRestoreOutput(stdout)
+	parsed.RestorePlanID = plan.ID
+	parsed.RestoreJobID = restoreJob.ID
+	parsed.RunnerHostID = host.ID
+	parsed.RunnerID = runnerIDForHost(host)
+	parsed.BarmanServerName = server.BarmanServerName
+	parsed.BackupID = base.ExternalBackupID
+	parsed.Stdout = trimText(stdout, maxRunnerOutputLength)
+	parsed.Stderr = trimText(stderr, maxRunnerOutputLength)
+	parsed.ExitCode = exitCode
+	parsed.StartedAt = started.Format("2006-01-02 15:04:05")
+	parsed.WorkDir = firstNonEmpty(parsed.WorkDir, result.WorkDir)
+	parsed.PreparedDatadir = firstNonEmpty(parsed.PreparedDatadir, result.PreparedDatadir)
+	parsed.LogPath = firstNonEmpty(parsed.LogPath, result.LogPath)
+	parsed.ArtifactURI = firstNonEmpty(parsed.ArtifactURI, result.ArtifactURI)
+	parsed.TargetType = firstNonEmpty(parsed.TargetType, result.TargetType)
+	parsed.TargetValue = firstNonEmpty(parsed.TargetValue, result.TargetValue)
+	parsed.TargetTimelineID = firstNonEmpty(parsed.TargetTimelineID, targetTimelineID)
+	parsed.TargetAction = firstNonEmpty(parsed.TargetAction, targetAction)
+	parsed.GetWAL = getWAL
+	if runErr != nil {
+		return parsed, exitCode, fmt.Errorf("Barman restore Runner 执行失败: %s", trimText(firstNonEmpty(stderr, runErr.Error()), 1000))
+	}
+	return parsed, exitCode, nil
+}
+
+func buildBarmanRestoreScript(input barmanRestoreScriptInput) (string, error) {
+	if input.RestoreJobID == 0 || input.RunnerHostID == 0 {
+		return "", fmt.Errorf("恢复任务上下文不完整")
+	}
+	if !barmanServerNamePattern.MatchString(strings.TrimSpace(input.BarmanServerName)) {
+		return "", fmt.Errorf("Barman server name 不合法")
+	}
+	if !barmanBackupIDPattern.MatchString(strings.TrimSpace(input.BackupID)) {
+		return "", fmt.Errorf("Barman backup ID 不合法")
+	}
+	targetType := strings.ToLower(strings.TrimSpace(input.TargetType))
+	if targetType != "time" && targetType != "lsn" {
+		return "", fmt.Errorf("Barman restore 仅支持 targetType=time/lsn")
+	}
+	if strings.TrimSpace(input.TargetValue) == "" {
+		return "", fmt.Errorf("恢复目标不能为空")
+	}
+	targetAction := normalizeBarmanRestoreTargetAction(input.TargetAction)
+	barmanTargetTimelineID := ""
+	if input.TargetTimelineID != "" {
+		input.TargetTimelineID = pgwal.NormalizeTimelineID(input.TargetTimelineID)
+		timelineNo, err := pgwal.TimelineNumber(input.TargetTimelineID)
+		if err != nil {
+			return "", fmt.Errorf("target timeline 不合法")
+		}
+		barmanTargetTimelineID = strconv.FormatUint(timelineNo, 10)
+	}
+	lines := []string{
+		"set -eu",
+		"WORK_ROOT=" + shellSingleQuote(input.WorkRoot),
+		fmt.Sprintf("RESTORE_JOB_ID=%d", input.RestoreJobID),
+		fmt.Sprintf("RESTORE_PLAN_ID=%d", input.RestorePlanID),
+		"WORK_DIR=\"$WORK_ROOT/restore/job-$RESTORE_JOB_ID\"",
+		"DEST_DIR=\"$WORK_DIR/pgdata\"",
+		"LOG_FILE=\"$WORK_DIR/restore.log\"",
+		"PROOF_FILE=\"$WORK_DIR/proof.json\"",
+		"SERVER=" + shellSingleQuote(input.BarmanServerName),
+		"BACKUP_ID=" + shellSingleQuote(input.BackupID),
+		"CONFIG_PATH=" + shellSingleQuote(input.ConfigPath),
+		"TARGET_TYPE=" + shellSingleQuote(targetType),
+		"TARGET_VALUE=" + shellSingleQuote(input.TargetValue),
+		"TARGET_TLI=" + shellSingleQuote(input.TargetTimelineID),
+		"BARMAN_TARGET_TLI=" + shellSingleQuote(barmanTargetTimelineID),
+		"TARGET_ACTION=" + shellSingleQuote(targetAction),
+		"GET_WAL=" + boolShellValue(input.GetWAL),
+		"CLEANUP_ON_FAILURE=" + boolShellValue(input.CleanupOnFailure),
+		`mkdir -p "$WORK_DIR"`,
+		`: > "$LOG_FILE"`,
+		`step() { printf 'OPSHUB_RESTORE_STEP=%s|%s|%s\n' "$1" "$2" "$(date '+%Y-%m-%d %H:%M:%S')"; printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> "$LOG_FILE"; }`,
+		`cleanup_failure() { code="$?"; if [ "$code" != "0" ] && [ "$CLEANUP_ON_FAILURE" = "1" ]; then rm -rf "$DEST_DIR" >> "$LOG_FILE" 2>&1 || true; printf '%s cleanup_on_failure restored_dir_removed\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE" || true; fi; exit "$code"; }`,
+		`trap cleanup_failure EXIT`,
+		`fail_step() { step "$1" "failed"; echo "$2" >> "$LOG_FILE"; exit 1; }`,
+		`run_barman() { if [ -n "$CONFIG_PATH" ]; then barman -c "$CONFIG_PATH" "$@"; else barman "$@"; fi; }`,
+		`printf 'OPSHUB_WORK_DIR=%s\n' "$WORK_DIR"`,
+		`printf 'OPSHUB_PREPARED_DATADIR=%s\n' "$DEST_DIR"`,
+		`printf 'OPSHUB_LOG_PATH=%s\n' "$LOG_FILE"`,
+		`printf 'OPSHUB_PROOF_PATH=%s\n' "$PROOF_FILE"`,
+		`printf 'OPSHUB_BARMAN_SERVER=%s\n' "$SERVER"`,
+		`printf 'OPSHUB_BARMAN_BACKUP_ID=%s\n' "$BACKUP_ID"`,
+		`printf 'OPSHUB_TARGET_TYPE=%s\n' "$TARGET_TYPE"`,
+		`printf 'OPSHUB_TARGET_VALUE=%s\n' "$TARGET_VALUE"`,
+		`printf 'OPSHUB_TARGET_TLI=%s\n' "$TARGET_TLI"`,
+		`printf 'OPSHUB_TARGET_ACTION=%s\n' "$TARGET_ACTION"`,
+		`printf 'OPSHUB_GET_WAL=%s\n' "$GET_WAL"`,
+		`step "prepare_restore_directory" "running"`,
+		`case "$DEST_DIR" in "$WORK_ROOT"/restore/job-"$RESTORE_JOB_ID"/pgdata) ;; *) fail_step "prepare_restore_directory" "unsafe restore destination: $DEST_DIR";; esac`,
+		`rm -rf "$DEST_DIR"`,
+		`mkdir -p "$DEST_DIR"`,
+		`step "prepare_restore_directory" "success"`,
+		`step "barman_restore" "running"`,
+		`set -- restore "$SERVER" "$BACKUP_ID" "$DEST_DIR"`,
+		`if [ "$TARGET_TYPE" = "time" ]; then set -- "$@" --target-time "$TARGET_VALUE"; else set -- "$@" --target-lsn "$TARGET_VALUE"; fi`,
+		`if [ -n "$BARMAN_TARGET_TLI" ]; then set -- "$@" --target-tli "$BARMAN_TARGET_TLI"; fi`,
+		`if [ -n "$TARGET_ACTION" ]; then set -- "$@" --target-action "$TARGET_ACTION"; fi`,
+		`if [ "$GET_WAL" = "1" ]; then set -- "$@" --get-wal; else set -- "$@" --no-get-wal; fi`,
+		`printf '%s barman command: barman %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"`,
+		`run_barman "$@" >> "$LOG_FILE" 2>&1 || fail_step "barman_restore" "barman restore failed"`,
+		`step "barman_restore" "success"`,
+		`step "verify_pgdata" "running"`,
+		`test -f "$DEST_DIR/PG_VERSION" || fail_step "verify_pgdata" "PG_VERSION not found in restored PGDATA"`,
+		`test -d "$DEST_DIR/global" || fail_step "verify_pgdata" "global directory not found in restored PGDATA"`,
+		`test -d "$DEST_DIR/base" || fail_step "verify_pgdata" "base directory not found in restored PGDATA"`,
+		`step "verify_pgdata" "success"`,
+		`GENERATED_AT="$(date '+%Y-%m-%d %H:%M:%S')"`,
+		`printf '{"restoreJobId":%s,"restorePlanId":%s,"workDir":"%s","preparedDatadir":"%s","barmanServerName":"%s","backupId":"%s","targetType":"%s","targetValue":"%s","targetTimelineId":"%s","targetAction":"%s","getWal":"%s","generatedAt":"%s"}\n' "$RESTORE_JOB_ID" "$RESTORE_PLAN_ID" "$WORK_DIR" "$DEST_DIR" "$SERVER" "$BACKUP_ID" "$TARGET_TYPE" "$TARGET_VALUE" "$TARGET_TLI" "$TARGET_ACTION" "$GET_WAL" "$GENERATED_AT" > "$PROOF_FILE"`,
+		`printf 'OPSHUB_ARTIFACT_URI=runner://runner-host-` + strconv.Itoa(int(input.RunnerHostID)) + `%s\n' "$PROOF_FILE"`,
+		`step "generate_proof" "success"`,
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func parseBarmanRestoreOutput(stdout string) barmanRestoreRunnerResult {
+	result := barmanRestoreRunnerResult{}
+	kv := parseRunnerKeyValueOutput(stdout)
+	result.WorkDir = kv["OPSHUB_WORK_DIR"]
+	result.PreparedDatadir = kv["OPSHUB_PREPARED_DATADIR"]
+	result.LogPath = kv["OPSHUB_LOG_PATH"]
+	result.ProofPath = kv["OPSHUB_PROOF_PATH"]
+	result.ArtifactURI = kv["OPSHUB_ARTIFACT_URI"]
+	result.BarmanServerName = kv["OPSHUB_BARMAN_SERVER"]
+	result.BackupID = kv["OPSHUB_BARMAN_BACKUP_ID"]
+	result.TargetType = kv["OPSHUB_TARGET_TYPE"]
+	result.TargetValue = kv["OPSHUB_TARGET_VALUE"]
+	result.TargetTimelineID = kv["OPSHUB_TARGET_TLI"]
+	result.TargetAction = kv["OPSHUB_TARGET_ACTION"]
+	result.GetWAL = kv["OPSHUB_GET_WAL"] == "1"
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if value, ok := strings.CutPrefix(line, "OPSHUB_RESTORE_STEP="); ok {
+			parts := strings.SplitN(value, "|", 3)
+			if len(parts) == 3 {
+				result.Steps = append(result.Steps, physicalRestoreStep{Name: parts[0], Status: parts[1], OccurredAt: parts[2]})
+			}
+		}
+	}
+	return result
+}
+
+func normalizeBarmanRestoreTargetAction(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "shutdown", "promote":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "pause"
+	}
+}
+
+func extractTargetTimelineFromPlan(plan *DatabaseRestorePlan) string {
+	if plan == nil || strings.TrimSpace(plan.PlanJSON) == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(plan.PlanJSON), &payload); err != nil {
+		return ""
+	}
+	if target, ok := payload["target"].(map[string]any); ok {
+		if value, ok := target["timelineId"].(string); ok {
+			return pgwal.NormalizeTimelineID(value)
+		}
+	}
+	if value, ok := payload["targetTimelineId"].(string); ok {
+		return pgwal.NormalizeTimelineID(value)
+	}
+	return ""
 }
 
 func buildPhysicalRestoreScript(input physicalRestoreScriptInput) (string, error) {
@@ -1217,6 +1694,43 @@ func buildPhysicalRestoreProofJSON(plan *DatabaseRestorePlan, job *DatabaseResto
 	return marshalBackupPlanJSON(proof)
 }
 
+func buildBarmanRestoreProofJSON(plan *DatabaseRestorePlan, job *DatabaseRestoreJob, result barmanRestoreRunnerResult, finalStatus, message string) string {
+	restoreStatus := DatabaseRestoreStatusFailed
+	if finalStatus == DatabaseBackupStatusSuccess {
+		restoreStatus = DatabaseRestoreStatusRestored
+	}
+	proof := map[string]any{
+		"restoreJobId":       job.ID,
+		"restorePlanId":      plan.ID,
+		"sourceInstanceId":   plan.SourceInstanceID,
+		"targetInstanceId":   plan.TargetInstanceID,
+		"restoreTargetType":  plan.RestoreTargetType,
+		"restoreTargetValue": plan.RestoreTargetValue,
+		"targetTimelineId":   result.TargetTimelineID,
+		"targetAction":       result.TargetAction,
+		"getWal":             result.GetWAL,
+		"runnerHostId":       job.RunnerHostID,
+		"runnerJobId":        job.RunnerJobID,
+		"baseBackupRecordId": job.BackupRecordID,
+		"barmanServerName":   result.BarmanServerName,
+		"backupId":           result.BackupID,
+		"workDir":            result.WorkDir,
+		"preparedDatadir":    result.PreparedDatadir,
+		"logPath":            result.LogPath,
+		"artifactUri":        result.ArtifactURI,
+		"steps":              result.Steps,
+		"startedAt":          result.StartedAt,
+		"finishedAt":         result.FinishedAt,
+		"durationMs":         result.DurationMs,
+		"operatorId":         job.OperatorID,
+		"operatorName":       job.OperatorName,
+		"finalStatus":        finalStatus,
+		"restoreStatus":      restoreStatus,
+		"message":            message,
+	}
+	return marshalBackupPlanJSON(proof)
+}
+
 func physicalRestoreRequestJSON(plan *DatabaseRestorePlan, job *DatabaseRestoreJob, host *DatabaseRunnerHost, validationChecks []restoreValidationCheck, cleanupOnFailure bool, operator QueryOperator) string {
 	payload := map[string]any{
 		"restorePlanId":    plan.ID,
@@ -1232,6 +1746,44 @@ func physicalRestoreRequestJSON(plan *DatabaseRestorePlan, job *DatabaseRestoreJ
 		"targetValue":      job.RestoreTargetValue,
 		"validationSql":    validationCheckSQLs(validationChecks),
 		"validationChecks": validationChecks,
+		"cleanupOnFailure": cleanupOnFailure,
+		"operatorId":       operator.ID,
+		"operatorName":     operator.Username,
+	}
+	data, _ := json.Marshal(payload)
+	return trimText(string(data), maxRunnerJSONLength)
+}
+
+func barmanRestoreRequestJSON(plan *DatabaseRestorePlan, job *DatabaseRestoreJob, host *DatabaseRunnerHost, server *DatabaseBarmanServer, base *DatabaseBackupRecord, req *DatabaseRestorePlanRunRequest, operator QueryOperator) string {
+	getWAL := true
+	if req != nil && req.BarmanGetWAL != nil {
+		getWAL = *req.BarmanGetWAL
+	}
+	targetTimelineID := ""
+	targetAction := "pause"
+	cleanupOnFailure := false
+	if req != nil {
+		targetTimelineID = pgwal.NormalizeTimelineID(req.TargetTimelineID)
+		targetAction = normalizeBarmanRestoreTargetAction(req.TargetAction)
+		cleanupOnFailure = req.CleanupOnFailure
+	}
+	payload := map[string]any{
+		"restorePlanId":    plan.ID,
+		"restoreJobId":     job.ID,
+		"runnerHostId":     host.ID,
+		"runnerType":       host.RunnerType,
+		"allowedCommand":   DatabaseRunnerAllowedCommandBarmanRestore,
+		"barmanServerId":   server.ID,
+		"barmanServerName": server.BarmanServerName,
+		"backupRecordId":   base.ID,
+		"backupId":         base.ExternalBackupID,
+		"workDir":          job.WorkDir,
+		"destinationDir":   job.PreparedDatadir,
+		"targetType":       job.RestoreTargetType,
+		"targetValue":      job.RestoreTargetValue,
+		"targetTimelineId": targetTimelineID,
+		"targetAction":     targetAction,
+		"getWal":           getWAL,
 		"cleanupOnFailure": cleanupOnFailure,
 		"operatorId":       operator.ID,
 		"operatorName":     operator.Username,

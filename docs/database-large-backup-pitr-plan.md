@@ -3944,6 +3944,50 @@ WAL 状态页面：
 
 目标：恢复计划能针对 PostgreSQL 做真实预校验。
 
+当前落地状态（2026-04-29）：
+
+1. `CreateRestorePlan` 已按来源实例类型分支；PostgreSQL 走 Barman 专用预校验链路。
+2. PostgreSQL 目标类型已支持：
+   - `time`
+   - `lsn`
+3. 新增 PostgreSQL WAL/LSN 工具能力：
+   - LSN 解析、格式化和比较。
+   - 按 LSN 计算所属 WAL segment。
+   - timeline ID 规范化。
+   - WAL segment LSN 覆盖范围计算。
+4. base backup 选择策略：
+   - 仅选择 `backup_method=physical`、`backup_engine=barman`、`backup_level=full`、带 `external_backup_id` 的 Barman backup record。
+   - `targetType=time` 选择目标时间前最近的可用 Barman full backup。
+   - `targetType=lsn` 优先选择 `EndLSN <= target LSN` 的最近 Barman full backup。
+5. 预校验已覆盖：
+   - Barman server 是否能由 backup record 唯一定位。
+   - `pg_system_identifier` 是否一致。
+   - target timeline 与 base backup timeline 是否一致。
+   - timeline 大于 1 时是否存在对应 `.history` 文件。
+   - WAL segment 是否连续。
+   - target LSN 所需 WAL segment 是否完整。
+   - target time 所需 WAL 时间窗口是否覆盖。
+   - WAL/backup checksum 或 missing 状态。
+   - Barman runner host 和工具状态。
+6. `plan_json` 已生成 PostgreSQL 专用结构，包含：
+   - Barman server ID/name。
+   - runner host。
+   - target type/value/timeline。
+   - base backup。
+   - WAL archive IDs。
+   - checks。
+   - restore steps。
+7. `required_tool_json` 已加入 `barman`。
+8. `required_artifact_json` 已保留 PostgreSQL/Barman 元数据，包括 `externalBackupId`、`externalServerName`、`pgSystemIdentifier`、timeline、LSN、WAL segment 信息。
+9. 前端恢复计划弹窗已对 PostgreSQL 开放 `按 LSN`，并支持填写目标 timeline。
+
+当前边界：
+
+1. `targetType=time` 的覆盖能力依赖已同步 WAL archive 的 `first_event_time / last_event_time`，Barman catalog 粒度不足时只能按现有元数据判断。
+2. `targetType=lsn` 能精确校验 WAL segment 连续性，但不解析 WAL 内部 event，不判断事务级精确停止点。
+3. `storage object` 仍以 OpsHub 已登记 metadata 为准，不在 backend 容器里读取 Barman 仓库文件。
+4. timeline 历史文件要求基于已同步的 WAL catalog；如果 Barman 中存在 `.history` 但尚未同步，计划会失败，需先执行 WAL 同步。
+
 实现内容：
 
 1. `CreateRestorePlan` 支持 PostgreSQL `targetType=time|lsn`。
@@ -3967,6 +4011,57 @@ WAL 状态页面：
 ##### P3.6：Barman restore 到隔离目录
 
 目标：Runner 能执行 Barman restore，把 PGDATA 恢复到隔离目录。
+
+当前落地状态（2026-04-29）：
+
+1. Runner Job 已新增：
+   - `job_type=barman_restore`
+   - `allowed_command=barman_restore`
+2. `RunRestorePlan` 已支持 PostgreSQL 分支：
+   - 来源实例为 PostgreSQL 时不再走 MySQL/MariaDB 物理恢复容器逻辑。
+   - 仅允许预校验通过的 Barman PITR 计划执行。
+   - 执行前会重新做 PostgreSQL/Barman 恢复计划复检。
+3. Barman restore 执行边界：
+   - 必须在 Barman server 登记的 SSH Runner 主机上执行。
+   - 不允许用户自由输入命令。
+   - `server` 来自已登记 Barman server。
+   - `backup_id` 来自已同步 backup record 的 `external_backup_id`。
+   - `destination_dir` 固定为：
+     `runnerWorkRoot/restore/job-<restore_job_id>/pgdata`
+   - 脚本内再次校验 destination 必须匹配安全目录模式。
+4. 已支持受控 target 参数：
+   - `--target-time`
+   - `--target-lsn`
+   - `--target-tli`，OpsHub 内部保存规范化 8 位十六进制 timeline，执行 Barman CLI 时转换为数字 timeline。
+   - `--target-action pause|shutdown|promote`
+   - `--get-wal / --no-get-wal`
+5. Runner 脚本执行后会校验恢复目录结构：
+   - `PG_VERSION`
+   - `global/`
+   - `base/`
+6. 恢复任务会记录：
+   - `database_restore_jobs.work_dir`
+   - `prepared_datadir`
+   - `log_path`
+   - `artifact_uri`
+   - `step_json`
+   - `proof_json`
+7. 恢复成功后：
+   - restore job 状态为 `success`。
+   - restore plan 状态为 `restored`。
+   - 备份记录 `restore_test_status` 标记为 `restored`。
+8. 前端恢复执行弹窗已针对 PostgreSQL 切换为 Barman restore 模式：
+   - 不显示 MySQL/MariaDB 容器镜像、端口和校验 SQL。
+   - 显示 target timeline、target action、get-wal 开关。
+   - 风险确认文案改为“恢复到 Runner 隔离目录”。
+
+当前边界：
+
+1. P3.6 不启动隔离 PostgreSQL 实例。
+2. P3.6 不执行校验 SQL 和断言，SQL 校验放到 P3.7。
+3. P3.6 不做生产切换、不回填数据、不自动清理成功恢复目录。
+4. 需要 Runner 主机已经正确安装并配置 Barman，且能访问 Barman backup/WAL 仓库。
+5. `barman restore` 的 stdout/stderr 只作为 Runner 结果和 proof 摘要保存，不把完整恢复目录内容纳管进 OpsHub。
 
 实现内容：
 

@@ -650,6 +650,8 @@ func RunnerJobTypeText(value string) string {
 		return "Barman WAL 同步"
 	case DatabaseRunnerJobTypeBarmanBackup:
 		return "Barman 备份"
+	case DatabaseRunnerJobTypeBarmanRestore:
+		return "Barman 恢复"
 	default:
 		return "Runner 探测"
 	}

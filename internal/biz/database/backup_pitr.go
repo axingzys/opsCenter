@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ydcloud-dy/opshub/internal/biz/database/pgwal"
 )
 
 type DatabaseStorageProfileListRequest struct {
@@ -368,6 +370,7 @@ type DatabaseRestorePlanRequest struct {
 	RestoreMode            string `json:"restoreMode" binding:"omitempty,max=30"`
 	RestoreTargetType      string `json:"restoreTargetType" binding:"omitempty,max=30"`
 	RestoreTargetValue     string `json:"restoreTargetValue" binding:"required,max=255"`
+	TargetTimelineID       string `json:"targetTimelineId" binding:"omitempty,max=60"`
 	RestoreTargetInclusive bool   `json:"restoreTargetInclusive"`
 }
 
@@ -899,6 +902,9 @@ func (uc *UseCase) CreateRestorePlan(ctx context.Context, req *DatabaseRestorePl
 	if targetType == "" {
 		targetType = "time"
 	}
+	if normalizeDBType(source.DBType) == DBTypePostgreSQL {
+		return uc.createPostgreSQLRestorePlan(ctx, req, source, target, targetType, operator)
+	}
 	if targetType != "time" {
 		return nil, fmt.Errorf("P1 仅支持按时间生成恢复计划")
 	}
@@ -997,45 +1003,68 @@ type restorePlanValidationResult struct {
 	LogProofs         []restoreProofLogArchive `json:"logProofs,omitempty"`
 	ValidationSQL     []string                 `json:"validationSql,omitempty"`
 	Messages          []string                 `json:"messages"`
+	RunnerHostID      uint                     `json:"runnerHostId,omitempty"`
+	BarmanServerID    uint                     `json:"barmanServerId,omitempty"`
+	BarmanServerName  string                   `json:"barmanServerName,omitempty"`
+	TargetTimelineID  string                   `json:"targetTimelineId,omitempty"`
+	TargetLSN         string                   `json:"targetLsn,omitempty"`
 }
 
 type restoreProofBackup struct {
-	ID               uint   `json:"id"`
-	BackupMethod     string `json:"backupMethod"`
-	BackupLevel      string `json:"backupLevel"`
-	BackupEngine     string `json:"backupEngine"`
-	FileName         string `json:"fileName"`
-	StorageURI       string `json:"storageUri"`
-	FileSize         int64  `json:"fileSize"`
-	ChecksumSHA256   string `json:"checksumSha256"`
-	RecoverableFrom  string `json:"recoverableFrom,omitempty"`
-	RecoverableUntil string `json:"recoverableUntil,omitempty"`
-	ToolName         string `json:"toolName,omitempty"`
-	ToolVersion      string `json:"toolVersion,omitempty"`
-	BinlogFile       string `json:"backupBinlogFile,omitempty"`
-	BinlogPos        int64  `json:"backupBinlogPos,omitempty"`
-	GTIDSet          string `json:"backupGtidSet,omitempty"`
-	ServerUUID       string `json:"serverUuid,omitempty"`
-	ServerID         string `json:"serverId,omitempty"`
+	ID                  uint   `json:"id"`
+	BackupMethod        string `json:"backupMethod"`
+	BackupLevel         string `json:"backupLevel"`
+	BackupEngine        string `json:"backupEngine"`
+	FileName            string `json:"fileName"`
+	StorageURI          string `json:"storageUri"`
+	FileSize            int64  `json:"fileSize"`
+	ChecksumSHA256      string `json:"checksumSha256"`
+	RecoverableFrom     string `json:"recoverableFrom,omitempty"`
+	RecoverableUntil    string `json:"recoverableUntil,omitempty"`
+	ToolName            string `json:"toolName,omitempty"`
+	ToolVersion         string `json:"toolVersion,omitempty"`
+	BinlogFile          string `json:"backupBinlogFile,omitempty"`
+	BinlogPos           int64  `json:"backupBinlogPos,omitempty"`
+	GTIDSet             string `json:"backupGtidSet,omitempty"`
+	ServerUUID          string `json:"serverUuid,omitempty"`
+	ServerID            string `json:"serverId,omitempty"`
+	ExternalBackupID    string `json:"externalBackupId,omitempty"`
+	ExternalServerName  string `json:"externalServerName,omitempty"`
+	PGSystemIdentifier  string `json:"pgSystemIdentifier,omitempty"`
+	TimelineID          string `json:"timelineId,omitempty"`
+	TimelineHistoryFile string `json:"timelineHistoryFile,omitempty"`
+	WALSegmentSize      int64  `json:"walSegmentSize,omitempty"`
+	StartLSN            string `json:"startLsn,omitempty"`
+	EndLSN              string `json:"endLsn,omitempty"`
+	WALStart            string `json:"walStart,omitempty"`
+	WALEnd              string `json:"walEnd,omitempty"`
 }
 
 type restoreProofLogArchive struct {
-	ID               uint   `json:"id"`
-	ArchiveType      string `json:"archiveType"`
-	FileName         string `json:"fileName"`
-	StorageURI       string `json:"storageUri"`
-	FileSize         int64  `json:"fileSize,omitempty"`
-	ChecksumSHA256   string `json:"checksumSha256"`
-	FirstEventTime   string `json:"firstEventTime,omitempty"`
-	LastEventTime    string `json:"lastEventTime,omitempty"`
-	StartPos         int64  `json:"startPos,omitempty"`
-	EndPos           int64  `json:"endPos,omitempty"`
-	StartGTIDSet     string `json:"startGtidSet,omitempty"`
-	EndGTIDSet       string `json:"endGtidSet,omitempty"`
-	PreviousFileName string `json:"previousFileName,omitempty"`
-	NextFileName     string `json:"nextFileName,omitempty"`
-	ServerUUID       string `json:"serverUuid,omitempty"`
-	ServerID         string `json:"serverId,omitempty"`
+	ID                 uint   `json:"id"`
+	ArchiveType        string `json:"archiveType"`
+	FileName           string `json:"fileName"`
+	StorageURI         string `json:"storageUri"`
+	FileSize           int64  `json:"fileSize,omitempty"`
+	ChecksumSHA256     string `json:"checksumSha256"`
+	FirstEventTime     string `json:"firstEventTime,omitempty"`
+	LastEventTime      string `json:"lastEventTime,omitempty"`
+	StartPos           int64  `json:"startPos,omitempty"`
+	EndPos             int64  `json:"endPos,omitempty"`
+	StartGTIDSet       string `json:"startGtidSet,omitempty"`
+	EndGTIDSet         string `json:"endGtidSet,omitempty"`
+	PreviousFileName   string `json:"previousFileName,omitempty"`
+	NextFileName       string `json:"nextFileName,omitempty"`
+	ServerUUID         string `json:"serverUuid,omitempty"`
+	ServerID           string `json:"serverId,omitempty"`
+	PGSystemIdentifier string `json:"pgSystemIdentifier,omitempty"`
+	TimelineID         string `json:"timelineId,omitempty"`
+	WALSegmentSize     int64  `json:"walSegmentSize,omitempty"`
+	ExternalServerName string `json:"externalServerName,omitempty"`
+	StartLSN           string `json:"startLsn,omitempty"`
+	EndLSN             string `json:"endLsn,omitempty"`
+	SegmentNo          string `json:"segmentNo,omitempty"`
+	TimelineHistoryURI string `json:"timelineHistoryUri,omitempty"`
 }
 
 func (uc *UseCase) validateRestorePlan(ctx context.Context, instance *DatabaseInstance, records []*DatabaseBackupRecord, base *DatabaseBackupRecord, targetTime time.Time) *restorePlanValidationResult {
@@ -1135,6 +1164,506 @@ func (uc *UseCase) validateRestorePlan(ctx context.Context, instance *DatabaseIn
 	return result
 }
 
+type postgreSQLRestoreTarget struct {
+	Type       string
+	Value      string
+	Time       *time.Time
+	LSN        uint64
+	TimelineID string
+}
+
+func (uc *UseCase) createPostgreSQLRestorePlan(ctx context.Context, req *DatabaseRestorePlanRequest, source, targetInstance *DatabaseInstance, targetType string, operator QueryOperator) (*DatabaseRestorePlanVO, error) {
+	restoreTarget, err := normalizePostgreSQLRestoreTarget(targetType, req.RestoreTargetValue, req.TargetTimelineID)
+	if err != nil {
+		return nil, err
+	}
+	startedAt := time.Now()
+	records, err := uc.backupRecordRepo.ListSuccessfulForRestore(ctx, req.SourceInstanceID, restoreTarget.Time)
+	if err != nil {
+		return nil, err
+	}
+	base := selectPostgreSQLBarmanBaseRecord(records, restoreTarget)
+	result := uc.validatePostgreSQLRestorePlan(ctx, source, records, base, restoreTarget)
+	finishedAt := time.Now()
+	mode := strings.TrimSpace(req.RestoreMode)
+	if mode == "" {
+		mode = "isolated_restore"
+	}
+	item := &DatabaseRestorePlan{
+		SourceInstanceID:        req.SourceInstanceID,
+		TargetInstanceID:        req.TargetInstanceID,
+		RunnerHostID:            result.RunnerHostID,
+		RestoreMode:             mode,
+		RestoreTargetType:       restoreTarget.Type,
+		RestoreTargetValue:      restoreTarget.Value,
+		RestoreTargetInclusive:  req.RestoreTargetInclusive,
+		SelectedBaseRecordID:    result.BaseRecordID,
+		SelectedBackupRecordIDs: marshalUintList(result.BackupRecordIDs),
+		SelectedLogArchiveIDs:   marshalUintList(result.LogArchiveIDs),
+		BackupChainStatus:       result.BackupChainStatus,
+		LogChainStatus:          result.LogChainStatus,
+		StorageStatus:           result.StorageStatus,
+		ToolStatus:              result.ToolStatus,
+		ValidationStatus:        result.ValidationStatus,
+		RestoreStatus:           DatabaseRestoreStatusPlanned,
+		RequiredToolJSON:        buildRestoreRequiredToolJSON(source, result),
+		RequiredArtifactJSON:    buildRestoreRequiredArtifactJSON(result),
+		EstimatedRestoreBytes:   estimateRestoreBytes(result),
+		EstimatedRestoreMinutes: estimateRestoreMinutes(result),
+		PlanJSON:                buildPostgreSQLRestorePlanJSON(source, result, restoreTarget, mode),
+		ProofJSON:               buildPostgreSQLRestoreProofJSON(source, targetInstance, result, restoreTarget, operator, mode),
+		OperatorID:              operator.ID,
+		OperatorName:            trimText(operator.Username, 120),
+		StartedAt:               &startedAt,
+		FinishedAt:              &finishedAt,
+		DurationMs:              finishedAt.Sub(startedAt).Milliseconds(),
+		ErrorMessage:            trimText(strings.Join(result.Messages, "；"), 1000),
+	}
+	if err := uc.restorePlanRepo.Create(ctx, item); err != nil {
+		return nil, err
+	}
+	sourceName := source.Name
+	targetName := ""
+	if targetInstance != nil {
+		targetName = targetInstance.Name
+	}
+	return uc.toRestorePlanVO(item, sourceName, targetName), nil
+}
+
+func normalizePostgreSQLRestoreTarget(targetType, value, timelineID string) (postgreSQLRestoreTarget, error) {
+	targetType = strings.ToLower(strings.TrimSpace(targetType))
+	if targetType == "" {
+		targetType = "time"
+	}
+	timelineID = pgwal.NormalizeTimelineID(timelineID)
+	switch targetType {
+	case "time":
+		targetTime, err := parseDatabaseTime(value)
+		if err != nil || targetTime == nil {
+			return postgreSQLRestoreTarget{}, fmt.Errorf("PostgreSQL 恢复目标时间格式不正确")
+		}
+		return postgreSQLRestoreTarget{
+			Type:       "time",
+			Value:      targetTime.Format("2006-01-02 15:04:05"),
+			Time:       targetTime,
+			TimelineID: timelineID,
+		}, nil
+	case "lsn":
+		lsn, err := pgwal.ParseLSN(value)
+		if err != nil {
+			return postgreSQLRestoreTarget{}, fmt.Errorf("PostgreSQL 恢复目标 LSN 格式不正确")
+		}
+		return postgreSQLRestoreTarget{
+			Type:       "lsn",
+			Value:      pgwal.FormatLSN(lsn),
+			LSN:        lsn,
+			TimelineID: timelineID,
+		}, nil
+	default:
+		return postgreSQLRestoreTarget{}, fmt.Errorf("PostgreSQL PITR 首版仅支持 targetType=time 或 lsn")
+	}
+}
+
+func selectPostgreSQLBarmanBaseRecord(records []*DatabaseBackupRecord, target postgreSQLRestoreTarget) *DatabaseBackupRecord {
+	for _, item := range records {
+		if !isPostgreSQLBarmanBaseRecord(item) {
+			continue
+		}
+		if target.Type != "lsn" {
+			return item
+		}
+		if lsnText := strings.TrimSpace(item.EndLSN); lsnText != "" {
+			if endLSN, err := pgwal.ParseLSN(lsnText); err == nil && endLSN <= target.LSN {
+				return item
+			}
+			continue
+		}
+		return item
+	}
+	return nil
+}
+
+func isPostgreSQLBarmanBaseRecord(item *DatabaseBackupRecord) bool {
+	return item != nil &&
+		normalizeBackupMethod(item.BackupMethod) == DatabaseBackupMethodPhysical &&
+		normalizeBackupLevel(item.BackupLevel) == DatabaseBackupLevelFull &&
+		strings.EqualFold(strings.TrimSpace(item.BackupEngine), "barman") &&
+		strings.TrimSpace(item.ExternalBackupID) != ""
+}
+
+func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *DatabaseInstance, records []*DatabaseBackupRecord, base *DatabaseBackupRecord, target postgreSQLRestoreTarget) *restorePlanValidationResult {
+	result := &restorePlanValidationResult{
+		BackupChainStatus: DatabaseBackupChainStatusMissingBase,
+		LogChainStatus:    DatabaseLogChainStatusUnsupported,
+		StorageStatus:     DatabaseStorageStatusUnsupported,
+		ToolStatus:        DatabaseToolStatusUnsupported,
+		ValidationStatus:  DatabasePlanValidationFailed,
+		ValidationSQL:     validationSQLForRestorePlan(instance),
+		Messages:          []string{},
+		TargetTimelineID:  target.TimelineID,
+	}
+	if target.Type == "lsn" {
+		result.TargetLSN = target.Value
+	}
+	if base == nil {
+		result.Messages = append(result.Messages, "未找到目标点之前可用的 PostgreSQL Barman full backup")
+		return result
+	}
+	result.BaseRecordID = base.ID
+	result.BackupRecordIDs = []uint{base.ID}
+	result.BackupProofs = buildSelectedBackupProofs(records, result.BackupRecordIDs)
+	result.BackupChainStatus = DatabaseBackupChainStatusComplete
+	result.StorageStatus = storageStatusForBackupRecord(base)
+	result.ToolStatus = toolStatusForBackupRecord(base)
+	if result.StorageStatus != DatabaseStorageStatusAvailable {
+		result.Messages = append(result.Messages, StorageStatusText(result.StorageStatus))
+	}
+	if result.ToolStatus != DatabaseToolStatusCompatible {
+		result.Messages = append(result.Messages, ToolStatusText(result.ToolStatus))
+	}
+	server, serverErr := uc.findBarmanServerForBackup(ctx, base)
+	if serverErr != nil {
+		result.ToolStatus = DatabaseToolStatusMissingTool
+		result.Messages = append(result.Messages, serverErr.Error())
+	} else if server != nil {
+		result.RunnerHostID = server.RunnerHostID
+		result.BarmanServerID = server.ID
+		result.BarmanServerName = server.BarmanServerName
+		if strings.TrimSpace(server.LastCheckStatus) == DatabaseRunnerJobStatusFailed {
+			result.ToolStatus = DatabaseToolStatusIncompatibleVersion
+			result.Messages = append(result.Messages, "Barman Server 最近检查失败，请先执行 Barman 检查")
+		}
+	}
+	serverSystemID := ""
+	if server != nil {
+		serverSystemID = server.PGSystemIdentifier
+	}
+	expectedSystemID := strings.TrimSpace(firstNonEmpty(base.PGSystemIdentifier, serverSystemID))
+	expectedTimeline := pgwal.NormalizeTimelineID(firstNonEmpty(target.TimelineID, base.TimelineID))
+	if expectedTimeline == "" && strings.TrimSpace(base.WALEnd) != "" {
+		if segment, err := pgwal.ParseSegmentName(base.WALEnd, postgreSQLWALSegmentSize(base, server)); err == nil {
+			expectedTimeline = segment.TimelineID
+		}
+	}
+	result.TargetTimelineID = expectedTimeline
+
+	if server != nil && strings.TrimSpace(base.PGSystemIdentifier) != "" && strings.TrimSpace(server.PGSystemIdentifier) != "" && strings.TrimSpace(base.PGSystemIdentifier) != strings.TrimSpace(server.PGSystemIdentifier) {
+		result.LogChainStatus = DatabaseLogChainStatusSystemIdentifierMismatch
+		result.Messages = append(result.Messages, fmt.Sprintf("base backup system_identifier=%s 与 Barman server=%s 不一致", base.PGSystemIdentifier, server.PGSystemIdentifier))
+		return finalizePostgreSQLRestoreValidation(result)
+	}
+	logs, err := uc.listPostgreSQLWALArchivesForRestore(ctx, base.InstanceID)
+	if err != nil {
+		result.LogChainStatus = DatabaseLogChainStatusUnsupported
+		result.Messages = append(result.Messages, "读取 PostgreSQL WAL catalog 失败: "+err.Error())
+		return finalizePostgreSQLRestoreValidation(result)
+	}
+	logs = filterPostgreSQLWALArchives(logs, expectedSystemID, expectedTimeline, base.ExternalServerName)
+	if expectedSystemID != "" {
+		for _, item := range logs {
+			if item == nil || strings.TrimSpace(item.PGSystemIdentifier) == "" {
+				continue
+			}
+			if strings.TrimSpace(item.PGSystemIdentifier) != expectedSystemID {
+				result.LogChainStatus = DatabaseLogChainStatusSystemIdentifierMismatch
+				result.Messages = append(result.Messages, fmt.Sprintf("WAL %s system_identifier=%s 与 base backup=%s 不一致", item.FileName, item.PGSystemIdentifier, expectedSystemID))
+				return finalizePostgreSQLRestoreValidation(result)
+			}
+		}
+	}
+	if expectedTimeline != "" {
+		baseTimeline := pgwal.NormalizeTimelineID(base.TimelineID)
+		if baseTimeline != "" && baseTimeline != expectedTimeline {
+			result.LogChainStatus = DatabaseLogChainStatusTimelineMismatch
+			result.Messages = append(result.Messages, fmt.Sprintf("恢复目标 timeline=%s 与 base backup timeline=%s 不一致", expectedTimeline, baseTimeline))
+			return finalizePostgreSQLRestoreValidation(result)
+		}
+	}
+	status, selected, message := validatePostgreSQLWALCoverage(base, logs, target, expectedTimeline, postgreSQLWALSegmentSize(base, server))
+	result.LogChainStatus = status
+	result.LogArchiveIDs = selected
+	result.LogProofs = buildSelectedLogProofs(logs, selected)
+	if message != "" {
+		result.Messages = append(result.Messages, message)
+	}
+	if status == DatabaseLogChainStatusComplete {
+		if historyStatus, historyMessage := validatePostgreSQLTimelineHistory(logs, expectedTimeline); historyStatus != DatabaseLogChainStatusComplete {
+			result.LogChainStatus = historyStatus
+			result.Messages = append(result.Messages, historyMessage)
+		}
+	}
+	for _, item := range logs {
+		if item == nil {
+			continue
+		}
+		if item.Status == DatabaseLogArchiveStatusChecksumFailed {
+			result.StorageStatus = DatabaseStorageStatusChecksumFailed
+			result.Messages = append(result.Messages, fmt.Sprintf("WAL %s checksum 异常", item.FileName))
+			break
+		}
+		if item.Status == DatabaseLogArchiveStatusMissing {
+			result.StorageStatus = DatabaseStorageStatusMissingObject
+			result.Messages = append(result.Messages, fmt.Sprintf("WAL %s 被标记为缺失", item.FileName))
+			break
+		}
+	}
+	return finalizePostgreSQLRestoreValidation(result)
+}
+
+func finalizePostgreSQLRestoreValidation(result *restorePlanValidationResult) *restorePlanValidationResult {
+	if result.BackupChainStatus == DatabaseBackupChainStatusComplete &&
+		result.LogChainStatus == DatabaseLogChainStatusComplete &&
+		result.StorageStatus == DatabaseStorageStatusAvailable &&
+		result.ToolStatus == DatabaseToolStatusCompatible {
+		result.ValidationStatus = DatabasePlanValidationPassed
+		result.Messages = append(result.Messages, "PostgreSQL Barman PITR 恢复计划预校验通过，可下发 barman restore 到隔离目录")
+		return result
+	}
+	result.ValidationStatus = DatabasePlanValidationFailed
+	if len(result.Messages) == 0 {
+		result.Messages = append(result.Messages, "PostgreSQL Barman PITR 恢复计划预校验未通过")
+	}
+	return result
+}
+
+func (uc *UseCase) findBarmanServerForBackup(ctx context.Context, base *DatabaseBackupRecord) (*DatabaseBarmanServer, error) {
+	if base == nil {
+		return nil, fmt.Errorf("base backup 不存在")
+	}
+	if uc.barmanServerRepo == nil {
+		return nil, fmt.Errorf("Barman Server 仓库未配置")
+	}
+	items, _, err := uc.barmanServerRepo.List(ctx, &DatabaseBarmanServerListRequest{
+		SourceInstanceID: base.InstanceID,
+		Page:             1,
+		PageSize:         200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	serverName := strings.TrimSpace(base.ExternalServerName)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if serverName != "" && strings.TrimSpace(item.BarmanServerName) == serverName {
+			return item, nil
+		}
+	}
+	if serverName != "" {
+		return nil, fmt.Errorf("未找到 Barman Server：%s", serverName)
+	}
+	if len(items) == 1 {
+		return items[0], nil
+	}
+	return nil, fmt.Errorf("无法唯一确定 Barman Server，请先同步 Barman catalog")
+}
+
+func (uc *UseCase) listPostgreSQLWALArchivesForRestore(ctx context.Context, instanceID uint) ([]*DatabaseLogArchive, error) {
+	if uc.logArchiveRepo == nil {
+		return nil, fmt.Errorf("日志归档仓库未配置")
+	}
+	items, _, err := uc.logArchiveRepo.List(ctx, &DatabaseLogArchiveListRequest{
+		InstanceID:  instanceID,
+		ArchiveType: DatabaseArchiveTypeWAL,
+		Page:        1,
+		PageSize:    10000,
+	})
+	return items, err
+}
+
+func filterPostgreSQLWALArchives(items []*DatabaseLogArchive, systemID, timelineID, externalServerName string) []*DatabaseLogArchive {
+	result := make([]*DatabaseLogArchive, 0, len(items))
+	timelineID = pgwal.NormalizeTimelineID(timelineID)
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if strings.TrimSpace(systemID) != "" && strings.TrimSpace(item.PGSystemIdentifier) != "" && strings.TrimSpace(item.PGSystemIdentifier) != strings.TrimSpace(systemID) {
+			result = append(result, item)
+			continue
+		}
+		if strings.TrimSpace(externalServerName) != "" && strings.TrimSpace(item.ExternalServerName) != "" && strings.TrimSpace(item.ExternalServerName) != strings.TrimSpace(externalServerName) {
+			continue
+		}
+		if timelineID != "" && pgwal.IsSegmentName(item.FileName) {
+			itemTimeline := pgwal.NormalizeTimelineID(item.TimelineID)
+			if itemTimeline == "" {
+				if segment, err := pgwal.ParseSegmentName(item.FileName, item.WALSegmentSize); err == nil {
+					itemTimeline = segment.TimelineID
+				}
+			}
+			if itemTimeline != "" && itemTimeline != timelineID {
+				result = append(result, item)
+				continue
+			}
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func postgreSQLWALSegmentSize(base *DatabaseBackupRecord, server *DatabaseBarmanServer) int64 {
+	if base != nil && base.WALSegmentSize > 0 {
+		return base.WALSegmentSize
+	}
+	if server != nil && server.WALSegmentSize > 0 {
+		return server.WALSegmentSize
+	}
+	return pgwal.DefaultSegmentSize
+}
+
+func validatePostgreSQLWALCoverage(base *DatabaseBackupRecord, logs []*DatabaseLogArchive, target postgreSQLRestoreTarget, timelineID string, segmentSize int64) (string, []uint, string) {
+	if base == nil {
+		return DatabaseLogChainStatusMissingWAL, nil, "缺少 base backup"
+	}
+	if target.Type == "lsn" {
+		return validatePostgreSQLLSNWALCoverage(base, logs, target, timelineID, segmentSize)
+	}
+	return validatePostgreSQLTimeWALCoverage(base, logs, target, timelineID)
+}
+
+func validatePostgreSQLTimeWALCoverage(base *DatabaseBackupRecord, logs []*DatabaseLogArchive, target postgreSQLRestoreTarget, timelineID string) (string, []uint, string) {
+	if target.Time == nil {
+		return DatabaseLogChainStatusTimeRangeGap, nil, "恢复目标时间为空"
+	}
+	logStart := firstNonNilTime(base.RecoverableUntil, base.FinishedAt)
+	if logStart == nil || !target.Time.After(*logStart) {
+		return DatabaseLogChainStatusComplete, nil, ""
+	}
+	candidates := make([]*DatabaseLogArchive, 0, len(logs))
+	for _, item := range logs {
+		if item == nil || pgwal.IsTimelineHistoryFile(item.FileName) {
+			continue
+		}
+		if item.LastEventTime == nil || item.FirstEventTime == nil {
+			continue
+		}
+		if item.LastEventTime.Before(*logStart) || item.FirstEventTime.After(*target.Time) {
+			continue
+		}
+		candidates = append(candidates, item)
+	}
+	status, ids, message := validateLogArchiveCoverage(candidates, DatabaseArchiveTypeWAL, *logStart, *target.Time)
+	if status != DatabaseLogChainStatusComplete {
+		return status, ids, message
+	}
+	if continuityStatus, continuityMessage := validatePostgreSQLWALContinuity(candidates, timelineID); continuityStatus != DatabaseLogChainStatusComplete {
+		return continuityStatus, ids, continuityMessage
+	}
+	return DatabaseLogChainStatusComplete, ids, ""
+}
+
+func validatePostgreSQLLSNWALCoverage(base *DatabaseBackupRecord, logs []*DatabaseLogArchive, target postgreSQLRestoreTarget, timelineID string, segmentSize int64) (string, []uint, string) {
+	timelineID = pgwal.NormalizeTimelineID(firstNonEmpty(timelineID, base.TimelineID))
+	if timelineID == "" && strings.TrimSpace(base.WALEnd) != "" {
+		if segment, err := pgwal.ParseSegmentName(base.WALEnd, segmentSize); err == nil {
+			timelineID = segment.TimelineID
+		}
+	}
+	if timelineID == "" {
+		return DatabaseLogChainStatusTimelineMismatch, nil, "无法确定 PostgreSQL 恢复目标 timeline"
+	}
+	if strings.TrimSpace(base.EndLSN) != "" {
+		if baseEnd, err := pgwal.ParseLSN(base.EndLSN); err == nil && target.LSN <= baseEnd {
+			return DatabaseLogChainStatusComplete, nil, ""
+		}
+	}
+	startSegmentName := strings.TrimSpace(base.WALEnd)
+	if startSegmentName == "" {
+		if strings.TrimSpace(base.EndLSN) == "" {
+			return DatabaseLogChainStatusLSNNotCovered, nil, "base backup 缺少 EndLSN/WALEnd，无法校验 LSN 覆盖"
+		}
+		baseEnd, err := pgwal.ParseLSN(base.EndLSN)
+		if err != nil {
+			return DatabaseLogChainStatusLSNNotCovered, nil, "base backup EndLSN 不合法"
+		}
+		startSegmentName = pgwal.SegmentForLSN(timelineID, baseEnd, segmentSize).Name
+	}
+	targetSegment := pgwal.SegmentForLSN(timelineID, target.LSN, segmentSize)
+	required, err := pgwal.SegmentRange(startSegmentName, targetSegment.Name, segmentSize, 20000)
+	if err != nil {
+		return DatabaseLogChainStatusLSNNotCovered, nil, err.Error()
+	}
+	bySegment := map[string]*DatabaseLogArchive{}
+	for _, item := range logs {
+		if item == nil || !pgwal.IsSegmentName(item.FileName) {
+			continue
+		}
+		segment, err := pgwal.ParseSegmentName(item.FileName, firstNonZeroInt64(item.WALSegmentSize, segmentSize))
+		if err != nil || segment.TimelineID != timelineID {
+			continue
+		}
+		bySegment[segment.Name] = item
+	}
+	ids := make([]uint, 0, len(required))
+	for _, segment := range required {
+		item := bySegment[segment.Name]
+		if item == nil {
+			return DatabaseLogChainStatusMissingWAL, ids, fmt.Sprintf("缺少覆盖目标 LSN 的 WAL segment：%s", segment.Name)
+		}
+		if item.Status == DatabaseLogArchiveStatusMissing {
+			return DatabaseLogChainStatusMissingWAL, ids, fmt.Sprintf("WAL segment %s 被标记为缺失", segment.Name)
+		}
+		if item.Status == DatabaseLogArchiveStatusChecksumFailed {
+			return DatabaseLogChainStatusTimeRangeGap, ids, fmt.Sprintf("WAL segment %s checksum 异常", segment.Name)
+		}
+		ids = append(ids, item.ID)
+	}
+	return DatabaseLogChainStatusComplete, ids, ""
+}
+
+func validatePostgreSQLWALContinuity(logs []*DatabaseLogArchive, timelineID string) (string, string) {
+	segments := make([]uint64, 0, len(logs))
+	timelineID = pgwal.NormalizeTimelineID(timelineID)
+	for _, item := range logs {
+		if item == nil || !pgwal.IsSegmentName(item.FileName) {
+			continue
+		}
+		segment, err := pgwal.ParseSegmentName(item.FileName, item.WALSegmentSize)
+		if err != nil {
+			continue
+		}
+		if timelineID != "" && segment.TimelineID != timelineID {
+			return DatabaseLogChainStatusTimelineMismatch, fmt.Sprintf("WAL %s timeline=%s 与目标 timeline=%s 不一致", item.FileName, segment.TimelineID, timelineID)
+		}
+		segments = append(segments, segment.SegmentNo)
+	}
+	if len(segments) == 0 {
+		return DatabaseLogChainStatusComplete, ""
+	}
+	sort.Slice(segments, func(i, j int) bool { return segments[i] < segments[j] })
+	for i := 1; i < len(segments); i++ {
+		if segments[i] == segments[i-1] {
+			continue
+		}
+		if segments[i] != segments[i-1]+1 {
+			return DatabaseLogChainStatusMissingWAL, "WAL segment 序号不连续"
+		}
+	}
+	return DatabaseLogChainStatusComplete, ""
+}
+
+func validatePostgreSQLTimelineHistory(logs []*DatabaseLogArchive, timelineID string) (string, string) {
+	timelineID = pgwal.NormalizeTimelineID(timelineID)
+	if timelineID == "" {
+		return DatabaseLogChainStatusComplete, ""
+	}
+	timelineNo, err := pgwal.TimelineNumber(timelineID)
+	if err != nil || timelineNo <= 1 {
+		return DatabaseLogChainStatusComplete, ""
+	}
+	for _, item := range logs {
+		if item == nil {
+			continue
+		}
+		if pgwal.TimelineFromHistoryFile(item.FileName) == timelineID || strings.Contains(strings.ToUpper(item.TimelineHistoryURI), timelineID+".HISTORY") {
+			return DatabaseLogChainStatusComplete, ""
+		}
+	}
+	return DatabaseLogChainStatusTimelineGap, fmt.Sprintf("timeline %s 需要对应 timeline history 文件，但当前 WAL catalog 未找到", timelineID)
+}
+
 func buildSelectedBackupProofs(records []*DatabaseBackupRecord, ids []uint) []restoreProofBackup {
 	if len(records) == 0 || len(ids) == 0 {
 		return nil
@@ -1164,21 +1693,31 @@ func backupProofFromRecord(item *DatabaseBackupRecord) restoreProofBackup {
 		return restoreProofBackup{}
 	}
 	proof := restoreProofBackup{
-		ID:             item.ID,
-		BackupMethod:   item.BackupMethod,
-		BackupLevel:    item.BackupLevel,
-		BackupEngine:   item.BackupEngine,
-		FileName:       item.FileName,
-		StorageURI:     firstNonEmpty(item.StorageURI, item.FilePath),
-		FileSize:       item.FileSize,
-		ChecksumSHA256: item.ChecksumSHA256,
-		ToolName:       item.ToolName,
-		ToolVersion:    item.ToolVersion,
-		BinlogFile:     item.BackupBinlogFile,
-		BinlogPos:      item.BackupBinlogPos,
-		GTIDSet:        item.BackupGTIDSet,
-		ServerUUID:     item.ServerUUID,
-		ServerID:       item.ServerID,
+		ID:                  item.ID,
+		BackupMethod:        item.BackupMethod,
+		BackupLevel:         item.BackupLevel,
+		BackupEngine:        item.BackupEngine,
+		FileName:            item.FileName,
+		StorageURI:          firstNonEmpty(item.StorageURI, item.FilePath),
+		FileSize:            item.FileSize,
+		ChecksumSHA256:      item.ChecksumSHA256,
+		ToolName:            item.ToolName,
+		ToolVersion:         item.ToolVersion,
+		BinlogFile:          item.BackupBinlogFile,
+		BinlogPos:           item.BackupBinlogPos,
+		GTIDSet:             item.BackupGTIDSet,
+		ServerUUID:          item.ServerUUID,
+		ServerID:            item.ServerID,
+		ExternalBackupID:    item.ExternalBackupID,
+		ExternalServerName:  item.ExternalServerName,
+		PGSystemIdentifier:  item.PGSystemIdentifier,
+		TimelineID:          item.TimelineID,
+		TimelineHistoryFile: item.TimelineHistoryFile,
+		WALSegmentSize:      item.WALSegmentSize,
+		StartLSN:            item.StartLSN,
+		EndLSN:              item.EndLSN,
+		WALStart:            item.WALStart,
+		WALEnd:              item.WALEnd,
 	}
 	if item.RecoverableFrom != nil {
 		proof.RecoverableFrom = item.RecoverableFrom.Format("2006-01-02 15:04:05")
@@ -1206,20 +1745,28 @@ func buildSelectedLogProofs(logs []*DatabaseLogArchive, ids []uint) []restorePro
 			continue
 		}
 		proof := restoreProofLogArchive{
-			ID:               item.ID,
-			ArchiveType:      item.ArchiveType,
-			FileName:         item.FileName,
-			StorageURI:       item.StorageURI,
-			FileSize:         item.FileSize,
-			ChecksumSHA256:   item.ChecksumSHA256,
-			StartPos:         item.StartPos,
-			EndPos:           item.EndPos,
-			StartGTIDSet:     item.StartGTIDSet,
-			EndGTIDSet:       item.EndGTIDSet,
-			PreviousFileName: item.PreviousFileName,
-			NextFileName:     item.NextFileName,
-			ServerUUID:       item.ServerUUID,
-			ServerID:         item.ServerID,
+			ID:                 item.ID,
+			ArchiveType:        item.ArchiveType,
+			FileName:           item.FileName,
+			StorageURI:         item.StorageURI,
+			FileSize:           item.FileSize,
+			ChecksumSHA256:     item.ChecksumSHA256,
+			StartPos:           item.StartPos,
+			EndPos:             item.EndPos,
+			StartGTIDSet:       item.StartGTIDSet,
+			EndGTIDSet:         item.EndGTIDSet,
+			PreviousFileName:   item.PreviousFileName,
+			NextFileName:       item.NextFileName,
+			ServerUUID:         item.ServerUUID,
+			ServerID:           item.ServerID,
+			PGSystemIdentifier: item.PGSystemIdentifier,
+			TimelineID:         item.TimelineID,
+			WALSegmentSize:     item.WALSegmentSize,
+			ExternalServerName: item.ExternalServerName,
+			StartLSN:           item.StartLSN,
+			EndLSN:             item.EndLSN,
+			SegmentNo:          item.SegmentNo,
+			TimelineHistoryURI: item.TimelineHistoryURI,
 		}
 		if item.FirstEventTime != nil {
 			proof.FirstEventTime = item.FirstEventTime.Format("2006-01-02 15:04:05")
@@ -1298,6 +1845,110 @@ func buildRestoreProofJSON(source, target *DatabaseInstance, result *restorePlan
 	return marshalBackupPlanJSON(proof)
 }
 
+func buildPostgreSQLRestorePlanJSON(source *DatabaseInstance, result *restorePlanValidationResult, target postgreSQLRestoreTarget, mode string) string {
+	if result == nil {
+		return "{}"
+	}
+	var base any
+	incrementals := []restoreProofBackup{}
+	if len(result.BackupProofs) > 0 {
+		base = result.BackupProofs[0]
+		if len(result.BackupProofs) > 1 {
+			incrementals = result.BackupProofs[1:]
+		}
+	}
+	payload := map[string]any{
+		"engine":       DBTypePostgreSQL,
+		"backupEngine": "barman",
+		"backupScope":  "cluster",
+		"restoreMode":  mode,
+		"sourceInstanceId": func() uint {
+			if source != nil {
+				return source.ID
+			}
+			return 0
+		}(),
+		"barmanServerId":   result.BarmanServerID,
+		"barmanServerName": result.BarmanServerName,
+		"runnerHostId":     result.RunnerHostID,
+		"target": map[string]any{
+			"type":       target.Type,
+			"value":      target.Value,
+			"inclusive":  true,
+			"timelineId": result.TargetTimelineID,
+		},
+		"baseBackup":       base,
+		"incrementalChain": incrementals,
+		"walChain": map[string]any{
+			"status":                  result.LogChainStatus,
+			"archiveIds":              result.LogArchiveIDs,
+			"timelineHistoryRequired": postgreSQLTimelineHistoryRequired(result.TargetTimelineID),
+			"timelineId":              result.TargetTimelineID,
+			"targetLsn":               result.TargetLSN,
+		},
+		"checks": map[string]any{
+			"backupChain":      result.BackupChainStatus,
+			"logChain":         result.LogChainStatus,
+			"storage":          result.StorageStatus,
+			"tool":             result.ToolStatus,
+			"validationStatus": result.ValidationStatus,
+		},
+		"requiredTools": []string{"barman"},
+		"restoreSteps":  []string{"barman restore", "check restored PGDATA directory", "generate proof"},
+		"messages":      result.Messages,
+	}
+	return marshalBackupPlanJSON(payload)
+}
+
+func buildPostgreSQLRestoreProofJSON(source, targetInstance *DatabaseInstance, result *restorePlanValidationResult, target postgreSQLRestoreTarget, operator QueryOperator, mode string) string {
+	if result == nil {
+		return "{}"
+	}
+	proof := map[string]any{
+		"generatedAt":        time.Now().Format("2006-01-02 15:04:05"),
+		"sourceInstanceId":   uint(0),
+		"sourceInstanceName": "",
+		"targetInstanceId":   uint(0),
+		"targetInstanceName": "",
+		"restoreMode":        mode,
+		"restoreTargetType":  target.Type,
+		"restoreTargetValue": target.Value,
+		"targetTimelineId":   result.TargetTimelineID,
+		"targetLsn":          result.TargetLSN,
+		"validationStatus":   result.ValidationStatus,
+		"backupChainStatus":  result.BackupChainStatus,
+		"logChainStatus":     result.LogChainStatus,
+		"storageStatus":      result.StorageStatus,
+		"toolStatus":         result.ToolStatus,
+		"barmanServerId":     result.BarmanServerID,
+		"barmanServerName":   result.BarmanServerName,
+		"runnerHostId":       result.RunnerHostID,
+		"baseBackup":         nil,
+		"walArchiveRange":    result.LogProofs,
+		"validationSql":      result.ValidationSQL,
+		"operatorId":         operator.ID,
+		"operatorName":       operator.Username,
+		"messages":           result.Messages,
+	}
+	if source != nil {
+		proof["sourceInstanceId"] = source.ID
+		proof["sourceInstanceName"] = source.Name
+	}
+	if targetInstance != nil {
+		proof["targetInstanceId"] = targetInstance.ID
+		proof["targetInstanceName"] = targetInstance.Name
+	}
+	if len(result.BackupProofs) > 0 {
+		proof["baseBackup"] = result.BackupProofs[0]
+	}
+	return marshalBackupPlanJSON(proof)
+}
+
+func postgreSQLTimelineHistoryRequired(timelineID string) bool {
+	timelineNo, err := pgwal.TimelineNumber(timelineID)
+	return err == nil && timelineNo > 1
+}
+
 func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanValidationResult) string {
 	if result == nil {
 		return "[]"
@@ -1331,6 +1982,8 @@ func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanV
 		tools = append(tools, map[string]any{"name": "docker", "requiredBy": "isolated_instance"})
 		tools = append(tools, map[string]any{"name": "mysqlbinlog", "requiredBy": "pitr_log_replay"})
 		tools = append(tools, map[string]any{"name": "mysql", "requiredBy": "validation_sql"})
+	} else if engine == DBTypePostgreSQL {
+		tools = append(tools, map[string]any{"name": "barman", "requiredBy": "barman_restore"})
 	}
 	data, _ := json.Marshal(tools)
 	return string(data)
@@ -1343,23 +1996,39 @@ func buildRestoreRequiredArtifactJSON(result *restorePlanValidationResult) strin
 	artifacts := make([]map[string]any, 0, len(result.BackupProofs)+len(result.LogProofs))
 	for _, item := range result.BackupProofs {
 		artifacts = append(artifacts, map[string]any{
-			"type":           "backup",
-			"id":             item.ID,
-			"fileName":       item.FileName,
-			"storageUri":     item.StorageURI,
-			"fileSize":       item.FileSize,
-			"checksumSha256": item.ChecksumSHA256,
-			"level":          item.BackupLevel,
+			"type":               "backup",
+			"id":                 item.ID,
+			"fileName":           item.FileName,
+			"storageUri":         item.StorageURI,
+			"fileSize":           item.FileSize,
+			"checksumSha256":     item.ChecksumSHA256,
+			"level":              item.BackupLevel,
+			"backupEngine":       item.BackupEngine,
+			"externalBackupId":   item.ExternalBackupID,
+			"externalServerName": item.ExternalServerName,
+			"pgSystemIdentifier": item.PGSystemIdentifier,
+			"timelineId":         item.TimelineID,
+			"startLsn":           item.StartLSN,
+			"endLsn":             item.EndLSN,
+			"walStart":           item.WALStart,
+			"walEnd":             item.WALEnd,
 		})
 	}
 	for _, item := range result.LogProofs {
 		artifacts = append(artifacts, map[string]any{
-			"type":           item.ArchiveType,
-			"id":             item.ID,
-			"fileName":       item.FileName,
-			"storageUri":     item.StorageURI,
-			"fileSize":       item.FileSize,
-			"checksumSha256": item.ChecksumSHA256,
+			"type":               item.ArchiveType,
+			"id":                 item.ID,
+			"fileName":           item.FileName,
+			"storageUri":         item.StorageURI,
+			"fileSize":           item.FileSize,
+			"checksumSha256":     item.ChecksumSHA256,
+			"pgSystemIdentifier": item.PGSystemIdentifier,
+			"timelineId":         item.TimelineID,
+			"externalServerName": item.ExternalServerName,
+			"startLsn":           item.StartLSN,
+			"endLsn":             item.EndLSN,
+			"segmentNo":          item.SegmentNo,
+			"timelineHistoryUri": item.TimelineHistoryURI,
 		})
 	}
 	data, _ := json.Marshal(artifacts)
@@ -2505,6 +3174,12 @@ func LogChainStatusText(value string) string {
 		return "缺少 binlog"
 	case DatabaseLogChainStatusTimelineGap:
 		return "timeline 缺口"
+	case DatabaseLogChainStatusTimelineMismatch:
+		return "timeline 不匹配"
+	case DatabaseLogChainStatusSystemIdentifierMismatch:
+		return "system identifier 不匹配"
+	case DatabaseLogChainStatusLSNNotCovered:
+		return "LSN 未覆盖"
 	case DatabaseLogChainStatusGTIDGap:
 		return "GTID 缺口"
 	case DatabaseLogChainStatusTimeRangeGap:

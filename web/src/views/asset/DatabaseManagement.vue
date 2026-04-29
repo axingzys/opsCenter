@@ -1822,6 +1822,7 @@
                       <el-option label="Barman Catalog 同步" value="barman_catalog_sync" />
                       <el-option label="Barman WAL 同步" value="barman_wal_sync" />
                       <el-option label="Barman 备份" value="barman_backup" />
+                      <el-option label="Barman 恢复" value="barman_restore" />
                     </el-select>
                     <el-select v-model="runnerJobQuery.status" placeholder="状态" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="排队中" value="queued" />
@@ -3988,7 +3989,7 @@
       @close="resetRestorePlanForm"
     >
       <el-alert
-        title="恢复计划会检查备份链、日志链、存储对象和工具兼容状态。P1 不直接启动恢复库，只输出预校验结果。"
+        title="恢复计划会检查备份链、日志链、存储对象和工具兼容状态。PostgreSQL 支持 Barman 的 target time / target LSN 预校验。"
         type="warning"
         show-icon
         :closable="false"
@@ -4021,12 +4022,24 @@
             <el-form-item label="目标类型" prop="restoreTargetType">
               <el-select v-model="restorePlanForm.restoreTargetType" style="width: 100%;">
                 <el-option label="按时间点" value="time" />
+                <el-option v-if="restorePlanSourceDbType === 'postgresql'" label="按 LSN" value="lsn" />
               </el-select>
             </el-form-item>
           </el-col>
         </el-row>
-        <el-form-item label="目标时间" prop="restoreTargetValue">
-          <el-date-picker v-model="restorePlanForm.restoreTargetValue" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" placeholder="选择恢复目标时间" style="width: 100%;" />
+        <el-form-item :label="restorePlanForm.restoreTargetType === 'lsn' ? '目标 LSN' : '目标时间'" prop="restoreTargetValue">
+          <el-date-picker
+            v-if="restorePlanForm.restoreTargetType !== 'lsn'"
+            v-model="restorePlanForm.restoreTargetValue"
+            type="datetime"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            placeholder="选择恢复目标时间"
+            style="width: 100%;"
+          />
+          <el-input v-else v-model="restorePlanForm.restoreTargetValue" placeholder="如：A/18000098" />
+        </el-form-item>
+        <el-form-item v-if="restorePlanSourceDbType === 'postgresql'" label="目标 Timeline">
+          <el-input v-model="restorePlanForm.targetTimelineId" placeholder="可选，如 1 或 00000001；为空时使用 base backup timeline" />
         </el-form-item>
         <el-form-item label="包含目标点">
           <el-switch v-model="restorePlanForm.restoreTargetInclusive" active-text="包含" inactive-text="不包含" />
@@ -4045,7 +4058,7 @@
       @close="resetRestorePlanRunForm"
     >
       <el-alert
-        title="P2.7 只恢复到 Runner 主机上的隔离容器，不覆盖生产库、不切换业务连接、不自动回填数据。"
+        :title="isPostgreSQLRestoreRun ? 'P3.6 只执行 Barman restore 到 Runner 隔离目录，不启动 PostgreSQL 实例、不覆盖生产库。' : 'P2.7 只恢复到 Runner 主机上的隔离容器，不覆盖生产库、不切换业务连接、不自动回填数据。'"
         type="warning"
         show-icon
         :closable="false"
@@ -4065,7 +4078,7 @@
             />
           </el-select>
         </el-form-item>
-        <el-row :gutter="16">
+        <el-row v-if="!isPostgreSQLRestoreRun" :gutter="16">
           <el-col :span="12">
             <el-form-item label="容器镜像">
               <el-input v-model="restorePlanRunForm.containerImage" placeholder="mysql:8.0 / mysql:8.4 / mariadb:latest" />
@@ -4078,6 +4091,27 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-row v-if="isPostgreSQLRestoreRun" :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="目标 Timeline">
+              <el-input v-model="restorePlanRunForm.targetTimelineId" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="目标动作">
+              <el-select v-model="restorePlanRunForm.targetAction" style="width: 100%;">
+                <el-option label="pause" value="pause" />
+                <el-option label="shutdown" value="shutdown" />
+                <el-option label="promote" value="promote" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="Get WAL">
+              <el-switch v-model="restorePlanRunForm.barmanGetWal" active-text="--get-wal" inactive-text="--no-get-wal" />
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="保留小时" prop="expiresInHours">
@@ -4086,11 +4120,15 @@
           </el-col>
           <el-col :span="12">
             <el-form-item label="失败后清理">
-              <el-switch v-model="restorePlanRunForm.cleanupOnFailure" active-text="清理容器" inactive-text="保留现场" />
+              <el-switch
+                v-model="restorePlanRunForm.cleanupOnFailure"
+                :active-text="isPostgreSQLRestoreRun ? '清理目录' : '清理容器'"
+                inactive-text="保留现场"
+              />
             </el-form-item>
           </el-col>
         </el-row>
-        <el-form-item label="额外校验 SQL">
+        <el-form-item v-if="!isPostgreSQLRestoreRun" label="额外校验 SQL">
           <el-input
             v-model="restorePlanRunForm.validationSqlText"
             type="textarea"
@@ -4098,7 +4136,7 @@
             placeholder="每行一条，只允许 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN"
           />
         </el-form-item>
-        <el-form-item label="断言校验">
+        <el-form-item v-if="!isPostgreSQLRestoreRun" label="断言校验">
           <div class="restore-assertions">
             <div class="restore-assertions-header">
               <span class="field-tip">expectedRows 校验结果行数；expectedScalar 校验首行首列；expectedContains 校验输出中包含固定文本。</span>
@@ -4136,7 +4174,7 @@
         </el-form-item>
         <el-form-item label="风险确认" prop="confirmIsolated">
           <el-checkbox v-model="restorePlanRunForm.confirmIsolated">
-            我确认本次只恢复到隔离库，不覆盖生产数据。
+            {{ isPostgreSQLRestoreRun ? '我确认本次只恢复到 Runner 隔离目录，不覆盖生产数据。' : '我确认本次只恢复到隔离库，不覆盖生产数据。' }}
           </el-checkbox>
         </el-form-item>
       </el-form>
@@ -4273,7 +4311,7 @@
       @close="resetBarmanServerForm"
     >
       <el-alert
-        title="Barman Server 通过 Runner 主机上的既有 Barman 配置执行受控命令：check、catalog 同步、WAL 同步和 cluster 级 barman backup；隔离恢复仍在后续 P3 阶段继续做。"
+        title="Barman Server 通过 Runner 主机上的既有 Barman 配置执行受控命令：check、catalog 同步、WAL 同步、cluster 级 backup 和 restore 到隔离目录；隔离实例启动在 P3.7 继续做。"
         type="info"
         show-icon
         :closable="false"
@@ -5360,6 +5398,7 @@ const restorePlanForm = reactive<DatabaseRestorePlanPayload>({
   restoreMode: 'isolated_restore',
   restoreTargetType: 'time',
   restoreTargetValue: '',
+  targetTimelineId: '',
   restoreTargetInclusive: true
 })
 
@@ -5372,6 +5411,9 @@ const restorePlanRunForm = reactive<DatabaseRestorePlanRunPayload & { validation
   validationAssertions: [],
   validationSqlText: '',
   cleanupOnFailure: false,
+  targetTimelineId: '',
+  targetAction: 'pause',
+  barmanGetWal: true,
   confirmIsolated: false
 })
 
@@ -5696,6 +5738,26 @@ const pitrBackupInstances = computed(() =>
 
 const postgresqlBackupInstances = computed(() =>
   instances.value.filter(item => item.dbType === 'postgresql' && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
+)
+
+const restorePlanSourceInstance = computed(() =>
+  instances.value.find(item => item.id === restorePlanForm.sourceInstanceId)
+)
+
+const restorePlanSourceDbType = computed(() =>
+  restorePlanSourceInstance.value?.dbType || ''
+)
+
+const restoreRunSourceInstance = computed(() =>
+  instances.value.find(item => item.id === restorePlanRunSource.value?.sourceInstanceId)
+)
+
+const restoreRunSourceDbType = computed(() =>
+  restoreRunSourceInstance.value?.dbType || ''
+)
+
+const isPostgreSQLRestoreRun = computed(() =>
+  restoreRunSourceDbType.value === 'postgresql'
 )
 
 const selectedBackupTaskInstance = computed(() =>
@@ -6917,6 +6979,7 @@ const resetRestorePlanForm = () => {
   restorePlanForm.restoreMode = 'isolated_restore'
   restorePlanForm.restoreTargetType = 'time'
   restorePlanForm.restoreTargetValue = formatDateTimeInput()
+  restorePlanForm.targetTimelineId = ''
   restorePlanForm.restoreTargetInclusive = true
   restorePlanFormRef.value?.clearValidate()
 }
@@ -7388,6 +7451,7 @@ const submitRestorePlan = async () => {
 const defaultRestoreImageForPlan = (row?: DatabaseRestorePlanResult) => {
   const source = instances.value.find(item => item.id === row?.sourceInstanceId)
   const version = String(source?.version || '')
+  if (source?.dbType === 'postgresql') return ''
   if (source?.dbType === 'mariadb') {
     const versionTag = version.split('-')[0]?.split(' ')[0] || ''
     return versionTag ? `mariadb:${versionTag}` : 'mariadb:latest'
@@ -7397,12 +7461,25 @@ const defaultRestoreImageForPlan = (row?: DatabaseRestorePlanResult) => {
   return 'mysql:8.0'
 }
 
+const restorePlanTargetTimeline = (row?: DatabaseRestorePlanResult) => {
+  if (!row?.planJson) return ''
+  try {
+    const payload = JSON.parse(row.planJson)
+    return String(payload?.target?.timelineId || payload?.targetTimelineId || '')
+  } catch {
+    return ''
+  }
+}
+
 const openRunRestorePlanDialog = (row: DatabaseRestorePlanResult) => {
   restorePlanRunSource.value = row
   restorePlanRunForm.runnerHostId = row.runnerHostId || runnerHosts.value.find(item => item.runnerType === 'ssh' && item.enabled !== false)?.id || 0
   restorePlanRunForm.containerImage = defaultRestoreImageForPlan(row)
   restorePlanRunForm.listenPort = undefined
   restorePlanRunForm.expiresInHours = 24
+  restorePlanRunForm.targetTimelineId = restorePlanTargetTimeline(row)
+  restorePlanRunForm.targetAction = 'pause'
+  restorePlanRunForm.barmanGetWal = true
   restorePlanRunForm.validationSqlText = ''
   restorePlanRunForm.validationSql = []
   restorePlanRunForm.validationAssertions = []
@@ -7417,6 +7494,9 @@ const resetRestorePlanRunForm = () => {
   restorePlanRunForm.containerImage = ''
   restorePlanRunForm.listenPort = undefined
   restorePlanRunForm.expiresInHours = 24
+  restorePlanRunForm.targetTimelineId = ''
+  restorePlanRunForm.targetAction = 'pause'
+  restorePlanRunForm.barmanGetWal = true
   restorePlanRunForm.validationSqlText = ''
   restorePlanRunForm.validationSql = []
   restorePlanRunForm.validationAssertions = []
@@ -7462,11 +7542,14 @@ const submitRunRestorePlan = async () => {
       ))
     const payload: DatabaseRestorePlanRunPayload = {
       runnerHostId: restorePlanRunForm.runnerHostId,
-      containerImage: restorePlanRunForm.containerImage || undefined,
-      listenPort: restorePlanRunForm.listenPort || undefined,
+      containerImage: isPostgreSQLRestoreRun.value ? undefined : (restorePlanRunForm.containerImage || undefined),
+      listenPort: isPostgreSQLRestoreRun.value ? undefined : (restorePlanRunForm.listenPort || undefined),
       expiresInHours: restorePlanRunForm.expiresInHours || 24,
-      validationSql,
-      validationAssertions,
+      validationSql: isPostgreSQLRestoreRun.value ? [] : validationSql,
+      validationAssertions: isPostgreSQLRestoreRun.value ? [] : validationAssertions,
+      targetTimelineId: isPostgreSQLRestoreRun.value ? (restorePlanRunForm.targetTimelineId || undefined) : undefined,
+      targetAction: isPostgreSQLRestoreRun.value ? (restorePlanRunForm.targetAction || 'pause') : undefined,
+      barmanGetWal: isPostgreSQLRestoreRun.value ? restorePlanRunForm.barmanGetWal !== false : undefined,
       cleanupOnFailure: restorePlanRunForm.cleanupOnFailure === true
     }
     await runDatabaseRestorePlan(restorePlanRunSource.value.id, payload)
@@ -9750,6 +9833,24 @@ watch(
   (sourceInstanceId) => {
     if (restorePlanForm.targetInstanceId === sourceInstanceId) {
       restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== sourceInstanceId)?.id
+    }
+    if (restorePlanSourceDbType.value !== 'postgresql' && restorePlanForm.restoreTargetType === 'lsn') {
+      restorePlanForm.restoreTargetType = 'time'
+      restorePlanForm.restoreTargetValue = formatDateTimeInput()
+      restorePlanForm.targetTimelineId = ''
+    }
+  }
+)
+
+watch(
+  () => restorePlanForm.restoreTargetType,
+  (targetType) => {
+    if (targetType === 'lsn') {
+      restorePlanForm.restoreTargetValue = ''
+      return
+    }
+    if (!restorePlanForm.restoreTargetValue || /^[0-9A-Fa-f]+\/[0-9A-Fa-f]+$/.test(String(restorePlanForm.restoreTargetValue))) {
+      restorePlanForm.restoreTargetValue = formatDateTimeInput()
     }
   }
 )
