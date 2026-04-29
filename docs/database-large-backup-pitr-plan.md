@@ -1546,7 +1546,8 @@ database_log_archive_event_rollups
    - cursor、active file、message、payload 保存最后发生事件的值。
 3. 高频原始事件压缩策略：
    - 归档流整体事件仍按 stream retention 删除。
-   - 当 stream retention 大于 7 天时，高频原始事件只保留最近 7 天。
+   - 当 stream retention 大于 7 天时，`info` 级高频原始事件只保留最近 7 天。
+   - `warning/error` 级高频原始事件仍按 stream retention 保留，避免压缩掉异常证据。
    - 小时级 rollup 用于长期趋势和运行证明。
 4. `archive_success`、`archive_failed`、`purge_gap`、`state_changed` 等关键事件仍按原 retention 保留原始明细。
 
@@ -1556,6 +1557,209 @@ database_log_archive_event_rollups
 2. 不把 error/warning 全部压缩掉。
 3. 不改变现有事件列表接口返回结构。
 4. 不把 rollup 当作 PITR 恢复输入；PITR 仍只使用 finalized archive 和日志链元数据。
+
+### 2026-04-29 P2.6.12：对象存储安全姿态检测
+
+目标：让 OpsHub 能主动核验备份仓库的安全姿态，避免 storage profile 里“登记为安全”的值和真实对象存储配置不一致。P2.6.12 第一版只做 S3/MinIO 兼容对象存储的只读检测，输出登记值、检测值、差异和风险摘要；不在 backend 中保存对象存储明文密钥。
+
+#### P2.6.12 为什么需要单独做
+
+P2.6.10 已经把 binlog finalized 文件发布到 S3/MinIO，并通过 staging、checksum 和重试队列保证“对象能补传成功”。但这只能证明文件发布链路可用，不能证明备份仓库本身具备长期抗误删、抗覆盖、抗勒索删除的能力。
+
+大库备份仓库至少要关注：
+
+1. `versioning`：避免对象被覆盖或删除后没有历史版本。
+2. `object lock / immutability`：防止备份对象在保留期内被误删或恶意删除。
+3. 默认服务端加密：防止对象以明文落入远端存储。
+4. KMS key：确认默认加密使用的是期望的 KMS Key，而不是平台默认 key 或空配置。
+5. bucket policy / public access block：避免备份仓库被公开读取，或存在公开访问策略。
+
+#### P2.6.12 数据模型
+
+复用 `database_storage_profiles`，新增检测结果字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `posture_status` | `unknown / passed / warning / failed / unsupported` |
+| `posture_summary` | 最近一次检测摘要，用于列表快速展示 |
+| `posture_json` | 最近一次检测明细 JSON，不保存 access key、secret key、session token |
+| `last_posture_check_at` | 最近一次检测时间 |
+
+`posture_json` 建议结构：
+
+```json
+{
+  "checkedAt": "2026-04-29T12:00:00+08:00",
+  "provider": "minio",
+  "endpoint": "http://192.168.1.30:9000",
+  "bucket": "opshub-backup",
+  "expected": {
+    "versioningEnabled": true,
+    "immutabilityEnabled": true,
+    "kmsKeyId": "kms-key-1",
+    "retentionLockDays": 30
+  },
+  "actual": {
+    "bucketReachable": true,
+    "versioningStatus": "Enabled",
+    "versioningEnabled": true,
+    "objectLockEnabled": true,
+    "objectLockMode": "GOVERNANCE",
+    "objectLockRetentionDays": 30,
+    "encryptionEnabled": true,
+    "encryptionAlgorithm": "aws:kms",
+    "encryptionKmsKeyId": "kms-key-1",
+    "bucketPolicyPublic": "private",
+    "publicAccessBlockConfigured": true,
+    "blockPublicAcls": true,
+    "ignorePublicAcls": true,
+    "blockPublicPolicy": true,
+    "restrictPublicBuckets": true
+  },
+  "checks": [
+    {
+      "key": "versioning",
+      "label": "版本化",
+      "status": "passed",
+      "expected": "启用",
+      "actual": "Enabled",
+      "message": "Bucket 已启用版本化，可降低误删覆盖后无法找回对象的风险。"
+    }
+  ],
+  "status": "passed",
+  "summary": "对象存储安全姿态检测通过，登记值与检测值未发现明显差异。"
+}
+```
+
+#### P2.6.12 检测输入与密钥边界
+
+1. `database_storage_profiles` 仍只保存 endpoint、bucket、region、path_prefix 和期望安全值。
+2. `secret_profile` 仍是密钥引用，不保存明文。
+3. 主动检测接口要求用户临时输入：
+   - `accessKey`
+   - `secretKey`
+   - `sessionToken` 可选
+   - `useSsl`
+   - `usePathStyle`
+   - `insecureSkipVerify`
+4. 临时凭据只用于本次 HTTP 请求，不写入数据库，不写入 `posture_json`，不写入审计摘要。
+5. 以后如果接入 Vault / KMS / 凭据中心，可以让 backend 按 `secret_profile_id` 拉取临时凭据；P2.6.12 不直接扩大密钥存储面。
+
+#### P2.6.12 后端接口
+
+新增接口：
+
+```text
+POST /api/v1/databases/storage-profiles/:id/posture-check
+```
+
+权限：
+
+```text
+permDatabaseBackupRun
+```
+
+原因：
+
+1. 检测是只读 Bucket API，但会更新 storage profile 的最近检测结果。
+2. 输入临时对象存储凭据，权限应高于普通只读列表。
+3. 不归类为 create/update profile，避免用户误以为凭据会被保存。
+
+请求示例：
+
+```json
+{
+  "accessKey": "temporary-access-key",
+  "secretKey": "temporary-secret-key",
+  "sessionToken": "",
+  "useSsl": false,
+  "usePathStyle": true,
+  "insecureSkipVerify": false
+}
+```
+
+返回：
+
+```text
+DatabaseStorageProfileVO
+```
+
+其中包含：
+
+1. `postureStatus`
+2. `postureStatusText`
+3. `postureSummary`
+4. `postureJson`
+5. `lastPostureCheckAt`
+
+#### P2.6.12 只读检测 API
+
+S3/MinIO 第一版使用以下只读 API：
+
+| 能力 | API | 说明 |
+| --- | --- | --- |
+| 可访问性 | `HeadBucket` | 失败则整体 `failed` |
+| 区域 | `GetBucketLocation` | 可选辅助信息 |
+| 版本化 | `GetBucketVersioning` | 检测 `Enabled / Suspended / 空` |
+| 对象锁 | `GetObjectLockConfiguration` | 检测 Object Lock、mode 和默认保留期 |
+| 默认加密 | `GetBucketEncryption` | 检测 SSE-S3 / SSE-KMS 和 KMS key |
+| 公开策略 | `GetBucketPolicyStatus` | 检测 AWS S3 policy 是否 public；MinIO 可能不支持 |
+| 公开访问阻断 | `GetPublicAccessBlock` | AWS S3 优先；MinIO 可能不支持 |
+
+兼容策略：
+
+1. `HeadBucket` 失败：整体 `failed`。
+2. 可选 API 不支持：单项 `unsupported`，整体通常为 `warning`，提示人工核验。
+3. 可选 API 返回“未配置”：按能力判断为 `warning` 或 `unsupported`。
+4. 登记值要求开启，但检测值未开启：`warning`。
+5. 检测到 bucket policy public：`warning`。
+6. KMS Key 登记值和检测值不一致：`warning`。
+7. 全部关键检查通过：`passed`。
+
+#### P2.6.12 前端展示
+
+在数据库管理的 `备份任务 -> PITR 链路与恢复计划` 中新增 `存储配置` 子页：
+
+1. 列出 storage profile：
+   - 名称
+   - 存储类型
+   - bucket / endpoint
+   - path prefix
+   - 登记安全值：版本化、不可变保留、KMS、保留天数
+   - 最近姿态状态
+   - 最近检测时间
+   - 差异/风险摘要
+2. 新增存储配置弹窗：
+   - 只登记位置和期望安全值。
+   - 明确提示不保存明文密钥。
+3. 检测弹窗：
+   - 临时输入 access key / secret key / session token。
+   - 可选择 HTTPS、Path Style、跳过 TLS 校验。
+   - 检测完成后自动打开详情。
+4. 详情弹窗：
+   - 展示整体状态、摘要、检查项表格。
+   - 展示登记值和检测值。
+   - 展示原始 `posture_json`，便于审计和问题排查。
+
+#### P2.6.12 不做的事
+
+1. 不保存对象存储 access key、secret key、session token。
+2. 不自动修改 bucket 配置。
+3. 不自动开启 versioning、object lock、default encryption 或 bucket policy。
+4. 不删除或修复已有对象。
+5. 不把 `posture_json` 当作 PITR 恢复输入；PITR 仍以 finalized archive 和日志链元数据为准。
+6. 不对 OSS/COS 做主动检测；第一版标记为 `unsupported`，后续按厂商 SDK 单独接入。
+
+#### P2.6.12 验收标准
+
+1. S3/MinIO profile 可执行安全姿态检测。
+2. 检测凭据不落库。
+3. `HeadBucket` 失败时返回明确失败摘要。
+4. 版本化、对象锁、默认加密、KMS、公开访问能力能分别展示登记值和检测值。
+5. MinIO 不支持的 AWS 专属 API 不导致整体崩溃，而是标记为需人工核验。
+6. 非 S3/MinIO 存储类型显示 `unsupported`。
+7. 前端列表能展示最近检测状态、时间和摘要。
+8. 前端详情能展示检查项和原始 JSON。
 
 ### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
 
@@ -2410,6 +2614,10 @@ restore_status:
 | `retention_lock_days` | int | 锁定保留天数 |
 | `status` | varchar(30) | 状态 |
 | `last_test_at` | datetime | 最近测试时间 |
+| `posture_status` | varchar(30) | 对象存储安全姿态：`unknown / passed / warning / failed / unsupported` |
+| `posture_summary` | varchar(1000) | 最近一次姿态检测摘要 |
+| `posture_json` | text | 最近一次姿态检测明细 JSON，不包含临时密钥 |
+| `last_posture_check_at` | datetime | 最近一次安全姿态检测时间 |
 
 ### 新增 `database_secret_profiles`
 

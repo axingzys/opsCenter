@@ -296,6 +296,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.GET("/log-archive-events", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchiveEvents)
 		databases.GET("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListStorageProfiles)
 		databases.POST("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateStorageProfile)
+		databases.POST("/storage-profiles/:id/posture-check", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.CheckStorageProfilePosture)
 		databases.GET("/secret-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListSecretProfiles)
 		databases.POST("/secret-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateSecretProfile)
 		databases.GET("/runner-hosts", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListRunnerHosts)

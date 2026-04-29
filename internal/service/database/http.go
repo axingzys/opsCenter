@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -82,6 +83,7 @@ func writeDatabaseError(c *gin.Context, prefix string, err error) {
 		statusCode = http.StatusUnauthorized
 	case strings.Contains(message, "不能为空"),
 		strings.Contains(message, "请选择"),
+		strings.Contains(message, "需要"),
 		strings.Contains(message, "不支持"),
 		strings.Contains(message, "格式"),
 		strings.Contains(message, "表达式"),
@@ -821,6 +823,24 @@ func (s *Service) CreateStorageProfile(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) CheckStorageProfilePosture(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "存储配置ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseStorageProfilePostureCheckRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errorsIsEOF(err) {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.CheckStorageProfilePosture(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "检测失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) ListSecretProfiles(c *gin.Context) {
 	var req dbbiz.DatabaseSecretProfileListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
@@ -847,6 +867,10 @@ func (s *Service) CreateSecretProfile(c *gin.Context) {
 		return
 	}
 	response.Success(c, item)
+}
+
+func errorsIsEOF(err error) bool {
+	return err == io.EOF || strings.EqualFold(strings.TrimSpace(err.Error()), "EOF")
 }
 
 func (s *Service) ListRunnerHosts(c *gin.Context) {

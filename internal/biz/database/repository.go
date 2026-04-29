@@ -140,6 +140,7 @@ type RestorePlanRepo interface {
 
 type StorageProfileRepo interface {
 	Create(ctx context.Context, item *DatabaseStorageProfile) error
+	Update(ctx context.Context, item *DatabaseStorageProfile) error
 	GetByID(ctx context.Context, id uint) (*DatabaseStorageProfile, error)
 	List(ctx context.Context, req *DatabaseStorageProfileListRequest) ([]*DatabaseStorageProfile, int64, error)
 }

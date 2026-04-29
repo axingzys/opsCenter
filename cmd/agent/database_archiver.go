@@ -2784,6 +2784,15 @@ func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiv
 	bucket := cfg.Storage.Bucket
 	finalKey := agentObjectStorageFinalKey(cfg, item, artifact.FileName)
 	stagingKey := agentObjectStorageStagingKey(cfg, item, artifact.FileName)
+	stagingUploaded := false
+	defer func() {
+		if !stagingUploaded {
+			return
+		}
+		if _, err := client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(stagingKey)}); err != nil {
+			log.Printf("database archiver remove staging object failed: bucket=%s key=%s err=%v", bucket, stagingKey, err)
+		}
+	}()
 	metadata := map[string]string{
 		"opshub-artifact":       "mysql-binlog",
 		"opshub-stream-id":      strconv.FormatUint(uint64(item.Stream.ID), 10),
@@ -2797,6 +2806,7 @@ func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiv
 	if err := uploadAgentObjectFileLimited(ctx, client, bucket, stagingKey, artifact.Path, metadata, cfg.UploadBandwidthBytesPerSecond); err != nil {
 		return fmt.Errorf("上传 binlog staging 对象失败: %w", err)
 	}
+	stagingUploaded = true
 	if err := verifyAgentObject(ctx, client, bucket, stagingKey, artifact.FileSize, artifact.ChecksumSHA256); err != nil {
 		return fmt.Errorf("校验 binlog staging 对象失败: %w", err)
 	}
@@ -2823,9 +2833,6 @@ func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiv
 	}
 	if err := publishAgentBinlogSidecar(ctx, client, bucket, finalKey+".manifest.json", artifact.Path+".manifest.json", metadata); err != nil {
 		return err
-	}
-	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(stagingKey)}); err != nil {
-		log.Printf("database archiver remove staging object failed: bucket=%s key=%s err=%v", bucket, stagingKey, err)
 	}
 	return nil
 }

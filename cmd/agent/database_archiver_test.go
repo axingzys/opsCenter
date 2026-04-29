@@ -550,6 +550,77 @@ func TestAgentUploadRetryQueuePersistsAndValidatesArtifact(t *testing.T) {
 	}
 }
 
+func TestFinalizeAgentBinlogArtifactQueuesObjectUploadFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := &resolvedDatabaseArchiverConfig{
+		StorageRoot:        root,
+		UploadRetryEnabled: true,
+		UploadRetryBase:    time.Second,
+		UploadRetryMax:     10 * time.Second,
+		Storage: databaseArchiverStorage{
+			Type:          "minio",
+			Endpoint:      "http://127.0.0.1:1",
+			Bucket:        "backup",
+			Region:        "us-east-1",
+			PathPrefix:    "archives",
+			StagingPrefix: "archives/.staging",
+			AccessKey:     "access",
+			SecretKey:     "secret",
+			UsePathStyle:  true,
+		},
+	}
+	item := databaseArchiverAssignedStream{
+		Stream: databaseArchiverStream{ID: 9, InstanceID: 4, SourceInstanceID: 4},
+		Runner: databaseArchiverRunnerConfig{ID: 12},
+	}
+	filePath := filepath.Join(root, "binlog.000001")
+	data := testAgentBinlogFile(true, []byte("format"))
+	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	checksum, err := sha256File(filePath)
+	if err != nil {
+		t.Fatalf("checksum: %v", err)
+	}
+	artifact := agentBinlogArtifact{
+		FileName:       "binlog.000001",
+		Path:           filePath,
+		StorageURI:     agentStorageURI(item.Runner.ID, filePath),
+		FileSize:       int64(len(data)),
+		ChecksumSHA256: checksum,
+		FirstEventTime: time.Now(),
+		LastEventTime:  time.Now(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result, err := finalizeAgentBinlogArtifact(ctx, cfg, item, artifact)
+	if err != nil {
+		t.Fatalf("finalize should queue upload failure instead of failing: %v", err)
+	}
+	if result.StorageURI != artifact.StorageURI {
+		t.Fatalf("expected local storage uri after queued upload failure, got %s", result.StorageURI)
+	}
+	for _, sidecar := range []string{filePath + ".sha256", filePath + ".manifest.json"} {
+		if _, err := os.Stat(sidecar); err != nil {
+			t.Fatalf("sidecar missing after queued upload failure: %s err=%v", sidecar, err)
+		}
+	}
+	entries, err := os.ReadDir(agentUploadQueueDir(cfg))
+	if err != nil {
+		t.Fatalf("read upload queue: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one queued upload item, got %d", len(entries))
+	}
+	queueItem, err := readAgentUploadQueueItem(filepath.Join(agentUploadQueueDir(cfg), entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read queue item: %v", err)
+	}
+	if queueItem.ObjectURI != agentObjectStorageURI(cfg, item, artifact.FileName) || queueItem.LocalPath != filePath || queueItem.LastError == "" {
+		t.Fatalf("unexpected queued upload item: %#v", queueItem)
+	}
+}
+
 func TestAgentRollingLogWriterRotates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mysqlbinlog.stderr.log")
 	writer, err := newAgentRollingLogWriter(path, 10, 3)
@@ -659,6 +730,9 @@ func TestAgentObjectStorageMinIOIntegration(t *testing.T) {
 		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-34/binlog.000001")})
 		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-34/binlog.000001.sha256")})
 		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-34/binlog.000001.manifest.json")})
+		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-35/binlog.000002")})
+		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-35/binlog.000002.sha256")})
+		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-35/binlog.000002.manifest.json")})
 		_, _ = client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	}()
 	filePath := filepath.Join(t.TempDir(), "binlog.000001")
@@ -683,7 +757,13 @@ func TestAgentObjectStorageMinIOIntegration(t *testing.T) {
 	if !exists {
 		t.Fatalf("expected object to exist")
 	}
-	cfg := &resolvedDatabaseArchiverConfig{Storage: storage}
+	cfg := &resolvedDatabaseArchiverConfig{
+		StorageRoot:        t.TempDir(),
+		UploadRetryEnabled: true,
+		UploadRetryBase:    time.Second,
+		UploadRetryMax:     10 * time.Second,
+		Storage:            storage,
+	}
 	item := databaseArchiverAssignedStream{
 		Stream: databaseArchiverStream{ID: 34, InstanceID: 12, SourceInstanceID: 12},
 	}
@@ -709,6 +789,63 @@ func TestAgentObjectStorageMinIOIntegration(t *testing.T) {
 	stagingKey := agentObjectStorageStagingKey(cfg, item, artifact.FileName)
 	if _, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(stagingKey)}); err == nil {
 		t.Fatalf("staging object should be removed after publish")
+	}
+
+	retryPath := filepath.Join(t.TempDir(), "binlog.000002")
+	retryData := []byte("opshub-binlog-object-storage-retry-test")
+	if err := os.WriteFile(retryPath, retryData, 0o600); err != nil {
+		t.Fatalf("write retry artifact: %v", err)
+	}
+	retryChecksum, err := sha256File(retryPath)
+	if err != nil {
+		t.Fatalf("retry checksum: %v", err)
+	}
+	retryItem := databaseArchiverAssignedStream{
+		Stream: databaseArchiverStream{ID: 35, InstanceID: 12, SourceInstanceID: 12},
+	}
+	retryArtifact := agentBinlogArtifact{
+		FileName:       "binlog.000002",
+		Path:           retryPath,
+		StorageURI:     agentObjectStorageURI(cfg, retryItem, "binlog.000002"),
+		FileSize:       int64(len(retryData)),
+		ChecksumSHA256: retryChecksum,
+		FirstEventTime: time.Now(),
+		LastEventTime:  time.Now(),
+	}
+	if err := writeAgentBinlogSidecars(retryArtifact); err != nil {
+		t.Fatalf("write retry sidecars: %v", err)
+	}
+	now := time.Now().UTC()
+	queueItem := agentUploadQueueItem{
+		ID:             agentUploadQueueID(retryItem, retryArtifact),
+		StreamID:       retryItem.Stream.ID,
+		InstanceID:     retryItem.Stream.InstanceID,
+		FileName:       retryArtifact.FileName,
+		LocalPath:      retryArtifact.Path,
+		ObjectURI:      retryArtifact.StorageURI,
+		FileSize:       retryArtifact.FileSize,
+		ChecksumSHA256: retryArtifact.ChecksumSHA256,
+		FirstEventTime: retryArtifact.FirstEventTime.Format("2006-01-02 15:04:05"),
+		LastEventTime:  retryArtifact.LastEventTime.Format("2006-01-02 15:04:05"),
+		NextAttemptAt:  now.Add(-time.Second).Format(time.RFC3339),
+		CreatedAt:      now.Format(time.RFC3339),
+		UpdatedAt:      now.Format(time.RFC3339),
+	}
+	if err := os.MkdirAll(agentUploadQueueDir(cfg), 0o755); err != nil {
+		t.Fatalf("mkdir upload queue: %v", err)
+	}
+	queuePath := agentUploadQueuePath(cfg, queueItem.ID)
+	if err := writeAgentUploadQueueItem(queuePath, queueItem); err != nil {
+		t.Fatalf("write upload queue item: %v", err)
+	}
+	app := &agentApp{httpClient: http.DefaultClient}
+	app.processAgentUploadRetryQueue(ctx, cfg)
+	if _, err := os.Stat(queuePath); !os.IsNotExist(err) {
+		t.Fatalf("queue item should be removed after retry success, err=%v", err)
+	}
+	retryFinalKey := agentObjectStorageFinalKey(cfg, retryItem, retryArtifact.FileName)
+	if err := verifyAgentObject(ctx, client, bucket, retryFinalKey, retryArtifact.FileSize, retryArtifact.ChecksumSHA256); err != nil {
+		t.Fatalf("verify retry final object: %v", err)
 	}
 }
 

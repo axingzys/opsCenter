@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
@@ -116,4 +117,135 @@ func TestArchiveEventPayloadIsBoundedJSON(t *testing.T) {
 	if len(archiveEventPayload(strings.Repeat("x", 5000))) > 4000 {
 		t.Fatalf("payload should be bounded")
 	}
+}
+
+func TestRecordLogArchiveEventBuildsHourlyRollupAndPrunesHighFrequency(t *testing.T) {
+	occurredAt := time.Date(2026, 4, 29, 12, 34, 56, 0, time.Local)
+	eventRepo := &testLogArchiveEventRepo{}
+	streamRepo := &testLogArchiveStreamRepo{stream: &DatabaseLogArchiveStream{RetentionDays: 30}}
+	uc := &UseCase{
+		logArchiveEventRepo:  eventRepo,
+		logArchiveStreamRepo: streamRepo,
+	}
+
+	err := uc.recordLogArchiveEvent(context.Background(), &DatabaseLogArchiveEvent{
+		StreamID:          7,
+		InstanceID:        3,
+		SourceInstanceID:  2,
+		RunnerHostID:      9,
+		RunnerID:          "runner-a",
+		EventType:         DatabaseLogArchiveEventCheckpoint,
+		Level:             DatabaseLogArchiveEventLevelWarning,
+		Message:           strings.Repeat("m", 1200),
+		CursorFile:        "binlog.000010",
+		CursorPos:         2048,
+		ActiveFile:        "binlog.000011",
+		ArchiveLagSeconds: 91,
+		PayloadJSON:       `{"pid":123}`,
+		OccurredAt:        &occurredAt,
+	})
+	if err != nil {
+		t.Fatalf("recordLogArchiveEvent() error = %v", err)
+	}
+	if len(eventRepo.created) != 1 {
+		t.Fatalf("expected one raw event, got %d", len(eventRepo.created))
+	}
+	if len(eventRepo.rollups) != 1 {
+		t.Fatalf("expected one rollup, got %d", len(eventRepo.rollups))
+	}
+	rollup := eventRepo.rollups[0]
+	if rollup.StreamID != 7 || rollup.EventType != DatabaseLogArchiveEventCheckpoint {
+		t.Fatalf("unexpected rollup identity: %#v", rollup)
+	}
+	if !rollup.BucketStart.Equal(occurredAt.Truncate(time.Hour)) || !rollup.BucketEnd.Equal(occurredAt.Truncate(time.Hour).Add(time.Hour)) {
+		t.Fatalf("unexpected rollup bucket: start=%s end=%s", rollup.BucketStart, rollup.BucketEnd)
+	}
+	if rollup.EventCount != 1 || rollup.WarningCount != 1 || rollup.ErrorCount != 0 || rollup.Level != DatabaseLogArchiveEventLevelWarning {
+		t.Fatalf("unexpected rollup counters: %#v", rollup)
+	}
+	if rollup.LastCursorFile != "binlog.000010" || rollup.LastCursorPos != 2048 || rollup.LastActiveFile != "binlog.000011" {
+		t.Fatalf("unexpected rollup cursor fields: %#v", rollup)
+	}
+	if len(eventRepo.highFrequencyDeletes) != 1 || len(eventRepo.deletes) != 1 {
+		t.Fatalf("expected high frequency and normal prune calls, high=%d normal=%d", len(eventRepo.highFrequencyDeletes), len(eventRepo.deletes))
+	}
+	if eventRepo.highFrequencyDeletes[0].streamID != 7 {
+		t.Fatalf("unexpected high-frequency prune stream: %#v", eventRepo.highFrequencyDeletes[0])
+	}
+	if got := eventRepo.highFrequencyDeletes[0].eventTypes; len(got) != 3 || got[0] != DatabaseLogArchiveEventCheckpoint {
+		t.Fatalf("unexpected high-frequency event types: %#v", got)
+	}
+	if len(eventRepo.created[0].Message) > 1000 {
+		t.Fatalf("event message should be trimmed")
+	}
+}
+
+type testLogArchiveEventRepo struct {
+	created []*DatabaseLogArchiveEvent
+	rollups []*DatabaseLogArchiveEventRollup
+	deletes []struct {
+		before   time.Time
+		streamID uint
+	}
+	highFrequencyDeletes []struct {
+		before     time.Time
+		streamID   uint
+		eventTypes []string
+	}
+}
+
+func (r *testLogArchiveEventRepo) Create(_ context.Context, item *DatabaseLogArchiveEvent) error {
+	cloned := *item
+	r.created = append(r.created, &cloned)
+	return nil
+}
+
+func (r *testLogArchiveEventRepo) List(context.Context, *DatabaseLogArchiveEventListRequest) ([]*DatabaseLogArchiveEvent, int64, error) {
+	return nil, 0, nil
+}
+
+func (r *testLogArchiveEventRepo) UpsertRollup(_ context.Context, item *DatabaseLogArchiveEventRollup) error {
+	cloned := *item
+	r.rollups = append(r.rollups, &cloned)
+	return nil
+}
+
+func (r *testLogArchiveEventRepo) DeleteBefore(_ context.Context, before time.Time, streamID uint) (int64, error) {
+	r.deletes = append(r.deletes, struct {
+		before   time.Time
+		streamID uint
+	}{before: before, streamID: streamID})
+	return 0, nil
+}
+
+func (r *testLogArchiveEventRepo) DeleteHighFrequencyBefore(_ context.Context, before time.Time, streamID uint, eventTypes []string) (int64, error) {
+	r.highFrequencyDeletes = append(r.highFrequencyDeletes, struct {
+		before     time.Time
+		streamID   uint
+		eventTypes []string
+	}{before: before, streamID: streamID, eventTypes: append([]string{}, eventTypes...)})
+	return 0, nil
+}
+
+type testLogArchiveStreamRepo struct {
+	stream *DatabaseLogArchiveStream
+}
+
+func (r *testLogArchiveStreamRepo) Create(context.Context, *DatabaseLogArchiveStream) error {
+	return nil
+}
+func (r *testLogArchiveStreamRepo) Update(context.Context, *DatabaseLogArchiveStream) error {
+	return nil
+}
+func (r *testLogArchiveStreamRepo) GetByID(context.Context, uint) (*DatabaseLogArchiveStream, error) {
+	return r.stream, nil
+}
+func (r *testLogArchiveStreamRepo) List(context.Context, *DatabaseLogArchiveStreamListRequest) ([]*DatabaseLogArchiveStream, int64, error) {
+	return nil, 0, nil
+}
+func (r *testLogArchiveStreamRepo) ListRunnableForRunner(context.Context, uint) ([]*DatabaseLogArchiveStream, error) {
+	return nil, nil
+}
+func (r *testLogArchiveStreamRepo) TryAcquireLease(context.Context, uint, uint, string, time.Time, time.Time) (bool, error) {
+	return false, nil
 }

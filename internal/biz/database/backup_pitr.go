@@ -32,6 +32,15 @@ type DatabaseStorageProfileRequest struct {
 	Status              string `json:"status" binding:"omitempty,max=30"`
 }
 
+type DatabaseStorageProfilePostureCheckRequest struct {
+	AccessKey          string `json:"accessKey" binding:"omitempty,max=255"`
+	SecretKey          string `json:"secretKey" binding:"omitempty,max=255"`
+	SessionToken       string `json:"sessionToken" binding:"omitempty,max=2048"`
+	UseSSL             *bool  `json:"useSsl"`
+	UsePathStyle       *bool  `json:"usePathStyle"`
+	InsecureSkipVerify *bool  `json:"insecureSkipVerify"`
+}
+
 type DatabaseStorageProfileVO struct {
 	ID                  uint   `json:"id"`
 	Name                string `json:"name"`
@@ -49,6 +58,11 @@ type DatabaseStorageProfileVO struct {
 	Status              string `json:"status"`
 	StatusText          string `json:"statusText"`
 	LastTestAt          string `json:"lastTestAt"`
+	PostureStatus       string `json:"postureStatus"`
+	PostureStatusText   string `json:"postureStatusText"`
+	PostureSummary      string `json:"postureSummary"`
+	PostureJSON         string `json:"postureJson"`
+	LastPostureCheckAt  string `json:"lastPostureCheckAt"`
 	CreatedAt           string `json:"createdAt"`
 	UpdatedAt           string `json:"updatedAt"`
 }
@@ -1833,6 +1847,11 @@ func toStorageProfileVO(item *DatabaseStorageProfile) *DatabaseStorageProfileVO 
 		Status:              item.Status,
 		StatusText:          ProfileStatusText(item.Status),
 		LastTestAt:          formatTime(item.LastTestAt),
+		PostureStatus:       normalizeStoragePostureStatus(item.PostureStatus),
+		PostureStatusText:   StoragePostureStatusText(item.PostureStatus),
+		PostureSummary:      item.PostureSummary,
+		PostureJSON:         item.PostureJSON,
+		LastPostureCheckAt:  formatTime(item.LastPostureCheckAt),
 		CreatedAt:           item.CreatedAt.Format("2006-01-02 15:04:05"),
 		UpdatedAt:           item.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
@@ -2080,6 +2099,21 @@ func normalizeProfileStatus(value string) string {
 		return DatabaseLogArchiveStreamStatusPending
 	}
 	return trimText(value, 30)
+}
+
+func normalizeStoragePostureStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "passed":
+		return "passed"
+	case "warning":
+		return "warning"
+	case "failed":
+		return "failed"
+	case "unsupported":
+		return "unsupported"
+	default:
+		return "unknown"
+	}
 }
 
 func parseDatabaseTime(value string) (*time.Time, error) {
@@ -2374,6 +2408,21 @@ func StorageProfileTypeText(value string) string {
 		return "外部存储"
 	default:
 		return "本地"
+	}
+}
+
+func StoragePostureStatusText(value string) string {
+	switch normalizeStoragePostureStatus(value) {
+	case "passed":
+		return "通过"
+	case "warning":
+		return "有风险"
+	case "failed":
+		return "检测失败"
+	case "unsupported":
+		return "不支持"
+	default:
+		return "未检测"
 	}
 }
 

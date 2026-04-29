@@ -443,6 +443,56 @@ export interface DatabaseLogArchiveEventResult {
   createdAt: string
 }
 
+export interface DatabaseStorageProfilePayload {
+  name: string
+  storageType: string
+  endpoint?: string
+  bucket?: string
+  region?: string
+  pathPrefix?: string
+  secretProfileId?: number
+  versioningEnabled?: boolean
+  immutabilityEnabled?: boolean
+  kmsKeyId?: string
+  retentionLockDays?: number
+  status?: string
+}
+
+export interface DatabaseStorageProfileResult {
+  id: number
+  name: string
+  storageType: string
+  storageTypeText: string
+  endpoint: string
+  bucket: string
+  region: string
+  pathPrefix: string
+  secretProfileId: number
+  versioningEnabled: boolean
+  immutabilityEnabled: boolean
+  kmsKeyId: string
+  retentionLockDays: number
+  status: string
+  statusText: string
+  lastTestAt: string
+  postureStatus: string
+  postureStatusText: string
+  postureSummary: string
+  postureJson: string
+  lastPostureCheckAt: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseStorageProfilePostureCheckPayload {
+  accessKey?: string
+  secretKey?: string
+  sessionToken?: string
+  useSsl?: boolean
+  usePathStyle?: boolean
+  insecureSkipVerify?: boolean
+}
+
 export interface DatabaseRunLogArchiveOncePayload {
   runnerHostId: number
   fileName?: string
@@ -957,6 +1007,20 @@ export const listDatabaseLogArchiveEvents = (params?: {
   level?: string
   eventType?: string
 }) => request.get('/api/v1/databases/log-archive-events', { params })
+
+export const listDatabaseStorageProfiles = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  storageType?: string
+  status?: string
+}) => request.get('/api/v1/databases/storage-profiles', { params })
+
+export const createDatabaseStorageProfile = (data: DatabaseStorageProfilePayload) =>
+  request.post('/api/v1/databases/storage-profiles', data)
+
+export const checkDatabaseStorageProfilePosture = (id: number, data: DatabaseStorageProfilePostureCheckPayload) =>
+  request.post(`/api/v1/databases/storage-profiles/${id}/posture-check`, data)
 
 export const listDatabaseRestorePlans = (params?: {
   page?: number

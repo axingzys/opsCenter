@@ -729,6 +729,10 @@ type DatabaseStorageProfile struct {
 	RetentionLockDays   int        `gorm:"column:retention_lock_days;type:int;default:0;comment:锁定保留天数" json:"retentionLockDays"`
 	Status              string     `gorm:"type:varchar(30);default:'pending';index;comment:状态" json:"status"`
 	LastTestAt          *time.Time `gorm:"column:last_test_at;comment:最近测试时间" json:"lastTestAt,omitempty"`
+	PostureStatus       string     `gorm:"column:posture_status;type:varchar(30);default:'unknown';index;comment:对象存储安全姿态状态" json:"postureStatus"`
+	PostureSummary      string     `gorm:"column:posture_summary;type:varchar(1000);comment:对象存储安全姿态摘要" json:"postureSummary"`
+	PostureJSON         string     `gorm:"column:posture_json;type:text;comment:对象存储安全姿态检测结果JSON" json:"postureJson"`
+	LastPostureCheckAt  *time.Time `gorm:"column:last_posture_check_at;comment:最近安全姿态检测时间" json:"lastPostureCheckAt,omitempty"`
 }
 
 func (DatabaseStorageProfile) TableName() string {

@@ -1617,13 +1617,107 @@
                 </el-button>
               </div>
               <div class="backup-toolbar-group">
-                <el-button :loading="runnerHostLoading || runnerJobLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
+                <el-button :loading="storageProfileLoading || runnerHostLoading || runnerJobLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
                   刷新 PITR
                 </el-button>
               </div>
             </div>
 
             <el-tabs v-model="backupPitrTab" class="pitr-tabs">
+              <el-tab-pane label="存储配置" name="storageProfiles">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="storageProfileQuery.keyword"
+                      placeholder="搜索名称、bucket、前缀"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadStorageProfiles"
+                      @clear="loadStorageProfiles"
+                    />
+                    <el-select v-model="storageProfileQuery.storageType" placeholder="类型" clearable class="audit-select" @change="loadStorageProfiles">
+                      <el-option label="S3" value="s3" />
+                      <el-option label="MinIO" value="minio" />
+                      <el-option label="本地" value="local" />
+                      <el-option label="NFS" value="nfs" />
+                      <el-option label="外部" value="external" />
+                    </el-select>
+                    <el-select v-model="storageProfileQuery.status" placeholder="状态" clearable class="audit-select" @change="loadStorageProfiles">
+                      <el-option label="待配置" value="pending" />
+                      <el-option label="启用" value="enabled" />
+                      <el-option label="禁用" value="disabled" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetStorageProfileQuery">重置</el-button>
+                    <el-button type="primary" plain @click="openStorageProfileDialog">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      新增存储
+                    </el-button>
+                    <el-button type="primary" plain :loading="storageProfileLoading" @click="loadStorageProfiles">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="storageProfiles" v-loading="storageProfileLoading" stripe class="modern-table">
+                  <el-table-column label="名称" min-width="160">
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.name }}</span>
+                        <el-tag size="small" type="info">{{ row.storageTypeText || row.storageType }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="Bucket / 端点" min-width="240" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ row.bucket || '-' }}
+                      <span v-if="row.endpoint" class="muted-text"> / {{ row.endpoint }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="路径前缀" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.pathPrefix || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="登记安全值" min-width="240" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" :type="row.versioningEnabled ? 'success' : 'info'">版本化 {{ row.versioningEnabled ? '开' : '未要求' }}</el-tag>
+                        <el-tag size="small" :type="row.immutabilityEnabled ? 'success' : 'info'">不可变 {{ row.immutabilityEnabled ? '开' : '未要求' }}</el-tag>
+                        <el-tag v-if="row.kmsKeyId" size="small" type="success">KMS</el-tag>
+                        <el-tag v-if="row.retentionLockDays" size="small" type="warning">{{ row.retentionLockDays }}天</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="检测姿态" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="storagePostureStatusTag(row.postureStatus)">
+                        {{ row.postureStatusText || '未检测' }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最近检测" width="170">
+                    <template #default="{ row }">{{ row.lastPostureCheckAt || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="差异/风险摘要" min-width="300" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.postureSummary || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="150" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button link type="primary" @click="openStoragePostureDialog(row)">检测</el-button>
+                      <el-button link type="info" :disabled="!row.postureJson" @click="openStoragePostureDetail(row)">详情</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="storageProfileQuery.page"
+                    v-model:page-size="storageProfileQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="storageProfileTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadStorageProfiles"
+                    @current-change="loadStorageProfiles"
+                  />
+                </div>
+              </el-tab-pane>
+
               <el-tab-pane label="Runner主机" name="runnerHosts">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
@@ -3237,6 +3331,191 @@
     </el-dialog>
 
     <el-dialog
+      v-model="storageProfileDialogVisible"
+      title="新增存储配置"
+      width="820px"
+      @close="resetStorageProfileForm"
+    >
+      <el-alert
+        title="存储配置只登记目标位置和期望安全能力，不保存对象存储明文密钥。安全姿态检测时请临时输入 access key / secret key。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="storageProfileFormRef" :model="storageProfileForm" :rules="storageProfileRules" label-width="120px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="名称" prop="name">
+              <el-input v-model="storageProfileForm.name" placeholder="如：minio-backup-prod" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="存储类型" prop="storageType">
+              <el-select v-model="storageProfileForm.storageType" style="width: 100%;">
+                <el-option label="S3" value="s3" />
+                <el-option label="MinIO" value="minio" />
+                <el-option label="本地" value="local" />
+                <el-option label="NFS" value="nfs" />
+                <el-option label="外部" value="external" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Endpoint">
+              <el-input v-model="storageProfileForm.endpoint" placeholder="MinIO 示例：http://192.168.1.30:9000；AWS S3 可留空" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Region">
+              <el-input v-model="storageProfileForm.region" placeholder="如 us-east-1" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Bucket">
+              <el-input v-model="storageProfileForm.bucket" placeholder="opshub-backup" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="路径前缀">
+              <el-input v-model="storageProfileForm.pathPrefix" placeholder="opshub/database-archives" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="要求版本化">
+              <el-switch v-model="storageProfileForm.versioningEnabled" active-text="是" inactive-text="否" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="要求不可变">
+              <el-switch v-model="storageProfileForm.immutabilityEnabled" active-text="是" inactive-text="否" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="保留天数">
+              <el-input-number v-model="storageProfileForm.retentionLockDays" :min="0" :max="3650" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="KMS Key">
+          <el-input v-model="storageProfileForm.kmsKeyId" placeholder="可选；登记后检测会对比默认加密 KMS Key" />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="storageProfileForm.status" style="width: 180px;">
+            <el-option label="待配置" value="pending" />
+            <el-option label="启用" value="enabled" />
+            <el-option label="禁用" value="disabled" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="storageProfileDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="storageProfileSubmitting" @click="submitStorageProfile">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="storagePostureDialogVisible"
+      title="对象存储安全姿态检测"
+      width="760px"
+      @close="resetStoragePostureForm"
+    >
+      <el-alert
+        title="检测会调用只读 Bucket API，临时 access key / secret key 仅随本次请求发送，不会写入存储配置。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-descriptions :column="2" border class="backup-detail-descriptions">
+        <el-descriptions-item label="配置">{{ currentStoragePostureProfile?.name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="类型">{{ currentStoragePostureProfile?.storageTypeText || currentStoragePostureProfile?.storageType || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="Bucket">{{ currentStoragePostureProfile?.bucket || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="Endpoint">{{ currentStoragePostureProfile?.endpoint || '-' }}</el-descriptions-item>
+      </el-descriptions>
+      <el-form ref="storagePostureFormRef" :model="storagePostureForm" :rules="storagePostureRules" label-width="130px" class="write-confirm-form">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Access Key" prop="accessKey">
+              <el-input v-model="storagePostureForm.accessKey" autocomplete="off" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Secret Key" prop="secretKey">
+              <el-input v-model="storagePostureForm.secretKey" type="password" show-password autocomplete="new-password" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="Session Token">
+          <el-input v-model="storagePostureForm.sessionToken" type="textarea" :rows="2" placeholder="可选，STS 临时凭据使用" />
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="HTTPS">
+              <el-switch v-model="storagePostureForm.useSsl" active-text="开" inactive-text="关" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="Path Style">
+              <el-switch v-model="storagePostureForm.usePathStyle" active-text="开" inactive-text="关" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="跳过 TLS 校验">
+              <el-switch v-model="storagePostureForm.insecureSkipVerify" active-text="开" inactive-text="关" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <div v-if="currentStoragePostureProfile?.postureSummary" class="storage-posture-current">
+        <strong>上次结果：</strong>{{ currentStoragePostureProfile.postureSummary }}
+      </div>
+      <template #footer>
+        <el-button @click="storagePostureDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="storagePostureSubmitting" @click="submitStoragePostureCheck">开始检测</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="storagePostureDetailVisible" title="对象存储姿态详情" width="900px">
+      <div v-if="currentStoragePostureDetail" class="storage-posture-detail">
+        <el-descriptions :column="2" border class="backup-detail-descriptions">
+          <el-descriptions-item label="配置">{{ currentStoragePostureDetail.name }}</el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag :type="storagePostureStatusTag(currentStoragePostureDetail.postureStatus)">
+              {{ currentStoragePostureDetail.postureStatusText || currentStoragePostureDetail.postureStatus || '-' }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="最近检测">{{ currentStoragePostureDetail.lastPostureCheckAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="摘要">{{ currentStoragePostureDetail.postureSummary || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <el-table :data="storagePostureChecks" stripe class="modern-table storage-posture-checks">
+          <el-table-column label="检查项" prop="label" min-width="150" />
+          <el-table-column label="登记值" prop="expected" min-width="180" show-overflow-tooltip />
+          <el-table-column label="检测值" prop="actual" min-width="180" show-overflow-tooltip />
+          <el-table-column label="状态" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="storagePostureStatusTag(row.status)">{{ storagePostureStatusText(row.status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="说明" prop="message" min-width="260" show-overflow-tooltip />
+        </el-table>
+        <div class="audit-sql-block">
+          <div class="audit-sql-title">原始检测 JSON</div>
+          <pre>{{ formattedStoragePostureJson }}</pre>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="storagePostureDetailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="logArchiveStreamDialogVisible"
       title="新增日志归档流"
       width="720px"
@@ -3930,9 +4209,11 @@ import {
 import { getCredentials } from '@/api/host'
 import {
   DATABASE_PERMISSION,
+  checkDatabaseStorageProfilePosture,
   createDatabaseLogArchiveStream,
   createDatabaseRestorePlan,
   createDatabaseRunnerHost,
+  createDatabaseStorageProfile,
   createDatabaseBackupTask,
   createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
@@ -3968,6 +4249,7 @@ import {
   listDatabaseRestorePlans,
   listDatabaseRunnerHosts,
   listDatabaseRunnerJobs,
+  listDatabaseStorageProfiles,
   getDatabaseSupportedTypes,
   getDatabaseTableDDL,
   listDatabaseColumns,
@@ -4025,6 +4307,9 @@ import {
   type DatabaseRunnerHostPayload,
   type DatabaseRunnerHostResult,
   type DatabaseRunnerJobResult,
+  type DatabaseStorageProfilePayload,
+  type DatabaseStorageProfilePostureCheckPayload,
+  type DatabaseStorageProfileResult,
   type DatabaseSupportedType,
   type DatabaseTopologyResult,
   type DatabaseWriteExecuteResult,
@@ -4217,6 +4502,18 @@ const backupRecordTotal = ref(0)
 const externalBackupDialogVisible = ref(false)
 const externalBackupSubmitting = ref(false)
 const externalBackupFormRef = ref<FormInstance>()
+const storageProfileLoading = ref(false)
+const storageProfileSubmitting = ref(false)
+const storageProfileDialogVisible = ref(false)
+const storageProfileFormRef = ref<FormInstance>()
+const storageProfiles = ref<DatabaseStorageProfileResult[]>([])
+const storageProfileTotal = ref(0)
+const storagePostureDialogVisible = ref(false)
+const storagePostureSubmitting = ref(false)
+const storagePostureFormRef = ref<FormInstance>()
+const currentStoragePostureProfile = ref<DatabaseStorageProfileResult>()
+const storagePostureDetailVisible = ref(false)
+const currentStoragePostureDetail = ref<DatabaseStorageProfileResult>()
 const logArchiveStreamLoading = ref(false)
 const logArchiveStreams = ref<DatabaseLogArchiveStreamResult[]>([])
 const logArchiveStreamTotal = ref(0)
@@ -4369,6 +4666,14 @@ const backupRecordQuery = reactive({
   instanceId: undefined as number | undefined,
   status: '',
   triggerType: ''
+})
+
+const storageProfileQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  storageType: '',
+  status: ''
 })
 
 const logArchiveStreamQuery = reactive({
@@ -4526,6 +4831,30 @@ const externalBackupForm = reactive<DatabaseExternalBackupRecordPayload>({
   walEnd: ''
 })
 
+const storageProfileForm = reactive<DatabaseStorageProfilePayload>({
+  name: '',
+  storageType: 'minio',
+  endpoint: '',
+  bucket: '',
+  region: 'us-east-1',
+  pathPrefix: '',
+  secretProfileId: undefined,
+  versioningEnabled: true,
+  immutabilityEnabled: false,
+  kmsKeyId: '',
+  retentionLockDays: 0,
+  status: 'enabled'
+})
+
+const storagePostureForm = reactive<DatabaseStorageProfilePostureCheckPayload>({
+  accessKey: '',
+  secretKey: '',
+  sessionToken: '',
+  useSsl: false,
+  usePathStyle: true,
+  insecureSkipVerify: false
+})
+
 const logArchiveStreamForm = reactive<DatabaseLogArchiveStreamPayload>({
   instanceId: 0,
   sourceInstanceId: undefined,
@@ -4632,6 +4961,38 @@ const externalBackupRules: FormRules = {
   fileName: [{ required: true, message: '请输入备份文件名', trigger: 'blur' }],
   recoverableFrom: [{ required: true, message: '请选择可恢复起点', trigger: 'change' }],
   recoverableUntil: [{ required: true, message: '请选择可恢复终点', trigger: 'change' }]
+}
+
+const storageProfileRules: FormRules = {
+  name: [{ required: true, message: '请输入存储配置名称', trigger: 'blur' }],
+  storageType: [{ required: true, message: '请选择存储类型', trigger: 'change' }]
+}
+
+function isObjectStorageProfile(profile?: { storageType?: string }) {
+  return ['s3', 'minio'].includes(String(profile?.storageType || '').toLowerCase())
+}
+
+const storagePostureRules: FormRules = {
+  accessKey: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      if (isObjectStorageProfile(currentStoragePostureProfile.value) && !String(value || '').trim()) {
+        callback(new Error('请输入临时 Access Key'))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur'
+  }],
+  secretKey: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      if (isObjectStorageProfile(currentStoragePostureProfile.value) && !String(value || '').trim()) {
+        callback(new Error('请输入临时 Secret Key'))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur'
+  }]
 }
 
 const logArchiveStreamRules: FormRules = {
@@ -4973,6 +5334,27 @@ const runnerHostOptions = computed(() =>
     label: `${item.name}（${item.runnerTypeText || item.runnerType}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`
   }))
 )
+
+const storagePostureChecks = computed(() => {
+  const raw = currentStoragePostureDetail.value?.postureJson || ''
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed.checks) ? parsed.checks : []
+  } catch {
+    return []
+  }
+})
+
+const formattedStoragePostureJson = computed(() => {
+  const raw = currentStoragePostureDetail.value?.postureJson || ''
+  if (!raw) return ''
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+})
 
 const sshCredentialOptions = computed(() =>
   credentials.value.filter((item: any) => (item.protocol || 'ssh') === 'ssh')
@@ -5694,6 +6076,19 @@ const loadBackupRecords = async () => {
   }
 }
 
+const loadStorageProfiles = async () => {
+  storageProfileLoading.value = true
+  try {
+    const res: any = await listDatabaseStorageProfiles(storageProfileQuery)
+    storageProfiles.value = res.list || []
+    storageProfileTotal.value = res.total || 0
+    if (res.page) storageProfileQuery.page = res.page
+    if (res.pageSize) storageProfileQuery.pageSize = res.pageSize
+  } finally {
+    storageProfileLoading.value = false
+  }
+}
+
 const loadLogArchiveStreams = async () => {
   logArchiveStreamLoading.value = true
   try {
@@ -5773,7 +6168,7 @@ const loadRunnerJobs = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans()])
+  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans()])
 }
 
 const loadRestoreJobs = async () => {
@@ -5882,6 +6277,34 @@ const resetExternalBackupForm = () => {
   externalBackupForm.walStart = ''
   externalBackupForm.walEnd = ''
   externalBackupFormRef.value?.clearValidate()
+}
+
+const resetStorageProfileForm = () => {
+  storageProfileForm.name = ''
+  storageProfileForm.storageType = 'minio'
+  storageProfileForm.endpoint = ''
+  storageProfileForm.bucket = ''
+  storageProfileForm.region = 'us-east-1'
+  storageProfileForm.pathPrefix = ''
+  storageProfileForm.secretProfileId = undefined
+  storageProfileForm.versioningEnabled = true
+  storageProfileForm.immutabilityEnabled = false
+  storageProfileForm.kmsKeyId = ''
+  storageProfileForm.retentionLockDays = 0
+  storageProfileForm.status = 'enabled'
+  storageProfileFormRef.value?.clearValidate()
+}
+
+const resetStoragePostureForm = () => {
+  storagePostureForm.accessKey = ''
+  storagePostureForm.secretKey = ''
+  storagePostureForm.sessionToken = ''
+  const profile = currentStoragePostureProfile.value
+  const endpoint = String(profile?.endpoint || '').toLowerCase()
+  storagePostureForm.useSsl = endpoint.startsWith('https://') || (!endpoint.startsWith('http://') && profile?.storageType === 's3')
+  storagePostureForm.usePathStyle = profile?.storageType === 'minio' || !!profile?.endpoint
+  storagePostureForm.insecureSkipVerify = false
+  storagePostureFormRef.value?.clearValidate()
 }
 
 const resetLogArchiveStreamForm = () => {
@@ -6080,6 +6503,81 @@ const submitExternalBackup = async () => {
   } finally {
     externalBackupSubmitting.value = false
   }
+}
+
+const openStorageProfileDialog = () => {
+  resetStorageProfileForm()
+  storageProfileDialogVisible.value = true
+}
+
+const submitStorageProfile = async () => {
+  if (!storageProfileFormRef.value) return
+  await storageProfileFormRef.value.validate()
+  storageProfileSubmitting.value = true
+  try {
+    await createDatabaseStorageProfile({
+      ...storageProfileForm,
+      name: storageProfileForm.name.trim(),
+      endpoint: storageProfileForm.endpoint?.trim(),
+      bucket: storageProfileForm.bucket?.trim(),
+      region: storageProfileForm.region?.trim(),
+      pathPrefix: storageProfileForm.pathPrefix?.trim(),
+      kmsKeyId: storageProfileForm.kmsKeyId?.trim(),
+      secretProfileId: storageProfileForm.secretProfileId || undefined
+    })
+    storageProfileDialogVisible.value = false
+    ElMessage.success('存储配置已创建')
+    await loadStorageProfiles()
+  } finally {
+    storageProfileSubmitting.value = false
+  }
+}
+
+const openStoragePostureDialog = async (row: DatabaseStorageProfileResult) => {
+  currentStoragePostureProfile.value = row
+  if (!isObjectStorageProfile(row)) {
+    storagePostureSubmitting.value = true
+    try {
+      const result: any = await checkDatabaseStorageProfilePosture(row.id, {})
+      currentStoragePostureDetail.value = result
+      storagePostureDetailVisible.value = true
+      ElMessage.warning(result?.postureSummary || '该存储类型暂不支持自动检测')
+      await loadStorageProfiles()
+    } finally {
+      storagePostureSubmitting.value = false
+    }
+    return
+  }
+  resetStoragePostureForm()
+  storagePostureDialogVisible.value = true
+}
+
+const submitStoragePostureCheck = async () => {
+  if (!storagePostureFormRef.value || !currentStoragePostureProfile.value?.id) return
+  await storagePostureFormRef.value.validate()
+  storagePostureSubmitting.value = true
+  try {
+    const result: any = await checkDatabaseStorageProfilePosture(currentStoragePostureProfile.value.id, {
+      accessKey: storagePostureForm.accessKey?.trim(),
+      secretKey: storagePostureForm.secretKey,
+      sessionToken: storagePostureForm.sessionToken?.trim(),
+      useSsl: storagePostureForm.useSsl,
+      usePathStyle: storagePostureForm.usePathStyle,
+      insecureSkipVerify: storagePostureForm.insecureSkipVerify
+    })
+    storagePostureDialogVisible.value = false
+    currentStoragePostureDetail.value = result
+    storagePostureDetailVisible.value = true
+    ElMessage.success(result?.postureSummary || '对象存储安全姿态检测完成')
+    await loadStorageProfiles()
+  } finally {
+    storagePostureSubmitting.value = false
+  }
+}
+
+const openStoragePostureDetail = (row: DatabaseStorageProfileResult) => {
+  currentStoragePostureDetail.value = row
+  storagePostureDetailVisible.value = true
 }
 
 const openLogArchiveStreamDialog = () => {
@@ -7499,6 +7997,15 @@ const resetBackupRecordQuery = () => {
   loadBackupRecords()
 }
 
+const resetStorageProfileQuery = () => {
+  storageProfileQuery.page = 1
+  storageProfileQuery.pageSize = 10
+  storageProfileQuery.keyword = ''
+  storageProfileQuery.storageType = ''
+  storageProfileQuery.status = ''
+  loadStorageProfiles()
+}
+
 const resetLogArchiveStreamQuery = () => {
   logArchiveStreamQuery.page = 1
   logArchiveStreamQuery.pageSize = 10
@@ -8032,6 +8539,35 @@ const backupVerifyStatusTag = (status?: string) => {
   }
 }
 
+const storagePostureStatusTag = (status?: string) => {
+  switch (status) {
+    case 'passed':
+      return 'success'
+    case 'warning':
+    case 'unsupported':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const storagePostureStatusText = (status?: string) => {
+  switch (status) {
+    case 'passed':
+      return '通过'
+    case 'warning':
+      return '有风险'
+    case 'failed':
+      return '失败'
+    case 'unsupported':
+      return '需人工核验'
+    default:
+      return '未检测'
+  }
+}
+
 const logArchiveStatusTag = (status?: string) => {
   switch (status) {
     case 'archived':
@@ -8361,6 +8897,7 @@ watch(activeTab, async (tab) => {
     await Promise.all([
       loadBackupTasks(),
       loadBackupRecords(),
+      loadStorageProfiles(),
       loadRunnerHosts(),
       loadRunnerJobs(),
       loadLogArchiveStreams(),
@@ -9197,6 +9734,30 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+.muted-text {
+  color: #6b7280;
+}
+
+.storage-posture-current {
+  margin-top: 8px;
+  padding: 10px 12px;
+  color: #4b5563;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  line-height: 1.6;
+}
+
+.storage-posture-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.storage-posture-checks {
+  margin-top: 4px;
 }
 
 .runner-config-section {

@@ -2,12 +2,12 @@ package database
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
 	dbbiz "github.com/ydcloud-dy/opshub/internal/biz/database"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type logArchiveStreamRepo struct {
@@ -223,59 +223,59 @@ func (r *logArchiveEventRepo) UpsertRollup(ctx context.Context, item *dbbiz.Data
 	if item == nil || item.StreamID == 0 || item.EventType == "" || item.BucketStart.IsZero() {
 		return nil
 	}
-	var existing dbbiz.DatabaseLogArchiveEventRollup
-	err := r.db.WithContext(ctx).
-		Where("stream_id = ? AND event_type = ? AND bucket_start = ?", item.StreamID, item.EventType, item.BucketStart).
-		First(&existing).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return r.db.WithContext(ctx).Create(item).Error
+	now := time.Now()
+	item.UpdatedAt = now
+	updates := map[string]any{
+		"instance_id":        item.InstanceID,
+		"source_instance_id": item.SourceInstanceID,
+		"runner_host_id":     item.RunnerHostID,
+		"runner_id":          item.RunnerID,
+		"bucket_end":         item.BucketEnd,
+		"event_count":        gorm.Expr("event_count + ?", item.EventCount),
+		"warning_count":      gorm.Expr("warning_count + ?", item.WarningCount),
+		"error_count":        gorm.Expr("error_count + ?", item.ErrorCount),
+		"level":              rollupLevelExpr(item.Level),
+		"min_lag_seconds":    gorm.Expr("CASE WHEN min_lag_seconds = 0 OR (? > 0 AND ? < min_lag_seconds) THEN ? ELSE min_lag_seconds END", item.MinLagSeconds, item.MinLagSeconds, item.MinLagSeconds),
+		"max_lag_seconds":    gorm.Expr("CASE WHEN ? > max_lag_seconds THEN ? ELSE max_lag_seconds END", item.MaxLagSeconds, item.MaxLagSeconds),
+		"last_cursor_file":   rollupLatestValueExpr("last_cursor_file", item.LastCursorFile, item.LastOccurredAt),
+		"last_cursor_pos":    rollupLatestValueExpr("last_cursor_pos", item.LastCursorPos, item.LastOccurredAt),
+		"last_active_file":   rollupLatestValueExpr("last_active_file", item.LastActiveFile, item.LastOccurredAt),
+		"last_message":       rollupLatestValueExpr("last_message", item.LastMessage, item.LastOccurredAt),
+		"last_payload_json":  rollupLatestValueExpr("last_payload_json", item.LastPayloadJSON, item.LastOccurredAt),
+		"last_occurred_at":   rollupLatestValueExpr("last_occurred_at", item.LastOccurredAt, item.LastOccurredAt),
+		"updated_at":         now,
 	}
-	if err != nil {
-		return err
-	}
-	existing.InstanceID = item.InstanceID
-	existing.SourceInstanceID = item.SourceInstanceID
-	existing.RunnerHostID = item.RunnerHostID
-	existing.RunnerID = item.RunnerID
-	existing.EventCount += item.EventCount
-	existing.WarningCount += item.WarningCount
-	existing.ErrorCount += item.ErrorCount
-	existing.Level = maxLogArchiveEventLevel(existing.Level, item.Level)
-	if existing.MinLagSeconds == 0 || (item.MinLagSeconds > 0 && item.MinLagSeconds < existing.MinLagSeconds) {
-		existing.MinLagSeconds = item.MinLagSeconds
-	}
-	if item.MaxLagSeconds > existing.MaxLagSeconds {
-		existing.MaxLagSeconds = item.MaxLagSeconds
-	}
-	if item.LastOccurredAt.After(existing.LastOccurredAt) || existing.LastOccurredAt.IsZero() {
-		existing.LastCursorFile = item.LastCursorFile
-		existing.LastCursorPos = item.LastCursorPos
-		existing.LastActiveFile = item.LastActiveFile
-		existing.LastMessage = item.LastMessage
-		existing.LastPayloadJSON = item.LastPayloadJSON
-		existing.LastOccurredAt = item.LastOccurredAt
-	}
-	return r.db.WithContext(ctx).Save(&existing).Error
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "stream_id"},
+			{Name: "event_type"},
+			{Name: "bucket_start"},
+		},
+		DoUpdates: clause.Assignments(updates),
+	}).Create(item).Error
 }
 
-func maxLogArchiveEventLevel(a, b string) string {
-	rank := func(level string) int {
-		switch strings.ToLower(strings.TrimSpace(level)) {
-		case dbbiz.DatabaseLogArchiveEventLevelError:
-			return 3
-		case dbbiz.DatabaseLogArchiveEventLevelWarning:
-			return 2
-		default:
-			return 1
-		}
+func rollupLevelExpr(level string) clause.Expr {
+	level = strings.ToLower(strings.TrimSpace(level))
+	if level == "" {
+		level = dbbiz.DatabaseLogArchiveEventLevelInfo
 	}
-	if rank(b) > rank(a) {
-		return b
-	}
-	if strings.TrimSpace(a) == "" {
-		return dbbiz.DatabaseLogArchiveEventLevelInfo
-	}
-	return a
+	return gorm.Expr(
+		"CASE WHEN level = ? OR ? = ? THEN ? WHEN level = ? OR ? = ? THEN ? ELSE ? END",
+		dbbiz.DatabaseLogArchiveEventLevelError,
+		level,
+		dbbiz.DatabaseLogArchiveEventLevelError,
+		dbbiz.DatabaseLogArchiveEventLevelError,
+		dbbiz.DatabaseLogArchiveEventLevelWarning,
+		level,
+		dbbiz.DatabaseLogArchiveEventLevelWarning,
+		dbbiz.DatabaseLogArchiveEventLevelWarning,
+		dbbiz.DatabaseLogArchiveEventLevelInfo,
+	)
+}
+
+func rollupLatestValueExpr(column string, value any, occurredAt time.Time) clause.Expr {
+	return gorm.Expr("CASE WHEN last_occurred_at IS NULL OR ? >= last_occurred_at THEN ? ELSE "+column+" END", occurredAt, value)
 }
 
 func (r *logArchiveEventRepo) DeleteBefore(ctx context.Context, before time.Time, streamID uint) (int64, error) {
@@ -296,7 +296,10 @@ func (r *logArchiveEventRepo) DeleteHighFrequencyBefore(ctx context.Context, bef
 	if before.IsZero() || len(eventTypes) == 0 {
 		return 0, nil
 	}
-	query := r.db.WithContext(ctx).Where("occurred_at < ?", before).Where("event_type IN ?", eventTypes)
+	query := r.db.WithContext(ctx).
+		Where("occurred_at < ?", before).
+		Where("event_type IN ?", eventTypes).
+		Where("(level = ? OR level = '' OR level IS NULL)", dbbiz.DatabaseLogArchiveEventLevelInfo)
 	if streamID > 0 {
 		query = query.Where("stream_id = ?", streamID)
 	} else {
@@ -371,6 +374,10 @@ func NewStorageProfileRepo(db *gorm.DB) dbbiz.StorageProfileRepo {
 
 func (r *storageProfileRepo) Create(ctx context.Context, item *dbbiz.DatabaseStorageProfile) error {
 	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *storageProfileRepo) Update(ctx context.Context, item *dbbiz.DatabaseStorageProfile) error {
+	return r.db.WithContext(ctx).Save(item).Error
 }
 
 func (r *storageProfileRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseStorageProfile, error) {
