@@ -42,6 +42,8 @@
 2. 增加真正隔离恢复 Runner：准备物理备份、应用增量、按目标时间应用 binlog、启动隔离库并执行校验 SQL。
 3. 增加备份工具部署检测和 Runner 主机能力模型，避免要求 backend 容器直接承担所有数据库主机级操作。
 
+状态更新：截至 2026-04-29，长期 binlog 归档已经推进到 P2.6.12，对象存储安全姿态检测已落地；隔离恢复 Runner 已完成 P2.7 第一版，支持 MySQL/MariaDB 物理备份链恢复到 SSH Runner 上的隔离 Docker 容器并生成 proof。
+
 ### 2026-04-29 P2.1 + P2.2 实施边界
 
 本次继续完善 P2，但仍遵守一个关键边界：`opshub-api` 普通 backend 容器只负责编排、权限、审计、状态和短生命周期 SSH 调度；真正长期连续 binlog archiver、恢复目标 MySQL datadir 停止/清空/prepare/重建/启动等主机级动作，必须由 Runner 主机或后续 Agent 承载，不能简单塞进 HTTP 请求或 backend 容器内长期运行。
@@ -2084,6 +2086,29 @@ validation-results.json
 10. 恢复环境能手动清理，并在过期后提示清理。
 11. 单元测试覆盖计划状态判断、命令模板生成、危险路径拒绝、校验 SQL 白名单、proof 字段。
 12. 集成测试至少覆盖 MySQL 8.0 full restore、MySQL 8.0 full+incremental restore、MariaDB full restore。
+
+#### P2.7 当前落地边界
+
+本期第一版已按 SSH Runner 方式落地隔离恢复闭环：
+
+1. 恢复计划预校验通过后，可以通过 `POST /api/v1/databases/restore-plans/{id}/run` 下发隔离恢复任务。
+2. 后端创建 `database_restore_jobs` 和 `database_runner_jobs`，记录 Runner、工作目录、容器、监听端口、步骤、校验结果和 proof。
+3. Runner 执行受控 shell 模板，恢复输入只允许来自 `runner://runner-host-<id>/...`、`local://...`、`file://...` 或绝对路径；`metadata://` 只允许用于预校验，不允许作为真实恢复输入。
+4. 物理备份准备使用 `xtrabackup` 或 `mariadb-backup`，先 prepare base backup，再按顺序 apply incremental chain。
+5. 隔离实例以 Docker 容器启动，端口默认绑定 `127.0.0.1`，不覆盖生产 datadir，不自动切换业务连接，不自动回填生产数据。
+6. binlog 使用 `mysqlbinlog` 或 `mariadb-binlog` 回放到目标时间；P2.7 第一版优先支持按时间恢复。
+7. 校验 SQL 继续使用只读白名单，只允许 `SELECT / SHOW / DESC / DESCRIBE / EXPLAIN` 类语句。
+8. 恢复完成后生成 `proof_json`，包含恢复计划、base backup、incremental chain、binlog chain、Runner 输出、步骤状态、校验摘要和最终状态。
+9. 前端已提供恢复计划执行入口、隔离恢复弹窗、恢复任务列表、隔离库连接信息、proof 查看和清理按钮。
+10. 清理动作只允许删除安全工作目录格式 `/restore/job-<id>` 下的恢复目录，并尝试移除对应隔离容器。
+
+本期仍不做：
+
+1. 不在 backend 容器里直接操作 datadir。
+2. 不做生产库覆盖恢复、自动切流或自动回填。
+3. 不做对象存储 artifact 直拉；对象存储文件需要先由 Runner 可访问的挂载路径、`runner://` 路径或后续下载器提供。
+4. 不做长期运行恢复 Worker 池；本期由后端下发 SSH Runner 任务并记录审计。
+5. 不承诺 PostgreSQL 隔离恢复；PostgreSQL 仍放在后续 Barman/WAL-G/pg_basebackup 专项。
 
 ## 文档定位
 

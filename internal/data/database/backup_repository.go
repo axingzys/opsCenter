@@ -258,6 +258,12 @@ func (r *restoreJobRepo) List(ctx context.Context, req *dbbiz.DatabaseRestoreJob
 		if req.BackupRecordID > 0 {
 			query = query.Where("backup_record_id = ?", req.BackupRecordID)
 		}
+		if req.RestorePlanID > 0 {
+			query = query.Where("restore_plan_id = ?", req.RestorePlanID)
+		}
+		if req.RunnerHostID > 0 {
+			query = query.Where("runner_host_id = ?", req.RunnerHostID)
+		}
 		if req.SourceInstanceID > 0 {
 			query = query.Where("source_instance_id = ?", req.SourceInstanceID)
 		}

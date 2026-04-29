@@ -94,7 +94,8 @@ const (
 	DatabaseRestoreCapabilityPITRCapable        = "pitr_capable"
 	DatabaseRestoreCapabilityPITRVerified       = "pitr_verified"
 
-	DatabaseRestoreModeDryRun = "dry_run"
+	DatabaseRestoreModeDryRun          = "dry_run"
+	DatabaseRestoreModeIsolatedRestore = "isolated_restore"
 
 	DatabaseRestoreStrategyObjectReplace = "object_replace"
 	DatabaseRestoreStrategyDatabaseClean = "database_clean"
@@ -169,6 +170,7 @@ const (
 	DatabaseRunnerAllowedCommandToolProbe            = "tool_probe"
 	DatabaseRunnerAllowedCommandBinlogArchiveOnce    = "mysqlbinlog_archive_once"
 	DatabaseRunnerAllowedCommandBinlogArchiveCatchUp = "mysqlbinlog_archive_catch_up"
+	DatabaseRunnerAllowedCommandPhysicalRestore      = "mysql_physical_restore"
 
 	DatabaseBackupChainStatusComplete           = "complete"
 	DatabaseBackupChainStatusMissingBase        = "missing_base"
@@ -699,6 +701,11 @@ type DatabaseRestorePlan struct {
 	ToolStatus              string     `gorm:"column:tool_status;type:varchar(30);comment:工具兼容状态" json:"toolStatus"`
 	ValidationStatus        string     `gorm:"column:validation_status;type:varchar(30);comment:计划校验状态" json:"validationStatus"`
 	RestoreStatus           string     `gorm:"column:restore_status;type:varchar(30);default:'planned';comment:恢复执行状态" json:"restoreStatus"`
+	RunnerHostID            uint       `gorm:"column:runner_host_id;index;comment:推荐或最近执行Runner" json:"runnerHostId"`
+	RequiredToolJSON        string     `gorm:"column:required_tool_json;type:text;comment:恢复所需工具JSON" json:"requiredToolJson"`
+	RequiredArtifactJSON    string     `gorm:"column:required_artifact_json;type:text;comment:恢复所需对象JSON" json:"requiredArtifactJson"`
+	EstimatedRestoreBytes   int64      `gorm:"column:estimated_restore_bytes;type:bigint;default:0;comment:预计恢复字节数" json:"estimatedRestoreBytes"`
+	EstimatedRestoreMinutes int        `gorm:"column:estimated_restore_minutes;type:int;default:0;comment:预计恢复分钟数" json:"estimatedRestoreMinutes"`
 	PlanJSON                string     `gorm:"column:plan_json;type:text;comment:完整计划" json:"planJson"`
 	ProofJSON               string     `gorm:"column:proof_json;type:text;comment:恢复证明" json:"proofJson"`
 	OperatorID              uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
@@ -813,20 +820,38 @@ func (DatabaseRunnerJob) TableName() string {
 // DatabaseRestoreJob 备份恢复演练记录
 type DatabaseRestoreJob struct {
 	gorm.Model
-	BackupRecordID   uint       `gorm:"column:backup_record_id;not null;index;comment:备份记录ID" json:"backupRecordId"`
-	SourceInstanceID uint       `gorm:"column:source_instance_id;not null;index;comment:来源实例ID" json:"sourceInstanceId"`
-	TargetInstanceID uint       `gorm:"column:target_instance_id;not null;index;comment:目标实例ID" json:"targetInstanceId"`
-	RestoreMode      string     `gorm:"column:restore_mode;type:varchar(30);default:'dry_run';comment:恢复模式" json:"restoreMode"`
-	RestoreStrategy  string     `gorm:"column:restore_strategy;type:varchar(30);default:'object_replace';comment:恢复目标处理策略" json:"restoreStrategy"`
-	Status           string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
-	FileName         string     `gorm:"column:file_name;type:varchar(255);comment:备份文件名" json:"fileName"`
-	FileSize         int64      `gorm:"column:file_size;type:bigint;default:0;comment:备份文件大小" json:"fileSize"`
-	OperatorID       uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
-	OperatorName     string     `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
-	StartedAt        *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
-	FinishedAt       *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
-	DurationMs       int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
-	ErrorMessage     string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
+	BackupRecordID     uint       `gorm:"column:backup_record_id;not null;index;comment:备份记录ID" json:"backupRecordId"`
+	RestorePlanID      uint       `gorm:"column:restore_plan_id;index;comment:PITR恢复计划ID" json:"restorePlanId"`
+	RunnerHostID       uint       `gorm:"column:runner_host_id;index;comment:执行Runner主机ID" json:"runnerHostId"`
+	RunnerJobID        uint       `gorm:"column:runner_job_id;index;comment:底层Runner任务ID" json:"runnerJobId"`
+	SourceInstanceID   uint       `gorm:"column:source_instance_id;not null;index;comment:来源实例ID" json:"sourceInstanceId"`
+	TargetInstanceID   uint       `gorm:"column:target_instance_id;not null;index;comment:目标实例ID" json:"targetInstanceId"`
+	RestoreMode        string     `gorm:"column:restore_mode;type:varchar(30);default:'dry_run';comment:恢复模式" json:"restoreMode"`
+	RestoreStrategy    string     `gorm:"column:restore_strategy;type:varchar(30);default:'object_replace';comment:恢复目标处理策略" json:"restoreStrategy"`
+	RestoreTargetType  string     `gorm:"column:restore_target_type;type:varchar(30);comment:恢复目标类型" json:"restoreTargetType"`
+	RestoreTargetValue string     `gorm:"column:restore_target_value;type:varchar(255);comment:恢复目标值" json:"restoreTargetValue"`
+	Status             string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
+	FileName           string     `gorm:"column:file_name;type:varchar(255);comment:备份文件名" json:"fileName"`
+	FileSize           int64      `gorm:"column:file_size;type:bigint;default:0;comment:备份文件大小" json:"fileSize"`
+	WorkDir            string     `gorm:"column:work_dir;type:varchar(1000);comment:恢复工作目录" json:"workDir"`
+	PreparedDatadir    string     `gorm:"column:prepared_datadir;type:varchar(1000);comment:prepare后datadir" json:"preparedDatadir"`
+	ContainerName      string     `gorm:"column:container_name;type:varchar(255);comment:隔离容器名" json:"containerName"`
+	ContainerImage     string     `gorm:"column:container_image;type:varchar(255);comment:隔离容器镜像" json:"containerImage"`
+	ListenHost         string     `gorm:"column:listen_host;type:varchar(255);comment:隔离实例监听地址" json:"listenHost"`
+	ListenPort         int        `gorm:"column:listen_port;type:int;default:0;comment:隔离实例监听端口" json:"listenPort"`
+	StepJSON           string     `gorm:"column:step_json;type:text;comment:步骤状态JSON" json:"stepJson"`
+	ValidationJSON     string     `gorm:"column:validation_json;type:text;comment:校验SQL结果JSON" json:"validationJson"`
+	ProofJSON          string     `gorm:"column:proof_json;type:text;comment:恢复证明JSON" json:"proofJson"`
+	LogPath            string     `gorm:"column:log_path;type:varchar(1000);comment:Runner日志路径或URI" json:"logPath"`
+	ArtifactURI        string     `gorm:"column:artifact_uri;type:varchar(1000);comment:恢复证明或日志归档URI" json:"artifactUri"`
+	ExpiresAt          *time.Time `gorm:"column:expires_at;comment:临时恢复库过期时间" json:"expiresAt,omitempty"`
+	CleanupStatus      string     `gorm:"column:cleanup_status;type:varchar(30);default:'pending';comment:清理状态" json:"cleanupStatus"`
+	OperatorID         uint       `gorm:"column:operator_id;index;comment:操作人ID" json:"operatorId"`
+	OperatorName       string     `gorm:"column:operator_name;type:varchar(100);comment:操作人" json:"operatorName"`
+	StartedAt          *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	FinishedAt         *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
+	DurationMs         int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	ErrorMessage       string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
 }
 
 func (DatabaseRestoreJob) TableName() string {

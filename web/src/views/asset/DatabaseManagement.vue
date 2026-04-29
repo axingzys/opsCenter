@@ -2212,8 +2212,32 @@
                       <el-tag size="small" :type="restoreValidationStatusTag(row.validationStatus)">{{ row.validationStatusText || row.validationStatus || '-' }}</el-tag>
                     </template>
                   </el-table-column>
+                  <el-table-column label="恢复状态" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="restoreStatusTag(row.restoreStatus)">{{ row.restoreStatusText || row.restoreStatus || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="Runner" min-width="150" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.runnerHostName || (row.runnerHostId ? `#${row.runnerHostId}` : '-') }}</template>
+                  </el-table-column>
                   <el-table-column label="结果" min-width="260" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.message || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="170" fixed="right">
+                    <template #default="{ row }">
+                      <el-button
+                        size="small"
+                        type="warning"
+                        link
+                        :disabled="row.validationStatus !== 'passed' || ['queued', 'running'].includes(row.restoreStatus)"
+                        @click="openRunRestorePlanDialog(row)"
+                      >
+                        执行恢复
+                      </el-button>
+                      <el-button size="small" type="primary" link :disabled="!row.proofJson" @click="viewRestoreProof(row)">
+                        Proof
+                      </el-button>
+                    </template>
                   </el-table-column>
                 </el-table>
                 <div class="pagination-container">
@@ -2311,6 +2335,9 @@
                   </el-tag>
                 </template>
               </el-table-column>
+              <el-table-column label="Runner" min-width="150" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.runnerHostName || (row.runnerHostId ? `#${row.runnerHostId}` : '-') }}</template>
+              </el-table-column>
               <el-table-column label="模式" width="110" align="center">
                 <template #default="{ row }">{{ row.restoreModeText || row.restoreMode || '-' }}</template>
               </el-table-column>
@@ -2327,6 +2354,15 @@
               <el-table-column label="文件" min-width="180" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.fileName || '-' }}</template>
               </el-table-column>
+              <el-table-column label="隔离库" min-width="180" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.listenPort">{{ row.listenHost || '127.0.0.1' }}:{{ row.listenPort }}</span>
+                  <span v-else>-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="容器" min-width="180" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.containerName || '-' }}</template>
+              </el-table-column>
               <el-table-column label="操作者" width="120">
                 <template #default="{ row }">{{ row.operatorName || '-' }}</template>
               </el-table-column>
@@ -2335,6 +2371,20 @@
               </el-table-column>
               <el-table-column label="结果" min-width="260" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.message || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="170" fixed="right">
+                <template #default="{ row }">
+                  <el-button size="small" type="primary" link :disabled="!row.proofJson" @click="viewRestoreProof(row)">Proof</el-button>
+                  <el-button
+                    size="small"
+                    type="warning"
+                    link
+                    :disabled="row.status === 'running' || row.cleanupStatus === 'cleaned'"
+                    @click="cleanupRestoreJob(row)"
+                  >
+                    清理
+                  </el-button>
+                </template>
               </el-table-column>
             </el-table>
 
@@ -3867,6 +3917,85 @@
     </el-dialog>
 
     <el-dialog
+      v-model="restorePlanRunDialogVisible"
+      title="执行隔离恢复"
+      width="760px"
+      @close="resetRestorePlanRunForm"
+    >
+      <el-alert
+        title="P2.7 只恢复到 Runner 主机上的隔离容器，不覆盖生产库、不切换业务连接、不自动回填数据。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="restorePlanRunFormRef" :model="restorePlanRunForm" :rules="restorePlanRunRules" label-width="130px">
+        <el-form-item label="恢复计划">
+          <el-input :model-value="restorePlanRunSource ? `#${restorePlanRunSource.id} / ${restorePlanRunSource.restoreTargetValue}` : '-'" disabled />
+        </el-form-item>
+        <el-form-item label="Runner 主机" prop="runnerHostId">
+          <el-select v-model="restorePlanRunForm.runnerHostId" placeholder="请选择 SSH Runner" filterable style="width: 100%;">
+            <el-option
+              v-for="item in runnerHosts.filter(host => host.runnerType === 'ssh' && host.enabled !== false)"
+              :key="item.id"
+              :label="`${item.name}（${item.host || item.runnerType}）`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="容器镜像">
+              <el-input v-model="restorePlanRunForm.containerImage" placeholder="mysql:8.0 / mysql:8.4 / mariadb:latest" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="监听端口">
+              <el-input-number v-model="restorePlanRunForm.listenPort" :min="0" :max="65535" class="query-number" />
+              <div class="field-tip">0 表示由后端自动分配本机端口。</div>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="保留小时" prop="expiresInHours">
+              <el-input-number v-model="restorePlanRunForm.expiresInHours" :min="1" :max="168" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="失败后清理">
+              <el-switch v-model="restorePlanRunForm.cleanupOnFailure" active-text="清理容器" inactive-text="保留现场" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="额外校验 SQL">
+          <el-input
+            v-model="restorePlanRunForm.validationSqlText"
+            type="textarea"
+            :rows="5"
+            placeholder="每行一条，只允许 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN"
+          />
+        </el-form-item>
+        <el-form-item label="风险确认" prop="confirmIsolated">
+          <el-checkbox v-model="restorePlanRunForm.confirmIsolated">
+            我确认本次只恢复到隔离库，不覆盖生产数据。
+          </el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="restorePlanRunDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="restorePlanRunSubmitting" @click="submitRunRestorePlan">下发恢复任务</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="restoreProofDialogVisible" :title="restoreProofTitle || '恢复证明'" width="860px">
+      <pre class="audit-detail-pre">{{ restoreProofContent }}</pre>
+      <template #footer>
+        <el-button @click="restoreProofDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="runnerHostDialogVisible"
       :title="runnerHostForm.id ? '编辑 Runner 主机' : '新增 Runner 主机'"
       width="860px"
@@ -4210,6 +4339,7 @@ import { getCredentials } from '@/api/host'
 import {
   DATABASE_PERMISSION,
   checkDatabaseStorageProfilePosture,
+  cleanupDatabaseRestoreJob,
   createDatabaseLogArchiveStream,
   createDatabaseRestorePlan,
   createDatabaseRunnerHost,
@@ -4232,6 +4362,7 @@ import {
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
+  getDatabaseRestoreJobProof,
   getDatabaseTopology,
   getDatabaseUIPermissions,
   exportDatabaseQueryResult,
@@ -4269,6 +4400,7 @@ import {
   runDatabaseLogArchiveCatchUp,
   runDatabaseLogArchiveOnce,
   runDatabaseRestoreDryRun,
+  runDatabaseRestorePlan,
   startDatabaseLogArchiveStream,
   stopDatabaseLogArchiveStream,
   syncDatabaseMetadata,
@@ -4301,6 +4433,7 @@ import {
   type DatabaseRestoreDryRunPayload,
   type DatabaseRestoreJobResult,
   type DatabaseRestorePlanPayload,
+  type DatabaseRestorePlanRunPayload,
   type DatabaseRestorePlanResult,
   type DatabaseRunLogArchiveCatchUpPayload,
   type DatabaseRunLogArchiveOncePayload,
@@ -4547,6 +4680,13 @@ const restorePlanTotal = ref(0)
 const restorePlanDialogVisible = ref(false)
 const restorePlanSubmitting = ref(false)
 const restorePlanFormRef = ref<FormInstance>()
+const restorePlanRunDialogVisible = ref(false)
+const restorePlanRunSubmitting = ref(false)
+const restorePlanRunFormRef = ref<FormInstance>()
+const restorePlanRunSource = ref<DatabaseRestorePlanResult>()
+const restoreProofDialogVisible = ref(false)
+const restoreProofTitle = ref('')
+const restoreProofContent = ref('')
 const runnerHostLoading = ref(false)
 const runnerHostSubmitting = ref(false)
 const runnerHostDialogVisible = ref(false)
@@ -4921,6 +5061,17 @@ const restorePlanForm = reactive<DatabaseRestorePlanPayload>({
   restoreTargetInclusive: true
 })
 
+const restorePlanRunForm = reactive<DatabaseRestorePlanRunPayload & { validationSqlText?: string; confirmIsolated?: boolean }>({
+  runnerHostId: 0,
+  containerImage: '',
+  listenPort: undefined,
+  expiresInHours: 24,
+  validationSql: [],
+  validationSqlText: '',
+  cleanupOnFailure: false,
+  confirmIsolated: false
+})
+
 const runnerHostForm = reactive<DatabaseRunnerHostPayload & { id?: number }>({
   id: undefined,
   name: '',
@@ -5028,6 +5179,21 @@ const restorePlanRules: FormRules = {
   sourceInstanceId: [{ required: true, message: '请选择来源实例', trigger: 'change' }],
   restoreTargetType: [{ required: true, message: '请选择目标类型', trigger: 'change' }],
   restoreTargetValue: [{ required: true, message: '请选择恢复目标时间', trigger: 'change' }]
+}
+
+const restorePlanRunRules: FormRules = {
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
+  expiresInHours: [{ required: true, message: '请输入保留小时数', trigger: 'change' }],
+  confirmIsolated: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      if (!value) {
+        callback(new Error('请确认本次只恢复到隔离库'))
+        return
+      }
+      callback()
+    },
+    trigger: 'change'
+  }]
 }
 
 const runnerHostRules: FormRules = {
@@ -6168,7 +6334,7 @@ const loadRunnerJobs = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans()])
+  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs()])
 }
 
 const loadRestoreJobs = async () => {
@@ -6826,6 +6992,100 @@ const submitRestorePlan = async () => {
   } finally {
     restorePlanSubmitting.value = false
   }
+}
+
+const defaultRestoreImageForPlan = (row?: DatabaseRestorePlanResult) => {
+  const source = instances.value.find(item => item.id === row?.sourceInstanceId)
+  const version = String(source?.version || '')
+  if (source?.dbType === 'mariadb') return version ? `mariadb:${version.split('-')[0].split(' ')[0]}` : 'mariadb:latest'
+  if (/8\.4/.test(version)) return 'mysql:8.4'
+  if (/5\.7/.test(version)) return 'mysql:5.7'
+  return 'mysql:8.0'
+}
+
+const openRunRestorePlanDialog = (row: DatabaseRestorePlanResult) => {
+  restorePlanRunSource.value = row
+  restorePlanRunForm.runnerHostId = row.runnerHostId || runnerHosts.value.find(item => item.runnerType === 'ssh' && item.enabled !== false)?.id || 0
+  restorePlanRunForm.containerImage = defaultRestoreImageForPlan(row)
+  restorePlanRunForm.listenPort = undefined
+  restorePlanRunForm.expiresInHours = 24
+  restorePlanRunForm.validationSqlText = ''
+  restorePlanRunForm.validationSql = []
+  restorePlanRunForm.cleanupOnFailure = false
+  restorePlanRunForm.confirmIsolated = false
+  restorePlanRunDialogVisible.value = true
+}
+
+const resetRestorePlanRunForm = () => {
+  restorePlanRunSource.value = undefined
+  restorePlanRunForm.runnerHostId = 0
+  restorePlanRunForm.containerImage = ''
+  restorePlanRunForm.listenPort = undefined
+  restorePlanRunForm.expiresInHours = 24
+  restorePlanRunForm.validationSqlText = ''
+  restorePlanRunForm.validationSql = []
+  restorePlanRunForm.cleanupOnFailure = false
+  restorePlanRunForm.confirmIsolated = false
+  restorePlanRunFormRef.value?.clearValidate()
+}
+
+const submitRunRestorePlan = async () => {
+  if (!restorePlanRunFormRef.value || !restorePlanRunSource.value) return
+  await restorePlanRunFormRef.value.validate()
+  restorePlanRunSubmitting.value = true
+  try {
+    const validationSql = String(restorePlanRunForm.validationSqlText || '')
+      .split('\n')
+      .map(item => item.trim())
+      .filter(Boolean)
+    const payload: DatabaseRestorePlanRunPayload = {
+      runnerHostId: restorePlanRunForm.runnerHostId,
+      containerImage: restorePlanRunForm.containerImage || undefined,
+      listenPort: restorePlanRunForm.listenPort || undefined,
+      expiresInHours: restorePlanRunForm.expiresInHours || 24,
+      validationSql,
+      cleanupOnFailure: restorePlanRunForm.cleanupOnFailure === true
+    }
+    await runDatabaseRestorePlan(restorePlanRunSource.value.id, payload)
+    restorePlanRunDialogVisible.value = false
+    ElMessage.success('隔离恢复任务已下发 Runner')
+    await Promise.all([loadRestorePlans(), loadRestoreJobs(), loadRunnerJobs()])
+  } finally {
+    restorePlanRunSubmitting.value = false
+  }
+}
+
+const viewRestoreProof = async (row: DatabaseRestoreJobResult | DatabaseRestorePlanResult) => {
+  restoreProofTitle.value = `恢复证明 #${row.id}`
+  let proof = ''
+  if ('proofJson' in row && row.proofJson) {
+    proof = row.proofJson
+  }
+  if (!proof && 'restorePlanId' in row && row.id) {
+    const res: any = await getDatabaseRestoreJobProof(row.id)
+    proof = res?.proofJson || ''
+  }
+  if (!proof) {
+    ElMessage.warning('恢复证明尚未生成')
+    return
+  }
+  try {
+    restoreProofContent.value = JSON.stringify(JSON.parse(proof), null, 2)
+  } catch (_err) {
+    restoreProofContent.value = proof
+  }
+  restoreProofDialogVisible.value = true
+}
+
+const cleanupRestoreJob = async (row: DatabaseRestoreJobResult) => {
+  await ElMessageBox.confirm('将停止隔离容器并删除 Runner 工作目录，确认清理？', '清理恢复环境', {
+    confirmButtonText: '清理',
+    cancelButtonText: '取消',
+    type: 'warning'
+  })
+  await cleanupDatabaseRestoreJob(row.id)
+  ElMessage.success('恢复环境已清理')
+  await loadRestoreJobs()
 }
 
 const openRunnerHostDialog = (row?: DatabaseRunnerHostResult) => {
@@ -8509,14 +8769,24 @@ const backupStatusTag = (status: string) => {
   switch (status) {
     case 'success':
       return 'success'
+    case 'verified':
+      return 'success'
+    case 'restored':
+      return 'success'
     case 'failed':
       return 'danger'
     case 'running':
       return 'warning'
     case 'queued':
       return 'info'
+    case 'planned':
+      return 'info'
+    case 'cancelled':
+      return 'info'
     case 'cleaning':
       return 'warning'
+    case 'cleaned':
+      return 'success'
     case 'pending':
       return 'info'
     default:
@@ -8697,6 +8967,23 @@ const runnerJobStatusTag = (status?: string) => {
       return 'danger'
     case 'running':
       return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+const restoreStatusTag = (status?: string) => {
+  switch (status) {
+    case 'verified':
+    case 'restored':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'running':
+    case 'queued':
+      return 'warning'
+    case 'cancelled':
+      return 'info'
     default:
       return 'info'
   }

@@ -24,9 +24,10 @@ func (uc *UseCase) ListRestoreJobs(ctx context.Context, req *DatabaseRestoreJobL
 	}
 	uc.reconcileStaleRestoreJobs(ctx, items)
 	sourceNames, targetNames, targetEnvs := uc.loadRestoreJobInstanceMeta(ctx, items)
+	runnerNames := uc.loadRestoreJobRunnerMeta(ctx, items)
 	list := make([]*DatabaseRestoreJobVO, 0, len(items))
 	for _, item := range items {
-		list = append(list, uc.toRestoreJobVO(item, sourceNames[item.SourceInstanceID], targetNames[item.TargetInstanceID], targetEnvs[item.TargetInstanceID]))
+		list = append(list, uc.toRestoreJobVO(item, sourceNames[item.SourceInstanceID], targetNames[item.TargetInstanceID], targetEnvs[item.TargetInstanceID], runnerNames[item.RunnerHostID]))
 	}
 	return list, total, nil
 }
@@ -149,7 +150,7 @@ func (uc *UseCase) RunRestoreDryRun(ctx context.Context, backupRecordID uint, re
 		return nil, auditErr
 	}
 
-	vo := uc.toRestoreJobVO(job, source.Name, target.Name, target.Environment)
+	vo := uc.toRestoreJobVO(job, source.Name, target.Name, target.Environment, "")
 	go uc.executeRestoreDryRunJob(job, audit, target, record, spec, databaseName, restoreFilePath, startedAt, restoreLockKey)
 	releaseRestoreLock = false
 	return vo, nil
@@ -407,13 +408,36 @@ func (uc *UseCase) loadRestoreJobInstanceMeta(ctx context.Context, items []*Data
 	return sourceNames, targetNames, targetEnvs
 }
 
-func (uc *UseCase) toRestoreJobVO(item *DatabaseRestoreJob, sourceName, targetName, targetEnvironment string) *DatabaseRestoreJobVO {
+func (uc *UseCase) loadRestoreJobRunnerMeta(ctx context.Context, items []*DatabaseRestoreJob) map[uint]string {
+	result := make(map[uint]string)
+	if uc == nil || uc.runnerHostRepo == nil {
+		return result
+	}
+	for _, item := range items {
+		if item == nil || item.RunnerHostID == 0 {
+			continue
+		}
+		if _, ok := result[item.RunnerHostID]; ok {
+			continue
+		}
+		if host, err := uc.runnerHostRepo.GetByID(ctx, item.RunnerHostID); err == nil && host != nil {
+			result[item.RunnerHostID] = host.Name
+		}
+	}
+	return result
+}
+
+func (uc *UseCase) toRestoreJobVO(item *DatabaseRestoreJob, sourceName, targetName, targetEnvironment, runnerHostName string) *DatabaseRestoreJobVO {
 	if item == nil {
 		return nil
 	}
 	return &DatabaseRestoreJobVO{
 		ID:                  item.ID,
 		BackupRecordID:      item.BackupRecordID,
+		RestorePlanID:       item.RestorePlanID,
+		RunnerHostID:        item.RunnerHostID,
+		RunnerHostName:      runnerHostName,
+		RunnerJobID:         item.RunnerJobID,
 		SourceInstanceID:    item.SourceInstanceID,
 		SourceInstanceName:  sourceName,
 		TargetInstanceID:    item.TargetInstanceID,
@@ -423,10 +447,25 @@ func (uc *UseCase) toRestoreJobVO(item *DatabaseRestoreJob, sourceName, targetNa
 		RestoreModeText:     RestoreModeText(item.RestoreMode),
 		RestoreStrategy:     normalizeRestoreStrategy(item.RestoreStrategy),
 		RestoreStrategyText: RestoreStrategyText(item.RestoreStrategy),
+		RestoreTargetType:   item.RestoreTargetType,
+		RestoreTargetValue:  item.RestoreTargetValue,
 		Status:              item.Status,
 		StatusText:          BackupStatusText(item.Status),
 		FileName:            item.FileName,
 		FileSize:            item.FileSize,
+		WorkDir:             item.WorkDir,
+		PreparedDatadir:     item.PreparedDatadir,
+		ContainerName:       item.ContainerName,
+		ContainerImage:      item.ContainerImage,
+		ListenHost:          item.ListenHost,
+		ListenPort:          item.ListenPort,
+		StepJSON:            item.StepJSON,
+		ValidationJSON:      item.ValidationJSON,
+		ProofJSON:           item.ProofJSON,
+		LogPath:             item.LogPath,
+		ArtifactURI:         item.ArtifactURI,
+		ExpiresAt:           formatTime(item.ExpiresAt),
+		CleanupStatus:       item.CleanupStatus,
 		OperatorID:          item.OperatorID,
 		OperatorName:        item.OperatorName,
 		StartedAt:           formatTime(item.StartedAt),

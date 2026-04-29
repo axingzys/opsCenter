@@ -513,12 +513,23 @@ export interface DatabaseRestorePlanPayload {
   restoreTargetInclusive?: boolean
 }
 
+export interface DatabaseRestorePlanRunPayload {
+  runnerHostId: number
+  containerImage?: string
+  listenPort?: number
+  expiresInHours?: number
+  validationSql?: string[]
+  cleanupOnFailure?: boolean
+}
+
 export interface DatabaseRestorePlanResult {
   id: number
   sourceInstanceId: number
   sourceInstanceName: string
   targetInstanceId: number
   targetInstanceName: string
+  runnerHostId: number
+  runnerHostName: string
   restoreMode: string
   restoreModeText: string
   restoreTargetType: string
@@ -539,6 +550,10 @@ export interface DatabaseRestorePlanResult {
   validationStatusText: string
   restoreStatus: string
   restoreStatusText: string
+  requiredToolJson: string
+  requiredArtifactJson: string
+  estimatedRestoreBytes: number
+  estimatedRestoreMinutes: number
   planJson: string
   proofJson: string
   operatorName: string
@@ -645,6 +660,10 @@ export interface DatabaseRestoreDryRunPayload {
 export interface DatabaseRestoreJobResult {
   id: number
   backupRecordId: number
+  restorePlanId: number
+  runnerHostId: number
+  runnerHostName: string
+  runnerJobId: number
   sourceInstanceId: number
   sourceInstanceName: string
   targetInstanceId: number
@@ -654,10 +673,25 @@ export interface DatabaseRestoreJobResult {
   restoreModeText: string
   restoreStrategy: string
   restoreStrategyText: string
+  restoreTargetType: string
+  restoreTargetValue: string
   status: string
   statusText: string
   fileName: string
   fileSize: number
+  workDir: string
+  preparedDatadir: string
+  containerName: string
+  containerImage: string
+  listenHost: string
+  listenPort: number
+  stepJson: string
+  validationJson: string
+  proofJson: string
+  logPath: string
+  artifactUri: string
+  expiresAt: string
+  cleanupStatus: string
   operatorId: number
   operatorName: string
   startedAt: string
@@ -1033,6 +1067,21 @@ export const listDatabaseRestorePlans = (params?: {
 
 export const createDatabaseRestorePlan = (data: DatabaseRestorePlanPayload) =>
   request.post('/api/v1/databases/restore-plans', data)
+
+export const runDatabaseRestorePlan = (id: number, data: DatabaseRestorePlanRunPayload) =>
+  request.post(`/api/v1/databases/restore-plans/${id}/run`, data)
+
+export const getDatabaseRestoreJob = (id: number) =>
+  request.get(`/api/v1/databases/restore-jobs/${id}`)
+
+export const cancelDatabaseRestoreJob = (id: number) =>
+  request.post(`/api/v1/databases/restore-jobs/${id}/cancel`)
+
+export const cleanupDatabaseRestoreJob = (id: number) =>
+  request.post(`/api/v1/databases/restore-jobs/${id}/cleanup`)
+
+export const getDatabaseRestoreJobProof = (id: number) =>
+  request.get(`/api/v1/databases/restore-jobs/${id}/proof`)
 
 export const listDatabaseRunnerHosts = (params?: {
   page?: number

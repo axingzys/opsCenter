@@ -215,6 +215,8 @@ type DatabaseRestoreJobListRequest struct {
 	Page               int    `form:"page"`
 	PageSize           int    `form:"pageSize"`
 	BackupRecordID     uint   `form:"backupRecordId"`
+	RestorePlanID      uint   `form:"restorePlanId"`
+	RunnerHostID       uint   `form:"runnerHostId"`
 	SourceInstanceID   uint   `form:"sourceInstanceId"`
 	TargetInstanceID   uint   `form:"targetInstanceId"`
 	Status             string `form:"status"`
@@ -657,6 +659,10 @@ type DatabaseBackupDownloadVO struct {
 type DatabaseRestoreJobVO struct {
 	ID                  uint   `json:"id"`
 	BackupRecordID      uint   `json:"backupRecordId"`
+	RestorePlanID       uint   `json:"restorePlanId"`
+	RunnerHostID        uint   `json:"runnerHostId"`
+	RunnerHostName      string `json:"runnerHostName"`
+	RunnerJobID         uint   `json:"runnerJobId"`
 	SourceInstanceID    uint   `json:"sourceInstanceId"`
 	SourceInstanceName  string `json:"sourceInstanceName"`
 	TargetInstanceID    uint   `json:"targetInstanceId"`
@@ -666,10 +672,25 @@ type DatabaseRestoreJobVO struct {
 	RestoreModeText     string `json:"restoreModeText"`
 	RestoreStrategy     string `json:"restoreStrategy"`
 	RestoreStrategyText string `json:"restoreStrategyText"`
+	RestoreTargetType   string `json:"restoreTargetType"`
+	RestoreTargetValue  string `json:"restoreTargetValue"`
 	Status              string `json:"status"`
 	StatusText          string `json:"statusText"`
 	FileName            string `json:"fileName"`
 	FileSize            int64  `json:"fileSize"`
+	WorkDir             string `json:"workDir"`
+	PreparedDatadir     string `json:"preparedDatadir"`
+	ContainerName       string `json:"containerName"`
+	ContainerImage      string `json:"containerImage"`
+	ListenHost          string `json:"listenHost"`
+	ListenPort          int    `json:"listenPort"`
+	StepJSON            string `json:"stepJson"`
+	ValidationJSON      string `json:"validationJson"`
+	ProofJSON           string `json:"proofJson"`
+	LogPath             string `json:"logPath"`
+	ArtifactURI         string `json:"artifactUri"`
+	ExpiresAt           string `json:"expiresAt"`
+	CleanupStatus       string `json:"cleanupStatus"`
 	OperatorID          uint   `json:"operatorId"`
 	OperatorName        string `json:"operatorName"`
 	StartedAt           string `json:"startedAt"`
@@ -2021,6 +2042,8 @@ func BackupStatusText(status string) string {
 		return "失败"
 	case DatabaseBackupStatusExpired:
 		return "已过期"
+	case DatabaseRestoreStatusCancelled:
+		return "已取消"
 	default:
 		return "未知"
 	}
@@ -2045,6 +2068,8 @@ func RestoreModeText(mode string) string {
 	switch strings.TrimSpace(mode) {
 	case DatabaseRestoreModeDryRun:
 		return "恢复演练"
+	case DatabaseRestoreModeIsolatedRestore:
+		return "隔离恢复"
 	default:
 		return strings.TrimSpace(mode)
 	}

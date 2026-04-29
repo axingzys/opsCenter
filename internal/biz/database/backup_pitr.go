@@ -365,6 +365,8 @@ type DatabaseRestorePlanVO struct {
 	SourceInstanceName      string `json:"sourceInstanceName"`
 	TargetInstanceID        uint   `json:"targetInstanceId"`
 	TargetInstanceName      string `json:"targetInstanceName"`
+	RunnerHostID            uint   `json:"runnerHostId"`
+	RunnerHostName          string `json:"runnerHostName"`
 	RestoreMode             string `json:"restoreMode"`
 	RestoreModeText         string `json:"restoreModeText"`
 	RestoreTargetType       string `json:"restoreTargetType"`
@@ -385,6 +387,10 @@ type DatabaseRestorePlanVO struct {
 	ValidationStatusText    string `json:"validationStatusText"`
 	RestoreStatus           string `json:"restoreStatus"`
 	RestoreStatusText       string `json:"restoreStatusText"`
+	RequiredToolJSON        string `json:"requiredToolJson"`
+	RequiredArtifactJSON    string `json:"requiredArtifactJson"`
+	EstimatedRestoreBytes   int64  `json:"estimatedRestoreBytes"`
+	EstimatedRestoreMinutes int    `json:"estimatedRestoreMinutes"`
 	PlanJSON                string `json:"planJson"`
 	ProofJSON               string `json:"proofJson"`
 	OperatorID              uint   `json:"operatorId"`
@@ -913,6 +919,10 @@ func (uc *UseCase) CreateRestorePlan(ctx context.Context, req *DatabaseRestorePl
 		ToolStatus:              result.ToolStatus,
 		ValidationStatus:        result.ValidationStatus,
 		RestoreStatus:           DatabaseRestoreStatusPlanned,
+		RequiredToolJSON:        buildRestoreRequiredToolJSON(source, result),
+		RequiredArtifactJSON:    buildRestoreRequiredArtifactJSON(result),
+		EstimatedRestoreBytes:   estimateRestoreBytes(result),
+		EstimatedRestoreMinutes: estimateRestoreMinutes(result),
 		PlanJSON:                planJSON,
 		ProofJSON:               proofJSON,
 		OperatorID:              operator.ID,
@@ -997,6 +1007,7 @@ type restoreProofLogArchive struct {
 	ArchiveType      string `json:"archiveType"`
 	FileName         string `json:"fileName"`
 	StorageURI       string `json:"storageUri"`
+	FileSize         int64  `json:"fileSize,omitempty"`
 	ChecksumSHA256   string `json:"checksumSha256"`
 	FirstEventTime   string `json:"firstEventTime,omitempty"`
 	LastEventTime    string `json:"lastEventTime,omitempty"`
@@ -1182,6 +1193,7 @@ func buildSelectedLogProofs(logs []*DatabaseLogArchive, ids []uint) []restorePro
 			ArchiveType:      item.ArchiveType,
 			FileName:         item.FileName,
 			StorageURI:       item.StorageURI,
+			FileSize:         item.FileSize,
 			ChecksumSHA256:   item.ChecksumSHA256,
 			StartPos:         item.StartPos,
 			EndPos:           item.EndPos,
@@ -1267,6 +1279,105 @@ func buildRestoreProofJSON(source, target *DatabaseInstance, result *restorePlan
 		}
 	}
 	return marshalBackupPlanJSON(proof)
+}
+
+func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanValidationResult) string {
+	if result == nil {
+		return "[]"
+	}
+	tools := make([]map[string]any, 0, 3)
+	seen := map[string]struct{}{}
+	for _, item := range result.BackupProofs {
+		tool := strings.TrimSpace(item.ToolName)
+		if tool == "" {
+			tool = mysqlPhysicalBackupToolName(item.BackupEngine, "")
+		}
+		if tool == "" {
+			continue
+		}
+		key := tool + "|" + item.ToolVersion
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		tools = append(tools, map[string]any{
+			"name":       tool,
+			"version":    item.ToolVersion,
+			"requiredBy": "physical_backup_prepare",
+		})
+	}
+	engine := ""
+	if source != nil {
+		engine = normalizeDBType(source.DBType)
+	}
+	if engine == DBTypeMySQL || engine == DBTypeMariaDB {
+		tools = append(tools, map[string]any{"name": "docker", "requiredBy": "isolated_instance"})
+		tools = append(tools, map[string]any{"name": "mysqlbinlog", "requiredBy": "pitr_log_replay"})
+		tools = append(tools, map[string]any{"name": "mysql", "requiredBy": "validation_sql"})
+	}
+	data, _ := json.Marshal(tools)
+	return string(data)
+}
+
+func buildRestoreRequiredArtifactJSON(result *restorePlanValidationResult) string {
+	if result == nil {
+		return "[]"
+	}
+	artifacts := make([]map[string]any, 0, len(result.BackupProofs)+len(result.LogProofs))
+	for _, item := range result.BackupProofs {
+		artifacts = append(artifacts, map[string]any{
+			"type":           "backup",
+			"id":             item.ID,
+			"fileName":       item.FileName,
+			"storageUri":     item.StorageURI,
+			"fileSize":       item.FileSize,
+			"checksumSha256": item.ChecksumSHA256,
+			"level":          item.BackupLevel,
+		})
+	}
+	for _, item := range result.LogProofs {
+		artifacts = append(artifacts, map[string]any{
+			"type":           item.ArchiveType,
+			"id":             item.ID,
+			"fileName":       item.FileName,
+			"storageUri":     item.StorageURI,
+			"fileSize":       item.FileSize,
+			"checksumSha256": item.ChecksumSHA256,
+		})
+	}
+	data, _ := json.Marshal(artifacts)
+	return string(data)
+}
+
+func estimateRestoreBytes(result *restorePlanValidationResult) int64 {
+	if result == nil {
+		return 0
+	}
+	var total int64
+	for _, item := range result.BackupProofs {
+		if item.FileSize > 0 {
+			total += item.FileSize
+		}
+	}
+	for _, item := range result.LogProofs {
+		if item.FileSize > 0 {
+			total += item.FileSize
+		}
+	}
+	return total
+}
+
+func estimateRestoreMinutes(result *restorePlanValidationResult) int {
+	total := estimateRestoreBytes(result)
+	if total <= 0 {
+		return 0
+	}
+	// 粗略按 2 GiB/min 估算，实际耗时以后由 Runner 历史样本校准。
+	minutes := int((total + (2*1024*1024*1024 - 1)) / (2 * 1024 * 1024 * 1024))
+	if minutes < 1 {
+		return 1
+	}
+	return minutes
 }
 
 func backupChecksumProofs(items []restoreProofBackup) []map[string]any {
@@ -1787,12 +1898,20 @@ func (uc *UseCase) toRestorePlanVO(item *DatabaseRestorePlan, sourceName, target
 	if item == nil {
 		return nil
 	}
+	runnerHostName := ""
+	if item.RunnerHostID > 0 && uc != nil && uc.runnerHostRepo != nil {
+		if host, err := uc.runnerHostRepo.GetByID(context.Background(), item.RunnerHostID); err == nil && host != nil {
+			runnerHostName = host.Name
+		}
+	}
 	return &DatabaseRestorePlanVO{
 		ID:                      item.ID,
 		SourceInstanceID:        item.SourceInstanceID,
 		SourceInstanceName:      sourceName,
 		TargetInstanceID:        item.TargetInstanceID,
 		TargetInstanceName:      targetName,
+		RunnerHostID:            item.RunnerHostID,
+		RunnerHostName:          runnerHostName,
 		RestoreMode:             item.RestoreMode,
 		RestoreModeText:         RestoreModeText(item.RestoreMode),
 		RestoreTargetType:       item.RestoreTargetType,
@@ -1813,6 +1932,10 @@ func (uc *UseCase) toRestorePlanVO(item *DatabaseRestorePlan, sourceName, target
 		ValidationStatusText:    ValidationStatusText(item.ValidationStatus),
 		RestoreStatus:           item.RestoreStatus,
 		RestoreStatusText:       RestoreStatusText(item.RestoreStatus),
+		RequiredToolJSON:        item.RequiredToolJSON,
+		RequiredArtifactJSON:    item.RequiredArtifactJSON,
+		EstimatedRestoreBytes:   item.EstimatedRestoreBytes,
+		EstimatedRestoreMinutes: item.EstimatedRestoreMinutes,
 		PlanJSON:                item.PlanJSON,
 		ProofJSON:               item.ProofJSON,
 		OperatorID:              item.OperatorID,

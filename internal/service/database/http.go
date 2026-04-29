@@ -1310,6 +1310,128 @@ func (s *Service) CreateRestorePlan(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) RunRestorePlan(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "恢复计划ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRestorePlanRunRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	sourceInstanceID, err := s.useCase.GetRestorePlanSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "执行失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, sourceInstanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
+	item, err := s.useCase.RunRestorePlan(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "执行失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) GetRestoreJob(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "恢复任务ID")
+	if !ok {
+		return
+	}
+	sourceInstanceID, err := s.useCase.GetRestoreJobSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, sourceInstanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
+	item, err := s.useCase.GetRestoreJob(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) CancelRestoreJob(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "恢复任务ID")
+	if !ok {
+		return
+	}
+	sourceInstanceID, err := s.useCase.GetRestoreJobSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "取消失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, sourceInstanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
+	item, err := s.useCase.CancelRestoreJob(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "取消失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) CleanupRestoreJob(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "恢复任务ID")
+	if !ok {
+		return
+	}
+	sourceInstanceID, err := s.useCase.GetRestoreJobSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "清理失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, sourceInstanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
+	item, err := s.useCase.CleanupRestoreJob(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "清理失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) GetRestoreJobProof(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "恢复任务ID")
+	if !ok {
+		return
+	}
+	sourceInstanceID, err := s.useCase.GetRestoreJobSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, sourceInstanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
+	proof, err := s.useCase.GetRestoreJobProof(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"proofJson": proof})
+}
+
 // DownloadBackupRecord 下载备份文件
 // @Summary 下载备份文件
 // @Description 下载指定的成功备份文件，并写入统一审计
