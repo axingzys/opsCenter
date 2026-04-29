@@ -1,6 +1,11 @@
 package database
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -172,6 +177,72 @@ func TestBuildPgBaseBackupRestoreScriptDirectoryOnly(t *testing.T) {
 	}
 	if strings.Contains(script, `run_pg_validation 1`) {
 		t.Fatalf("directory-only restore should not schedule validation SQL:\n%s", script)
+	}
+}
+
+func TestPgBaseBackupRestoreDirectoryScriptSmoke(t *testing.T) {
+	for _, tool := range []string{"bash", "tar", "sha256sum"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available: %v", tool, err)
+		}
+	}
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source-pgdata")
+	for _, dir := range []string{"global", "base", "pg_wal"} {
+		if err := os.MkdirAll(filepath.Join(sourceDir, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "PG_VERSION"), []byte("16\n"), 0o644); err != nil {
+		t.Fatalf("write PG_VERSION: %v", err)
+	}
+	artifact := filepath.Join(root, "pg-base.tar.gz")
+	if out, err := exec.Command("tar", "-czf", artifact, "-C", sourceDir, ".").CombinedOutput(); err != nil {
+		t.Fatalf("package artifact: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(artifact)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	info, err := os.Stat(artifact)
+	if err != nil {
+		t.Fatalf("stat artifact: %v", err)
+	}
+	checksum := fmt.Sprintf("%x", sha256.Sum256(data))
+	workRoot := filepath.Join(root, "runner")
+	script, err := buildPgBaseBackupRestoreScript(pgBaseBackupRestoreScriptInput{
+		RestoreJobID:  31,
+		RestorePlanID: 13,
+		RunnerHostID:  3,
+		WorkRoot:      workRoot,
+		Base: physicalRestoreArtifact{
+			Kind:           "base",
+			FileName:       "pg-base.tar.gz",
+			SourcePath:     artifact,
+			ChecksumSHA256: checksum,
+			FileSize:       info.Size(),
+		},
+		TargetType:    "time",
+		TargetValue:   "2026-04-29 10:00:00",
+		StartInstance: false,
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+	out, err := exec.Command("bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run restore script: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "OPSHUB_VALIDATION_STATUS=warning") {
+		t.Fatalf("script output missing directory-only validation status:\n%s", out)
+	}
+	pgVersion := filepath.Join(workRoot, "restore", "job-31", "pgdata", "PG_VERSION")
+	if _, err := os.Stat(pgVersion); err != nil {
+		t.Fatalf("restored PG_VERSION missing: %v\n%s", err, out)
+	}
+	proof := filepath.Join(workRoot, "restore", "job-31", "proof.json")
+	if _, err := os.Stat(proof); err != nil {
+		t.Fatalf("proof missing: %v\n%s", err, out)
 	}
 }
 
