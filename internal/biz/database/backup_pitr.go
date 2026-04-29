@@ -1656,7 +1656,31 @@ func (uc *UseCase) recordLogArchiveEvent(ctx context.Context, item *DatabaseLogA
 	item.ActiveFile = trimText(strings.TrimSpace(item.ActiveFile), 255)
 	item.RunnerID = trimText(strings.TrimSpace(item.RunnerID), 120)
 	item.PayloadJSON = trimText(strings.TrimSpace(item.PayloadJSON), 4000)
-	return uc.logArchiveEventRepo.Create(ctx, item)
+	if err := uc.logArchiveEventRepo.Create(ctx, item); err != nil {
+		return err
+	}
+	uc.pruneLogArchiveEvents(ctx, item.StreamID)
+	return nil
+}
+
+func (uc *UseCase) pruneLogArchiveEvents(ctx context.Context, streamID uint) {
+	if uc.logArchiveEventRepo == nil {
+		return
+	}
+	retentionDays := 30
+	if streamID > 0 && uc.logArchiveStreamRepo != nil {
+		if stream, err := uc.logArchiveStreamRepo.GetByID(ctx, streamID); err == nil && stream != nil {
+			retentionDays = normalizeArchiveRetentionDays(stream.RetentionDays)
+		}
+	}
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	if retentionDays > 3650 {
+		retentionDays = 3650
+	}
+	before := time.Now().AddDate(0, 0, -retentionDays)
+	_, _ = uc.logArchiveEventRepo.DeleteBefore(ctx, before, streamID)
 }
 
 func (uc *UseCase) archiveInstanceNames(ctx context.Context, instanceID, sourceID uint) (string, string) {

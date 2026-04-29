@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -38,22 +39,28 @@ const (
 	defaultDatabaseArchiverMaxFilesPerLoop = 5
 	defaultDatabaseArchiverWorkDir         = "/var/lib/opshub-agent"
 	defaultDatabaseArchiverObjectPrefix    = "opshub/database-archives"
+	defaultDatabaseArchiverMaxConcurrent   = 2
+	defaultDatabaseArchiverBackoffSeconds  = 30
+	defaultDatabaseArchiverMaxBackoffSec   = 300
 )
 
 type databaseArchiverConfig struct {
-	Enabled         bool                         `json:"enabled"`
-	BaseURL         string                       `json:"baseUrl"`
-	RunnerID        string                       `json:"runnerId"`
-	RunnerAuth      string                       `json:"runnerAuth"`
-	IntervalSeconds int                          `json:"intervalSeconds"`
-	LeaseTTLSeconds int                          `json:"leaseTtlSeconds"`
-	MaxFilesPerLoop int                          `json:"maxFilesPerLoop"`
-	IncludeCurrent  bool                         `json:"includeCurrent"`
-	WorkDir         string                       `json:"workDir"`
-	StorageRoot     string                       `json:"storageRoot"`
-	Storage         databaseArchiverStorage      `json:"storage"`
-	MySQLBinlogPath string                       `json:"mysqlBinlogPath"`
-	Credentials     []databaseArchiverCredential `json:"credentials"`
+	Enabled                  bool                         `json:"enabled"`
+	BaseURL                  string                       `json:"baseUrl"`
+	RunnerID                 string                       `json:"runnerId"`
+	RunnerAuth               string                       `json:"runnerAuth"`
+	IntervalSeconds          int                          `json:"intervalSeconds"`
+	LeaseTTLSeconds          int                          `json:"leaseTtlSeconds"`
+	MaxFilesPerLoop          int                          `json:"maxFilesPerLoop"`
+	MaxConcurrentStreams     int                          `json:"maxConcurrentStreams"`
+	FailureBackoffSeconds    int                          `json:"failureBackoffSeconds"`
+	MaxFailureBackoffSeconds int                          `json:"maxFailureBackoffSeconds"`
+	IncludeCurrent           bool                         `json:"includeCurrent"`
+	WorkDir                  string                       `json:"workDir"`
+	StorageRoot              string                       `json:"storageRoot"`
+	Storage                  databaseArchiverStorage      `json:"storage"`
+	MySQLBinlogPath          string                       `json:"mysqlBinlogPath"`
+	Credentials              []databaseArchiverCredential `json:"credentials"`
 }
 
 type databaseArchiverStorage struct {
@@ -80,20 +87,23 @@ type databaseArchiverCredential struct {
 }
 
 type resolvedDatabaseArchiverConfig struct {
-	Enabled         bool
-	OpsHubBaseURL   string
-	EndpointBaseURL string
-	RunnerID        string
-	RunnerAuth      string
-	Interval        time.Duration
-	LeaseTTLSeconds int
-	MaxFilesPerLoop int
-	IncludeCurrent  bool
-	WorkDir         string
-	StorageRoot     string
-	Storage         databaseArchiverStorage
-	MySQLBinlogPath string
-	Credentials     []databaseArchiverCredential
+	Enabled              bool
+	OpsHubBaseURL        string
+	EndpointBaseURL      string
+	RunnerID             string
+	RunnerAuth           string
+	Interval             time.Duration
+	LeaseTTLSeconds      int
+	MaxFilesPerLoop      int
+	MaxConcurrentStreams int
+	FailureBackoff       time.Duration
+	MaxFailureBackoff    time.Duration
+	IncludeCurrent       bool
+	WorkDir              string
+	StorageRoot          string
+	Storage              databaseArchiverStorage
+	MySQLBinlogPath      string
+	Credentials          []databaseArchiverCredential
 }
 
 type databaseArchiverAPIResponse struct {
@@ -237,6 +247,14 @@ type agentBinlogArtifact struct {
 	Next           string
 }
 
+type agentSpoolResult struct {
+	FileName   string
+	Path       string
+	Size       int64
+	SourceSize int64
+	Reused     bool
+}
+
 type agentBinlogPurgeGapError struct {
 	LastArchived   string
 	FirstAvailable string
@@ -288,6 +306,36 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 	if maxFiles > 20 {
 		maxFiles = 20
 	}
+	maxConcurrent := raw.MaxConcurrentStreams
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultDatabaseArchiverMaxConcurrent
+	}
+	if maxConcurrent < 1 {
+		maxConcurrent = 1
+	}
+	if maxConcurrent > 16 {
+		maxConcurrent = 16
+	}
+	backoffSeconds := raw.FailureBackoffSeconds
+	if backoffSeconds <= 0 {
+		backoffSeconds = defaultDatabaseArchiverBackoffSeconds
+	}
+	if backoffSeconds < 5 {
+		backoffSeconds = 5
+	}
+	if backoffSeconds > 3600 {
+		backoffSeconds = 3600
+	}
+	maxBackoffSeconds := raw.MaxFailureBackoffSeconds
+	if maxBackoffSeconds <= 0 {
+		maxBackoffSeconds = defaultDatabaseArchiverMaxBackoffSec
+	}
+	if maxBackoffSeconds < backoffSeconds {
+		maxBackoffSeconds = backoffSeconds
+	}
+	if maxBackoffSeconds > 3600 {
+		maxBackoffSeconds = 3600
+	}
 	workDir := strings.TrimSpace(raw.WorkDir)
 	if workDir == "" {
 		workDir = defaultDatabaseArchiverWorkDir
@@ -302,20 +350,23 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 	}
 	endpointBase := strings.TrimRight(opsHubBaseURL, "/") + "/api/v1/public/databases/runner-agents/" + url.PathEscape(runnerID)
 	return &resolvedDatabaseArchiverConfig{
-		Enabled:         true,
-		OpsHubBaseURL:   strings.TrimRight(opsHubBaseURL, "/"),
-		EndpointBaseURL: endpointBase,
-		RunnerID:        runnerID,
-		RunnerAuth:      runnerAuth,
-		Interval:        time.Duration(intervalSeconds) * time.Second,
-		LeaseTTLSeconds: leaseTTLSeconds,
-		MaxFilesPerLoop: maxFiles,
-		IncludeCurrent:  raw.IncludeCurrent,
-		WorkDir:         workDir,
-		StorageRoot:     storageRoot,
-		Storage:         storage,
-		MySQLBinlogPath: strings.TrimSpace(raw.MySQLBinlogPath),
-		Credentials:     append([]databaseArchiverCredential{}, raw.Credentials...),
+		Enabled:              true,
+		OpsHubBaseURL:        strings.TrimRight(opsHubBaseURL, "/"),
+		EndpointBaseURL:      endpointBase,
+		RunnerID:             runnerID,
+		RunnerAuth:           runnerAuth,
+		Interval:             time.Duration(intervalSeconds) * time.Second,
+		LeaseTTLSeconds:      leaseTTLSeconds,
+		MaxFilesPerLoop:      maxFiles,
+		MaxConcurrentStreams: maxConcurrent,
+		FailureBackoff:       time.Duration(backoffSeconds) * time.Second,
+		MaxFailureBackoff:    time.Duration(maxBackoffSeconds) * time.Second,
+		IncludeCurrent:       raw.IncludeCurrent,
+		WorkDir:              workDir,
+		StorageRoot:          storageRoot,
+		Storage:              storage,
+		MySQLBinlogPath:      strings.TrimSpace(raw.MySQLBinlogPath),
+		Credentials:          append([]databaseArchiverCredential{}, raw.Credentials...),
 	}, nil
 }
 
@@ -419,18 +470,101 @@ func (a *agentApp) runDatabaseArchiverOnce(ctx context.Context, cfg *resolvedDat
 		return
 	}
 	running := 0
+	var wg sync.WaitGroup
+	maxConcurrent := cfg.MaxConcurrentStreams
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	sem := make(chan struct{}, maxConcurrent)
 	for _, stream := range streams.Streams {
 		if stream.Stream.ID == 0 {
 			continue
 		}
-		running++
-		if err := a.processDatabaseArchiverStream(ctx, cfg, stream); err != nil {
-			log.Printf("database archiver stream %d failed: %v", stream.Stream.ID, err)
+		if remaining := a.databaseArchiverBackoffRemaining(stream.Stream.ID); remaining > 0 {
+			log.Printf("database archiver stream %d skipped by failure backoff: remaining=%s", stream.Stream.ID, remaining.Round(time.Second))
+			continue
 		}
+		running++
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(item databaseArchiverAssignedStream) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := a.processDatabaseArchiverStream(ctx, cfg, item); err != nil {
+				delay := a.databaseArchiverMarkFailure(cfg, item.Stream.ID)
+				log.Printf("database archiver stream %d failed: %v; backoff=%s", item.Stream.ID, err, delay.Round(time.Second))
+				return
+			}
+			a.databaseArchiverMarkSuccess(item.Stream.ID)
+		}(stream)
 	}
+	wg.Wait()
 	if err := a.databaseArchiverHeartbeat(ctx, cfg, "online", "", running); err != nil {
 		log.Printf("database archiver heartbeat failed: %v", err)
 	}
+}
+
+func (a *agentApp) databaseArchiverBackoffRemaining(streamID uint) time.Duration {
+	if streamID == 0 {
+		return 0
+	}
+	a.databaseArchiverBackoffMu.Lock()
+	defer a.databaseArchiverBackoffMu.Unlock()
+	if a.databaseArchiverBackoffUntil == nil {
+		return 0
+	}
+	until := a.databaseArchiverBackoffUntil[streamID]
+	if until.IsZero() {
+		return 0
+	}
+	remaining := time.Until(until)
+	if remaining <= 0 {
+		delete(a.databaseArchiverBackoffUntil, streamID)
+		return 0
+	}
+	return remaining
+}
+
+func (a *agentApp) databaseArchiverMarkFailure(cfg *resolvedDatabaseArchiverConfig, streamID uint) time.Duration {
+	if streamID == 0 {
+		return 0
+	}
+	a.databaseArchiverBackoffMu.Lock()
+	defer a.databaseArchiverBackoffMu.Unlock()
+	if a.databaseArchiverFailures == nil {
+		a.databaseArchiverFailures = map[uint]int{}
+	}
+	if a.databaseArchiverBackoffUntil == nil {
+		a.databaseArchiverBackoffUntil = map[uint]time.Time{}
+	}
+	a.databaseArchiverFailures[streamID]++
+	failures := a.databaseArchiverFailures[streamID]
+	delay := cfg.FailureBackoff
+	for i := 1; i < failures; i++ {
+		delay *= 2
+		if delay >= cfg.MaxFailureBackoff {
+			delay = cfg.MaxFailureBackoff
+			break
+		}
+	}
+	if delay <= 0 {
+		delay = time.Duration(defaultDatabaseArchiverBackoffSeconds) * time.Second
+	}
+	if cfg.MaxFailureBackoff > 0 && delay > cfg.MaxFailureBackoff {
+		delay = cfg.MaxFailureBackoff
+	}
+	a.databaseArchiverBackoffUntil[streamID] = time.Now().Add(delay)
+	return delay
+}
+
+func (a *agentApp) databaseArchiverMarkSuccess(streamID uint) {
+	if streamID == 0 {
+		return
+	}
+	a.databaseArchiverBackoffMu.Lock()
+	defer a.databaseArchiverBackoffMu.Unlock()
+	delete(a.databaseArchiverFailures, streamID)
+	delete(a.databaseArchiverBackoffUntil, streamID)
 }
 
 func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream) (err error) {
@@ -558,7 +692,8 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 		return err
 	}
 	if mode == "streaming" && current.Name != "" {
-		if err := spoolAgentActiveBinlog(ctx, cfg, item, credential, tool, current.Name); err != nil {
+		spool, err := spoolAgentActiveBinlog(ctx, cfg, item, credential, tool, current.Name, current.Size)
+		if err != nil {
 			_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
 				DaemonStatus:        "degraded",
 				ActiveFile:          current.Name,
@@ -570,13 +705,23 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 			})
 			return err
 		}
+		message := "active binlog spool 已更新"
+		if spool.Reused {
+			message = "active binlog spool 未变化，跳过重复拉取"
+		}
 		_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
-			EventType:   "spool_updated",
-			Level:       "info",
-			Message:     "active binlog spool 已更新",
-			ActiveFile:  current.Name,
-			PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{"activeFile": current.Name, "sourcePos": firstNonZeroInt64Agent(status.Position, current.Size)}),
-			OccurredAt:  time.Now().Format("2006-01-02 15:04:05"),
+			EventType:  "spool_updated",
+			Level:      "info",
+			Message:    message,
+			ActiveFile: current.Name,
+			PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
+				"activeFile": current.Name,
+				"sourcePos":  firstNonZeroInt64Agent(status.Position, current.Size),
+				"sourceSize": spool.SourceSize,
+				"spoolSize":  spool.Size,
+				"reused":     spool.Reused,
+			}),
+			OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
 		})
 	}
 	var lastArtifact *agentBinlogArtifact
@@ -909,22 +1054,48 @@ func archiveAgentBinlogFile(ctx context.Context, cfg *resolvedDatabaseArchiverCo
 	return artifact, nil
 }
 
-func spoolAgentActiveBinlog(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool, fileName string) error {
+func spoolAgentActiveBinlog(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool, fileName string, sourceSize int64) (agentSpoolResult, error) {
+	if !isSafeAgentBinlogFileName(fileName) {
+		return agentSpoolResult{}, fmt.Errorf("binlog 文件名不合法: %s", fileName)
+	}
 	spoolDir := agentBinlogSpoolDir(cfg, item)
 	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
-		return err
+		return agentSpoolResult{}, err
+	}
+	target := filepath.Join(spoolDir, fileName+".partial")
+	if sourceSize > 0 {
+		if info, err := os.Stat(target); err == nil && info.Size() >= sourceSize {
+			return agentSpoolResult{
+				FileName:   fileName,
+				Path:       target,
+				Size:       info.Size(),
+				SourceSize: sourceSize,
+				Reused:     true,
+			}, nil
+		}
 	}
 	tmpDir, err := os.MkdirTemp(spoolDir, ".opshub-spool-")
 	if err != nil {
-		return err
+		return agentSpoolResult{}, err
 	}
 	defer os.RemoveAll(tmpDir)
 	if err := runAgentMysqlbinlogRaw(ctx, cfg, item, credential, tool, tmpDir, fileName); err != nil {
-		return err
+		return agentSpoolResult{}, err
 	}
 	tmpPath := filepath.Join(tmpDir, fileName)
-	target := filepath.Join(spoolDir, fileName+".partial")
-	return replaceAgentBinlogFile(tmpPath, target)
+	if err := replaceAgentBinlogFile(tmpPath, target); err != nil {
+		return agentSpoolResult{}, err
+	}
+	size := int64(0)
+	if info, err := os.Stat(target); err == nil {
+		size = info.Size()
+	}
+	return agentSpoolResult{
+		FileName:   fileName,
+		Path:       target,
+		Size:       size,
+		SourceSize: sourceSize,
+	}, nil
 }
 
 func runAgentMysqlbinlogRaw(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool, resultDir, fileName string) error {

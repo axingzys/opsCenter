@@ -126,6 +126,7 @@ type LogArchiveRepo interface {
 type LogArchiveEventRepo interface {
 	Create(ctx context.Context, item *DatabaseLogArchiveEvent) error
 	List(ctx context.Context, req *DatabaseLogArchiveEventListRequest) ([]*DatabaseLogArchiveEvent, int64, error)
+	DeleteBefore(ctx context.Context, before time.Time, streamID uint) (int64, error)
 }
 
 type RestorePlanRepo interface {

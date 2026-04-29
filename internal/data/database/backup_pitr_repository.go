@@ -218,6 +218,20 @@ func (r *logArchiveEventRepo) List(ctx context.Context, req *dbbiz.DatabaseLogAr
 	return items, total, nil
 }
 
+func (r *logArchiveEventRepo) DeleteBefore(ctx context.Context, before time.Time, streamID uint) (int64, error) {
+	if before.IsZero() {
+		return 0, nil
+	}
+	query := r.db.WithContext(ctx).Where("occurred_at < ?", before)
+	if streamID > 0 {
+		query = query.Where("stream_id = ?", streamID)
+	} else {
+		query = query.Where("stream_id = 0")
+	}
+	result := query.Unscoped().Delete(&dbbiz.DatabaseLogArchiveEvent{})
+	return result.RowsAffected, result.Error
+}
+
 type restorePlanRepo struct {
 	db *gorm.DB
 }

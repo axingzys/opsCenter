@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -195,9 +196,12 @@ type agentMetrics struct {
 }
 
 type agentApp struct {
-	cfg        *agentConfig
-	httpClient *http.Client
-	metrics    *agentMetrics
+	cfg                          *agentConfig
+	httpClient                   *http.Client
+	metrics                      *agentMetrics
+	databaseArchiverBackoffMu    sync.Mutex
+	databaseArchiverFailures     map[uint]int
+	databaseArchiverBackoffUntil map[uint]time.Time
 }
 
 func main() {
@@ -253,9 +257,11 @@ func parseConfigPath(args []string) (string, error) {
 
 func runAgent(ctx context.Context, cfg *agentConfig) error {
 	app := &agentApp{
-		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 20 * time.Second},
-		metrics:    newAgentMetrics(),
+		cfg:                          cfg,
+		httpClient:                   &http.Client{Timeout: 20 * time.Second},
+		metrics:                      newAgentMetrics(),
+		databaseArchiverFailures:     map[uint]int{},
+		databaseArchiverBackoffUntil: map[uint]time.Time{},
 	}
 
 	if err := app.serveMetrics(ctx); err != nil {

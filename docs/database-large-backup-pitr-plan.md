@@ -1035,6 +1035,58 @@ curl -H "X-OpsHub-Runner-Auth: $AUTH" \
 4. 事件表保留策略和高频事件压缩。
 5. 对象存储版本化、不可变保留、KMS、bucket policy 的只读检测与风险提示。
 
+### 2026-04-29 P2.6.6：Agent 并发、失败退避和事件保留
+
+目标：把 P2.6.5 已能发布对象存储的 Agent 归档器继续推进到长期运行可用状态。此阶段不引入真正 `mysqlbinlog --stop-never` 长连接，也不做二进制 partial append，先解决一个 Runner 同时负责多个归档流时的调度稳定性、失败隔离和事件表增长问题。
+
+#### P2.6.6 落地范围
+
+1. Agent 本地配置新增并发与退避参数。
+   - `maxConcurrentStreams`：同一 Agent 每轮最多并发处理多少个归档流，默认 `2`，范围 `1-16`。
+   - `failureBackoffSeconds`：单个归档流失败后的基础退避秒数，默认 `30`，最小 `5`。
+   - `maxFailureBackoffSeconds`：单个归档流指数退避上限，默认 `300`，最大 `3600`。
+2. 多 stream 并发调度。
+   - 每轮从 backend 获取分配给当前 Runner 的归档流。
+   - 对不在退避窗口内的归档流按 `maxConcurrentStreams` 并发执行。
+   - 每个 stream 仍独立获取租约、checkpoint、归档登记和事件上报。
+   - 任一 stream 失败不会阻塞其他 stream。
+3. 单 stream 失败指数退避。
+   - 第一次失败退避 `failureBackoffSeconds`。
+   - 后续连续失败按 `2x` 增长，直到 `maxFailureBackoffSeconds`。
+   - stream 成功后清空本地失败计数和退避窗口。
+   - 退避状态只保存在 Agent 进程内；Agent 重启后重新从 backend 状态和租约恢复。
+4. active spool 去重优化。
+   - `streaming` 模式仍只把当前活跃 binlog 保存到 `spool/<file>.partial`，不登记为 finalized。
+   - 如果本地 partial 文件大小已经大于等于源库当前活跃 binlog 大小，本轮跳过重复拉取，避免每 30 秒重写同一份活跃文件。
+   - `spool_updated` 事件 payload 增加：
+     - `sourceSize`
+     - `spoolSize`
+     - `reused`
+   - 如果源库活跃 binlog 继续增长，当前阶段仍采用重新拉取并原子替换 partial 的安全策略，不做 append。
+5. 事件保留策略。
+   - 写入 `database_log_archive_events` 后，按归档流 `retention_days` 清理该流更早的事件。
+   - 没有归档流上下文时使用默认 `30` 天。
+   - 保留天数最大按 `3650` 天保护，避免异常配置导致事件表无限保留。
+
+#### P2.6.6 不做的事
+
+1. 不实现长期 `mysqlbinlog --stop-never` 子进程。
+2. 不对 `.partial` 文件做二进制 append。binlog 事件边界、header 和 checksum 需要专门验证，不能只按文件大小追加。
+3. 不把 active spool 纳入 PITR 恢复证明。
+4. 不做带宽限制和 IO 限速；本阶段只做并发度控制。
+5. 不自动调整对象存储 bucket 的版本化、对象锁、KMS 或 bucket policy。
+
+#### P2.6.7+ 后续深化
+
+1. 真正 `mysqlbinlog --stop-never` 进程托管、健康检查、自动重启和 stdout/stderr 日志滚动。
+2. active spool 增量 append 前置验证：
+   - 验证 `mysqlbinlog --raw --start-position` 输出是否适合 append。
+   - 校验 binlog header、事件边界和 checksum。
+   - 只在严格验证通过后开放 resume。
+3. Agent 侧带宽限制、IO 限速和对象存储上传重试队列。
+4. 事件压缩/归档，把高频 `checkpoint/spool_updated` 合并为小时级摘要。
+5. 对象存储版本化、不可变保留、KMS、bucket policy 的只读检测和 UI 风险提示。
+
 ### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
 
 目标：把 P1/P2 已有的“恢复计划和恢复证明预生成”升级为可执行的隔离恢复流程，真正把物理备份链和 binlog 归档链恢复到一个隔离 MySQL/MariaDB 实例，并执行校验 SQL。

@@ -36,6 +36,36 @@ func TestResolveDatabaseArchiverConfigDerivesBaseURL(t *testing.T) {
 	if resolved.Interval != defaultDatabaseArchiverIntervalSeconds*time.Second {
 		t.Fatalf("unexpected interval: %s", resolved.Interval)
 	}
+	if resolved.MaxConcurrentStreams != defaultDatabaseArchiverMaxConcurrent {
+		t.Fatalf("unexpected max concurrency: %d", resolved.MaxConcurrentStreams)
+	}
+	if resolved.FailureBackoff != defaultDatabaseArchiverBackoffSeconds*time.Second || resolved.MaxFailureBackoff != defaultDatabaseArchiverMaxBackoffSec*time.Second {
+		t.Fatalf("unexpected backoff: %s/%s", resolved.FailureBackoff, resolved.MaxFailureBackoff)
+	}
+}
+
+func TestResolveDatabaseArchiverConfigClampsConcurrencyAndBackoff(t *testing.T) {
+	cfg := &agentConfig{
+		ReportURL: "https://opshub.example.com/api/v1/public/agents/report",
+		DatabaseArchiver: databaseArchiverConfig{
+			Enabled:                  true,
+			RunnerID:                 "runner-host-7",
+			RunnerAuth:               "runner-auth",
+			MaxConcurrentStreams:     99,
+			FailureBackoffSeconds:    1,
+			MaxFailureBackoffSeconds: 2,
+		},
+	}
+	resolved, err := resolveDatabaseArchiverConfig(cfg)
+	if err != nil {
+		t.Fatalf("resolve config: %v", err)
+	}
+	if resolved.MaxConcurrentStreams != 16 {
+		t.Fatalf("unexpected max concurrency: %d", resolved.MaxConcurrentStreams)
+	}
+	if resolved.FailureBackoff != 5*time.Second || resolved.MaxFailureBackoff != 5*time.Second {
+		t.Fatalf("unexpected backoff clamp: %s/%s", resolved.FailureBackoff, resolved.MaxFailureBackoff)
+	}
 }
 
 func TestSelectAgentBinlogsForArchiveSkipsCurrentByDefault(t *testing.T) {
@@ -182,6 +212,54 @@ func TestAgentObjectStorageKeys(t *testing.T) {
 	uri := agentObjectStorageURI(cfg, item, "binlog.000001")
 	if uri != "minio://opshub-backup/"+key {
 		t.Fatalf("unexpected storage uri: %s", uri)
+	}
+}
+
+func TestDatabaseArchiverFailureBackoff(t *testing.T) {
+	app := &agentApp{}
+	cfg := &resolvedDatabaseArchiverConfig{
+		FailureBackoff:    10 * time.Second,
+		MaxFailureBackoff: 25 * time.Second,
+	}
+	if remaining := app.databaseArchiverBackoffRemaining(3); remaining != 0 {
+		t.Fatalf("unexpected initial backoff: %s", remaining)
+	}
+	if delay := app.databaseArchiverMarkFailure(cfg, 3); delay != 10*time.Second {
+		t.Fatalf("unexpected first backoff: %s", delay)
+	}
+	if remaining := app.databaseArchiverBackoffRemaining(3); remaining <= 0 || remaining > 10*time.Second {
+		t.Fatalf("unexpected remaining backoff: %s", remaining)
+	}
+	if delay := app.databaseArchiverMarkFailure(cfg, 3); delay != 20*time.Second {
+		t.Fatalf("unexpected second backoff: %s", delay)
+	}
+	if delay := app.databaseArchiverMarkFailure(cfg, 3); delay != 25*time.Second {
+		t.Fatalf("unexpected capped backoff: %s", delay)
+	}
+	app.databaseArchiverMarkSuccess(3)
+	if remaining := app.databaseArchiverBackoffRemaining(3); remaining != 0 {
+		t.Fatalf("backoff should be cleared, got %s", remaining)
+	}
+}
+
+func TestSpoolAgentActiveBinlogReusesUnchangedPartial(t *testing.T) {
+	root := t.TempDir()
+	cfg := &resolvedDatabaseArchiverConfig{StorageRoot: root}
+	item := databaseArchiverAssignedStream{Stream: databaseArchiverStream{ID: 2, InstanceID: 1}}
+	spoolDir := agentBinlogSpoolDir(cfg, item)
+	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
+		t.Fatalf("mkdir spool: %v", err)
+	}
+	target := filepath.Join(spoolDir, "binlog.000001.partial")
+	if err := os.WriteFile(target, []byte(strings.Repeat("x", 100)), 0o600); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+	result, err := spoolAgentActiveBinlog(context.Background(), cfg, item, databaseArchiverCredential{}, "missing-mysqlbinlog", "binlog.000001", 80)
+	if err != nil {
+		t.Fatalf("spool should reuse unchanged partial without invoking tool: %v", err)
+	}
+	if !result.Reused || result.Size != 100 || result.SourceSize != 80 {
+		t.Fatalf("unexpected spool result: %#v", result)
 	}
 }
 
