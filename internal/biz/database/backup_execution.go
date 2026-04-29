@@ -11,6 +11,9 @@ import (
 const backupCleanupFailedMessage = "保留策略清理失败"
 
 func (uc *UseCase) RunScheduledBackupTask(ctx context.Context, id uint) (*DatabaseBackupRunVO, error) {
+	if vo, handled, err := uc.runBarmanBackupTaskIfNeeded(ctx, id, scheduledBackupOperator(), DatabaseBackupTriggerSchedule); handled || err != nil {
+		return vo, err
+	}
 	run, err := uc.prepareBackupTaskRun(ctx, id, scheduledBackupOperator(), DatabaseBackupTriggerSchedule)
 	if err != nil {
 		return nil, err

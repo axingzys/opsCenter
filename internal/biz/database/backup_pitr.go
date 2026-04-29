@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -233,6 +234,14 @@ type DatabaseLogArchiveVO struct {
 	Status             string `json:"status"`
 	StatusText         string `json:"statusText"`
 	ArchivedAt         string `json:"archivedAt"`
+	PGSystemIdentifier string `json:"pgSystemIdentifier"`
+	TimelineID         string `json:"timelineId"`
+	WALSegmentSize     int64  `json:"walSegmentSize"`
+	ExternalServerName string `json:"externalServerName"`
+	StartLSN           string `json:"startLsn"`
+	EndLSN             string `json:"endLsn"`
+	SegmentNo          string `json:"segmentNo"`
+	TimelineHistoryURI string `json:"timelineHistoryUri"`
 	CreatedAt          string `json:"createdAt"`
 	UpdatedAt          string `json:"updatedAt"`
 }
@@ -656,6 +665,8 @@ func (uc *UseCase) RegisterExternalLogArchive(ctx context.Context, req *Database
 		NextFileName:       trimText(strings.TrimSpace(req.NextFileName), 255),
 		PGSystemIdentifier: trimText(strings.TrimSpace(req.PGSystemIdentifier), 120),
 		TimelineID:         trimText(strings.TrimSpace(req.TimelineID), 60),
+		WALSegmentSize:     streamWALSegmentSize(stream),
+		ExternalServerName: streamExternalServerName(stream),
 		StartLSN:           trimText(strings.TrimSpace(req.StartLSN), 120),
 		EndLSN:             trimText(strings.TrimSpace(req.EndLSN), 120),
 		SegmentNo:          trimText(strings.TrimSpace(req.SegmentNo), 120),
@@ -1736,6 +1747,14 @@ func (uc *UseCase) toLogArchiveVO(ctx context.Context, item *DatabaseLogArchive)
 		Status:             item.Status,
 		StatusText:         LogArchiveStatusText(item.Status),
 		ArchivedAt:         formatTime(item.ArchivedAt),
+		PGSystemIdentifier: item.PGSystemIdentifier,
+		TimelineID:         item.TimelineID,
+		WALSegmentSize:     item.WALSegmentSize,
+		ExternalServerName: item.ExternalServerName,
+		StartLSN:           item.StartLSN,
+		EndLSN:             item.EndLSN,
+		SegmentNo:          item.SegmentNo,
+		TimelineHistoryURI: item.TimelineHistoryURI,
 		CreatedAt:          item.CreatedAt.Format("2006-01-02 15:04:05"),
 		UpdatedAt:          item.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}
@@ -1898,6 +1917,42 @@ func (uc *UseCase) archiveInstanceNames(ctx context.Context, instanceID, sourceI
 		}
 	}
 	return instanceName, sourceName
+}
+
+func streamWALSegmentSize(stream *DatabaseLogArchiveStream) int64 {
+	if stream == nil || strings.TrimSpace(stream.ConfigJSON) == "" {
+		return 0
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stream.ConfigJSON), &payload); err != nil {
+		return 0
+	}
+	switch value := payload["walSegmentSize"].(type) {
+	case float64:
+		return int64(value)
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func streamExternalServerName(stream *DatabaseLogArchiveStream) string {
+	if stream == nil || strings.TrimSpace(stream.ConfigJSON) == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stream.ConfigJSON), &payload); err != nil {
+		return ""
+	}
+	if value, ok := payload["barmanServerName"].(string); ok {
+		return trimText(strings.TrimSpace(value), 120)
+	}
+	if value, ok := payload["externalServerName"].(string); ok {
+		return trimText(strings.TrimSpace(value), 120)
+	}
+	return ""
 }
 
 func (uc *UseCase) toRestorePlanVO(item *DatabaseRestorePlan, sourceName, targetName string) *DatabaseRestorePlanVO {

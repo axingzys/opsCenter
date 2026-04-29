@@ -3818,6 +3818,49 @@ WAL 状态页面：
 
 目标：OpsHub 能看到 PostgreSQL WAL 链路，并识别 WAL gap。
 
+当前落地状态（2026-04-29）：
+
+1. 已新增 `barman_wal_sync` Runner job 类型和白名单命令。
+2. 已新增接口：
+   - `POST /api/v1/databases/barman-servers/:id/sync-wal`
+3. 已通过 SSH Runner 执行受控脚本：
+   - `barman -f json list-backup <server>`，失败时兼容 `list-backups`
+   - `barman list-backup <server>`，失败时兼容 `list-backups`
+   - `barman -f json show-backup <server> <backup_id>`
+   - `barman list-files <server> <backup_id>`，用于读取 Barman catalog 中实际可见的 WAL / timeline history 文件
+4. 已自动创建或复用 `database_log_archive_streams`：
+   - `engine=postgresql`
+   - `archive_type=wal`
+   - `archive_engine=barman`
+   - `archive_mode=external`
+   - `config_json` 记录 `barmanServerId`、`barmanServerName`、`walSegmentSize`
+5. 已新增 PostgreSQL WAL segment 解析工具包：
+   - `internal/biz/database/pgwal`
+   - 支持 WAL segment 文件名解析、timeline 解析、segment 序号计算、segment range 展开、`.history` 文件识别。
+6. WAL 同步优先使用 `barman list-files` 的真实文件列表；只有当 `list-files` 不可用或无 WAL 文件输出时，才从 `show-backup` 的 `begin_wal/end_wal` 范围做兜底展开。
+7. 已写入或更新 `database_log_archives`：
+   - `file_name`
+   - `storage_uri=barman://<server>/wal/<segment>`
+   - `archive_type=wal`
+   - `pg_system_identifier`
+   - `timeline_id`
+   - `wal_segment_size`
+   - `segment_no`
+   - `external_server_name`
+   - `timeline_history_uri`
+8. 已对同步结果做第一版链路判断：
+   - 同 timeline 内 segment 序号不连续时返回 `missing_wal`
+   - timeline 大于 1 但缺少对应 `.history` 时返回 `timeline_gap`
+   - 异常时把归档流标记为 `degraded`
+9. 前端 Barman Server 页签已增加“同步WAL”操作；日志归档列表已展示 WAL timeline 和 segment 序号。
+
+本阶段边界：
+
+1. P3.3 只同步 Barman catalog 元数据，不直接复制 WAL 文件。
+2. `list-files` 不可用时的 `begin_wal/end_wal` 兜底范围只能证明“备份元数据要求的 WAL 范围”，不能证明对象文件真实存在。
+3. 精确 target time / target LSN 覆盖校验仍归入 P3.5。
+4. Barman WAL streaming / receive-wal 进程治理仍放在后续阶段。
+
 实现内容：
 
 1. 自动创建或绑定 `database_log_archive_streams`：
@@ -3841,6 +3884,43 @@ WAL 状态页面：
 ##### P3.4：Barman backup 触发
 
 目标：OpsHub 能触发 PostgreSQL cluster 级 Barman 物理备份。
+
+当前落地状态（2026-04-29）：
+
+1. 已新增 `barman_backup` Runner job 类型和白名单命令。
+2. 已新增接口：
+   - `POST /api/v1/databases/barman-servers/:id/backup`
+3. 已通过 SSH Runner 执行受控脚本：
+   - `barman backup <server>`
+   - `barman list-backup/list-backups <server>` 获取最新 backup ID
+   - `barman -f json show-backup <server> <backup_id>`
+   - `barman check-backup <server> <backup_id>` 作为附加校验输出采集
+4. 备份触发时会先创建 `database_backup_records` 排队记录，状态为 `queued/running`，完成后用 `show-backup` metadata 更新为 Barman catalog 记录。
+5. 已写入：
+   - `backup_method=physical`
+   - `backup_engine=barman`
+   - `backup_scope=cluster`
+   - `external_backup_id=<barman backup id>`
+   - `external_server_name=<barman server name>`
+   - `storage_uri=barman://<server>/<backup_id>`
+   - `pg_system_identifier`
+   - `timeline_id`
+   - `start_lsn/end_lsn`
+   - `wal_start/wal_end`
+6. Barman backup 成功后等价完成一次对应 backup record 的 catalog 同步；后续仍可手动执行完整 catalog sync 做 reconciliation。
+7. 备份任务已支持 PostgreSQL + `physical` + `barman`：
+   - 后端校验 PostgreSQL 物理备份必须 `backup_scope=cluster`
+   - `scope_config` 必须提供 `{"barmanServerId": 1}`
+   - 手动/调度触发都会下发 `barman_backup` Runner job
+8. 前端备份任务弹窗已允许 PostgreSQL 选择物理备份，并固定引擎为 Barman、范围为 cluster；Barman Server 页签已增加“备份”操作。
+9. 失败时会记录 Runner job、备份记录、任务状态和备份审计。
+
+本阶段边界：
+
+1. Barman backup 仍依赖 Runner 主机已正确安装并配置 Barman。
+2. 不在 backend 容器里执行 Barman。
+3. 不自动执行 PostgreSQL restore；恢复到隔离目录和隔离实例仍属于 P3.6/P3.7。
+4. 不把 Barman backup 产物复制到 OpsHub 本地存储，OpsHub 记录 Barman catalog URI 和元数据。
 
 实现内容：
 

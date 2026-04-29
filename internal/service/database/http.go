@@ -1080,6 +1080,56 @@ func (s *Service) SyncBarmanCatalog(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) SyncBarmanWAL(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Barman Server ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBarmanServerSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "WAL 同步失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.SyncBarmanWAL(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "WAL 同步失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) BackupBarmanServer(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Barman Server ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBarmanServerSourceInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "备份触发失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.BackupBarmanServer(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "备份触发失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) ListLogArchiveStreams(c *gin.Context) {
 	var req dbbiz.DatabaseLogArchiveStreamListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {

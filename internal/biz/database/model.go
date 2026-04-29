@@ -163,6 +163,8 @@ const (
 	DatabaseRunnerJobTypeRestoreValidate             = "restore_validate"
 	DatabaseRunnerJobTypeBarmanCheck                 = "barman_check"
 	DatabaseRunnerJobTypeBarmanCatalogSync           = "barman_catalog_sync"
+	DatabaseRunnerJobTypeBarmanWALSync               = "barman_wal_sync"
+	DatabaseRunnerJobTypeBarmanBackup                = "barman_backup"
 	DatabaseRunnerJobStatusQueued                    = "queued"
 	DatabaseRunnerJobStatusRunning                   = "running"
 	DatabaseRunnerJobStatusSuccess                   = "success"
@@ -175,6 +177,8 @@ const (
 	DatabaseRunnerAllowedCommandPhysicalRestore      = "mysql_physical_restore"
 	DatabaseRunnerAllowedCommandBarmanCheck          = "barman_check"
 	DatabaseRunnerAllowedCommandBarmanCatalogSync    = "barman_catalog_sync"
+	DatabaseRunnerAllowedCommandBarmanWALSync        = "barman_wal_sync"
+	DatabaseRunnerAllowedCommandBarmanBackup         = "barman_backup"
 
 	DatabaseBarmanServerStatusPending  = "pending"
 	DatabaseBarmanServerStatusHealthy  = "healthy"
@@ -664,6 +668,8 @@ type DatabaseLogArchive struct {
 	NextFileName       string     `gorm:"column:next_file_name;type:varchar(255);comment:下一个binlog文件" json:"nextFileName"`
 	PGSystemIdentifier string     `gorm:"column:pg_system_identifier;type:varchar(120);index;comment:PostgreSQL system identifier" json:"pgSystemIdentifier"`
 	TimelineID         string     `gorm:"column:timeline_id;type:varchar(60);comment:timeline" json:"timelineId"`
+	WALSegmentSize     int64      `gorm:"column:wal_segment_size;type:bigint;default:0;comment:WAL segment size" json:"walSegmentSize"`
+	ExternalServerName string     `gorm:"column:external_server_name;type:varchar(120);index;comment:外部归档server名称" json:"externalServerName"`
 	StartLSN           string     `gorm:"column:start_lsn;type:varchar(120);comment:起始LSN" json:"startLsn"`
 	EndLSN             string     `gorm:"column:end_lsn;type:varchar(120);comment:结束LSN" json:"endLsn"`
 	SegmentNo          string     `gorm:"column:segment_no;type:varchar(120);comment:segment序号" json:"segmentNo"`

@@ -119,9 +119,23 @@ func (r *logArchiveRepo) Create(ctx context.Context, item *dbbiz.DatabaseLogArch
 	return r.db.WithContext(ctx).Create(item).Error
 }
 
+func (r *logArchiveRepo) Update(ctx context.Context, item *dbbiz.DatabaseLogArchive) error {
+	return r.db.WithContext(ctx).Save(item).Error
+}
+
 func (r *logArchiveRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseLogArchive, error) {
 	var item dbbiz.DatabaseLogArchive
 	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *logArchiveRepo) GetByStreamFile(ctx context.Context, streamID uint, fileName string) (*dbbiz.DatabaseLogArchive, error) {
+	var item dbbiz.DatabaseLogArchive
+	if err := r.db.WithContext(ctx).
+		Where("stream_id = ? AND file_name = ?", streamID, strings.TrimSpace(fileName)).
+		First(&item).Error; err != nil {
 		return nil, err
 	}
 	return &item, nil

@@ -3,6 +3,7 @@ package database
 import (
 	"encoding/base64"
 	"testing"
+	"time"
 )
 
 func TestParseBarmanServerMetadata(t *testing.T) {
@@ -95,5 +96,96 @@ func TestParseBarmanShowOutputs(t *testing.T) {
 	}
 	if outputs[0].BackupID != "20260429T010203" || outputs[0].ExitCode != 0 || outputs[0].ShowJSON != showJSON {
 		t.Fatalf("unexpected output: %+v", outputs[0])
+	}
+}
+
+func TestCollectBarmanWALCatalogRecordsUsesListFilesForGapDetection(t *testing.T) {
+	showJSON := `{
+		"pg-main": {
+			"backup_id": "20260429T010203",
+			"status": "DONE",
+			"begin_time": "2026-04-29 01:02:03",
+			"end_time": "2026-04-29 01:12:03",
+			"system_identifier": "7392211849478099211",
+			"begin_wal": "000000010000000000000001",
+			"end_wal": "000000010000000000000003",
+			"begin_lsn": "0/1000000",
+			"end_lsn": "0/3000000"
+		}
+	}`
+	filesOutput := "000000010000000000000001\n000000010000000000000003\n"
+	stdout := "OPSHUB_BARMAN_SHOW_BACKUP=20260429T010203|0|" +
+		base64.StdEncoding.EncodeToString([]byte(showJSON)) + "|\n" +
+		"OPSHUB_BARMAN_LIST_FILES=20260429T010203|0|" +
+		base64.StdEncoding.EncodeToString([]byte(filesOutput)) + "|\n"
+	records := collectBarmanWALCatalogRecords(&DatabaseBarmanServer{
+		BarmanServerName:   "pg-main",
+		PGSystemIdentifier: "7392211849478099211",
+		WALSegmentSize:     16777216,
+	}, stdout)
+	if len(records) != 2 {
+		t.Fatalf("expected list-files records without fallback fill, got %d: %+v", len(records), records)
+	}
+	status, _ := classifyBarmanWALCatalog(records)
+	if status != DatabaseLogChainStatusMissingWAL {
+		t.Fatalf("expected missing_wal, got %s", status)
+	}
+}
+
+func TestCollectBarmanWALCatalogRecordsFallsBackToShowBackupRange(t *testing.T) {
+	showJSON := `{
+		"pg-main": {
+			"backup_id": "20260429T010203",
+			"status": "DONE",
+			"begin_time": "2026-04-29 01:02:03",
+			"end_time": "2026-04-29 01:12:03",
+			"begin_wal": "000000010000000000000001",
+			"end_wal": "000000010000000000000003"
+		}
+	}`
+	stdout := "OPSHUB_BARMAN_SHOW_BACKUP=20260429T010203|0|" +
+		base64.StdEncoding.EncodeToString([]byte(showJSON)) + "|\n" +
+		"OPSHUB_BARMAN_LIST_FILES=20260429T010203|1||" +
+		base64.StdEncoding.EncodeToString([]byte("list-files unsupported")) + "\n"
+	records := collectBarmanWALCatalogRecords(&DatabaseBarmanServer{BarmanServerName: "pg-main", WALSegmentSize: 16777216}, stdout)
+	if len(records) != 3 {
+		t.Fatalf("expected fallback range records, got %d: %+v", len(records), records)
+	}
+	status, _ := classifyBarmanWALCatalog(records)
+	if status != DatabaseLogChainStatusComplete {
+		t.Fatalf("expected complete, got %s", status)
+	}
+}
+
+func TestClassifyBarmanWALCatalogTimelineHistoryGap(t *testing.T) {
+	records := []barmanWALCatalogRecord{{
+		FileName:   "000000030000000000000001",
+		TimelineID: "00000003",
+		SegmentNo:  "1",
+	}}
+	status, timelineStatus := classifyBarmanWALCatalog(records)
+	if status != DatabaseLogChainStatusComplete || timelineStatus != DatabaseLogChainStatusTimelineGap {
+		t.Fatalf("unexpected status: %s/%s", status, timelineStatus)
+	}
+}
+
+func TestParseBarmanBackupRunnerResult(t *testing.T) {
+	showJSON := `{"pg-main":{"backup_id":"20260429T010203","status":"DONE"}}`
+	stdout := "OPSHUB_BARMAN_BACKUP_EXIT=0\n" +
+		"OPSHUB_BARMAN_BACKUP_ID=20260429T010203\n" +
+		"OPSHUB_BARMAN_SHOW_BACKUP=20260429T010203|0|" +
+		base64.StdEncoding.EncodeToString([]byte(showJSON)) + "|\n"
+	result := parseBarmanBackupRunnerResult(
+		&DatabaseBarmanServer{BarmanServerName: "pg-main"},
+		&DatabaseRunnerHost{Host: "runner", Port: 22},
+		stdout,
+		"",
+		0,
+		nil,
+		time.Now(),
+		time.Now(),
+	)
+	if result.BackupExitCode != 0 || result.BackupID != "20260429T010203" || result.ShowJSON != showJSON {
+		t.Fatalf("unexpected result: %+v", result)
 	}
 }

@@ -646,6 +646,10 @@ func RunnerJobTypeText(value string) string {
 		return "Barman 检查"
 	case DatabaseRunnerJobTypeBarmanCatalogSync:
 		return "Barman Catalog 同步"
+	case DatabaseRunnerJobTypeBarmanWALSync:
+		return "Barman WAL 同步"
+	case DatabaseRunnerJobTypeBarmanBackup:
+		return "Barman 备份"
 	default:
 		return "Runner 探测"
 	}

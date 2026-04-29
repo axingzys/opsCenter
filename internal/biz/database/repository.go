@@ -119,7 +119,9 @@ type LogArchiveStreamRepo interface {
 
 type LogArchiveRepo interface {
 	Create(ctx context.Context, item *DatabaseLogArchive) error
+	Update(ctx context.Context, item *DatabaseLogArchive) error
 	GetByID(ctx context.Context, id uint) (*DatabaseLogArchive, error)
+	GetByStreamFile(ctx context.Context, streamID uint, fileName string) (*DatabaseLogArchive, error)
 	List(ctx context.Context, req *DatabaseLogArchiveListRequest) ([]*DatabaseLogArchive, int64, error)
 	ListCoveringTimeRange(ctx context.Context, instanceID uint, archiveType string, startTime, endTime time.Time) ([]*DatabaseLogArchive, error)
 }

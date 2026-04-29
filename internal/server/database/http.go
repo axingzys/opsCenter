@@ -317,6 +317,8 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.DELETE("/barman-servers/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBarmanServer)
 		databases.POST("/barman-servers/:id/check", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.CheckBarmanServer)
 		databases.POST("/barman-servers/:id/sync-catalog", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.SyncBarmanCatalog)
+		databases.POST("/barman-servers/:id/sync-wal", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.SyncBarmanWAL)
+		databases.POST("/barman-servers/:id/backup", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.BackupBarmanServer)
 		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
 		databases.POST("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionRun), s.service.GenerateInspectionReport)
 		databases.GET("/inspection-reports/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.GetInspectionReport)

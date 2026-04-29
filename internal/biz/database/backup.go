@@ -153,6 +153,9 @@ func (uc *UseCase) DeleteBackupTask(ctx context.Context, id uint) error {
 }
 
 func (uc *UseCase) RunBackupTask(ctx context.Context, id uint, operator QueryOperator) (*DatabaseBackupRunVO, error) {
+	if vo, handled, err := uc.runBarmanBackupTaskIfNeeded(ctx, id, operator, DatabaseBackupTriggerManual); handled || err != nil {
+		return vo, err
+	}
 	run, err := uc.prepareBackupTaskRun(ctx, id, operator, DatabaseBackupTriggerManual)
 	if err != nil {
 		return nil, err
@@ -382,21 +385,44 @@ func (uc *UseCase) validateBackupTaskRequest(ctx context.Context, req *DatabaseB
 		return fmt.Errorf("当前不支持备份类型 %s", backupType)
 	}
 	if backupMethod == DatabaseBackupMethodPhysical {
-		if normalizeDBType(instance.DBType) != DBTypeMySQL && normalizeDBType(instance.DBType) != DBTypeMariaDB {
+		switch normalizeDBType(instance.DBType) {
+		case DBTypeMySQL, DBTypeMariaDB:
+			if scope := normalizeBackupScope(req.BackupScope); scope != "instance" {
+				return fmt.Errorf("MySQL/MariaDB 物理备份必须是 instance 级")
+			}
+			if uc.credentialResolver == nil {
+				return fmt.Errorf("连接凭据解析器未配置")
+			}
+			credential, err := uc.credentialResolver(ctx, instance.CredentialID)
+			if err != nil {
+				return fmt.Errorf("凭据不存在")
+			}
+			if _, err := validateMySQLPhysicalBackupCompatibility(ctx, instance, credential, req.BackupEngine); err != nil {
+				return err
+			}
+			if _, err := parsePhysicalBackupScopeConfig(req.ScopeConfig); err != nil {
+				return err
+			}
+		case DBTypePostgreSQL:
+			if strings.TrimSpace(req.BackupEngine) != "barman" {
+				return fmt.Errorf("PostgreSQL 物理备份第一版仅支持 Barman")
+			}
+			if normalizeBackupScope(req.BackupScope) != "cluster" {
+				return fmt.Errorf("PostgreSQL 物理备份必须是 cluster 级")
+			}
+			serverID, err := barmanServerIDFromBackupTask(&DatabaseBackupTask{ScopeConfig: req.ScopeConfig})
+			if err != nil {
+				return err
+			}
+			if uc.barmanServerRepo == nil {
+				return fmt.Errorf("Barman Server 仓库未配置")
+			}
+			server, err := uc.barmanServerRepo.GetByID(ctx, serverID)
+			if err != nil || server == nil || server.SourceInstanceID != req.InstanceID {
+				return fmt.Errorf("Barman Server 不存在或不属于当前 PostgreSQL 实例")
+			}
+		default:
 			return fmt.Errorf("%s 暂不支持物理备份任务", DBTypeText(instance.DBType))
-		}
-		if uc.credentialResolver == nil {
-			return fmt.Errorf("连接凭据解析器未配置")
-		}
-		credential, err := uc.credentialResolver(ctx, instance.CredentialID)
-		if err != nil {
-			return fmt.Errorf("凭据不存在")
-		}
-		if _, err := validateMySQLPhysicalBackupCompatibility(ctx, instance, credential, req.BackupEngine); err != nil {
-			return err
-		}
-		if _, err := parsePhysicalBackupScopeConfig(req.ScopeConfig); err != nil {
-			return err
 		}
 	} else if backupMethod != DatabaseBackupMethodLogical {
 		return fmt.Errorf("外部备份任务执行暂不支持，请使用外部备份记录登记")
@@ -847,7 +873,7 @@ func supportsBackupType(dbType, backupType string) bool {
 	backupType = normalizeBackupType(backupType)
 	switch normalizeDBType(dbType) {
 	case DBTypePostgreSQL:
-		return backupType == DatabaseBackupTypeLogical || backupType == DatabaseBackupTypeLogicalCustom
+		return backupType == DatabaseBackupTypeLogical || backupType == DatabaseBackupTypeLogicalCustom || backupType == DatabaseBackupTypePhysical
 	case DBTypeMySQL, DBTypeMariaDB:
 		return backupType == DatabaseBackupTypeLogical || backupType == DatabaseBackupTypePhysical
 	case DBTypeRedis:
@@ -874,6 +900,12 @@ func normalizeBackupTypeForMethod(backupType, method string) string {
 
 func normalizeBackupEngineForInstance(value, method string, instance *DatabaseInstance) string {
 	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
+		if instance != nil && normalizeDBType(instance.DBType) == DBTypePostgreSQL {
+			if strings.TrimSpace(value) == "" {
+				return "barman"
+			}
+			return trimText(strings.TrimSpace(value), 60)
+		}
 		dbType := ""
 		version := ""
 		if instance != nil {
@@ -887,6 +919,9 @@ func normalizeBackupEngineForInstance(value, method string, instance *DatabaseIn
 
 func normalizeBackupScopeForMethod(value, method string) string {
 	if normalizeBackupMethod(method) == DatabaseBackupMethodPhysical {
+		if normalizeBackupScope(value) == "cluster" {
+			return "cluster"
+		}
 		return "instance"
 	}
 	return normalizeBackupScope(value)

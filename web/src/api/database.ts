@@ -420,6 +420,14 @@ export interface DatabaseLogArchiveResult {
   status: string
   statusText: string
   archivedAt: string
+  pgSystemIdentifier?: string
+  timelineId?: string
+  walSegmentSize?: number
+  externalServerName?: string
+  startLsn?: string
+  endLsn?: string
+  segmentNo?: string
+  timelineHistoryUri?: string
   createdAt: string
   updatedAt: string
 }
@@ -1197,6 +1205,12 @@ export const checkDatabaseBarmanServer = (id: number) =>
 
 export const syncDatabaseBarmanCatalog = (id: number) =>
   request.post(`/api/v1/databases/barman-servers/${id}/sync-catalog`)
+
+export const syncDatabaseBarmanWAL = (id: number) =>
+  request.post(`/api/v1/databases/barman-servers/${id}/sync-wal`)
+
+export const backupDatabaseBarmanServer = (id: number) =>
+  request.post(`/api/v1/databases/barman-servers/${id}/backup`)
 
 export const listDatabaseInspectionReports = (params?: {
   page?: number

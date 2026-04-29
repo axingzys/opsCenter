@@ -1820,6 +1820,8 @@
                       <el-option label="物理恢复" value="physical_restore" />
                       <el-option label="Barman 检查" value="barman_check" />
                       <el-option label="Barman Catalog 同步" value="barman_catalog_sync" />
+                      <el-option label="Barman WAL 同步" value="barman_wal_sync" />
+                      <el-option label="Barman 备份" value="barman_backup" />
                     </el-select>
                     <el-select v-model="runnerJobQuery.status" placeholder="状态" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="排队中" value="queued" />
@@ -1952,17 +1954,24 @@
                   <el-table-column label="最近检查" width="170">
                     <template #default="{ row }">{{ row.lastCheckAt || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="最近同步" width="170">
-                    <template #default="{ row }">{{ row.lastCatalogSyncAt || '-' }}</template>
+                  <el-table-column label="最近同步" width="190">
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <span>Catalog {{ row.lastCatalogSyncAt || '-' }}</span>
+                        <span>WAL {{ row.lastWalSyncAt || '-' }}</span>
+                      </div>
+                    </template>
                   </el-table-column>
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="260" align="center" fixed="right">
+                  <el-table-column label="操作" width="360" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="primary" @click="openBarmanServerDialog(row)">编辑</el-button>
                       <el-button link type="success" :loading="barmanCheckingId === row.id" @click="handleCheckBarmanServer(row)">检查</el-button>
                       <el-button link type="warning" :loading="barmanCatalogSyncingId === row.id" @click="handleSyncBarmanCatalog(row)">同步</el-button>
+                      <el-button link type="warning" :loading="barmanWalSyncingId === row.id" @click="handleSyncBarmanWAL(row)">同步WAL</el-button>
+                      <el-button link type="danger" :loading="barmanBackingUpId === row.id" @click="handleBackupBarmanServer(row)">备份</el-button>
                       <el-button link type="danger" @click="handleDeleteBarmanServer(row)">删除</el-button>
                     </template>
                   </el-table-column>
@@ -2157,6 +2166,14 @@
                   </el-table-column>
                   <el-table-column label="文件" min-width="200" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.fileName || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="PG WAL" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <span v-if="row.archiveType === 'wal'">
+                        TLI {{ row.timelineId || '-' }} / #{{ row.segmentNo || '-' }}
+                      </span>
+                      <span v-else>-</span>
+                    </template>
                   </el-table-column>
                   <el-table-column label="大小" width="110" align="right">
                     <template #default="{ row }">{{ row.fileSize ? formatBytes(row.fileSize) : '-' }}</template>
@@ -3202,7 +3219,7 @@
       @close="resetBackupTaskForm"
     >
       <el-alert
-        title="MySQL / MariaDB 支持逻辑备份和物理备份任务；物理备份会按数据库版本校验 XtraBackup / mariadb-backup 兼容性。PostgreSQL / Redis 当前仍按逻辑备份配置。"
+        title="MySQL / MariaDB 物理备份使用 XtraBackup / mariadb-backup；PostgreSQL 物理备份第一版仅支持 Barman，且固定为 cluster 级，需要在范围配置中填写 barmanServerId。"
         type="warning"
         show-icon
         :closable="false"
@@ -3292,6 +3309,7 @@
             placeholder='全量可留空；增量示例：{"incrementalBaseDir":"/backup/mysql/base_20260428","extraArgs":["--parallel=4"]}'
           />
           <div class="field-tip">物理备份按实例/datadir 级别执行；extraArgs 不允许包含 password/secret。增量备份必须提供上一备份目录 incrementalBaseDir。</div>
+          <div v-if="selectedBackupTaskDbType === 'postgresql'" class="field-tip">PostgreSQL 物理备份是 cluster 级。示例：{"barmanServerId":1}，后续手动/调度触发会下发受控 barman backup Runner 任务。</div>
         </el-form-item>
         <el-form-item label="执行计划">
           <el-input
@@ -4255,8 +4273,8 @@
       @close="resetBarmanServerForm"
     >
       <el-alert
-        title="P3.1/P3.2 只纳管 Runner 主机上已有的 Barman 配置，并通过白名单 barman check / list-backup / show-backup 同步 catalog；物理备份触发、WAL 状态采集和隔离恢复在后续 P3 阶段继续做。"
-        type="warning"
+        title="Barman Server 通过 Runner 主机上的既有 Barman 配置执行受控命令：check、catalog 同步、WAL 同步和 cluster 级 barman backup；隔离恢复仍在后续 P3 阶段继续做。"
+        type="info"
         show-icon
         :closable="false"
         class="backup-dialog-alert"
@@ -4592,6 +4610,7 @@ import {
 import { getCredentials } from '@/api/host'
 import {
   DATABASE_PERMISSION,
+  backupDatabaseBarmanServer,
   checkDatabaseBarmanServer,
   checkDatabaseStorageProfilePosture,
   cleanupDatabaseRestoreJob,
@@ -4662,6 +4681,7 @@ import {
   startDatabaseLogArchiveStream,
   stopDatabaseLogArchiveStream,
   syncDatabaseBarmanCatalog,
+  syncDatabaseBarmanWAL,
   syncDatabaseMetadata,
   testDatabaseInstance,
   testDatabaseRunnerHost,
@@ -4973,6 +4993,8 @@ const barmanServers = ref<DatabaseBarmanServerResult[]>([])
 const barmanServerTotal = ref(0)
 const barmanCheckingId = ref(0)
 const barmanCatalogSyncingId = ref(0)
+const barmanWalSyncingId = ref(0)
+const barmanBackingUpId = ref(0)
 const backupPitrTab = ref('streams')
 const restoreJobLoading = ref(false)
 const restoreSubmitting = ref(false)
@@ -5700,7 +5722,7 @@ const availableBackupMethodOptions = computed(() => {
   const options = [
     { label: '逻辑备份', value: 'logical' }
   ]
-  if (isMySQLFamilyBackupTask.value) {
+  if (isMySQLFamilyBackupTask.value || selectedBackupTaskDbType.value === 'postgresql') {
     options.push({ label: '物理备份', value: 'physical' })
   }
   return options
@@ -5736,6 +5758,7 @@ const availableBackupLevelOptions = computed(() => {
 })
 
 const defaultPhysicalBackupEngine = () => {
+  if (selectedBackupTaskDbType.value === 'postgresql') return 'barman'
   if (selectedBackupTaskDbType.value === 'mariadb') return 'mariadb_backup'
   const version = String(selectedBackupTaskInstance.value?.version || '')
   const match = version.match(/(\d+)\.(\d+)/)
@@ -5747,6 +5770,11 @@ const defaultPhysicalBackupEngine = () => {
 }
 
 const availablePhysicalBackupEngineOptions = computed(() => {
+  if (selectedBackupTaskDbType.value === 'postgresql') {
+    return [
+      { label: 'Barman（cluster 级）', value: 'barman' }
+    ]
+  }
   if (selectedBackupTaskDbType.value === 'mariadb') {
     return [
       { label: 'mariadb-backup', value: 'mariadb_backup' }
@@ -5762,6 +5790,9 @@ const availablePhysicalBackupEngineOptions = computed(() => {
 const backupCapacityTipTitle = computed(() => {
   const sizeText = selectedBackupTaskInstance.value?.capacitySizeText || '-'
   if (isPhysicalBackupTaskForm.value) {
+    if (selectedBackupTaskDbType.value === 'postgresql') {
+      return `当前实例容量 ${sizeText}；PostgreSQL 物理备份固定为 cluster 级，PITR 还需要配套 WAL 归档和恢复演练。`
+    }
     return `当前实例容量 ${sizeText}；物理备份适合作为大库主链路，PITR 还需要配套 binlog 归档和恢复演练。`
   }
   return `当前实例容量 ${sizeText}，逻辑全量备份只适合作为小库、临时导出或演练能力。`
@@ -5778,7 +5809,7 @@ const normalizeBackupTaskFormBackupType = () => {
   }
   if (isPhysicalBackupTaskForm.value) {
     backupTaskForm.backupType = 'physical'
-    backupTaskForm.backupScope = 'instance'
+    backupTaskForm.backupScope = selectedBackupTaskDbType.value === 'postgresql' ? 'cluster' : 'instance'
     backupTaskForm.compression = backupTaskForm.compression || 'gzip'
     if (!availableBackupLevelOptions.value.some(item => item.value === backupTaskForm.backupLevel)) {
       backupTaskForm.backupLevel = 'full'
@@ -7635,6 +7666,48 @@ const handleSyncBarmanCatalog = async (row: DatabaseBarmanServerResult) => {
     }, 3000)
   } finally {
     barmanCatalogSyncingId.value = 0
+  }
+}
+
+const handleSyncBarmanWAL = async (row: DatabaseBarmanServerResult) => {
+  barmanWalSyncingId.value = row.id
+  try {
+    await syncDatabaseBarmanWAL(row.id)
+    ElMessage.success('Barman WAL 同步任务已下发')
+    await Promise.all([loadBarmanServers(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives()])
+    window.setTimeout(() => {
+      loadBarmanServers()
+      loadRunnerJobs()
+      loadLogArchiveStreams()
+      loadLogArchives()
+    }, 3000)
+  } finally {
+    barmanWalSyncingId.value = 0
+  }
+}
+
+const handleBackupBarmanServer = async (row: DatabaseBarmanServerResult) => {
+  await ElMessageBox.confirm(
+    `确认通过 Runner 触发 Barman cluster 级物理备份「${row.barmanServerName}」？该动作会在 Barman server 上执行受控 barman backup。`,
+    '触发 Barman 备份',
+    {
+      confirmButtonText: '触发备份',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }
+  )
+  barmanBackingUpId.value = row.id
+  try {
+    await backupDatabaseBarmanServer(row.id)
+    ElMessage.success('Barman 备份任务已下发')
+    await Promise.all([loadBarmanServers(), loadRunnerJobs(), loadBackupRecords()])
+    window.setTimeout(() => {
+      loadBarmanServers()
+      loadRunnerJobs()
+      loadBackupRecords()
+    }, 5000)
+  } finally {
+    barmanBackingUpId.value = 0
   }
 }
 
