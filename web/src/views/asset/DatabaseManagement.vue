@@ -1569,9 +1569,9 @@
                     v-if="row.status === 'success' && row.fileName"
                     link
                     type="warning"
-                    @click="openRestoreDialog(row)"
+                    @click="openBackupRecordDrill(row)"
                   >
-                    演练
+                    {{ isPgBaseBackupFullRecord(row) ? 'PITR演练' : '演练' }}
                   </el-button>
                   <span v-if="row.status !== 'success' || !row.fileName">-</span>
                 </template>
@@ -3991,7 +3991,7 @@
       @close="resetRestorePlanForm"
     >
       <el-alert
-        title="恢复计划会检查备份链、日志链、存储对象和工具兼容状态。PostgreSQL 支持 Barman 的 target time / target LSN 预校验。"
+        title="恢复计划会检查备份链、日志链、存储对象和工具兼容状态。PostgreSQL 支持 Barman / pg_basebackup 的 target time / target LSN 预校验；从 pg_basebackup full 记录进入时会固定 base。"
         type="warning"
         show-icon
         :closable="false"
@@ -4002,6 +4002,10 @@
           <el-select v-model="restorePlanForm.sourceInstanceId" placeholder="请选择来源实例" filterable style="width: 100%;">
             <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="`${item.name}（${item.dbTypeText || item.dbType}）`" :value="item.id" />
           </el-select>
+        </el-form-item>
+        <el-form-item v-if="restorePlanForm.baseRecordId" label="指定 Base">
+          <el-input :model-value="restorePlanBaseRecordLabel" disabled />
+          <div class="field-tip">从 pg_basebackup full 备份记录发起时会固定该 base；后端仍会重新校验 WAL、timeline 和增量链。</div>
         </el-form-item>
         <el-form-item label="目标实例">
           <el-select v-model="restorePlanForm.targetInstanceId" placeholder="可选，建议选择隔离恢复库" clearable filterable style="width: 100%;">
@@ -5013,6 +5017,7 @@ const restorePlanTotal = ref(0)
 const restorePlanDialogVisible = ref(false)
 const restorePlanSubmitting = ref(false)
 const restorePlanFormRef = ref<FormInstance>()
+const restorePlanBaseRecordLabel = ref('')
 const restorePlanRunDialogVisible = ref(false)
 const restorePlanRunSubmitting = ref(false)
 const restorePlanRunFormRef = ref<FormInstance>()
@@ -5407,6 +5412,7 @@ const runLogArchiveCatchUpForm = reactive<DatabaseRunLogArchiveCatchUpPayload>({
 const restorePlanForm = reactive<DatabaseRestorePlanPayload>({
   sourceInstanceId: 0,
   targetInstanceId: undefined,
+  baseRecordId: undefined,
   restoreMode: 'isolated_restore',
   restoreTargetType: 'time',
   restoreTargetValue: '',
@@ -7023,11 +7029,13 @@ const resetRunLogArchiveCatchUpForm = () => {
 const resetRestorePlanForm = () => {
   restorePlanForm.sourceInstanceId = pitrBackupInstances.value[0]?.id || 0
   restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== restorePlanForm.sourceInstanceId)?.id
+  restorePlanForm.baseRecordId = undefined
   restorePlanForm.restoreMode = 'isolated_restore'
   restorePlanForm.restoreTargetType = 'time'
   restorePlanForm.restoreTargetValue = formatDateTimeInput()
   restorePlanForm.targetTimelineId = ''
   restorePlanForm.restoreTargetInclusive = true
+  restorePlanBaseRecordLabel.value = ''
   restorePlanFormRef.value?.clearValidate()
 }
 
@@ -7474,6 +7482,35 @@ const openRestorePlanDialog = () => {
   restorePlanDialogVisible.value = true
 }
 
+const isPgBaseBackupFullRecord = (row?: DatabaseBackupRecordResult) => {
+  return row?.status === 'success' &&
+    row.backupMethod === 'physical' &&
+    row.backupLevel === 'full' &&
+    row.backupEngine === 'pg_basebackup'
+}
+
+const openRestorePlanDialogFromBackupRecord = (row: DatabaseBackupRecordResult) => {
+  resetRestorePlanForm()
+  restorePlanForm.sourceInstanceId = row.instanceId
+  restorePlanForm.baseRecordId = row.id
+  restorePlanForm.restoreMode = 'isolated_restore'
+  restorePlanForm.restoreTargetType = 'time'
+  restorePlanForm.restoreTargetValue = row.recoverableUntil || formatDateTimeInput()
+  restorePlanForm.targetTimelineId = ''
+  restorePlanForm.restoreTargetInclusive = true
+  restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== row.instanceId)?.id
+  restorePlanBaseRecordLabel.value = `#${row.id} ${row.fileName || row.externalBackupId || 'pg_basebackup full'}`
+  restorePlanDialogVisible.value = true
+}
+
+const openBackupRecordDrill = (row: DatabaseBackupRecordResult) => {
+  if (isPgBaseBackupFullRecord(row)) {
+    openRestorePlanDialogFromBackupRecord(row)
+    return
+  }
+  openRestoreDialog(row)
+}
+
 const submitRestorePlan = async () => {
   if (!restorePlanFormRef.value) return
   await restorePlanFormRef.value.validate()
@@ -7482,6 +7519,7 @@ const submitRestorePlan = async () => {
     const payload: DatabaseRestorePlanPayload = {
       ...restorePlanForm,
       targetInstanceId: restorePlanForm.targetInstanceId || undefined,
+      baseRecordId: restorePlanForm.baseRecordId || undefined,
       restoreMode: restorePlanForm.restoreMode || 'isolated_restore',
       restoreTargetType: restorePlanForm.restoreTargetType || 'time',
       restoreTargetInclusive: restorePlanForm.restoreTargetInclusive !== false

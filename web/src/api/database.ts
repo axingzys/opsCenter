@@ -521,6 +521,7 @@ export interface DatabaseRunLogArchiveCatchUpPayload {
 export interface DatabaseRestorePlanPayload {
   sourceInstanceId: number
   targetInstanceId?: number
+  baseRecordId?: number
   restoreMode?: string
   restoreTargetType?: string
   restoreTargetValue: string

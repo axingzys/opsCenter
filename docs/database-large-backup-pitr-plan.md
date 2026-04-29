@@ -4444,7 +4444,7 @@ P3.8.0 阶段未做边界：
 
 当前边界：
 
-1. P3.8.1/P3.8.2 只支持 OpsHub `pg_basebackup` full artifact 的自动恢复；原生 incremental 仍进入 P3.8.3。
+1. P3.8.1/P3.8.2 已支持 OpsHub `pg_basebackup` full artifact 的自动恢复；原生 incremental 由 P3.8.3 继续补齐。
 2. artifact 读取首版依赖 Runner 本地可读 `runner://` 路径；对象存储直接下载到 Runner staging 可在后续存储增强中补齐。
 3. 自动隔离恢复不会修改生产实例、不会切换业务连接、不会自动回填数据。
 4. `target_action=shutdown/promote` 会改变容器后续校验行为；长期默认建议仍使用 `pause` 做恢复证明。
@@ -4554,6 +4554,34 @@ P3.8.0 阶段未做边界：
    - 容器启动失败
    - 校验 SQL/断言失败
 4. 演练成功会更新 restore test 状态。
+
+2026-04-30 P3.8.3/P3.8.4 已落地：
+
+1. P3.8.3 增量链路校验：
+   - PostgreSQL `pg_basebackup` 恢复计划支持固定 base record。
+   - 计划生成会把 base 后续的同链路 incremental 纳入 `selected_backup_record_ids`。
+   - `pg_basebackup` incremental 链要求 `parent_record_id` 连续，且每个 incremental 记录必须具备 `backup_manifest_checksum` 或 `manifest_json`。
+   - 缺 parent、parent 不在已选链路、manifest 缺失时，计划会标记备份链不可用并给出明确原因。
+2. Runner 合成 synthetic full：
+   - `pg_basebackup_restore` Runner Job 会把 base 和 incrementals 恢复到隔离工作目录。
+   - 存在 incrementals 时先运行 `pg_combinebackup` 合成 synthetic full，再进入原 P3.8.2 WAL PITR 和隔离实例启动流程。
+   - Runner 缺少 `pg_combinebackup` 会返回 `tool_status=missing_tool`，不会继续启动 PostgreSQL。
+   - proof JSON 增加 `selectedBackupRecordIds`、`incrementalCount`、`combineBackupStatus`、`combineBackupVersion`、`syntheticFullPath`。
+3. P3.8.4 前端演练入口：
+   - 备份记录列表中 `physical + full + pg_basebackup + success` 记录显示为 `PITR演练`。
+   - 从该入口进入会打开 PITR 恢复计划弹窗并固定 `baseRecordId`。
+   - 后端仍会重新校验 base 归属、状态、目标时间、WAL、timeline 和增量链，不信任前端选择。
+   - 生成计划后可沿用 P3.8.2 的恢复执行弹窗选择 Runner、隔离实例参数和校验 SQL/断言。
+4. 记录回写：
+   - `pg_basebackup_restore` 执行完成后会更新 base backup record 的 `restore_tested_at`。
+   - 成功、失败都会写入 `restore_test_status`，避免演练失败被误看成“未演练”。
+
+当前边界：
+
+1. PostgreSQL 原生 incremental 备份执行入口仍不在 UI 开放；可先通过外部记录登记纳管 incremental artifact。
+2. synthetic full 第一版只作为恢复 Job 中间产物，不自动登记为新的长期 backup record。
+3. 对象存储 artifact 自动拉取到 Runner staging 仍留到后续存储增强；P3.8.3/P3.8.4 仍依赖 Runner 可读 artifact。
+4. 真实 PostgreSQL 环境的 full + incremental + WAL 长链路端到端演练归入 P3.10 总体验收。
 
 建议执行顺序：
 

@@ -19,6 +19,7 @@ type pgBaseBackupRestoreScriptInput struct {
 	RunnerHostID        uint
 	WorkRoot            string
 	Base                physicalRestoreArtifact
+	Incrementals        []physicalRestoreArtifact
 	Logs                []physicalRestoreArtifact
 	ContainerName       string
 	ContainerImage      string
@@ -37,38 +38,42 @@ type pgBaseBackupRestoreScriptInput struct {
 }
 
 type pgBaseBackupRestoreRunnerResult struct {
-	RestoreJobID       uint                              `json:"restoreJobId"`
-	RestorePlanID      uint                              `json:"restorePlanId"`
-	RunnerHostID       uint                              `json:"runnerHostId"`
-	RunnerID           string                            `json:"runnerId"`
-	WorkDir            string                            `json:"workDir"`
-	PreparedDatadir    string                            `json:"preparedDatadir"`
-	ContainerName      string                            `json:"containerName"`
-	ContainerImage     string                            `json:"containerImage"`
-	ListenHost         string                            `json:"listenHost"`
-	ListenPort         int                               `json:"listenPort"`
-	LogPath            string                            `json:"logPath"`
-	ProofPath          string                            `json:"proofPath"`
-	ArtifactURI        string                            `json:"artifactUri"`
-	TargetType         string                            `json:"targetType"`
-	TargetValue        string                            `json:"targetValue"`
-	TargetTimelineID   string                            `json:"targetTimelineId"`
-	TargetAction       string                            `json:"targetAction"`
-	StartInstance      bool                              `json:"startInstance"`
-	PGVersion          string                            `json:"pgVersion"`
-	ManifestChecksum   string                            `json:"manifestChecksum"`
-	VerifyBackupStatus string                            `json:"verifyBackupStatus"`
-	RecoverySummary    string                            `json:"recoverySummary"`
-	Steps              []physicalRestoreStep             `json:"steps"`
-	ValidationResults  []physicalRestoreValidationResult `json:"validationResults"`
-	ValidationStatus   string                            `json:"validationStatus"`
-	Stdout             string                            `json:"stdout"`
-	Stderr             string                            `json:"stderr"`
-	ExitCode           int                               `json:"exitCode"`
-	StartedAt          string                            `json:"startedAt"`
-	FinishedAt         string                            `json:"finishedAt"`
-	DurationMs         int64                             `json:"durationMs"`
-	Error              string                            `json:"error,omitempty"`
+	RestoreJobID         uint                              `json:"restoreJobId"`
+	RestorePlanID        uint                              `json:"restorePlanId"`
+	RunnerHostID         uint                              `json:"runnerHostId"`
+	RunnerID             string                            `json:"runnerId"`
+	WorkDir              string                            `json:"workDir"`
+	PreparedDatadir      string                            `json:"preparedDatadir"`
+	ContainerName        string                            `json:"containerName"`
+	ContainerImage       string                            `json:"containerImage"`
+	ListenHost           string                            `json:"listenHost"`
+	ListenPort           int                               `json:"listenPort"`
+	LogPath              string                            `json:"logPath"`
+	ProofPath            string                            `json:"proofPath"`
+	ArtifactURI          string                            `json:"artifactUri"`
+	TargetType           string                            `json:"targetType"`
+	TargetValue          string                            `json:"targetValue"`
+	TargetTimelineID     string                            `json:"targetTimelineId"`
+	TargetAction         string                            `json:"targetAction"`
+	StartInstance        bool                              `json:"startInstance"`
+	PGVersion            string                            `json:"pgVersion"`
+	ManifestChecksum     string                            `json:"manifestChecksum"`
+	IncrementalCount     int                               `json:"incrementalCount"`
+	CombineBackupStatus  string                            `json:"combineBackupStatus"`
+	CombineBackupVersion string                            `json:"combineBackupVersion"`
+	SyntheticFullPath    string                            `json:"syntheticFullPath"`
+	VerifyBackupStatus   string                            `json:"verifyBackupStatus"`
+	RecoverySummary      string                            `json:"recoverySummary"`
+	Steps                []physicalRestoreStep             `json:"steps"`
+	ValidationResults    []physicalRestoreValidationResult `json:"validationResults"`
+	ValidationStatus     string                            `json:"validationStatus"`
+	Stdout               string                            `json:"stdout"`
+	Stderr               string                            `json:"stderr"`
+	ExitCode             int                               `json:"exitCode"`
+	StartedAt            string                            `json:"startedAt"`
+	FinishedAt           string                            `json:"finishedAt"`
+	DurationMs           int64                             `json:"durationMs"`
+	Error                string                            `json:"error,omitempty"`
 }
 
 func (uc *UseCase) runPostgreSQLPgBaseBackupRestorePlan(ctx context.Context, plan *DatabaseRestorePlan, source *DatabaseInstance, base *DatabaseBackupRecord, req *DatabaseRestorePlanRunRequest, operator QueryOperator) (*DatabaseRestoreJobVO, error) {
@@ -108,6 +113,9 @@ func (uc *UseCase) runPostgreSQLPgBaseBackupRestorePlan(ctx context.Context, pla
 		return nil, fmt.Errorf("pg_basebackup artifact 属于 runnerHostId=%d，当前选择 Runner 为 %d", recheck.RunnerHostID, host.ID)
 	}
 	if _, err := restoreArtifactFromBackupRecord(base, host.ID, "base"); err != nil {
+		return nil, err
+	}
+	if _, err := uc.restoreBackupArtifacts(ctx, plan.SelectedBackupRecordIDs, host.ID, base.ID); err != nil {
 		return nil, err
 	}
 	startInstance := true
@@ -274,6 +282,9 @@ func (uc *UseCase) executePgBaseBackupRestoreJob(ctx context.Context, planID, re
 		runnerJob.ErrorMessage = trimText(runErr.Error(), 1000)
 	}
 	plan.RestoreStatus = restoreStatus
+	if runErr != nil && strings.Contains(strings.ToLower(runErr.Error()), "pg_combinebackup not found") {
+		plan.ToolStatus = DatabaseToolStatusMissingTool
+	}
 	plan.FinishedAt = &finished
 	plan.DurationMs = finished.Sub(started).Milliseconds()
 	plan.ProofJSON = proofJSON
@@ -281,11 +292,11 @@ func (uc *UseCase) executePgBaseBackupRestoreJob(ctx context.Context, planID, re
 	_ = uc.restoreJobRepo.Update(ctx, restoreJob)
 	_ = uc.runnerJobRepo.Update(ctx, runnerJob)
 	_ = uc.restorePlanRepo.Update(ctx, plan)
-	if status == DatabaseBackupStatusSuccess && restoreStatus == DatabaseRestoreStatusVerified && uc.backupRecordRepo != nil {
+	if uc.backupRecordRepo != nil {
 		if base, err := uc.backupRecordRepo.GetByID(ctx, restoreJob.BackupRecordID); err == nil && base != nil {
 			now := finished
 			base.RestoreTestedAt = &now
-			base.RestoreTestStatus = DatabaseBackupStatusSuccess
+			base.RestoreTestStatus = status
 			_ = uc.backupRecordRepo.Update(ctx, base)
 		}
 	}
@@ -327,6 +338,11 @@ func (uc *UseCase) runPgBaseBackupRestoreRunnerScript(ctx context.Context, plan 
 	if err != nil {
 		return result, 1, err
 	}
+	incrementals, err := uc.restoreBackupArtifacts(ctx, plan.SelectedBackupRecordIDs, restoreJob.RunnerHostID, base.ID)
+	if err != nil {
+		return result, 1, err
+	}
+	result.IncrementalCount = len(incrementals)
 	logs := []physicalRestoreArtifact{}
 	if startInstance {
 		logs, err = uc.restoreLogArtifacts(ctx, plan.SelectedLogArchiveIDs, restoreJob.RunnerHostID)
@@ -362,6 +378,7 @@ func (uc *UseCase) runPgBaseBackupRestoreRunnerScript(ctx context.Context, plan 
 		RunnerHostID:        restoreJob.RunnerHostID,
 		WorkRoot:            filepath.Dir(filepath.Dir(restoreJob.WorkDir)),
 		Base:                baseArtifact,
+		Incrementals:        incrementals,
 		Logs:                logs,
 		ContainerName:       restoreJob.ContainerName,
 		ContainerImage:      restoreJob.ContainerImage,
@@ -405,6 +422,7 @@ func (uc *UseCase) runPgBaseBackupRestoreRunnerScript(ctx context.Context, plan 
 	parsed.TargetTimelineID = firstNonEmpty(parsed.TargetTimelineID, targetTimelineID)
 	parsed.TargetAction = firstNonEmpty(parsed.TargetAction, targetAction)
 	parsed.StartInstance = startInstance
+	parsed.IncrementalCount = len(incrementals)
 	parsed.ValidationResults = attachRestoreValidationChecks(parsed.ValidationResults, validationChecks)
 	if startInstance && (parsed.ValidationStatus == "" || parsed.ValidationStatus == DatabasePlanValidationPending) {
 		parsed.ValidationStatus = validationStatusFromResults(parsed.ValidationResults)
@@ -421,6 +439,11 @@ func buildPgBaseBackupRestoreScript(input pgBaseBackupRestoreScriptInput) (strin
 	}
 	if err := validateRestoreArtifactForScript(input.Base); err != nil {
 		return "", err
+	}
+	for _, item := range input.Incrementals {
+		if err := validateRestoreArtifactForScript(item); err != nil {
+			return "", err
+		}
 	}
 	for _, item := range input.Logs {
 		if err := validateRestoreArtifactForScript(item); err != nil {
@@ -460,6 +483,8 @@ func buildPgBaseBackupRestoreScript(input pgBaseBackupRestoreScriptInput) (strin
 		"WORK_DIR=\"$WORK_ROOT/restore/job-$RESTORE_JOB_ID\"",
 		"ARTIFACT_DIR=\"$WORK_DIR/artifacts\"",
 		"WAL_DIR=\"$WORK_DIR/wal\"",
+		"COMBINE_DIR=\"$WORK_DIR/combine\"",
+		"COMBINE_BASE_DIR=\"$COMBINE_DIR/base\"",
 		"PGDATA_DIR=\"$WORK_DIR/pgdata\"",
 		"LOG_FILE=\"$WORK_DIR/restore.log\"",
 		"PROOF_FILE=\"$WORK_DIR/proof.json\"",
@@ -476,8 +501,9 @@ func buildPgBaseBackupRestoreScript(input pgBaseBackupRestoreScriptInput) (strin
 		"TARGET_ACTION=" + shellSingleQuote(targetAction),
 		"START_INSTANCE=" + boolShellValue(input.StartInstance),
 		"CLEANUP_ON_FAILURE=" + boolShellValue(input.CleanupOnFailure),
+		fmt.Sprintf("INCREMENTAL_COUNT=%d", len(input.Incrementals)),
 		fmt.Sprintf("WAL_COUNT=%d", len(input.Logs)),
-		`mkdir -p "$ARTIFACT_DIR" "$WAL_DIR" "$WORK_DIR"`,
+		`mkdir -p "$ARTIFACT_DIR" "$WAL_DIR" "$COMBINE_DIR" "$WORK_DIR"`,
 		`: > "$LOG_FILE"`,
 		`step() { printf 'OPSHUB_RESTORE_STEP=%s|%s|%s\n' "$1" "$2" "$(date '+%Y-%m-%d %H:%M:%S')"; printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> "$LOG_FILE"; }`,
 		`cleanup_failure() { code="$?"; if [ "$code" != "0" ] && [ "$CLEANUP_ON_FAILURE" = "1" ]; then DOCKER_BIN="$(command -v docker || true)"; if [ -n "$DOCKER_BIN" ] && [ -n "$CONTAINER_NAME" ]; then "$DOCKER_BIN" rm -f "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true; fi; rm -rf "$PGDATA_DIR" >> "$LOG_FILE" 2>&1 || true; printf '%s cleanup_on_failure pgdata_removed\n' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE" || true; fi; exit "$code"; }`,
@@ -499,15 +525,54 @@ func buildPgBaseBackupRestoreScript(input pgBaseBackupRestoreScriptInput) (strin
 		`printf 'OPSHUB_TARGET_ACTION=%s\n' "$TARGET_ACTION"`,
 		`step "prepare_restore_directory" "running"`,
 		`case "$PGDATA_DIR" in "$WORK_ROOT"/restore/job-"$RESTORE_JOB_ID"/pgdata) ;; *) fail_step "prepare_restore_directory" "unsafe pgdata destination: $PGDATA_DIR";; esac`,
-		`rm -rf "$PGDATA_DIR"`,
-		`mkdir -p "$PGDATA_DIR"`,
+		`rm -rf "$PGDATA_DIR" "$COMBINE_DIR"`,
+		`mkdir -p "$PGDATA_DIR" "$COMBINE_DIR"`,
 		`step "prepare_restore_directory" "success"`,
 	}
 	lines = append(lines, buildRestoreCopyArtifactLine("base", input.Base, `$ARTIFACT_DIR/base.pg_basebackup.tar.gz`))
+	if len(input.Incrementals) == 0 {
+		lines = append(lines,
+			`step "extract_base_backup" "running"`,
+			`tar -xzf "$ARTIFACT_DIR/base.pg_basebackup.tar.gz" -C "$PGDATA_DIR" >> "$LOG_FILE" 2>&1 || fail_step "extract_base_backup" "extract pg_basebackup artifact failed"`,
+			`printf 'OPSHUB_COMBINEBACKUP_STATUS=not_required\n'`,
+			`step "extract_base_backup" "success"`,
+		)
+	} else {
+		lines = append(lines,
+			`step "extract_base_backup" "running"`,
+			`mkdir -p "$COMBINE_BASE_DIR"`,
+			`tar -xzf "$ARTIFACT_DIR/base.pg_basebackup.tar.gz" -C "$COMBINE_BASE_DIR" >> "$LOG_FILE" 2>&1 || fail_step "extract_base_backup" "extract pg_basebackup base artifact failed"`,
+			`step "extract_base_backup" "success"`,
+		)
+		for idx, incArtifact := range input.Incrementals {
+			label := fmt.Sprintf("incremental_%d", idx+1)
+			artifactDest := fmt.Sprintf(`$ARTIFACT_DIR/inc-%d.pg_basebackup.tar.gz`, idx+1)
+			incDir := fmt.Sprintf(`$COMBINE_DIR/inc-%d`, idx+1)
+			lines = append(lines, buildRestoreCopyArtifactLine(label, incArtifact, artifactDest))
+			lines = append(lines,
+				fmt.Sprintf(`step "extract_%s" "running"`, label),
+				fmt.Sprintf(`mkdir -p "%s"`, incDir),
+				fmt.Sprintf(`tar -xzf "%s" -C "%s" >> "$LOG_FILE" 2>&1 || fail_step "extract_%s" "extract pg_basebackup incremental artifact failed"`, artifactDest, incDir, label),
+				fmt.Sprintf(`step "extract_%s" "success"`, label),
+			)
+		}
+		combineInputs := []string{`"$COMBINE_BASE_DIR"`}
+		for idx := range input.Incrementals {
+			combineInputs = append(combineInputs, fmt.Sprintf(`"$COMBINE_DIR/inc-%d"`, idx+1))
+		}
+		lines = append(lines,
+			`step "pg_combinebackup" "running"`,
+			`PG_COMBINEBACKUP="$(command -v pg_combinebackup || true)"`,
+			`if [ -z "$PG_COMBINEBACKUP" ]; then printf 'OPSHUB_COMBINEBACKUP_STATUS=missing_tool\n'; fail_step "pg_combinebackup" "pg_combinebackup not found"; fi`,
+			`combine_version="$("$PG_COMBINEBACKUP" --version 2>/dev/null | head -n 1 || true)"`,
+			`printf 'OPSHUB_PG_COMBINEBACKUP_VERSION=%s\n' "$combine_version"`,
+			fmt.Sprintf(`"$PG_COMBINEBACKUP" -o "$PGDATA_DIR" %s >> "$LOG_FILE" 2>&1 || { printf 'OPSHUB_COMBINEBACKUP_STATUS=failed\n'; fail_step "pg_combinebackup" "pg_combinebackup failed"; }`, strings.Join(combineInputs, " ")),
+			`printf 'OPSHUB_COMBINEBACKUP_STATUS=success\n'`,
+			`printf 'OPSHUB_SYNTHETIC_FULL_PATH=%s\n' "$PGDATA_DIR"`,
+			`step "pg_combinebackup" "success"`,
+		)
+	}
 	lines = append(lines,
-		`step "extract_base_backup" "running"`,
-		`tar -xzf "$ARTIFACT_DIR/base.pg_basebackup.tar.gz" -C "$PGDATA_DIR" >> "$LOG_FILE" 2>&1 || fail_step "extract_base_backup" "extract pg_basebackup artifact failed"`,
-		`step "extract_base_backup" "success"`,
 		`step "verify_pgdata" "running"`,
 		`test -f "$PGDATA_DIR/PG_VERSION" || fail_step "verify_pgdata" "PG_VERSION not found in restored PGDATA"`,
 		`test -d "$PGDATA_DIR/global" || fail_step "verify_pgdata" "global directory not found in restored PGDATA"`,
@@ -603,6 +668,9 @@ func parsePgBaseBackupRestoreOutput(stdout string) pgBaseBackupRestoreRunnerResu
 	result.TargetAction = kv["OPSHUB_TARGET_ACTION"]
 	result.PGVersion = kv["OPSHUB_PG_VERSION"]
 	result.ManifestChecksum = kv["OPSHUB_BACKUP_MANIFEST_CHECKSUM"]
+	result.CombineBackupStatus = kv["OPSHUB_COMBINEBACKUP_STATUS"]
+	result.CombineBackupVersion = kv["OPSHUB_PG_COMBINEBACKUP_VERSION"]
+	result.SyntheticFullPath = kv["OPSHUB_SYNTHETIC_FULL_PATH"]
 	result.VerifyBackupStatus = kv["OPSHUB_VERIFYBACKUP_STATUS"]
 	result.ValidationStatus = kv["OPSHUB_VALIDATION_STATUS"]
 	result.RecoverySummary = kv["OPSHUB_RECOVERY_SUMMARY"]
@@ -654,43 +722,48 @@ func buildPgBaseBackupRestoreProofJSON(plan *DatabaseRestorePlan, job *DatabaseR
 		}
 	}
 	proof := map[string]any{
-		"restoreJobId":          job.ID,
-		"restorePlanId":         plan.ID,
-		"sourceInstanceId":      plan.SourceInstanceID,
-		"targetInstanceId":      plan.TargetInstanceID,
-		"backupEngine":          BackupEnginePgBaseBackup,
-		"restoreTargetType":     plan.RestoreTargetType,
-		"restoreTargetValue":    plan.RestoreTargetValue,
-		"targetTimelineId":      result.TargetTimelineID,
-		"targetAction":          result.TargetAction,
-		"runnerHostId":          job.RunnerHostID,
-		"runnerJobId":           job.RunnerJobID,
-		"baseBackupRecordId":    job.BackupRecordID,
-		"selectedLogArchiveIds": plan.SelectedLogArchiveIDs,
-		"workDir":               result.WorkDir,
-		"preparedDatadir":       result.PreparedDatadir,
-		"containerName":         result.ContainerName,
-		"containerImage":        result.ContainerImage,
-		"listenHost":            result.ListenHost,
-		"listenPort":            result.ListenPort,
-		"logPath":               result.LogPath,
-		"artifactUri":           result.ArtifactURI,
-		"startInstance":         result.StartInstance,
-		"pgVersion":             result.PGVersion,
-		"manifestChecksum":      result.ManifestChecksum,
-		"verifyBackupStatus":    result.VerifyBackupStatus,
-		"recoverySummary":       result.RecoverySummary,
-		"steps":                 result.Steps,
-		"validationResults":     result.ValidationResults,
-		"validationStatus":      result.ValidationStatus,
-		"startedAt":             result.StartedAt,
-		"finishedAt":            result.FinishedAt,
-		"durationMs":            result.DurationMs,
-		"operatorId":            job.OperatorID,
-		"operatorName":          job.OperatorName,
-		"finalStatus":           finalStatus,
-		"restoreStatus":         restoreStatus,
-		"message":               message,
+		"restoreJobId":            job.ID,
+		"restorePlanId":           plan.ID,
+		"sourceInstanceId":        plan.SourceInstanceID,
+		"targetInstanceId":        plan.TargetInstanceID,
+		"backupEngine":            BackupEnginePgBaseBackup,
+		"restoreTargetType":       plan.RestoreTargetType,
+		"restoreTargetValue":      plan.RestoreTargetValue,
+		"targetTimelineId":        result.TargetTimelineID,
+		"targetAction":            result.TargetAction,
+		"runnerHostId":            job.RunnerHostID,
+		"runnerJobId":             job.RunnerJobID,
+		"baseBackupRecordId":      job.BackupRecordID,
+		"selectedBackupRecordIds": plan.SelectedBackupRecordIDs,
+		"selectedLogArchiveIds":   plan.SelectedLogArchiveIDs,
+		"workDir":                 result.WorkDir,
+		"preparedDatadir":         result.PreparedDatadir,
+		"containerName":           result.ContainerName,
+		"containerImage":          result.ContainerImage,
+		"listenHost":              result.ListenHost,
+		"listenPort":              result.ListenPort,
+		"logPath":                 result.LogPath,
+		"artifactUri":             result.ArtifactURI,
+		"startInstance":           result.StartInstance,
+		"pgVersion":               result.PGVersion,
+		"manifestChecksum":        result.ManifestChecksum,
+		"incrementalCount":        result.IncrementalCount,
+		"combineBackupStatus":     result.CombineBackupStatus,
+		"combineBackupVersion":    result.CombineBackupVersion,
+		"syntheticFullPath":       result.SyntheticFullPath,
+		"verifyBackupStatus":      result.VerifyBackupStatus,
+		"recoverySummary":         result.RecoverySummary,
+		"steps":                   result.Steps,
+		"validationResults":       result.ValidationResults,
+		"validationStatus":        result.ValidationStatus,
+		"startedAt":               result.StartedAt,
+		"finishedAt":              result.FinishedAt,
+		"durationMs":              result.DurationMs,
+		"operatorId":              job.OperatorID,
+		"operatorName":            job.OperatorName,
+		"finalStatus":             finalStatus,
+		"restoreStatus":           restoreStatus,
+		"message":                 message,
 	}
 	return marshalBackupPlanJSON(proof)
 }
@@ -715,31 +788,32 @@ func pgBaseBackupRestoreRequestJSON(plan *DatabaseRestorePlan, job *DatabaseRest
 		validationAssertions = req.ValidationAssertions
 	}
 	payload := map[string]any{
-		"restorePlanId":         plan.ID,
-		"restoreJobId":          job.ID,
-		"runnerHostId":          host.ID,
-		"runnerType":            host.RunnerType,
-		"allowedCommand":        DatabaseRunnerAllowedCommandPgBaseBackupRestore,
-		"backupRecordId":        base.ID,
-		"backupEngine":          BackupEnginePgBaseBackup,
-		"workDir":               job.WorkDir,
-		"destinationDir":        job.PreparedDatadir,
-		"containerName":         job.ContainerName,
-		"containerImage":        job.ContainerImage,
-		"listenHost":            job.ListenHost,
-		"listenPort":            job.ListenPort,
-		"targetType":            job.RestoreTargetType,
-		"targetValue":           job.RestoreTargetValue,
-		"targetTimelineId":      targetTimelineID,
-		"targetAction":          targetAction,
-		"startInstance":         startInstance,
-		"selectedLogArchiveIds": plan.SelectedLogArchiveIDs,
-		"validationSql":         validationSQL,
-		"validationAssertions":  validationAssertions,
-		"validationChecks":      validationChecks,
-		"cleanupOnFailure":      cleanupOnFailure,
-		"operatorId":            operator.ID,
-		"operatorName":          operator.Username,
+		"restorePlanId":           plan.ID,
+		"restoreJobId":            job.ID,
+		"runnerHostId":            host.ID,
+		"runnerType":              host.RunnerType,
+		"allowedCommand":          DatabaseRunnerAllowedCommandPgBaseBackupRestore,
+		"backupRecordId":          base.ID,
+		"backupEngine":            BackupEnginePgBaseBackup,
+		"workDir":                 job.WorkDir,
+		"destinationDir":          job.PreparedDatadir,
+		"containerName":           job.ContainerName,
+		"containerImage":          job.ContainerImage,
+		"listenHost":              job.ListenHost,
+		"listenPort":              job.ListenPort,
+		"targetType":              job.RestoreTargetType,
+		"targetValue":             job.RestoreTargetValue,
+		"targetTimelineId":        targetTimelineID,
+		"targetAction":            targetAction,
+		"startInstance":           startInstance,
+		"selectedBackupRecordIds": plan.SelectedBackupRecordIDs,
+		"selectedLogArchiveIds":   plan.SelectedLogArchiveIDs,
+		"validationSql":           validationSQL,
+		"validationAssertions":    validationAssertions,
+		"validationChecks":        validationChecks,
+		"cleanupOnFailure":        cleanupOnFailure,
+		"operatorId":              operator.ID,
+		"operatorName":            operator.Username,
 	}
 	data, _ := json.Marshal(payload)
 	return trimText(string(data), maxRunnerJSONLength)

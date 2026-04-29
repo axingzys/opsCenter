@@ -306,6 +306,56 @@ func TestBuildPgBaseBackupRestoreScriptStartsPITRContainerAndValidates(t *testin
 	}
 }
 
+func TestBuildPgBaseBackupRestoreScriptCombinesIncrementals(t *testing.T) {
+	script, err := buildPgBaseBackupRestoreScript(pgBaseBackupRestoreScriptInput{
+		RestoreJobID:     23,
+		RestorePlanID:    11,
+		RunnerHostID:     3,
+		WorkRoot:         "/var/lib/opshub/database-runner",
+		ContainerName:    "opshub-pgbase-restore-23",
+		ContainerImage:   "postgres:16",
+		ListenPort:       25434,
+		DatabaseName:     "postgres",
+		DBUsername:       "postgres",
+		TargetType:       "time",
+		TargetValue:      "2026-04-29 10:00:00",
+		TargetTimelineID: "00000001",
+		TargetAction:     "pause",
+		StartInstance:    false,
+		Base: physicalRestoreArtifact{
+			Kind:           "base",
+			FileName:       "pg-base.tar.gz",
+			SourcePath:     "/var/lib/opshub/database-runner/backup/pg-base.tar.gz",
+			ChecksumSHA256: strings.Repeat("d", 64),
+			FileSize:       1024,
+		},
+		Incrementals: []physicalRestoreArtifact{
+			{
+				Kind:           "incremental",
+				FileName:       "pg-inc-1.tar.gz",
+				SourcePath:     "/var/lib/opshub/database-runner/backup/pg-inc-1.tar.gz",
+				ChecksumSHA256: strings.Repeat("e", 64),
+				FileSize:       512,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+	for _, want := range []string{
+		`INCREMENTAL_COUNT=1`,
+		`copy_artifact 'incremental_1' '/var/lib/opshub/database-runner/backup/pg-inc-1.tar.gz' "$ARTIFACT_DIR/inc-1.pg_basebackup.tar.gz"`,
+		`PG_COMBINEBACKUP="$(command -v pg_combinebackup || true)"`,
+		`OPSHUB_COMBINEBACKUP_STATUS=missing_tool`,
+		`"$PG_COMBINEBACKUP" -o "$PGDATA_DIR" "$COMBINE_BASE_DIR" "$COMBINE_DIR/inc-1"`,
+		`OPSHUB_SYNTHETIC_FULL_PATH`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestParsePgBaseBackupRestoreOutputIncludesProofAndValidation(t *testing.T) {
 	stdout := strings.Join([]string{
 		"OPSHUB_WORK_DIR=/var/lib/opshub/database-runner/restore/job-22",
@@ -316,6 +366,9 @@ func TestParsePgBaseBackupRestoreOutputIncludesProofAndValidation(t *testing.T) 
 		"OPSHUB_LISTEN_PORT=25433",
 		"OPSHUB_PG_VERSION=16",
 		"OPSHUB_VERIFYBACKUP_STATUS=success",
+		"OPSHUB_COMBINEBACKUP_STATUS=success",
+		"OPSHUB_PG_COMBINEBACKUP_VERSION=pg_combinebackup (PostgreSQL) 17.0",
+		"OPSHUB_SYNTHETIC_FULL_PATH=/var/lib/opshub/database-runner/restore/job-22/pgdata",
 		"OPSHUB_VALIDATION_STATUS=passed",
 		"OPSHUB_RECOVERY_SUMMARY=t|0/3000000|2026-04-29 10:00:00+08",
 		"OPSHUB_RESTORE_STEP=verify_pgdata|success|2026-04-29 10:00:00",
@@ -327,6 +380,9 @@ func TestParsePgBaseBackupRestoreOutputIncludesProofAndValidation(t *testing.T) 
 	}
 	if result.PGVersion != "16" || result.VerifyBackupStatus != "success" {
 		t.Fatalf("backup verification metadata not parsed: %+v", result)
+	}
+	if result.CombineBackupStatus != "success" || !strings.Contains(result.CombineBackupVersion, "pg_combinebackup") {
+		t.Fatalf("combine metadata not parsed: %+v", result)
 	}
 	if result.ValidationStatus != "passed" || len(result.ValidationResults) != 1 {
 		t.Fatalf("validation not parsed: %+v", result)

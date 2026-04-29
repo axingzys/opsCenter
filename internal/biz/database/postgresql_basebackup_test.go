@@ -70,3 +70,53 @@ func TestBuildPostgreSQLRestorePlanJSONIncludesPgCombinebackup(t *testing.T) {
 		t.Fatalf("required tools should include pg_combinebackup: %v", tools)
 	}
 }
+
+func TestValidatePgBaseBackupIncrementalMetadataRequiresParentAndManifest(t *testing.T) {
+	base := &DatabaseBackupRecord{BackupLevel: DatabaseBackupLevelFull, BackupEngine: BackupEnginePgBaseBackup, BackupManifestChecksum: strings.Repeat("b", 64)}
+	base.ID = 1
+	inc := &DatabaseBackupRecord{
+		BaseRecordID: 1,
+		BackupLevel:  DatabaseBackupLevelIncremental,
+		BackupEngine: BackupEnginePgBaseBackup,
+	}
+	inc.ID = 2
+	status, message := validatePgBaseBackupIncrementalMetadata([]*DatabaseBackupRecord{base, inc})
+	if status != DatabaseBackupChainStatusMissingIncremental || !strings.Contains(message, "parent_record_id") {
+		t.Fatalf("expected missing parent, got status=%s message=%s", status, message)
+	}
+
+	inc.ParentRecordID = 1
+	status, message = validatePgBaseBackupIncrementalMetadata([]*DatabaseBackupRecord{base, inc})
+	if status != DatabaseBackupChainStatusMissingIncremental || !strings.Contains(message, "backup manifest") {
+		t.Fatalf("expected missing manifest, got status=%s message=%s", status, message)
+	}
+
+	inc.BackupManifestChecksum = strings.Repeat("a", 64)
+	status, message = validatePgBaseBackupIncrementalMetadata([]*DatabaseBackupRecord{base, inc})
+	if status != DatabaseBackupChainStatusComplete || message != "" {
+		t.Fatalf("expected complete, got status=%s message=%s", status, message)
+	}
+}
+
+func TestValidateRequestedPostgreSQLBaseRecordRejectsWrongTargetTime(t *testing.T) {
+	recoverableFrom := time.Date(2026, 4, 30, 10, 0, 0, 0, time.Local)
+	targetTime := recoverableFrom.Add(-time.Minute)
+	record := &DatabaseBackupRecord{
+		InstanceID:      7,
+		Status:          DatabaseBackupStatusSuccess,
+		BackupMethod:    DatabaseBackupMethodPhysical,
+		BackupLevel:     DatabaseBackupLevelFull,
+		BackupEngine:    BackupEnginePgBaseBackup,
+		StorageURI:      "runner://runner-host-1/pg-base.tar.gz",
+		RecoverableFrom: &recoverableFrom,
+	}
+	record.ID = 5
+	err := validateRequestedPostgreSQLBaseRecord(record, 7, postgreSQLRestoreTarget{
+		Type:  "time",
+		Value: targetTime.Format("2006-01-02 15:04:05"),
+		Time:  &targetTime,
+	})
+	if err == nil || !strings.Contains(err.Error(), "可恢复起点晚于目标时间") {
+		t.Fatalf("expected target time rejection, got %v", err)
+	}
+}

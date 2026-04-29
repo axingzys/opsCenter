@@ -367,6 +367,7 @@ type DatabaseRestorePlanListRequest struct {
 type DatabaseRestorePlanRequest struct {
 	SourceInstanceID       uint   `json:"sourceInstanceId" binding:"required"`
 	TargetInstanceID       uint   `json:"targetInstanceId"`
+	BaseRecordID           uint   `json:"baseRecordId"`
 	RestoreMode            string `json:"restoreMode" binding:"omitempty,max=30"`
 	RestoreTargetType      string `json:"restoreTargetType" binding:"omitempty,max=30"`
 	RestoreTargetValue     string `json:"restoreTargetValue" binding:"required,max=255"`
@@ -1011,33 +1012,35 @@ type restorePlanValidationResult struct {
 }
 
 type restoreProofBackup struct {
-	ID                  uint   `json:"id"`
-	BackupMethod        string `json:"backupMethod"`
-	BackupLevel         string `json:"backupLevel"`
-	BackupEngine        string `json:"backupEngine"`
-	FileName            string `json:"fileName"`
-	StorageURI          string `json:"storageUri"`
-	FileSize            int64  `json:"fileSize"`
-	ChecksumSHA256      string `json:"checksumSha256"`
-	RecoverableFrom     string `json:"recoverableFrom,omitempty"`
-	RecoverableUntil    string `json:"recoverableUntil,omitempty"`
-	ToolName            string `json:"toolName,omitempty"`
-	ToolVersion         string `json:"toolVersion,omitempty"`
-	BinlogFile          string `json:"backupBinlogFile,omitempty"`
-	BinlogPos           int64  `json:"backupBinlogPos,omitempty"`
-	GTIDSet             string `json:"backupGtidSet,omitempty"`
-	ServerUUID          string `json:"serverUuid,omitempty"`
-	ServerID            string `json:"serverId,omitempty"`
-	ExternalBackupID    string `json:"externalBackupId,omitempty"`
-	ExternalServerName  string `json:"externalServerName,omitempty"`
-	PGSystemIdentifier  string `json:"pgSystemIdentifier,omitempty"`
-	TimelineID          string `json:"timelineId,omitempty"`
-	TimelineHistoryFile string `json:"timelineHistoryFile,omitempty"`
-	WALSegmentSize      int64  `json:"walSegmentSize,omitempty"`
-	StartLSN            string `json:"startLsn,omitempty"`
-	EndLSN              string `json:"endLsn,omitempty"`
-	WALStart            string `json:"walStart,omitempty"`
-	WALEnd              string `json:"walEnd,omitempty"`
+	ID                     uint   `json:"id"`
+	BackupMethod           string `json:"backupMethod"`
+	BackupLevel            string `json:"backupLevel"`
+	BackupEngine           string `json:"backupEngine"`
+	FileName               string `json:"fileName"`
+	StorageURI             string `json:"storageUri"`
+	FileSize               int64  `json:"fileSize"`
+	ChecksumSHA256         string `json:"checksumSha256"`
+	RecoverableFrom        string `json:"recoverableFrom,omitempty"`
+	RecoverableUntil       string `json:"recoverableUntil,omitempty"`
+	ToolName               string `json:"toolName,omitempty"`
+	ToolVersion            string `json:"toolVersion,omitempty"`
+	BinlogFile             string `json:"backupBinlogFile,omitempty"`
+	BinlogPos              int64  `json:"backupBinlogPos,omitempty"`
+	GTIDSet                string `json:"backupGtidSet,omitempty"`
+	ServerUUID             string `json:"serverUuid,omitempty"`
+	ServerID               string `json:"serverId,omitempty"`
+	ExternalBackupID       string `json:"externalBackupId,omitempty"`
+	ExternalServerName     string `json:"externalServerName,omitempty"`
+	PGSystemIdentifier     string `json:"pgSystemIdentifier,omitempty"`
+	TimelineID             string `json:"timelineId,omitempty"`
+	TimelineHistoryFile    string `json:"timelineHistoryFile,omitempty"`
+	WALSegmentSize         int64  `json:"walSegmentSize,omitempty"`
+	StartLSN               string `json:"startLsn,omitempty"`
+	EndLSN                 string `json:"endLsn,omitempty"`
+	WALStart               string `json:"walStart,omitempty"`
+	WALEnd                 string `json:"walEnd,omitempty"`
+	ManifestJSON           string `json:"manifestJson,omitempty"`
+	BackupManifestChecksum string `json:"backupManifestChecksum,omitempty"`
 }
 
 type restoreProofLogArchive struct {
@@ -1182,7 +1185,18 @@ func (uc *UseCase) createPostgreSQLRestorePlan(ctx context.Context, req *Databas
 	if err != nil {
 		return nil, err
 	}
-	base := selectPostgreSQLPhysicalBaseRecord(records, restoreTarget)
+	var base *DatabaseBackupRecord
+	if req.BaseRecordID > 0 {
+		base, err = uc.postgreSQLRestoreBaseRecordFromRequest(ctx, req, restoreTarget, records)
+		if err != nil {
+			return nil, err
+		}
+		if !backupRecordInList(records, base.ID) {
+			records = append(records, base)
+		}
+	} else {
+		base = selectPostgreSQLPhysicalBaseRecord(records, restoreTarget)
+	}
 	result := uc.validatePostgreSQLRestorePlan(ctx, source, records, base, restoreTarget)
 	finishedAt := time.Now()
 	mode := strings.TrimSpace(req.RestoreMode)
@@ -1228,6 +1242,61 @@ func (uc *UseCase) createPostgreSQLRestorePlan(ctx context.Context, req *Databas
 		targetName = targetInstance.Name
 	}
 	return uc.toRestorePlanVO(item, sourceName, targetName), nil
+}
+
+func (uc *UseCase) postgreSQLRestoreBaseRecordFromRequest(ctx context.Context, req *DatabaseRestorePlanRequest, target postgreSQLRestoreTarget, candidates []*DatabaseBackupRecord) (*DatabaseBackupRecord, error) {
+	if req == nil || req.BaseRecordID == 0 {
+		return nil, fmt.Errorf("base backup 记录不能为空")
+	}
+	for _, item := range candidates {
+		if item != nil && item.ID == req.BaseRecordID {
+			if err := validateRequestedPostgreSQLBaseRecord(item, req.SourceInstanceID, target); err != nil {
+				return nil, err
+			}
+			return item, nil
+		}
+	}
+	item, err := uc.backupRecordRepo.GetByID(ctx, req.BaseRecordID)
+	if err != nil || item == nil {
+		return nil, fmt.Errorf("指定的 base backup 记录不存在")
+	}
+	if err := validateRequestedPostgreSQLBaseRecord(item, req.SourceInstanceID, target); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func validateRequestedPostgreSQLBaseRecord(item *DatabaseBackupRecord, sourceInstanceID uint, target postgreSQLRestoreTarget) error {
+	if item == nil {
+		return fmt.Errorf("指定的 base backup 记录不存在")
+	}
+	if item.InstanceID != sourceInstanceID {
+		return fmt.Errorf("指定的 base backup 不属于当前 PostgreSQL 实例")
+	}
+	if strings.TrimSpace(item.Status) != DatabaseBackupStatusSuccess {
+		return fmt.Errorf("指定的 base backup 不是成功状态")
+	}
+	if !isPostgreSQLPhysicalBaseRecord(item) {
+		return fmt.Errorf("指定的记录不是可用于 PITR 的 PostgreSQL physical full backup")
+	}
+	if target.Time != nil {
+		if item.RecoverableFrom != nil && item.RecoverableFrom.After(*target.Time) {
+			return fmt.Errorf("指定 base backup 的可恢复起点晚于目标时间")
+		}
+		if item.RecoverableFrom == nil && item.FinishedAt != nil && item.FinishedAt.After(*target.Time) {
+			return fmt.Errorf("指定 base backup 完成时间晚于目标时间")
+		}
+	}
+	return nil
+}
+
+func backupRecordInList(records []*DatabaseBackupRecord, id uint) bool {
+	for _, item := range records {
+		if item != nil && item.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizePostgreSQLRestoreTarget(targetType, value, timelineID string) (postgreSQLRestoreTarget, error) {
@@ -1354,6 +1423,22 @@ func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *
 	result.BackupProofs = buildSelectedBackupProofs(records, result.BackupRecordIDs)
 	result.StorageStatus = storageStatusForBackupRecord(base)
 	result.ToolStatus = toolStatusForBackupRecord(base)
+	selectedBackupRecords := backupRecordsByIDs(records, result.BackupRecordIDs)
+	for _, item := range selectedBackupRecords {
+		if item == nil || item.ID == base.ID {
+			continue
+		}
+		if status := storageStatusForBackupRecord(item); status != DatabaseStorageStatusAvailable {
+			result.StorageStatus = status
+			result.Messages = append(result.Messages, fmt.Sprintf("增量备份 #%d %s", item.ID, StorageStatusText(status)))
+			break
+		}
+		if status := toolStatusForBackupRecord(item); status != DatabaseToolStatusCompatible {
+			result.ToolStatus = status
+			result.Messages = append(result.Messages, fmt.Sprintf("增量备份 #%d %s", item.ID, ToolStatusText(status)))
+			break
+		}
+	}
 	if result.StorageStatus != DatabaseStorageStatusAvailable {
 		result.Messages = append(result.Messages, StorageStatusText(result.StorageStatus))
 	}
@@ -1361,6 +1446,13 @@ func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *
 		result.Messages = append(result.Messages, ToolStatusText(result.ToolStatus))
 	}
 	backupEngine := normalizePostgreSQLPhysicalBackupEngine(base.BackupEngine)
+	if backupEngine == BackupEnginePgBaseBackup && len(result.BackupRecordIDs) > 1 {
+		if status, message := validatePgBaseBackupIncrementalMetadata(selectedBackupRecords); status != DatabaseBackupChainStatusComplete {
+			result.BackupChainStatus = status
+			result.ToolStatus = DatabaseToolStatusIncompatibleVersion
+			result.Messages = append(result.Messages, message)
+		}
+	}
 	var server *DatabaseBarmanServer
 	switch backupEngine {
 	case "barman":
@@ -1778,31 +1870,33 @@ func backupProofFromRecord(item *DatabaseBackupRecord) restoreProofBackup {
 		return restoreProofBackup{}
 	}
 	proof := restoreProofBackup{
-		ID:                  item.ID,
-		BackupMethod:        item.BackupMethod,
-		BackupLevel:         item.BackupLevel,
-		BackupEngine:        item.BackupEngine,
-		FileName:            item.FileName,
-		StorageURI:          firstNonEmpty(item.StorageURI, item.FilePath),
-		FileSize:            item.FileSize,
-		ChecksumSHA256:      item.ChecksumSHA256,
-		ToolName:            item.ToolName,
-		ToolVersion:         item.ToolVersion,
-		BinlogFile:          item.BackupBinlogFile,
-		BinlogPos:           item.BackupBinlogPos,
-		GTIDSet:             item.BackupGTIDSet,
-		ServerUUID:          item.ServerUUID,
-		ServerID:            item.ServerID,
-		ExternalBackupID:    item.ExternalBackupID,
-		ExternalServerName:  item.ExternalServerName,
-		PGSystemIdentifier:  item.PGSystemIdentifier,
-		TimelineID:          item.TimelineID,
-		TimelineHistoryFile: item.TimelineHistoryFile,
-		WALSegmentSize:      item.WALSegmentSize,
-		StartLSN:            item.StartLSN,
-		EndLSN:              item.EndLSN,
-		WALStart:            item.WALStart,
-		WALEnd:              item.WALEnd,
+		ID:                     item.ID,
+		BackupMethod:           item.BackupMethod,
+		BackupLevel:            item.BackupLevel,
+		BackupEngine:           item.BackupEngine,
+		FileName:               item.FileName,
+		StorageURI:             firstNonEmpty(item.StorageURI, item.FilePath),
+		FileSize:               item.FileSize,
+		ChecksumSHA256:         item.ChecksumSHA256,
+		ToolName:               item.ToolName,
+		ToolVersion:            item.ToolVersion,
+		BinlogFile:             item.BackupBinlogFile,
+		BinlogPos:              item.BackupBinlogPos,
+		GTIDSet:                item.BackupGTIDSet,
+		ServerUUID:             item.ServerUUID,
+		ServerID:               item.ServerID,
+		ExternalBackupID:       item.ExternalBackupID,
+		ExternalServerName:     item.ExternalServerName,
+		PGSystemIdentifier:     item.PGSystemIdentifier,
+		TimelineID:             item.TimelineID,
+		TimelineHistoryFile:    item.TimelineHistoryFile,
+		WALSegmentSize:         item.WALSegmentSize,
+		StartLSN:               item.StartLSN,
+		EndLSN:                 item.EndLSN,
+		WALStart:               item.WALStart,
+		WALEnd:                 item.WALEnd,
+		ManifestJSON:           trimText(item.ManifestJSON, 1000),
+		BackupManifestChecksum: item.BackupManifestChecksum,
 	}
 	if item.RecoverableFrom != nil {
 		proof.RecoverableFrom = item.RecoverableFrom.Format("2006-01-02 15:04:05")
@@ -2257,6 +2351,68 @@ func validateIncrementalBackupChain(records []*DatabaseBackupRecord, base *Datab
 		}
 	}
 	return status
+}
+
+func backupRecordsByIDs(records []*DatabaseBackupRecord, ids []uint) []*DatabaseBackupRecord {
+	if len(records) == 0 || len(ids) == 0 {
+		return nil
+	}
+	byID := make(map[uint]*DatabaseBackupRecord, len(records))
+	for _, item := range records {
+		if item != nil {
+			byID[item.ID] = item
+		}
+	}
+	result := make([]*DatabaseBackupRecord, 0, len(ids))
+	seen := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if item := byID[id]; item != nil {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func validatePgBaseBackupIncrementalMetadata(records []*DatabaseBackupRecord) (string, string) {
+	if len(records) <= 1 {
+		return DatabaseBackupChainStatusComplete, ""
+	}
+	var base *DatabaseBackupRecord
+	seen := make(map[uint]struct{}, len(records))
+	for idx, item := range records {
+		if item == nil {
+			continue
+		}
+		if idx == 0 {
+			base = item
+			if strings.TrimSpace(item.BackupManifestChecksum) == "" && strings.TrimSpace(item.ManifestJSON) == "" {
+				return DatabaseBackupChainStatusMissingIncremental, fmt.Sprintf("pg_basebackup base 记录 #%d 缺少 backup manifest 摘要，无法证明 pg_combinebackup 依赖链", item.ID)
+			}
+			seen[item.ID] = struct{}{}
+			continue
+		}
+		if normalizeBackupLevel(item.BackupLevel) != DatabaseBackupLevelIncremental {
+			return DatabaseBackupChainStatusMissingIncremental, fmt.Sprintf("pg_basebackup 增量链包含非 incremental 记录 #%d", item.ID)
+		}
+		if item.BaseRecordID > 0 && base != nil && item.BaseRecordID != base.ID {
+			return DatabaseBackupChainStatusMissingIncremental, fmt.Sprintf("pg_basebackup 增量记录 #%d 的 base_record_id=%d 与当前 base #%d 不一致", item.ID, item.BaseRecordID, base.ID)
+		}
+		if item.ParentRecordID == 0 {
+			return DatabaseBackupChainStatusMissingIncremental, fmt.Sprintf("pg_basebackup 增量记录 #%d 缺少 parent_record_id", item.ID)
+		}
+		if _, ok := seen[item.ParentRecordID]; !ok {
+			return DatabaseBackupChainStatusMissingIncremental, fmt.Sprintf("pg_basebackup 增量记录 #%d 的父记录 #%d 不在当前链路内", item.ID, item.ParentRecordID)
+		}
+		if strings.TrimSpace(item.BackupManifestChecksum) == "" && strings.TrimSpace(item.ManifestJSON) == "" {
+			return DatabaseBackupChainStatusMissingIncremental, fmt.Sprintf("pg_basebackup 增量记录 #%d 缺少 backup manifest 摘要，无法证明 pg_combinebackup 依赖链", item.ID)
+		}
+		seen[item.ID] = struct{}{}
+	}
+	return DatabaseBackupChainStatusComplete, ""
 }
 
 func validateMySQLRestoreLogMetadata(base *DatabaseBackupRecord, logs []*DatabaseLogArchive) (string, string) {
