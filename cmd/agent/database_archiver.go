@@ -169,6 +169,20 @@ type databaseArchiverLogArchiveRequest struct {
 	NextFileName     string `json:"nextFileName,omitempty"`
 }
 
+type databaseArchiverEventRequest struct {
+	StreamID          uint   `json:"streamId"`
+	EventType         string `json:"eventType"`
+	Level             string `json:"level"`
+	Message           string `json:"message,omitempty"`
+	FileName          string `json:"fileName,omitempty"`
+	CursorFile        string `json:"cursorFile,omitempty"`
+	CursorPos         int64  `json:"cursorPos,omitempty"`
+	ActiveFile        string `json:"activeFile,omitempty"`
+	ArchiveLagSeconds int    `json:"archiveLagSeconds,omitempty"`
+	PayloadJSON       string `json:"payloadJson,omitempty"`
+	OccurredAt        string `json:"occurredAt,omitempty"`
+}
+
 type agentMySQLBinaryLog struct {
 	Name string
 	Size int64
@@ -337,23 +351,51 @@ func (a *agentApp) runDatabaseArchiverOnce(ctx context.Context, cfg *resolvedDat
 	}
 }
 
-func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream) error {
+func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream) (err error) {
+	var (
+		eventFile    string
+		eventActive  string
+		eventPayload = map[string]any{
+			"archiveMode": item.Stream.ArchiveMode,
+			"streamId":    item.Stream.ID,
+		}
+	)
+	defer func() {
+		if err == nil {
+			return
+		}
+		_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+			EventType:   "archive_failed",
+			Level:       "error",
+			Message:     err.Error(),
+			FileName:    eventFile,
+			CursorFile:  item.Stream.CursorFile,
+			CursorPos:   item.Stream.CursorPos,
+			ActiveFile:  eventActive,
+			PayloadJSON: databaseArchiverEventPayloadJSON(eventPayload),
+			OccurredAt:  time.Now().Format("2006-01-02 15:04:05"),
+		})
+	}()
 	if strings.ToLower(strings.TrimSpace(item.Stream.ArchiveType)) != "binlog" {
-		return a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
+		err = errors.New("Agent 当前仅支持 binlog 日志归档流")
+		_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
 			DaemonStatus:        "degraded",
-			LastError:           "Agent 当前仅支持 binlog 日志归档流",
+			LastError:           err.Error(),
 			ConsecutiveFailures: 1,
 			LeaseTTLSeconds:     cfg.LeaseTTLSeconds,
 		})
+		return err
 	}
 	mode := strings.ToLower(strings.TrimSpace(item.Stream.ArchiveMode))
 	if mode != "polling" && mode != "streaming" {
-		return a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
+		err = errors.New("Agent 仅支持 polling/streaming binlog 归档模式")
+		_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
 			DaemonStatus:        "degraded",
-			LastError:           "Agent 仅支持 polling/streaming binlog 归档模式",
+			LastError:           err.Error(),
 			ConsecutiveFailures: 1,
 			LeaseTTLSeconds:     cfg.LeaseTTLSeconds,
 		})
+		return err
 	}
 	credential, err := cfg.credentialForStream(item)
 	if err != nil {
@@ -388,6 +430,9 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 	}
 	status, _ := agentReadMySQLBinaryLogStatus(ctx, db)
 	current := currentAgentBinaryLog(logs)
+	eventActive = activeFileForMode(mode, current.Name)
+	eventPayload["sourceFile"] = firstNonEmptyString(status.File, current.Name)
+	eventPayload["sourcePos"] = firstNonZeroInt64Agent(status.Position, current.Size)
 	lastArchived := strings.TrimSpace(item.Stream.LastArchiveName)
 	if lastArchived == "" {
 		lastArchived = strings.TrimSpace(item.Stream.CursorFile)
@@ -433,9 +478,18 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 			})
 			return err
 		}
+		_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+			EventType:   "spool_updated",
+			Level:       "info",
+			Message:     "active binlog spool 已更新",
+			ActiveFile:  current.Name,
+			PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{"activeFile": current.Name, "sourcePos": firstNonZeroInt64Agent(status.Position, current.Size)}),
+			OccurredAt:  time.Now().Format("2006-01-02 15:04:05"),
+		})
 	}
 	var lastArtifact *agentBinlogArtifact
 	for _, selection := range selections {
+		eventFile = selection.FileName
 		artifact, err := archiveAgentBinlogFile(ctx, cfg, item, credential, tool, selection)
 		if err != nil {
 			_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
@@ -462,6 +516,7 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 			return err
 		}
 		lastArtifact = &artifact
+		eventFile = ""
 	}
 	checkpoint := databaseArchiverCheckpointRequest{
 		DaemonStatus:      "running",
@@ -1040,6 +1095,17 @@ func (a *agentApp) databaseArchiverRegisterLogArchive(ctx context.Context, cfg *
 	return a.databaseArchiverDoJSON(ctx, cfg, http.MethodPost, endpoint, payload, nil)
 }
 
+func (a *agentApp) databaseArchiverPostEvent(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, payload databaseArchiverEventRequest) error {
+	if payload.StreamID == 0 {
+		payload.StreamID = item.Stream.ID
+	}
+	if payload.OccurredAt == "" {
+		payload.OccurredAt = time.Now().Format("2006-01-02 15:04:05")
+	}
+	endpoint := cfg.EndpointBaseURL + "/log-archive-events"
+	return a.databaseArchiverDoJSON(ctx, cfg, http.MethodPost, endpoint, payload, nil)
+}
+
 func (a *agentApp) databaseArchiverDoJSON(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, method, endpoint string, payload any, out any) error {
 	var body io.Reader
 	if payload != nil {
@@ -1154,6 +1220,21 @@ func firstNonZeroInt64Agent(values ...int64) int64 {
 		}
 	}
 	return 0
+}
+
+func databaseArchiverEventPayloadJSON(value any) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	text := strings.TrimSpace(string(data))
+	if len(text) > 4000 {
+		return text[:4000]
+	}
+	return text
 }
 
 func isSafeAgentBinlogFileName(value string) bool {

@@ -237,6 +237,9 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseLogArchiveListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseLogArchiveEventListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseRestorePlanListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
@@ -1072,6 +1075,25 @@ func (s *Service) RegisterExternalLogArchive(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) ListLogArchiveEvents(c *gin.Context) {
+	var req dbbiz.DatabaseLogArchiveEventListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListLogArchiveEvents(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": total, "page": req.Page, "pageSize": req.PageSize})
+}
+
 func (s *Service) RunLogArchiveOnce(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "日志归档流ID")
 	if !ok {
@@ -1189,6 +1211,21 @@ func (s *Service) RunnerAgentRegisterLogArchive(c *gin.Context) {
 	item, err := s.useCase.RunnerAgentRegisterLogArchive(c.Request.Context(), runnerID, runnerAgentAuthHeader(c), &req)
 	if err != nil {
 		writeDatabaseError(c, "Runner Agent 登记日志归档失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) RunnerAgentCreateLogArchiveEvent(c *gin.Context) {
+	runnerID := c.Param("runnerId")
+	var req dbbiz.DatabaseRunnerAgentEventRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.RunnerAgentCreateLogArchiveEvent(c.Request.Context(), runnerID, runnerAgentAuthHeader(c), &req)
+	if err != nil {
+		writeDatabaseError(c, "Runner Agent 上报日志归档事件失败: ", err)
 		return
 	}
 	response.Success(c, item)

@@ -105,6 +105,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	inspectionReportRepo := dbdata.NewInspectionReportRepo(db)
 	logArchiveStreamRepo := dbdata.NewLogArchiveStreamRepo(db)
 	logArchiveRepo := dbdata.NewLogArchiveRepo(db)
+	logArchiveEventRepo := dbdata.NewLogArchiveEventRepo(db)
 	restorePlanRepo := dbdata.NewRestorePlanRepo(db)
 	storageProfileRepo := dbdata.NewStorageProfileRepo(db)
 	secretProfileRepo := dbdata.NewSecretProfileRepo(db)
@@ -177,6 +178,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	useCase.SetBackupGovernanceRepos(
 		logArchiveStreamRepo,
 		logArchiveRepo,
+		logArchiveEventRepo,
 		restorePlanRepo,
 		storageProfileRepo,
 		secretProfileRepo,
@@ -291,6 +293,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/log-archive-streams/:id/catch-up", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunLogArchiveCatchUp)
 		databases.GET("/log-archives", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchives)
 		databases.POST("/log-archives/external", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.RegisterExternalLogArchive)
+		databases.GET("/log-archive-events", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListLogArchiveEvents)
 		databases.GET("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListStorageProfiles)
 		databases.POST("/storage-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateStorageProfile)
 		databases.GET("/secret-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListSecretProfiles)
@@ -347,5 +350,6 @@ func (s *HTTPServer) RegisterPublicRoutes(r *gin.RouterGroup) {
 		agents.GET("/log-archive-streams", s.service.RunnerAgentListLogArchiveStreams)
 		agents.POST("/log-archive-streams/:id/checkpoint", s.service.RunnerAgentCheckpointLogArchiveStream)
 		agents.POST("/log-archives", s.service.RunnerAgentRegisterLogArchive)
+		agents.POST("/log-archive-events", s.service.RunnerAgentCreateLogArchiveEvent)
 	}
 }

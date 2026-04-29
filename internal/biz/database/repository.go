@@ -123,6 +123,11 @@ type LogArchiveRepo interface {
 	ListCoveringTimeRange(ctx context.Context, instanceID uint, archiveType string, startTime, endTime time.Time) ([]*DatabaseLogArchive, error)
 }
 
+type LogArchiveEventRepo interface {
+	Create(ctx context.Context, item *DatabaseLogArchiveEvent) error
+	List(ctx context.Context, req *DatabaseLogArchiveEventListRequest) ([]*DatabaseLogArchiveEvent, int64, error)
+}
+
 type RestorePlanRepo interface {
 	Create(ctx context.Context, item *DatabaseRestorePlan) error
 	Update(ctx context.Context, item *DatabaseRestorePlan) error

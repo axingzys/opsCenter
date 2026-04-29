@@ -57,6 +57,7 @@ type UseCase struct {
 	inspectionReportRepo   InspectionReportRepo
 	logArchiveStreamRepo   LogArchiveStreamRepo
 	logArchiveRepo         LogArchiveRepo
+	logArchiveEventRepo    LogArchiveEventRepo
 	restorePlanRepo        RestorePlanRepo
 	storageProfileRepo     StorageProfileRepo
 	secretProfileRepo      SecretProfileRepo
@@ -123,6 +124,7 @@ func NewUseCase(
 func (uc *UseCase) SetBackupGovernanceRepos(
 	logArchiveStreamRepo LogArchiveStreamRepo,
 	logArchiveRepo LogArchiveRepo,
+	logArchiveEventRepo LogArchiveEventRepo,
 	restorePlanRepo RestorePlanRepo,
 	storageProfileRepo StorageProfileRepo,
 	secretProfileRepo SecretProfileRepo,
@@ -134,6 +136,7 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	}
 	uc.logArchiveStreamRepo = logArchiveStreamRepo
 	uc.logArchiveRepo = logArchiveRepo
+	uc.logArchiveEventRepo = logArchiveEventRepo
 	uc.restorePlanRepo = restorePlanRepo
 	uc.storageProfileRepo = storageProfileRepo
 	uc.secretProfileRepo = secretProfileRepo

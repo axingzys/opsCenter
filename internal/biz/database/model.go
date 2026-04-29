@@ -132,6 +132,20 @@ const (
 	DatabaseLogArchiveDaemonStatusFailed   = "failed"
 	DatabaseLogArchiveDaemonStatusStopped  = "stopped"
 
+	DatabaseLogArchiveEventLevelInfo    = "info"
+	DatabaseLogArchiveEventLevelWarning = "warning"
+	DatabaseLogArchiveEventLevelError   = "error"
+
+	DatabaseLogArchiveEventRunnerHeartbeat = "runner_heartbeat"
+	DatabaseLogArchiveEventLeaseAcquired   = "lease_acquired"
+	DatabaseLogArchiveEventCheckpoint      = "checkpoint"
+	DatabaseLogArchiveEventStateChanged    = "state_changed"
+	DatabaseLogArchiveEventArchiveSuccess  = "archive_success"
+	DatabaseLogArchiveEventArchiveFailed   = "archive_failed"
+	DatabaseLogArchiveEventSpoolUpdated    = "spool_updated"
+	DatabaseLogArchiveEventPurgeGap        = "purge_gap"
+	DatabaseLogArchiveEventAgentMessage    = "agent_message"
+
 	DatabaseRunnerTypeSSH   = "ssh"
 	DatabaseRunnerTypeLocal = "local"
 	DatabaseRunnerTypeAgent = "agent"
@@ -612,6 +626,30 @@ type DatabaseLogArchive struct {
 
 func (DatabaseLogArchive) TableName() string {
 	return "database_log_archives"
+}
+
+// DatabaseLogArchiveEvent 归档流运行事件，用于长期 Agent 守护进程审计和诊断。
+type DatabaseLogArchiveEvent struct {
+	gorm.Model
+	StreamID          uint       `gorm:"column:stream_id;index;comment:归档流ID" json:"streamId"`
+	InstanceID        uint       `gorm:"column:instance_id;index;comment:主实例ID" json:"instanceId"`
+	SourceInstanceID  uint       `gorm:"column:source_instance_id;index;comment:来源实例ID" json:"sourceInstanceId"`
+	RunnerHostID      uint       `gorm:"column:runner_host_id;index;comment:Runner主机ID" json:"runnerHostId"`
+	RunnerID          string     `gorm:"column:runner_id;type:varchar(120);index;comment:Runner标识" json:"runnerId"`
+	EventType         string     `gorm:"column:event_type;type:varchar(60);not null;index;comment:事件类型" json:"eventType"`
+	Level             string     `gorm:"type:varchar(20);default:'info';index;comment:级别 info/warning/error" json:"level"`
+	Message           string     `gorm:"type:varchar(1000);comment:事件消息" json:"message"`
+	FileName          string     `gorm:"column:file_name;type:varchar(255);comment:相关日志文件" json:"fileName"`
+	CursorFile        string     `gorm:"column:cursor_file;type:varchar(255);comment:游标文件" json:"cursorFile"`
+	CursorPos         int64      `gorm:"column:cursor_pos;type:bigint;default:0;comment:游标position" json:"cursorPos"`
+	ActiveFile        string     `gorm:"column:active_file;type:varchar(255);comment:活跃文件" json:"activeFile"`
+	ArchiveLagSeconds int        `gorm:"column:archive_lag_seconds;type:int;default:0;comment:归档延迟秒" json:"archiveLagSeconds"`
+	PayloadJSON       string     `gorm:"column:payload_json;type:text;comment:事件摘要JSON，不保存密钥" json:"payloadJson"`
+	OccurredAt        *time.Time `gorm:"column:occurred_at;index;comment:事件发生时间" json:"occurredAt,omitempty"`
+}
+
+func (DatabaseLogArchiveEvent) TableName() string {
+	return "database_log_archive_events"
 }
 
 // DatabaseRestorePlan PITR 恢复计划和预校验结果

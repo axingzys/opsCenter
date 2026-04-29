@@ -86,3 +86,34 @@ func TestApplyRunnerAgentCheckpointReleaseLease(t *testing.T) {
 		t.Fatalf("unexpected stopped state: %s/%s", stream.DaemonStatus, stream.Status)
 	}
 }
+
+func TestNormalizeLogArchiveEvent(t *testing.T) {
+	if got := normalizeLogArchiveEventLevel("ERROR"); got != DatabaseLogArchiveEventLevelError {
+		t.Fatalf("unexpected level: %s", got)
+	}
+	if got := normalizeLogArchiveEventLevel("unknown"); got != DatabaseLogArchiveEventLevelInfo {
+		t.Fatalf("unexpected default level: %s", got)
+	}
+	if got := normalizeLogArchiveEventType("spool_updated"); got != DatabaseLogArchiveEventSpoolUpdated {
+		t.Fatalf("unexpected event type: %s", got)
+	}
+	if got := normalizeLogArchiveEventType("custom"); got != DatabaseLogArchiveEventAgentMessage {
+		t.Fatalf("unexpected default event type: %s", got)
+	}
+	if LogArchiveEventLevelText(DatabaseLogArchiveEventLevelWarning) != "警告" {
+		t.Fatalf("unexpected level text")
+	}
+	if LogArchiveEventTypeText(DatabaseLogArchiveEventArchiveFailed) != "归档失败" {
+		t.Fatalf("unexpected event type text")
+	}
+}
+
+func TestArchiveEventPayloadIsBoundedJSON(t *testing.T) {
+	payload := archiveEventPayload(map[string]any{"storageUri": "runner://runner-host-1/binlog.000001", "fileSize": 42})
+	if !strings.Contains(payload, "runner://runner-host-1/binlog.000001") {
+		t.Fatalf("payload missing storage uri: %s", payload)
+	}
+	if len(archiveEventPayload(strings.Repeat("x", 5000))) > 4000 {
+		t.Fatalf("payload should be bounded")
+	}
+}

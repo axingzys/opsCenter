@@ -172,6 +172,52 @@ func (r *logArchiveRepo) ListCoveringTimeRange(ctx context.Context, instanceID u
 	return items, nil
 }
 
+type logArchiveEventRepo struct {
+	db *gorm.DB
+}
+
+func NewLogArchiveEventRepo(db *gorm.DB) dbbiz.LogArchiveEventRepo {
+	return &logArchiveEventRepo{db: db}
+}
+
+func (r *logArchiveEventRepo) Create(ctx context.Context, item *dbbiz.DatabaseLogArchiveEvent) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *logArchiveEventRepo) List(ctx context.Context, req *dbbiz.DatabaseLogArchiveEventListRequest) ([]*dbbiz.DatabaseLogArchiveEvent, int64, error) {
+	var (
+		items []*dbbiz.DatabaseLogArchiveEvent
+		total int64
+	)
+	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseLogArchiveEvent{})
+	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
+		if req.StreamID > 0 {
+			query = query.Where("stream_id = ?", req.StreamID)
+		}
+		if req.InstanceID > 0 {
+			query = query.Where("instance_id = ?", req.InstanceID)
+		}
+		if req.RunnerHostID > 0 {
+			query = query.Where("runner_host_id = ?", req.RunnerHostID)
+		}
+		if level := strings.TrimSpace(req.Level); level != "" {
+			query = query.Where("level = ?", level)
+		}
+		if eventType := strings.TrimSpace(req.EventType); eventType != "" {
+			query = query.Where("event_type = ?", eventType)
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := normalizeRepoPage(reqPage(req), reqPageSize(req))
+	if err := query.Order("occurred_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 type restorePlanRepo struct {
 	db *gorm.DB
 }
@@ -456,6 +502,8 @@ func reqPage(req any) int {
 		return item.Page
 	case *dbbiz.DatabaseLogArchiveListRequest:
 		return item.Page
+	case *dbbiz.DatabaseLogArchiveEventListRequest:
+		return item.Page
 	case *dbbiz.DatabaseRestorePlanListRequest:
 		return item.Page
 	case *dbbiz.DatabaseStorageProfileListRequest:
@@ -476,6 +524,8 @@ func reqPageSize(req any) int {
 	case *dbbiz.DatabaseLogArchiveStreamListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseLogArchiveListRequest:
+		return item.PageSize
+	case *dbbiz.DatabaseLogArchiveEventListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseRestorePlanListRequest:
 		return item.PageSize

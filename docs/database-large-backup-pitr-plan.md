@@ -898,14 +898,54 @@ curl -H "X-OpsHub-Runner-Auth: $AUTH" \
    - binlog 事件时间解析。
    - stream 级凭据优先于 instance 级凭据。
 
-本阶段仍未实现，保留给 P2.6.4+：
+#### 2026-04-29 P2.6.4 已落地范围
+
+本阶段把 P2.6.3 的“能跑起来”继续补成“能看见、能审计、能交付 Agent 配置”的闭环。重点仍然不是引入真正 `--stop-never` 长连接，也不是让 backend 接管对象存储写入，而是先把长期守护进程的运维观察面补齐。
+
+已实现：
+
+1. 新增 `database_log_archive_events` 事件表：
+   - 记录 `stream_id / instance_id / source_instance_id / runner_host_id / runner_id`。
+   - 记录 `event_type / level / message / file_name / cursor_file / cursor_pos / active_file / archive_lag_seconds`。
+   - 记录 `payload_json`，只保存非敏感摘要，不保存数据库密码、连接串、临时 defaults 文件路径或对象存储密钥。
+   - 记录 `occurred_at`，用于还原 Agent 侧事件发生顺序。
+2. 后端新增事件查询接口：
+   - `GET /api/v1/databases/log-archive-events`
+   - 支持按归档流、实例、Runner、级别、事件类型过滤。
+   - 继续走数据库备份查看权限和实例级权限收敛。
+3. 后端新增 Runner Agent 事件上报接口：
+   - `POST /api/v1/public/databases/runner-agents/:runnerId/log-archive-events`
+   - 复用 `X-OpsHub-Runner-Auth` / Bearer 鉴权。
+   - 如果事件绑定 `streamId`，会校验归档流是否绑定当前 Runner。
+4. 后端自动记录关键状态事件：
+   - 用户启动、暂停、恢复、停止归档流时记录 `state_changed`。
+   - Agent 获取 stream lease 时记录 `lease_acquired`。
+   - Agent checkpoint 上报降级、失败、释放租约时记录 `checkpoint`。
+   - Agent 登记归档文件成功后记录 `archive_success`。
+   - Runner 心跳上报失败状态时记录 `runner_heartbeat`。
+5. `opshub-agent` 归档循环补充事件上报：
+   - 任意 stream 处理失败会补充上报 `archive_failed`，并带上归档模式、源库当前 binlog、position、当前 file/cursor 等非敏感摘要。
+   - streaming 安全 spool 成功后上报 `spool_updated`。
+   - 正常归档成功仍以登记 `database_log_archives` 为主，后端会自动补 `archive_success` 事件，避免 Agent 和后端重复写成功事件。
+6. 前端 PITR 页新增 `Agent事件` 子页：
+   - 可按归档流、Runner、级别、事件类型过滤。
+   - 显示事件时间、级别、类型、实例/Runner、文件、游标、延迟、消息和摘要。
+   - 归档流行和 Runner 主机行可以直接跳转到对应事件过滤视图。
+7. 前端 Runner 主机新增 `配置` 操作：
+   - 自动生成 `runner-host-<id>` 形式的 Runner ID。
+   - 生成随机 `runnerAuth` 明文，供 Agent 本地配置使用。
+   - 生成 `runnerAuthSha256`，供 Runner 主机 `configJson` 保存。
+   - 根据已绑定该 Runner 的归档流生成 Agent 本地 `databaseArchiver` 配置片段。
+   - 生成内容中的数据库用户名/密码仍是占位符，需要用户在 Agent 本机填入，不从 backend 下发真实数据库密码。
+
+本阶段仍未实现，保留给 P2.6.5+：
 
 1. 真正长连接 `mysqlbinlog --stop-never` 子进程管理。
 2. streaming active spool 的增量续传和断点 resume。
 3. 对象存储 S3/MinIO staging key、checksum 后提交和远端不可变保留。
-4. `database_log_archive_events` 事件表。
-5. 前端展示 Agent 配置生成器、runnerAuth hash 生成和最近 Agent 事件。
-6. Agent 侧多 stream 并发度、带宽限制和失败退避策略。
+4. Agent 侧多 stream 并发度、带宽限制和失败退避策略。
+5. 更细的 `purge_gap` 自动诊断：当前 cursor 已被源库 purge 时，除降级外还应明确写入断链事件并阻止后续恢复计划误判。
+6. 事件保留策略：高频事件要支持保留天数、归档或压缩，避免事件表无界增长。
 
 ### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
 

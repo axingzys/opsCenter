@@ -97,6 +97,16 @@ func (uc *UseCase) RunnerAgentHeartbeat(ctx context.Context, runnerID, auth stri
 	if err := uc.runnerHostRepo.Update(ctx, host); err != nil {
 		return nil, err
 	}
+	if host.Status == DatabaseRunnerHostStatusFailed {
+		uc.recordLogArchiveEvent(ctx, &DatabaseLogArchiveEvent{
+			RunnerHostID: host.ID,
+			RunnerID:     runnerIDForHost(host),
+			EventType:    DatabaseLogArchiveEventRunnerHeartbeat,
+			Level:        DatabaseLogArchiveEventLevelError,
+			Message:      host.LastError,
+			OccurredAt:   &now,
+		})
+	}
 	return runnerAgentHeartbeatVO(host, runnerIDForHost(host)), nil
 }
 
@@ -134,6 +144,21 @@ func (uc *UseCase) RunnerAgentListLogArchiveStreams(ctx context.Context, runnerI
 			continue
 		}
 		streams = append(streams, uc.toRunnerAgentStream(ctx, host, leased, basePath))
+		uc.recordLogArchiveEvent(ctx, &DatabaseLogArchiveEvent{
+			StreamID:          leased.ID,
+			InstanceID:        leased.InstanceID,
+			SourceInstanceID:  leased.SourceInstanceID,
+			RunnerHostID:      host.ID,
+			RunnerID:          resolvedRunnerID,
+			EventType:         DatabaseLogArchiveEventLeaseAcquired,
+			Level:             DatabaseLogArchiveEventLevelInfo,
+			Message:           "Runner Agent 已获取日志归档流租约",
+			CursorFile:        leased.CursorFile,
+			CursorPos:         leased.CursorPos,
+			ActiveFile:        leased.ActiveFile,
+			ArchiveLagSeconds: leased.ArchiveLagSeconds,
+			OccurredAt:        &now,
+		})
 	}
 	return &DatabaseRunnerAgentStreamListVO{
 		RunnerHostID:             host.ID,
@@ -169,6 +194,34 @@ func (uc *UseCase) RunnerAgentCheckpointLogArchiveStream(ctx context.Context, ru
 	if err := uc.logArchiveStreamRepo.Update(ctx, stream); err != nil {
 		return nil, err
 	}
+	if req.ReleaseLease || stream.Status == DatabaseLogArchiveStreamStatusDegraded || stream.Status == DatabaseLogArchiveStreamStatusFailed || strings.TrimSpace(stream.LastError) != "" {
+		level := DatabaseLogArchiveEventLevelInfo
+		if stream.Status == DatabaseLogArchiveStreamStatusFailed {
+			level = DatabaseLogArchiveEventLevelError
+		} else if stream.Status == DatabaseLogArchiveStreamStatusDegraded || strings.TrimSpace(stream.LastError) != "" {
+			level = DatabaseLogArchiveEventLevelWarning
+		}
+		message := stream.LastError
+		if req.ReleaseLease {
+			message = "Runner Agent 已释放日志归档流租约"
+		}
+		uc.recordLogArchiveEvent(ctx, &DatabaseLogArchiveEvent{
+			StreamID:          stream.ID,
+			InstanceID:        stream.InstanceID,
+			SourceInstanceID:  stream.SourceInstanceID,
+			RunnerHostID:      host.ID,
+			RunnerID:          resolvedRunnerID,
+			EventType:         DatabaseLogArchiveEventCheckpoint,
+			Level:             level,
+			Message:           message,
+			FileName:          stream.LastArchiveName,
+			CursorFile:        stream.CursorFile,
+			CursorPos:         stream.CursorPos,
+			ActiveFile:        stream.ActiveFile,
+			ArchiveLagSeconds: stream.ArchiveLagSeconds,
+			OccurredAt:        &now,
+		})
+	}
 	return uc.toLogArchiveStreamVO(ctx, stream), nil
 }
 
@@ -202,8 +255,83 @@ func (uc *UseCase) RunnerAgentRegisterLogArchive(ctx context.Context, runnerID, 
 		stream.LeaseOwner = resolvedRunnerID
 		stream.LeaseExpiresAt = ptrTime(now.Add(time.Duration(runnerAgentLeaseTTLSeconds(0)) * time.Second))
 		_ = uc.logArchiveStreamRepo.Update(ctx, stream)
+		uc.recordLogArchiveEvent(ctx, &DatabaseLogArchiveEvent{
+			StreamID:          stream.ID,
+			InstanceID:        stream.InstanceID,
+			SourceInstanceID:  stream.SourceInstanceID,
+			RunnerHostID:      host.ID,
+			RunnerID:          resolvedRunnerID,
+			EventType:         DatabaseLogArchiveEventArchiveSuccess,
+			Level:             DatabaseLogArchiveEventLevelInfo,
+			Message:           "Runner Agent 已登记日志归档文件",
+			FileName:          req.FileName,
+			CursorFile:        stream.CursorFile,
+			CursorPos:         stream.CursorPos,
+			ActiveFile:        stream.ActiveFile,
+			ArchiveLagSeconds: stream.ArchiveLagSeconds,
+			PayloadJSON:       archiveEventPayload(map[string]any{"storageUri": req.StorageURI, "fileSize": req.FileSize, "checksumSha256": req.ChecksumSHA256}),
+			OccurredAt:        &now,
+		})
 	}
 	return item, nil
+}
+
+func (uc *UseCase) RunnerAgentCreateLogArchiveEvent(ctx context.Context, runnerID, auth string, req *DatabaseRunnerAgentEventRequest) (*DatabaseLogArchiveEventVO, error) {
+	if uc.logArchiveEventRepo == nil {
+		return nil, fmt.Errorf("日志归档事件仓库未配置")
+	}
+	if req == nil {
+		return nil, fmt.Errorf("事件内容不能为空")
+	}
+	host, err := uc.authenticateRunnerAgent(ctx, runnerID, auth)
+	if err != nil {
+		return nil, err
+	}
+	resolvedRunnerID := runnerIDForHost(host)
+	var stream *DatabaseLogArchiveStream
+	if req.StreamID > 0 {
+		if uc.logArchiveStreamRepo == nil {
+			return nil, fmt.Errorf("日志归档流仓库未配置")
+		}
+		stream, err = uc.logArchiveStreamRepo.GetByID(ctx, req.StreamID)
+		if err != nil {
+			return nil, fmt.Errorf("日志归档流不存在")
+		}
+		if stream.RunnerHostID != host.ID {
+			return nil, fmt.Errorf("日志归档流未绑定当前 Runner")
+		}
+	}
+	occurredAt, err := parseDatabaseTime(req.OccurredAt)
+	if err != nil {
+		return nil, fmt.Errorf("事件时间格式不正确")
+	}
+	if occurredAt == nil {
+		now := time.Now()
+		occurredAt = &now
+	}
+	item := &DatabaseLogArchiveEvent{
+		RunnerHostID:      host.ID,
+		RunnerID:          resolvedRunnerID,
+		EventType:         normalizeLogArchiveEventType(req.EventType),
+		Level:             normalizeLogArchiveEventLevel(req.Level),
+		Message:           req.Message,
+		FileName:          req.FileName,
+		CursorFile:        req.CursorFile,
+		CursorPos:         req.CursorPos,
+		ActiveFile:        req.ActiveFile,
+		ArchiveLagSeconds: req.ArchiveLagSeconds,
+		PayloadJSON:       req.PayloadJSON,
+		OccurredAt:        occurredAt,
+	}
+	if stream != nil {
+		item.StreamID = stream.ID
+		item.InstanceID = stream.InstanceID
+		item.SourceInstanceID = stream.SourceInstanceID
+	}
+	if err := uc.recordLogArchiveEvent(ctx, item); err != nil {
+		return nil, err
+	}
+	return uc.toLogArchiveEventVO(ctx, item), nil
 }
 
 func (uc *UseCase) authenticateRunnerAgent(ctx context.Context, runnerID, auth string) (*DatabaseRunnerHost, error) {
@@ -439,6 +567,17 @@ func runnerAgentAuthMatches(configJSON, auth string) bool {
 	sum := sha256.Sum256([]byte(auth))
 	got := hex.EncodeToString(sum[:])
 	return subtle.ConstantTimeCompare([]byte(strings.ToLower(expected)), []byte(got)) == 1
+}
+
+func archiveEventPayload(value any) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return trimText(string(data), 4000)
 }
 
 func runnerAgentAuthHash(configJSON string) string {

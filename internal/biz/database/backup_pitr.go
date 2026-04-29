@@ -223,6 +223,57 @@ type DatabaseLogArchiveVO struct {
 	UpdatedAt          string `json:"updatedAt"`
 }
 
+type DatabaseLogArchiveEventListRequest struct {
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	StreamID           uint   `form:"streamId"`
+	InstanceID         uint   `form:"instanceId"`
+	RunnerHostID       uint   `form:"runnerHostId"`
+	Level              string `form:"level"`
+	EventType          string `form:"eventType"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
+}
+
+type DatabaseRunnerAgentEventRequest struct {
+	StreamID          uint   `json:"streamId"`
+	EventType         string `json:"eventType" binding:"omitempty,max=60"`
+	Level             string `json:"level" binding:"omitempty,max=20"`
+	Message           string `json:"message" binding:"omitempty,max=1000"`
+	FileName          string `json:"fileName" binding:"omitempty,max=255"`
+	CursorFile        string `json:"cursorFile" binding:"omitempty,max=255"`
+	CursorPos         int64  `json:"cursorPos"`
+	ActiveFile        string `json:"activeFile" binding:"omitempty,max=255"`
+	ArchiveLagSeconds int    `json:"archiveLagSeconds" binding:"omitempty,min=0"`
+	PayloadJSON       string `json:"payloadJson" binding:"omitempty,max=4000"`
+	OccurredAt        string `json:"occurredAt"`
+}
+
+type DatabaseLogArchiveEventVO struct {
+	ID                 uint   `json:"id"`
+	StreamID           uint   `json:"streamId"`
+	InstanceID         uint   `json:"instanceId"`
+	InstanceName       string `json:"instanceName"`
+	SourceInstanceID   uint   `json:"sourceInstanceId"`
+	SourceInstanceName string `json:"sourceInstanceName"`
+	RunnerHostID       uint   `json:"runnerHostId"`
+	RunnerHostName     string `json:"runnerHostName"`
+	RunnerID           string `json:"runnerId"`
+	EventType          string `json:"eventType"`
+	EventTypeText      string `json:"eventTypeText"`
+	Level              string `json:"level"`
+	LevelText          string `json:"levelText"`
+	Message            string `json:"message"`
+	FileName           string `json:"fileName"`
+	CursorFile         string `json:"cursorFile"`
+	CursorPos          int64  `json:"cursorPos"`
+	ActiveFile         string `json:"activeFile"`
+	ArchiveLagSeconds  int    `json:"archiveLagSeconds"`
+	PayloadJSON        string `json:"payloadJson"`
+	OccurredAt         string `json:"occurredAt"`
+	CreatedAt          string `json:"createdAt"`
+}
+
 type DatabaseExternalBackupRecordRequest struct {
 	TaskID                 uint   `json:"taskId"`
 	InstanceID             uint   `json:"instanceId" binding:"required"`
@@ -629,6 +680,21 @@ func (uc *UseCase) ListLogArchives(ctx context.Context, req *DatabaseLogArchiveL
 	list := make([]*DatabaseLogArchiveVO, 0, len(items))
 	for _, item := range items {
 		list = append(list, uc.toLogArchiveVO(ctx, item))
+	}
+	return list, total, nil
+}
+
+func (uc *UseCase) ListLogArchiveEvents(ctx context.Context, req *DatabaseLogArchiveEventListRequest) ([]*DatabaseLogArchiveEventVO, int64, error) {
+	if uc.logArchiveEventRepo == nil {
+		return nil, 0, fmt.Errorf("日志归档事件仓库未配置")
+	}
+	items, total, err := uc.logArchiveEventRepo.List(ctx, req)
+	if err != nil {
+		return nil, 0, err
+	}
+	list := make([]*DatabaseLogArchiveEventVO, 0, len(items))
+	for _, item := range items {
+		list = append(list, uc.toLogArchiveEventVO(ctx, item))
 	}
 	return list, total, nil
 }
@@ -1544,6 +1610,55 @@ func (uc *UseCase) toLogArchiveVO(ctx context.Context, item *DatabaseLogArchive)
 	}
 }
 
+func (uc *UseCase) toLogArchiveEventVO(ctx context.Context, item *DatabaseLogArchiveEvent) *DatabaseLogArchiveEventVO {
+	if item == nil {
+		return nil
+	}
+	instanceName, sourceName := uc.archiveInstanceNames(ctx, item.InstanceID, item.SourceInstanceID)
+	return &DatabaseLogArchiveEventVO{
+		ID:                 item.ID,
+		StreamID:           item.StreamID,
+		InstanceID:         item.InstanceID,
+		InstanceName:       instanceName,
+		SourceInstanceID:   item.SourceInstanceID,
+		SourceInstanceName: sourceName,
+		RunnerHostID:       item.RunnerHostID,
+		RunnerHostName:     uc.archiveRunnerHostName(ctx, item.RunnerHostID),
+		RunnerID:           item.RunnerID,
+		EventType:          normalizeLogArchiveEventType(item.EventType),
+		EventTypeText:      LogArchiveEventTypeText(item.EventType),
+		Level:              normalizeLogArchiveEventLevel(item.Level),
+		LevelText:          LogArchiveEventLevelText(item.Level),
+		Message:            item.Message,
+		FileName:           item.FileName,
+		CursorFile:         item.CursorFile,
+		CursorPos:          item.CursorPos,
+		ActiveFile:         item.ActiveFile,
+		ArchiveLagSeconds:  item.ArchiveLagSeconds,
+		PayloadJSON:        item.PayloadJSON,
+		OccurredAt:         formatTime(item.OccurredAt),
+		CreatedAt:          item.CreatedAt.Format("2006-01-02 15:04:05"),
+	}
+}
+
+func (uc *UseCase) recordLogArchiveEvent(ctx context.Context, item *DatabaseLogArchiveEvent) error {
+	if uc.logArchiveEventRepo == nil || item == nil {
+		return nil
+	}
+	if item.OccurredAt == nil || item.OccurredAt.IsZero() {
+		item.OccurredAt = ptrTime(time.Now())
+	}
+	item.EventType = normalizeLogArchiveEventType(item.EventType)
+	item.Level = normalizeLogArchiveEventLevel(item.Level)
+	item.Message = trimText(strings.TrimSpace(item.Message), 1000)
+	item.FileName = trimText(strings.TrimSpace(item.FileName), 255)
+	item.CursorFile = trimText(strings.TrimSpace(item.CursorFile), 255)
+	item.ActiveFile = trimText(strings.TrimSpace(item.ActiveFile), 255)
+	item.RunnerID = trimText(strings.TrimSpace(item.RunnerID), 120)
+	item.PayloadJSON = trimText(strings.TrimSpace(item.PayloadJSON), 4000)
+	return uc.logArchiveEventRepo.Create(ctx, item)
+}
+
 func (uc *UseCase) archiveInstanceNames(ctx context.Context, instanceID, sourceID uint) (string, string) {
 	instanceName := ""
 	sourceName := ""
@@ -1790,6 +1905,40 @@ func normalizeLogArchiveStatus(value string) string {
 	}
 }
 
+func normalizeLogArchiveEventLevel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case DatabaseLogArchiveEventLevelWarning:
+		return DatabaseLogArchiveEventLevelWarning
+	case DatabaseLogArchiveEventLevelError:
+		return DatabaseLogArchiveEventLevelError
+	default:
+		return DatabaseLogArchiveEventLevelInfo
+	}
+}
+
+func normalizeLogArchiveEventType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case DatabaseLogArchiveEventRunnerHeartbeat:
+		return DatabaseLogArchiveEventRunnerHeartbeat
+	case DatabaseLogArchiveEventLeaseAcquired:
+		return DatabaseLogArchiveEventLeaseAcquired
+	case DatabaseLogArchiveEventCheckpoint:
+		return DatabaseLogArchiveEventCheckpoint
+	case DatabaseLogArchiveEventStateChanged:
+		return DatabaseLogArchiveEventStateChanged
+	case DatabaseLogArchiveEventArchiveSuccess:
+		return DatabaseLogArchiveEventArchiveSuccess
+	case DatabaseLogArchiveEventArchiveFailed:
+		return DatabaseLogArchiveEventArchiveFailed
+	case DatabaseLogArchiveEventSpoolUpdated:
+		return DatabaseLogArchiveEventSpoolUpdated
+	case DatabaseLogArchiveEventPurgeGap:
+		return DatabaseLogArchiveEventPurgeGap
+	default:
+		return DatabaseLogArchiveEventAgentMessage
+	}
+}
+
 func normalizeStorageProfileType(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
@@ -1985,6 +2134,40 @@ func LogArchiveDaemonStatusText(value string) string {
 		return "失败"
 	default:
 		return "已停止"
+	}
+}
+
+func LogArchiveEventLevelText(value string) string {
+	switch normalizeLogArchiveEventLevel(value) {
+	case DatabaseLogArchiveEventLevelWarning:
+		return "警告"
+	case DatabaseLogArchiveEventLevelError:
+		return "错误"
+	default:
+		return "信息"
+	}
+}
+
+func LogArchiveEventTypeText(value string) string {
+	switch normalizeLogArchiveEventType(value) {
+	case DatabaseLogArchiveEventRunnerHeartbeat:
+		return "Runner 心跳"
+	case DatabaseLogArchiveEventLeaseAcquired:
+		return "租约获取"
+	case DatabaseLogArchiveEventCheckpoint:
+		return "Checkpoint"
+	case DatabaseLogArchiveEventStateChanged:
+		return "状态变更"
+	case DatabaseLogArchiveEventArchiveSuccess:
+		return "归档成功"
+	case DatabaseLogArchiveEventArchiveFailed:
+		return "归档失败"
+	case DatabaseLogArchiveEventSpoolUpdated:
+		return "Spool 更新"
+	case DatabaseLogArchiveEventPurgeGap:
+		return "日志断链"
+	default:
+		return "Agent 消息"
 	}
 }
 

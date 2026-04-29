@@ -418,6 +418,31 @@ export interface DatabaseLogArchiveResult {
   updatedAt: string
 }
 
+export interface DatabaseLogArchiveEventResult {
+  id: number
+  streamId: number
+  instanceId: number
+  instanceName: string
+  sourceInstanceId: number
+  sourceInstanceName: string
+  runnerHostId: number
+  runnerHostName: string
+  runnerId: string
+  eventType: string
+  eventTypeText: string
+  level: string
+  levelText: string
+  message: string
+  fileName: string
+  cursorFile: string
+  cursorPos: number
+  activeFile: string
+  archiveLagSeconds: number
+  payloadJson: string
+  occurredAt: string
+  createdAt: string
+}
+
 export interface DatabaseRunLogArchiveOncePayload {
   runnerHostId: number
   fileName?: string
@@ -922,6 +947,16 @@ export const listDatabaseLogArchives = (params?: {
 
 export const registerExternalDatabaseLogArchive = (data: DatabaseExternalLogArchivePayload) =>
   request.post('/api/v1/databases/log-archives/external', data)
+
+export const listDatabaseLogArchiveEvents = (params?: {
+  page?: number
+  pageSize?: number
+  streamId?: number
+  instanceId?: number
+  runnerHostId?: number
+  level?: string
+  eventType?: string
+}) => request.get('/api/v1/databases/log-archive-events', { params })
 
 export const listDatabaseRestorePlans = (params?: {
   page?: number

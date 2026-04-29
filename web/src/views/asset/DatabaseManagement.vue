@@ -1617,7 +1617,7 @@
                 </el-button>
               </div>
               <div class="backup-toolbar-group">
-                <el-button :loading="runnerHostLoading || runnerJobLoading || logArchiveStreamLoading || logArchiveLoading || restorePlanLoading" @click="refreshPITRState">
+                <el-button :loading="runnerHostLoading || runnerJobLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
                   刷新 PITR
                 </el-button>
               </div>
@@ -1691,9 +1691,11 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="150" align="center" fixed="right">
+                  <el-table-column label="操作" width="220" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="primary" @click="openRunnerHostDialog(row)">编辑</el-button>
+                      <el-button link type="primary" @click="openRunnerAgentConfigDialog(row)">配置</el-button>
+                      <el-button link type="info" @click="openLogArchiveEventsForRunner(row)">事件</el-button>
                       <el-button link type="success" :loading="runnerHostTestingId === row.id" @click="handleTestRunnerHost(row)">测试</el-button>
                     </template>
                   </el-table-column>
@@ -1853,7 +1855,7 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="260" align="center" fixed="right">
+                  <el-table-column label="操作" width="320" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button
                         link
@@ -1903,6 +1905,7 @@
                       >
                         追平
                       </el-button>
+                      <el-button link type="info" @click="openLogArchiveEventsForStream(row)">事件</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -1978,6 +1981,75 @@
                     layout="total, sizes, prev, pager, next, jumper"
                     @size-change="loadLogArchives"
                     @current-change="loadLogArchives"
+                  />
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="Agent事件" name="events">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-select v-model="logArchiveEventQuery.streamId" placeholder="归档流" clearable filterable class="audit-search-input" @change="loadLogArchiveEvents">
+                      <el-option v-for="item in logArchiveStreamOptions" :key="item.id" :label="item.label" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="logArchiveEventQuery.runnerHostId" placeholder="Runner" clearable filterable class="audit-select" @change="loadLogArchiveEvents">
+                      <el-option v-for="item in runnerHostOptions" :key="item.id" :label="item.label" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="logArchiveEventQuery.level" placeholder="级别" clearable class="audit-select" @change="loadLogArchiveEvents">
+                      <el-option label="信息" value="info" />
+                      <el-option label="警告" value="warning" />
+                      <el-option label="错误" value="error" />
+                    </el-select>
+                    <el-select v-model="logArchiveEventQuery.eventType" placeholder="事件类型" clearable class="audit-select" @change="loadLogArchiveEvents">
+                      <el-option label="租约获取" value="lease_acquired" />
+                      <el-option label="Checkpoint" value="checkpoint" />
+                      <el-option label="状态变更" value="state_changed" />
+                      <el-option label="归档成功" value="archive_success" />
+                      <el-option label="归档失败" value="archive_failed" />
+                      <el-option label="Spool 更新" value="spool_updated" />
+                      <el-option label="日志断链" value="purge_gap" />
+                      <el-option label="Agent 消息" value="agent_message" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetLogArchiveEventQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="logArchiveEventLoading" @click="loadLogArchiveEvents">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="logArchiveEvents" v-loading="logArchiveEventLoading" stripe class="modern-table">
+                  <el-table-column label="时间" prop="occurredAt" width="170" />
+                  <el-table-column label="级别" width="90" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="logArchiveEventLevelTag(row.level)">{{ row.levelText || row.level || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="类型" width="120">
+                    <template #default="{ row }">{{ row.eventTypeText || row.eventType || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="实例/Runner" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.instanceName || `#${row.instanceId || '-'}` }} / {{ row.runnerHostName || row.runnerId || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="文件" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.fileName || row.activeFile || row.cursorFile || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="游标/延迟" min-width="160" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.cursorFile ? `${row.cursorFile}:${row.cursorPos || 0}` : '-' }} / {{ row.archiveLagSeconds || 0 }}s</template>
+                  </el-table-column>
+                  <el-table-column label="消息" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.message || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="摘要" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.payloadJson || '-' }}</template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="logArchiveEventQuery.page"
+                    v-model:page-size="logArchiveEventQuery.pageSize"
+                    :page-sizes="[20, 50, 100]"
+                    :total="logArchiveEventTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadLogArchiveEvents"
+                    @current-change="loadLogArchiveEvents"
                   />
                 </div>
               </el-tab-pane>
@@ -3540,7 +3612,7 @@
               <el-select v-model="runnerHostForm.runnerType" style="width: 100%;">
                 <el-option label="SSH Runner" value="ssh" />
                 <el-option label="本地 Runner（后续）" value="local" disabled />
-                <el-option label="Agent Runner（后续）" value="agent" disabled />
+                <el-option label="Agent Runner" value="agent" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -3625,6 +3697,46 @@
       <template #footer>
         <el-button @click="runnerHostDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="runnerHostSubmitting" @click="submitRunnerHost">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="runnerAgentConfigDialogVisible"
+      title="Agent 归档配置"
+      width="920px"
+    >
+      <el-alert
+        title="认证明文只显示在本次生成结果中；runnerAuthSha256 写入 Runner 主机配置 JSON，runnerAuth 写入 Agent 本地配置。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-descriptions :column="2" border class="backup-detail-descriptions">
+        <el-descriptions-item label="Runner">{{ runnerAgentConfigHost?.name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="Runner ID">{{ runnerAgentConfigHost ? runnerAgentIDForHost(runnerAgentConfigHost) : '-' }}</el-descriptions-item>
+      </el-descriptions>
+      <div class="runner-config-section">
+        <div class="runner-config-title">
+          <span>Runner 主机 configJson</span>
+          <el-button size="small" @click="copyText(JSON.stringify({ runnerAuthSha256: runnerAgentAuthSha256 }, null, 2), 'runnerAuthSha256')">复制</el-button>
+        </div>
+        <el-input
+          :model-value="JSON.stringify({ runnerAuthSha256: runnerAgentAuthSha256 }, null, 2)"
+          type="textarea"
+          :rows="3"
+          readonly
+        />
+      </div>
+      <div class="runner-config-section">
+        <div class="runner-config-title">
+          <span>Agent 本地配置片段</span>
+          <el-button size="small" @click="copyText(runnerAgentConfigJson, 'Agent 配置')">复制</el-button>
+        </div>
+        <el-input v-model="runnerAgentConfigJson" type="textarea" :rows="16" readonly />
+      </div>
+      <template #footer>
+        <el-button @click="runnerAgentConfigDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -3849,6 +3961,7 @@ import {
   listDatabaseBackupTasks,
   listDatabaseDiagnosisSessions,
   listDatabaseInspectionReports,
+  listDatabaseLogArchiveEvents,
   listDatabaseLogArchives,
   listDatabaseLogArchiveStreams,
   listDatabaseRestoreJobs,
@@ -3894,6 +4007,7 @@ import {
   type DatabaseDDLValidateResult,
   type DatabaseExternalBackupRecordPayload,
   type DatabaseExternalLogArchivePayload,
+  type DatabaseLogArchiveEventResult,
   type DatabaseLogArchiveStreamControlPayload,
   type DatabaseLogArchiveResult,
   type DatabaseLogArchiveStreamPayload,
@@ -4119,6 +4233,9 @@ const logArchiveTotal = ref(0)
 const logArchiveDialogVisible = ref(false)
 const logArchiveSubmitting = ref(false)
 const logArchiveFormRef = ref<FormInstance>()
+const logArchiveEventLoading = ref(false)
+const logArchiveEvents = ref<DatabaseLogArchiveEventResult[]>([])
+const logArchiveEventTotal = ref(0)
 const runLogArchiveOnceDialogVisible = ref(false)
 const runLogArchiveOnceSubmitting = ref(false)
 const runLogArchiveOnceFormRef = ref<FormInstance>()
@@ -4140,6 +4257,11 @@ const runnerHostTestingId = ref(0)
 const runnerHostFormRef = ref<FormInstance>()
 const runnerHosts = ref<DatabaseRunnerHostResult[]>([])
 const runnerHostTotal = ref(0)
+const runnerAgentConfigDialogVisible = ref(false)
+const runnerAgentConfigHost = ref<DatabaseRunnerHostResult>()
+const runnerAgentPlainAuth = ref('')
+const runnerAgentAuthSha256 = ref('')
+const runnerAgentConfigJson = ref('')
 const runnerJobLoading = ref(false)
 const runnerJobs = ref<DatabaseRunnerJobResult[]>([])
 const runnerJobTotal = ref(0)
@@ -4264,6 +4386,16 @@ const logArchiveQuery = reactive({
   instanceId: undefined as number | undefined,
   archiveType: '',
   status: ''
+})
+
+const logArchiveEventQuery = reactive({
+  page: 1,
+  pageSize: 20,
+  streamId: undefined as number | undefined,
+  instanceId: undefined as number | undefined,
+  runnerHostId: undefined as number | undefined,
+  level: '',
+  eventType: ''
 })
 
 const restorePlanQuery = reactive({
@@ -4540,8 +4672,26 @@ const restorePlanRules: FormRules = {
 const runnerHostRules: FormRules = {
   name: [{ required: true, message: '请输入 Runner 名称', trigger: 'blur' }],
   runnerType: [{ required: true, message: '请选择 Runner 类型', trigger: 'change' }],
-  host: [{ required: true, message: '请输入 SSH 主机地址', trigger: 'blur' }],
-  credentialId: [{ required: true, message: '请选择 SSH 凭据', trigger: 'change' }]
+  host: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      if (runnerHostForm.runnerType === 'ssh' && !String(value || '').trim()) {
+        callback(new Error('请输入 SSH 主机地址'))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur'
+  }],
+  credentialId: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      if (runnerHostForm.runnerType === 'ssh' && !value) {
+        callback(new Error('请选择 SSH 凭据'))
+        return
+      }
+      callback()
+    },
+    trigger: 'change'
+  }]
 }
 
 const permissionRules: FormRules = {
@@ -5570,6 +5720,19 @@ const loadLogArchives = async () => {
   }
 }
 
+const loadLogArchiveEvents = async () => {
+  logArchiveEventLoading.value = true
+  try {
+    const res: any = await listDatabaseLogArchiveEvents(logArchiveEventQuery)
+    logArchiveEvents.value = res.list || []
+    logArchiveEventTotal.value = res.total || 0
+    if (res.page) logArchiveEventQuery.page = res.page
+    if (res.pageSize) logArchiveEventQuery.pageSize = res.pageSize
+  } finally {
+    logArchiveEventLoading.value = false
+  }
+}
+
 const loadRestorePlans = async () => {
   restorePlanLoading.value = true
   try {
@@ -5610,7 +5773,7 @@ const loadRunnerJobs = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadRestorePlans()])
+  await Promise.all([loadRunnerHosts(), loadRunnerJobs(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans()])
 }
 
 const loadRestoreJobs = async () => {
@@ -6198,8 +6361,8 @@ const submitRunnerHost = async () => {
       name: runnerHostForm.name.trim(),
       runnerType: runnerHostForm.runnerType || 'ssh',
       host: runnerHostForm.host?.trim(),
-      port: runnerHostForm.port || 22,
-      credentialId: runnerHostForm.credentialId || undefined,
+      port: runnerHostForm.runnerType === 'ssh' ? (runnerHostForm.port || 22) : undefined,
+      credentialId: runnerHostForm.runnerType === 'ssh' ? (runnerHostForm.credentialId || undefined) : undefined,
       workDir: runnerHostForm.workDir?.trim(),
       storageMountPath: runnerHostForm.storageMountPath?.trim(),
       maxConcurrentJobs: runnerHostForm.maxConcurrentJobs || 1,
@@ -6237,6 +6400,169 @@ const handleTestRunnerHost = async (row: DatabaseRunnerHostResult) => {
   } finally {
     runnerHostTestingId.value = 0
   }
+}
+
+const runnerAgentIDForHost = (row: DatabaseRunnerHostResult) => `runner-host-${row.id}`
+
+const generateRunnerAgentAuth = () => {
+  const bytes = new Uint8Array(32)
+  window.crypto.getRandomValues(bytes)
+  return Array.from(bytes).map(value => value.toString(16).padStart(2, '0')).join('')
+}
+
+const sha256Hex = async (value: string) => {
+  if (!window.crypto?.subtle) {
+    return sha256HexFallback(value)
+  }
+  const data = new TextEncoder().encode(value)
+  const digest = await window.crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(digest)).map(item => item.toString(16).padStart(2, '0')).join('')
+}
+
+const sha256HexFallback = (value: string) => {
+  const bytes = new TextEncoder().encode(value)
+  const words: number[] = []
+  for (let i = 0; i < bytes.length; i += 1) {
+    words[i >> 2] = (words[i >> 2] || 0) | ((bytes[i] || 0) << (24 - (i % 4) * 8))
+  }
+  words[bytes.length >> 2] = (words[bytes.length >> 2] || 0) | (0x80 << (24 - (bytes.length % 4) * 8))
+  words[(((bytes.length + 8) >> 6) << 4) + 15] = bytes.length * 8
+  const constants: number[] = Array.from({ length: 64 }, (_, i) => {
+    let count = 0
+    for (let n = 2; ; n += 1) {
+      let prime = true
+      for (let d = 2; d * d <= n; d += 1) {
+        if (n % d === 0) {
+          prime = false
+          break
+        }
+      }
+      if (prime) {
+        if (count === i) return Math.floor((Math.cbrt(n) % 1) * 0x100000000) >>> 0
+        count += 1
+      }
+    }
+  })
+  const hash = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+  const rightRotate = (x: number, n: number) => (x >>> n) | (x << (32 - n))
+  for (let i = 0; i < words.length; i += 16) {
+    const w = words.slice(i, i + 16)
+    for (let j = 16; j < 64; j += 1) {
+      const s0 = rightRotate(w[j - 15] || 0, 7) ^ rightRotate(w[j - 15] || 0, 18) ^ ((w[j - 15] || 0) >>> 3)
+      const s1 = rightRotate(w[j - 2] || 0, 17) ^ rightRotate(w[j - 2] || 0, 19) ^ ((w[j - 2] || 0) >>> 10)
+      w[j] = (((w[j - 16] || 0) + s0 + (w[j - 7] || 0) + s1) >>> 0)
+    }
+    let a = hash[0] || 0
+    let b = hash[1] || 0
+    let c = hash[2] || 0
+    let d = hash[3] || 0
+    let e = hash[4] || 0
+    let f = hash[5] || 0
+    let g = hash[6] || 0
+    let h = hash[7] || 0
+    for (let j = 0; j < 64; j += 1) {
+      const s1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25)
+      const ch = (e & f) ^ (~e & g)
+      const temp1 = (h + s1 + ch + (constants[j] || 0) + (w[j] || 0)) >>> 0
+      const s0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22)
+      const maj = (a & b) ^ (a & c) ^ (b & c)
+      const temp2 = (s0 + maj) >>> 0
+      h = g
+      g = f
+      f = e
+      e = (d + temp1) >>> 0
+      d = c
+      c = b
+      b = a
+      a = (temp1 + temp2) >>> 0
+    }
+    ;[a, b, c, d, e, f, g, h].forEach((item, index) => {
+      hash[index] = ((hash[index] || 0) + item) >>> 0
+    })
+  }
+  return hash.map(item => item.toString(16).padStart(8, '0')).join('')
+}
+
+const buildRunnerAgentConfig = (row: DatabaseRunnerHostResult, auth: string) => {
+  const assignedStreams = logArchiveStreams.value.filter(item => item.runnerHostId === row.id)
+  const credentials = assignedStreams.map(stream => {
+    const sourceID = stream.sourceInstanceId || stream.instanceId
+    const instance = instances.value.find(item => item.id === sourceID)
+    return {
+      streamId: stream.id,
+      instanceId: sourceID,
+      host: instance?.host || '',
+      port: instance?.port || 3306,
+      username: '<mysql_replication_user>',
+      password: '<local_secret>'
+    }
+  })
+  return JSON.stringify({
+    databaseArchiver: {
+      enabled: true,
+      baseUrl: window.location.origin,
+      runnerId: runnerAgentIDForHost(row),
+      runnerAuth: auth,
+      intervalSeconds: 30,
+      leaseTtlSeconds: 90,
+      maxFilesPerLoop: 5,
+      includeCurrent: false,
+      workDir: row.workDir || '/var/lib/opshub-agent',
+      storageRoot: row.storageMountPath || '/var/lib/opshub-agent/database-archives',
+      mysqlBinlogPath: '',
+      credentials
+    }
+  }, null, 2)
+}
+
+const openRunnerAgentConfigDialog = async (row: DatabaseRunnerHostResult) => {
+  if (!logArchiveStreams.value.length) {
+    await loadLogArchiveStreams()
+  }
+  runnerAgentConfigHost.value = row
+  runnerAgentPlainAuth.value = generateRunnerAgentAuth()
+  runnerAgentAuthSha256.value = await sha256Hex(runnerAgentPlainAuth.value)
+  runnerAgentConfigJson.value = buildRunnerAgentConfig(row, runnerAgentPlainAuth.value)
+  runnerAgentConfigDialogVisible.value = true
+}
+
+const copyText = async (value: string, label: string) => {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value)
+      ElMessage.success(`${label}已复制`)
+      return
+    } catch {
+      // fall back to textarea copy below
+    }
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  document.execCommand('copy')
+  document.body.removeChild(textarea)
+  ElMessage.success(`${label}已复制`)
+}
+
+const openLogArchiveEventsForStream = async (row: DatabaseLogArchiveStreamResult) => {
+  backupPitrTab.value = 'events'
+  logArchiveEventQuery.page = 1
+  logArchiveEventQuery.streamId = row.id
+  logArchiveEventQuery.instanceId = undefined
+  logArchiveEventQuery.runnerHostId = undefined
+  await loadLogArchiveEvents()
+}
+
+const openLogArchiveEventsForRunner = async (row: DatabaseRunnerHostResult) => {
+  backupPitrTab.value = 'events'
+  logArchiveEventQuery.page = 1
+  logArchiveEventQuery.streamId = undefined
+  logArchiveEventQuery.instanceId = undefined
+  logArchiveEventQuery.runnerHostId = row.id
+  await loadLogArchiveEvents()
 }
 
 const loadInstancePermissions = async () => {
@@ -7167,6 +7493,17 @@ const resetLogArchiveQuery = () => {
   loadLogArchives()
 }
 
+const resetLogArchiveEventQuery = () => {
+  logArchiveEventQuery.page = 1
+  logArchiveEventQuery.pageSize = 20
+  logArchiveEventQuery.streamId = undefined
+  logArchiveEventQuery.instanceId = undefined
+  logArchiveEventQuery.runnerHostId = undefined
+  logArchiveEventQuery.level = ''
+  logArchiveEventQuery.eventType = ''
+  loadLogArchiveEvents()
+}
+
 const resetRestorePlanQuery = () => {
   restorePlanQuery.page = 1
   restorePlanQuery.pageSize = 10
@@ -7693,6 +8030,17 @@ const logArchiveStatusTag = (status?: string) => {
   }
 }
 
+const logArchiveEventLevelTag = (level?: string) => {
+  switch (level) {
+    case 'error':
+      return 'danger'
+    case 'warning':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
 const logArchiveDesiredStateTag = (state?: string) => {
   switch (state) {
     case 'running':
@@ -7992,6 +8340,7 @@ watch(activeTab, async (tab) => {
       loadRunnerJobs(),
       loadLogArchiveStreams(),
       loadLogArchives(),
+      loadLogArchiveEvents(),
       loadRestorePlans(),
       loadRestoreJobs()
     ])
@@ -8823,6 +9172,19 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+.runner-config-section {
+  margin-top: 16px;
+}
+
+.runner-config-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-weight: 700;
+  color: #1f2937;
 }
 
 @media (max-width: 900px) {

@@ -43,6 +43,7 @@ func (uc *UseCase) StartLogArchiveStream(ctx context.Context, streamID uint, req
 	if err := uc.logArchiveStreamRepo.Update(ctx, stream); err != nil {
 		return nil, err
 	}
+	uc.recordLogArchiveStreamStateEvent(ctx, stream, DatabaseLogArchiveEventLevelInfo, "日志归档流已启动，等待 Runner Agent 接管")
 	return uc.toLogArchiveStreamVO(ctx, stream), nil
 }
 
@@ -59,6 +60,7 @@ func (uc *UseCase) PauseLogArchiveStream(ctx context.Context, streamID uint, req
 	if err := uc.logArchiveStreamRepo.Update(ctx, stream); err != nil {
 		return nil, err
 	}
+	uc.recordLogArchiveStreamStateEvent(ctx, stream, DatabaseLogArchiveEventLevelWarning, stream.LastError)
 	return uc.toLogArchiveStreamVO(ctx, stream), nil
 }
 
@@ -90,6 +92,7 @@ func (uc *UseCase) ResumeLogArchiveStream(ctx context.Context, streamID uint, re
 	if err := uc.logArchiveStreamRepo.Update(ctx, stream); err != nil {
 		return nil, err
 	}
+	uc.recordLogArchiveStreamStateEvent(ctx, stream, DatabaseLogArchiveEventLevelInfo, "日志归档流已恢复，等待 Runner Agent 接管")
 	return uc.toLogArchiveStreamVO(ctx, stream), nil
 }
 
@@ -106,6 +109,7 @@ func (uc *UseCase) StopLogArchiveStream(ctx context.Context, streamID uint, req 
 	if err := uc.logArchiveStreamRepo.Update(ctx, stream); err != nil {
 		return nil, err
 	}
+	uc.recordLogArchiveStreamStateEvent(ctx, stream, DatabaseLogArchiveEventLevelWarning, stream.LastError)
 	return uc.toLogArchiveStreamVO(ctx, stream), nil
 }
 
@@ -185,6 +189,27 @@ func (uc *UseCase) archiveRunnerHostName(ctx context.Context, runnerHostID uint)
 		return ""
 	}
 	return host.Name
+}
+
+func (uc *UseCase) recordLogArchiveStreamStateEvent(ctx context.Context, stream *DatabaseLogArchiveStream, level, message string) {
+	if stream == nil {
+		return
+	}
+	uc.recordLogArchiveEvent(ctx, &DatabaseLogArchiveEvent{
+		StreamID:          stream.ID,
+		InstanceID:        stream.InstanceID,
+		SourceInstanceID:  stream.SourceInstanceID,
+		RunnerHostID:      stream.RunnerHostID,
+		RunnerID:          stream.LeaseOwner,
+		EventType:         DatabaseLogArchiveEventStateChanged,
+		Level:             level,
+		Message:           message,
+		FileName:          stream.LastArchiveName,
+		CursorFile:        stream.CursorFile,
+		CursorPos:         stream.CursorPos,
+		ActiveFile:        stream.ActiveFile,
+		ArchiveLagSeconds: stream.ArchiveLagSeconds,
+	})
 }
 
 func daemonArchiveModeForStart(value string) string {

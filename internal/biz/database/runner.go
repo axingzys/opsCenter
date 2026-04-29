@@ -497,6 +497,9 @@ func runnerIDForHost(host *DatabaseRunnerHost) string {
 	case DatabaseRunnerTypeLocal:
 		return fmt.Sprintf("local:%d", host.ID)
 	case DatabaseRunnerTypeAgent:
+		if strings.TrimSpace(host.Host) == "" {
+			return fmt.Sprintf("runner-host-%d", host.ID)
+		}
 		return fmt.Sprintf("agent:%s", host.Host)
 	default:
 		return fmt.Sprintf("ssh:%s:%d", host.Host, host.Port)

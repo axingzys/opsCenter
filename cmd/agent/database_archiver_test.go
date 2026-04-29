@@ -104,3 +104,13 @@ func TestDatabaseArchiverCredentialMatching(t *testing.T) {
 		t.Fatalf("stream credential should win, got %s", credential.Username)
 	}
 }
+
+func TestDatabaseArchiverEventPayloadJSONIsBounded(t *testing.T) {
+	payload := databaseArchiverEventPayloadJSON(map[string]any{"sourceFile": "binlog.000001", "sourcePos": 42})
+	if payload == "" || len(payload) > 4000 {
+		t.Fatalf("unexpected payload: %q", payload)
+	}
+	if got := databaseArchiverEventPayloadJSON(string(make([]byte, 5000))); len(got) > 4000 {
+		t.Fatalf("payload should be bounded")
+	}
+}
