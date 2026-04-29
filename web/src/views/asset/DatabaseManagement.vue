@@ -6509,6 +6509,19 @@ const buildRunnerAgentConfig = (row: DatabaseRunnerHostResult, auth: string) => 
       includeCurrent: false,
       workDir: row.workDir || '/var/lib/opshub-agent',
       storageRoot: row.storageMountPath || '/var/lib/opshub-agent/database-archives',
+      storage: {
+        type: 'local',
+        endpoint: 'http://192.168.1.30:9000',
+        bucket: 'opshub-backup',
+        region: 'us-east-1',
+        pathPrefix: 'opshub/database-archives',
+        stagingPrefix: 'opshub/database-archives/.staging',
+        accessKey: '<minio_or_s3_access_key>',
+        secretKey: '<local_secret>',
+        useSsl: false,
+        usePathStyle: true,
+        insecureSkipVerify: false
+      },
       mysqlBinlogPath: '',
       credentials
     }

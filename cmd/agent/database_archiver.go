@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -16,12 +17,18 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
@@ -30,6 +37,7 @@ const (
 	defaultDatabaseArchiverLeaseTTLSeconds = 90
 	defaultDatabaseArchiverMaxFilesPerLoop = 5
 	defaultDatabaseArchiverWorkDir         = "/var/lib/opshub-agent"
+	defaultDatabaseArchiverObjectPrefix    = "opshub/database-archives"
 )
 
 type databaseArchiverConfig struct {
@@ -43,8 +51,23 @@ type databaseArchiverConfig struct {
 	IncludeCurrent  bool                         `json:"includeCurrent"`
 	WorkDir         string                       `json:"workDir"`
 	StorageRoot     string                       `json:"storageRoot"`
+	Storage         databaseArchiverStorage      `json:"storage"`
 	MySQLBinlogPath string                       `json:"mysqlBinlogPath"`
 	Credentials     []databaseArchiverCredential `json:"credentials"`
+}
+
+type databaseArchiverStorage struct {
+	Type               string `json:"type"`
+	Endpoint           string `json:"endpoint"`
+	Bucket             string `json:"bucket"`
+	Region             string `json:"region"`
+	PathPrefix         string `json:"pathPrefix"`
+	StagingPrefix      string `json:"stagingPrefix"`
+	AccessKey          string `json:"accessKey"`
+	SecretKey          string `json:"secretKey"`
+	UseSSL             bool   `json:"useSsl"`
+	UsePathStyle       bool   `json:"usePathStyle"`
+	InsecureSkipVerify bool   `json:"insecureSkipVerify"`
 }
 
 type databaseArchiverCredential struct {
@@ -68,6 +91,7 @@ type resolvedDatabaseArchiverConfig struct {
 	IncludeCurrent  bool
 	WorkDir         string
 	StorageRoot     string
+	Storage         databaseArchiverStorage
 	MySQLBinlogPath string
 	Credentials     []databaseArchiverCredential
 }
@@ -213,6 +237,16 @@ type agentBinlogArtifact struct {
 	Next           string
 }
 
+type agentBinlogPurgeGapError struct {
+	LastArchived   string
+	FirstAvailable string
+	LastAvailable  string
+}
+
+func (e *agentBinlogPurgeGapError) Error() string {
+	return fmt.Sprintf("归档流最近文件 %s 已不在源库 binlog 列表中，可用范围为 %s..%s，可能已经 purge，需人工确认日志链", e.LastArchived, e.FirstAvailable, e.LastAvailable)
+}
+
 func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverConfig, error) {
 	if cfg == nil || !cfg.DatabaseArchiver.Enabled {
 		return &resolvedDatabaseArchiverConfig{}, nil
@@ -262,6 +296,10 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 	if storageRoot == "" {
 		storageRoot = filepath.Join(workDir, "database-archives")
 	}
+	storage, err := resolveDatabaseArchiverStorage(raw.Storage)
+	if err != nil {
+		return nil, err
+	}
 	endpointBase := strings.TrimRight(opsHubBaseURL, "/") + "/api/v1/public/databases/runner-agents/" + url.PathEscape(runnerID)
 	return &resolvedDatabaseArchiverConfig{
 		Enabled:         true,
@@ -275,9 +313,53 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 		IncludeCurrent:  raw.IncludeCurrent,
 		WorkDir:         workDir,
 		StorageRoot:     storageRoot,
+		Storage:         storage,
 		MySQLBinlogPath: strings.TrimSpace(raw.MySQLBinlogPath),
 		Credentials:     append([]databaseArchiverCredential{}, raw.Credentials...),
 	}, nil
+}
+
+func resolveDatabaseArchiverStorage(raw databaseArchiverStorage) (databaseArchiverStorage, error) {
+	storageType := strings.ToLower(strings.TrimSpace(raw.Type))
+	if storageType == "" {
+		storageType = "local"
+	}
+	if storageType != "local" && storageType != "s3" && storageType != "minio" {
+		return databaseArchiverStorage{}, fmt.Errorf("databaseArchiver.storage.type 仅支持 local/s3/minio，当前为 %s", raw.Type)
+	}
+	result := databaseArchiverStorage{Type: storageType}
+	if storageType == "local" {
+		return result, nil
+	}
+	result.Endpoint = normalizeAgentObjectStorageEndpoint(raw.Endpoint, raw.UseSSL)
+	result.Bucket = strings.TrimSpace(raw.Bucket)
+	result.Region = strings.TrimSpace(raw.Region)
+	if result.Region == "" {
+		result.Region = "us-east-1"
+	}
+	result.PathPrefix = cleanAgentObjectKey(raw.PathPrefix)
+	if result.PathPrefix == "" {
+		result.PathPrefix = defaultDatabaseArchiverObjectPrefix
+	}
+	result.StagingPrefix = cleanAgentObjectKey(raw.StagingPrefix)
+	if result.StagingPrefix == "" {
+		result.StagingPrefix = joinAgentObjectKey(result.PathPrefix, ".staging")
+	}
+	result.AccessKey = strings.TrimSpace(raw.AccessKey)
+	result.SecretKey = strings.TrimSpace(raw.SecretKey)
+	result.UseSSL = raw.UseSSL
+	result.UsePathStyle = raw.UsePathStyle || storageType == "minio" || result.Endpoint != ""
+	result.InsecureSkipVerify = raw.InsecureSkipVerify
+	if result.Bucket == "" {
+		return databaseArchiverStorage{}, errors.New("databaseArchiver.storage.bucket 不能为空")
+	}
+	if result.AccessKey == "" || result.SecretKey == "" {
+		return databaseArchiverStorage{}, errors.New("databaseArchiver.storage.accessKey/secretKey 不能为空")
+	}
+	if storageType == "minio" && result.Endpoint == "" {
+		return databaseArchiverStorage{}, errors.New("databaseArchiver.storage.endpoint 不能为空")
+	}
+	return result, nil
 }
 
 func resolveDatabaseArchiverBaseURL(configured, reportURL string) string {
@@ -355,6 +437,8 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 	var (
 		eventFile    string
 		eventActive  string
+		eventType    = "archive_failed"
+		eventLevel   = "error"
 		eventPayload = map[string]any{
 			"archiveMode": item.Stream.ArchiveMode,
 			"streamId":    item.Stream.ID,
@@ -365,8 +449,8 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 			return
 		}
 		_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
-			EventType:   "archive_failed",
-			Level:       "error",
+			EventType:   eventType,
+			Level:       eventLevel,
 			Message:     err.Error(),
 			FileName:    eventFile,
 			CursorFile:  item.Stream.CursorFile,
@@ -443,6 +527,14 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 	}
 	selections, err := selectAgentBinlogsForArchive(logs, lastArchived, cfg.MaxFilesPerLoop, includeCurrent)
 	if err != nil {
+		var purgeGap *agentBinlogPurgeGapError
+		if errors.As(err, &purgeGap) {
+			eventType = "purge_gap"
+			eventLevel = "warning"
+			eventPayload["lastArchived"] = purgeGap.LastArchived
+			eventPayload["firstAvailable"] = purgeGap.FirstAvailable
+			eventPayload["lastAvailable"] = purgeGap.LastAvailable
+		}
 		_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
 			DaemonStatus:        "degraded",
 			LastSourceFile:      firstNonEmptyString(status.File, current.Name),
@@ -732,7 +824,11 @@ func selectAgentBinlogsForArchive(logs []agentMySQLBinaryLog, lastArchived strin
 			}
 		}
 		if start < 0 {
-			return nil, fmt.Errorf("归档流最近文件 %s 已不在源库 binlog 列表中，可能已经 purge，需人工确认日志链", lastArchived)
+			return nil, &agentBinlogPurgeGapError{
+				LastArchived:   lastArchived,
+				FirstAvailable: logs[0].Name,
+				LastAvailable:  logs[len(logs)-1].Name,
+			}
 		}
 	}
 	end := len(logs)
@@ -799,8 +895,16 @@ func archiveAgentBinlogFile(ctx context.Context, cfg *resolvedDatabaseArchiverCo
 	if err != nil {
 		return agentBinlogArtifact{}, err
 	}
+	if cfg.objectStorageEnabled() {
+		artifact.StorageURI = agentObjectStorageURI(cfg, item, artifact.FileName)
+	}
 	if err := writeAgentBinlogSidecars(artifact); err != nil {
 		return agentBinlogArtifact{}, err
+	}
+	if cfg.objectStorageEnabled() {
+		if err := publishAgentBinlogArtifact(ctx, cfg, item, artifact); err != nil {
+			return agentBinlogArtifact{}, err
+		}
 	}
 	return artifact, nil
 }
@@ -1181,6 +1285,258 @@ func agentStorageURI(runnerHostID uint, path string) string {
 		return fmt.Sprintf("runner://runner-host-%d%s", runnerHostID, runtimePath)
 	}
 	return fmt.Sprintf("runner://runner-host-%d/%s", runnerHostID, filepath.ToSlash(path))
+}
+
+func (cfg *resolvedDatabaseArchiverConfig) objectStorageEnabled() bool {
+	if cfg == nil {
+		return false
+	}
+	storageType := strings.ToLower(strings.TrimSpace(cfg.Storage.Type))
+	return storageType == "s3" || storageType == "minio"
+}
+
+func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, artifact agentBinlogArtifact) error {
+	if !cfg.objectStorageEnabled() {
+		return nil
+	}
+	client := newAgentObjectStorageS3Client(cfg.Storage)
+	bucket := cfg.Storage.Bucket
+	finalKey := agentObjectStorageFinalKey(cfg, item, artifact.FileName)
+	stagingKey := agentObjectStorageStagingKey(cfg, item, artifact.FileName)
+	metadata := map[string]string{
+		"opshub-artifact":       "mysql-binlog",
+		"opshub-stream-id":      strconv.FormatUint(uint64(item.Stream.ID), 10),
+		"opshub-instance-id":    strconv.FormatUint(uint64(item.Stream.InstanceID), 10),
+		"opshub-source-id":      strconv.FormatUint(uint64(item.Stream.SourceInstanceID), 10),
+		"opshub-sha256":         artifact.ChecksumSHA256,
+		"opshub-file-name":      artifact.FileName,
+		"opshub-first-event-at": artifact.FirstEventTime.Format(time.RFC3339),
+		"opshub-last-event-at":  artifact.LastEventTime.Format(time.RFC3339),
+	}
+	if err := uploadAgentObjectFile(ctx, client, bucket, stagingKey, artifact.Path, metadata); err != nil {
+		return fmt.Errorf("上传 binlog staging 对象失败: %w", err)
+	}
+	if err := verifyAgentObject(ctx, client, bucket, stagingKey, artifact.FileSize, artifact.ChecksumSHA256); err != nil {
+		return fmt.Errorf("校验 binlog staging 对象失败: %w", err)
+	}
+	exists, err := agentObjectExistsAndMatches(ctx, client, bucket, finalKey, artifact.FileSize, artifact.ChecksumSHA256)
+	if err != nil {
+		return fmt.Errorf("校验已存在 binlog final 对象失败: %w", err)
+	}
+	if !exists {
+		if err := uploadAgentObjectFile(ctx, client, bucket, finalKey, artifact.Path, metadata); err != nil {
+			return fmt.Errorf("提交 binlog final 对象失败: %w", err)
+		}
+		if err := verifyAgentObject(ctx, client, bucket, finalKey, artifact.FileSize, artifact.ChecksumSHA256); err != nil {
+			return fmt.Errorf("校验 binlog final 对象失败: %w", err)
+		}
+	}
+	if err := publishAgentBinlogSidecar(ctx, client, bucket, finalKey+".sha256", artifact.Path+".sha256", metadata); err != nil {
+		return err
+	}
+	if err := publishAgentBinlogSidecar(ctx, client, bucket, finalKey+".manifest.json", artifact.Path+".manifest.json", metadata); err != nil {
+		return err
+	}
+	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(stagingKey)}); err != nil {
+		log.Printf("database archiver remove staging object failed: bucket=%s key=%s err=%v", bucket, stagingKey, err)
+	}
+	return nil
+}
+
+func publishAgentBinlogSidecar(ctx context.Context, client *s3.Client, bucket, key, filePath string, baseMetadata map[string]string) error {
+	metadata := make(map[string]string, len(baseMetadata)+1)
+	for k, v := range baseMetadata {
+		metadata[k] = v
+	}
+	metadata["opshub-sidecar"] = filepath.Base(filePath)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	exists, err := agentObjectExistsAndMatches(ctx, client, bucket, key, info.Size(), "")
+	if err != nil {
+		return fmt.Errorf("校验已存在 binlog sidecar %s 失败: %w", filepath.Base(filePath), err)
+	}
+	if exists {
+		return nil
+	}
+	if err := uploadAgentObjectFile(ctx, client, bucket, key, filePath, metadata); err != nil {
+		return fmt.Errorf("上传 binlog sidecar %s 失败: %w", filepath.Base(filePath), err)
+	}
+	if err := verifyAgentObject(ctx, client, bucket, key, info.Size(), ""); err != nil {
+		return fmt.Errorf("校验 binlog sidecar %s 失败: %w", filepath.Base(filePath), err)
+	}
+	return nil
+}
+
+func newAgentObjectStorageS3Client(storage databaseArchiverStorage) *s3.Client {
+	awsCfg := aws.Config{
+		Region:      storage.Region,
+		Credentials: credentials.NewStaticCredentialsProvider(storage.AccessKey, storage.SecretKey, ""),
+	}
+	if storage.InsecureSkipVerify {
+		awsCfg.HTTPClient = &http.Client{Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // Agent 本地显式配置，仅用于内网自签名 MinIO。
+		}}
+	}
+	return s3.NewFromConfig(awsCfg, func(options *s3.Options) {
+		options.UsePathStyle = storage.UsePathStyle
+		if strings.TrimSpace(storage.Endpoint) != "" {
+			options.BaseEndpoint = aws.String(storage.Endpoint)
+		}
+	})
+}
+
+func uploadAgentObjectFile(ctx context.Context, client *s3.Client, bucket, key, filePath string, metadata map[string]string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	uploader := manager.NewUploader(client)
+	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(bucket),
+		Key:           aws.String(key),
+		Body:          file,
+		ContentLength: aws.Int64(info.Size()),
+		Metadata:      metadata,
+	})
+	return err
+}
+
+func verifyAgentObject(ctx context.Context, client *s3.Client, bucket, key string, expectedSize int64, expectedChecksum string) error {
+	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return err
+	}
+	if expectedSize >= 0 {
+		if head.ContentLength == nil {
+			return errors.New("对象存储未返回 ContentLength")
+		}
+		if *head.ContentLength != expectedSize {
+			return fmt.Errorf("对象大小不一致: got=%d expected=%d", *head.ContentLength, expectedSize)
+		}
+	}
+	if strings.TrimSpace(expectedChecksum) != "" {
+		value := firstNonEmptyString(head.Metadata["opshub-sha256"], head.Metadata["Opshub-Sha256"])
+		if value == "" {
+			return errors.New("对象缺少 opshub-sha256 metadata")
+		}
+		if value != "" && !strings.EqualFold(value, expectedChecksum) {
+			return fmt.Errorf("对象 checksum metadata 不一致: got=%s expected=%s", value, expectedChecksum)
+		}
+	}
+	return nil
+}
+
+func agentObjectExistsAndMatches(ctx context.Context, client *s3.Client, bucket, key string, expectedSize int64, expectedChecksum string) (bool, error) {
+	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		if isAgentObjectNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if expectedSize >= 0 {
+		if head.ContentLength == nil {
+			return false, errors.New("对象存储未返回 ContentLength")
+		}
+		if *head.ContentLength != expectedSize {
+			return false, fmt.Errorf("对象大小不一致: got=%d expected=%d", *head.ContentLength, expectedSize)
+		}
+	}
+	if strings.TrimSpace(expectedChecksum) != "" {
+		value := firstNonEmptyString(head.Metadata["opshub-sha256"], head.Metadata["Opshub-Sha256"])
+		if value == "" {
+			return false, errors.New("对象缺少 opshub-sha256 metadata")
+		}
+		if value != "" && !strings.EqualFold(value, expectedChecksum) {
+			return false, fmt.Errorf("对象 checksum metadata 不一致: got=%s expected=%s", value, expectedChecksum)
+		}
+	}
+	return true, nil
+}
+
+func isAgentObjectNotFound(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := strings.ToLower(apiErr.ErrorCode())
+		return code == "notfound" || code == "nosuchkey" || code == "404"
+	}
+	return false
+}
+
+func agentObjectStorageURI(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, fileName string) string {
+	key := agentObjectStorageFinalKey(cfg, item, fileName)
+	scheme := strings.ToLower(strings.TrimSpace(cfg.Storage.Type))
+	if scheme == "" {
+		scheme = "s3"
+	}
+	return fmt.Sprintf("%s://%s/%s", scheme, cfg.Storage.Bucket, key)
+}
+
+func agentObjectStorageFinalKey(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, fileName string) string {
+	return joinAgentObjectKey(cfg.Storage.PathPrefix, agentObjectStorageRelativeKey(item, fileName))
+}
+
+func agentObjectStorageStagingKey(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, fileName string) string {
+	stamp := strconv.FormatInt(time.Now().UnixNano(), 10)
+	return joinAgentObjectKey(cfg.Storage.StagingPrefix, agentObjectStorageRelativeKey(item, fileName)+"."+stamp+".tmp")
+}
+
+func agentObjectStorageRelativeKey(item databaseArchiverAssignedStream, fileName string) string {
+	return joinAgentObjectKey(
+		"mysql-binlog",
+		fmt.Sprintf("instance-%d", item.Stream.InstanceID),
+		fmt.Sprintf("stream-%d", item.Stream.ID),
+		"finalized",
+		fileName,
+	)
+}
+
+func normalizeAgentObjectStorageEndpoint(endpoint string, useSSL bool) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Scheme != "" {
+		return strings.TrimRight(endpoint, "/")
+	}
+	scheme := "http"
+	if useSSL {
+		scheme = "https"
+	}
+	return scheme + "://" + strings.TrimRight(endpoint, "/")
+}
+
+func cleanAgentObjectKey(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "/")
+	if value == "" {
+		return ""
+	}
+	value = path.Clean(strings.ReplaceAll(value, "\\", "/"))
+	if value == "." || value == "/" {
+		return ""
+	}
+	return strings.Trim(value, "/")
+}
+
+func joinAgentObjectKey(parts ...string) string {
+	cleaned := make([]string, 0, len(parts))
+	for _, item := range parts {
+		if value := cleanAgentObjectKey(item); value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ""
+	}
+	return path.Join(cleaned...)
 }
 
 func activeFileForMode(mode, current string) string {

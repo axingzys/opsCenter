@@ -947,6 +947,94 @@ curl -H "X-OpsHub-Runner-Auth: $AUTH" \
 5. 更细的 `purge_gap` 自动诊断：当前 cursor 已被源库 purge 时，除降级外还应明确写入断链事件并阻止后续恢复计划误判。
 6. 事件保留策略：高频事件要支持保留天数、归档或压缩，避免事件表无界增长。
 
+### 2026-04-29 P2.6.5：对象存储发布与 purge gap 诊断
+
+目标：在不改变 backend 存储密钥边界、不引入真正 `--stop-never` 长连接的前提下，把 Agent 已经 finalized 的 binlog 产物发布到 S3/MinIO，并把源库 purge 导致的日志断链从普通失败升级为明确诊断事件。
+
+#### P2.6.5 落地范围
+
+1. Agent 本地配置新增 `databaseArchiver.storage`。
+   - `type=local` 时保持原有 `runner://` 本地归档语义。
+   - `type=s3/minio` 时，Agent 在本机使用本地配置中的对象存储凭据上传归档产物。
+   - backend 不下发对象存储明文密钥，前端配置生成器只生成占位模板。
+2. finalized binlog 发布到对象存储。
+   - 先在 Runner 本地完成 `mysqlbinlog --raw` 下载、checksum、manifest 生成。
+   - 再上传到 staging key。
+   - 对 staging 对象执行 `HeadObject`，校验对象大小和 `opshub-sha256` metadata。
+   - 校验通过后上传到 final key。
+   - final 对象再次校验通过后，上传 `.sha256` 与 `.manifest.json` sidecar。
+   - 所有对象发布成功后才调用 backend 登记 `database_log_archives`，避免数据库中出现不可读取的归档记录。
+3. 对象 key 规范。
+   - final key：
+     `pathPrefix/mysql-binlog/instance-{instance_id}/stream-{stream_id}/finalized/{binlog_file}`
+   - staging key：
+     `stagingPrefix/mysql-binlog/instance-{instance_id}/stream-{stream_id}/finalized/{binlog_file}.{unix_nano}.tmp`
+   - `storage_uri`：
+     `s3://bucket/key` 或 `minio://bucket/key`
+4. `purge_gap` 自动诊断。
+   - 当 `lastArchiveName/cursorFile` 已经不在 `SHOW BINARY LOGS` 返回列表中时，Agent 返回 typed purge gap。
+   - checkpoint 将归档流置为 `degraded` 并写入 `last_error`。
+   - 事件表写入 `purge_gap`，级别为 `warning`，payload 包含：
+     - `lastArchived`
+     - `firstAvailable`
+     - `lastAvailable`
+     - `sourceFile`
+     - `sourcePos`
+   - 该状态表示 PITR 日志链已经存在断点，不能再把该流误判为连续可恢复。
+5. 前端 Agent 配置生成器补充对象存储模板。
+   - 默认仍为 `type: local`，避免用户误以为 backend 已经托管对象存储密钥。
+   - 若使用 MinIO/S3，需要用户在 Agent 本机把 `type`、`endpoint`、`bucket`、`accessKey`、`secretKey` 改成真实值。
+
+#### Agent 本地配置示例
+
+```json
+{
+  "databaseArchiver": {
+    "enabled": true,
+    "baseUrl": "http://opshub.example.com",
+    "runnerId": "runner-host-1",
+    "runnerAuth": "<local_secret>",
+    "intervalSeconds": 30,
+    "leaseTtlSeconds": 90,
+    "maxFilesPerLoop": 5,
+    "includeCurrent": false,
+    "workDir": "/var/lib/opshub-agent",
+    "storageRoot": "/var/lib/opshub-agent/database-archives",
+    "storage": {
+      "type": "minio",
+      "endpoint": "http://192.168.1.30:9000",
+      "bucket": "opshub-backup",
+      "region": "us-east-1",
+      "pathPrefix": "opshub/database-archives",
+      "stagingPrefix": "opshub/database-archives/.staging",
+      "accessKey": "<minio_access_key>",
+      "secretKey": "<local_secret>",
+      "useSsl": false,
+      "usePathStyle": true,
+      "insecureSkipVerify": false
+    },
+    "mysqlBinlogPath": "",
+    "credentials": []
+  }
+}
+```
+
+#### P2.6.5 仍不做的事
+
+1. 不实现真正长期 `mysqlbinlog --stop-never` 子进程管理。
+2. 不把 active spool 文件登记为 finalized 日志。
+3. 不让 backend 容器直接持有对象存储密钥或执行上传。
+4. 不自动创建 bucket、调整对象锁、版本化或不可变保留策略；这些属于存储侧基线治理，后续只做检测和提示。
+5. 不做自动隔离恢复 Runner；P2.7 仍按独立执行面设计。
+
+#### P2.6.6+ 后续深化
+
+1. streaming active spool 增量续传和断点 resume。
+2. 真正 `mysqlbinlog --stop-never` 进程托管、健康检查和自动重启。
+3. Agent 多 stream 并发度、带宽限制、失败退避。
+4. 事件表保留策略和高频事件压缩。
+5. 对象存储版本化、不可变保留、KMS、bucket policy 的只读检测与风险提示。
+
 ### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
 
 目标：把 P1/P2 已有的“恢复计划和恢复证明预生成”升级为可执行的隔离恢复流程，真正把物理备份链和 binlog 归档链恢复到一个隔离 MySQL/MariaDB 实例，并执行校验 SQL。

@@ -1,8 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 func TestResolveDatabaseArchiverConfigDerivesBaseURL(t *testing.T) {
@@ -52,8 +61,16 @@ func TestSelectAgentBinlogsForArchiveDetectsPurgedCursor(t *testing.T) {
 		{Name: "binlog.000004", Size: 40},
 		{Name: "binlog.000005", Size: 50},
 	}
-	if _, err := selectAgentBinlogsForArchive(logs, "binlog.000003", 10, false); err == nil {
+	_, err := selectAgentBinlogsForArchive(logs, "binlog.000003", 10, false)
+	if err == nil {
 		t.Fatalf("expected purge gap error")
+	}
+	var gap *agentBinlogPurgeGapError
+	if !errors.As(err, &gap) {
+		t.Fatalf("expected typed purge gap error, got %T", err)
+	}
+	if gap.LastArchived != "binlog.000003" || gap.FirstAvailable != "binlog.000004" || gap.LastAvailable != "binlog.000005" {
+		t.Fatalf("unexpected purge gap metadata: %#v", gap)
 	}
 }
 
@@ -112,5 +129,110 @@ func TestDatabaseArchiverEventPayloadJSONIsBounded(t *testing.T) {
 	}
 	if got := databaseArchiverEventPayloadJSON(string(make([]byte, 5000))); len(got) > 4000 {
 		t.Fatalf("payload should be bounded")
+	}
+}
+
+func TestResolveDatabaseArchiverStorageDefaultsLocal(t *testing.T) {
+	storage, err := resolveDatabaseArchiverStorage(databaseArchiverStorage{})
+	if err != nil {
+		t.Fatalf("resolve storage: %v", err)
+	}
+	if storage.Type != "local" {
+		t.Fatalf("unexpected storage type: %s", storage.Type)
+	}
+}
+
+func TestResolveDatabaseArchiverStorageNormalizesMinIO(t *testing.T) {
+	storage, err := resolveDatabaseArchiverStorage(databaseArchiverStorage{
+		Type:       "minio",
+		Endpoint:   "192.168.1.30:9000/",
+		Bucket:     "opshub",
+		AccessKey:  "minioadmin",
+		SecretKey:  "minioadmin",
+		PathPrefix: "/prod/binlogs/",
+	})
+	if err != nil {
+		t.Fatalf("resolve storage: %v", err)
+	}
+	if storage.Endpoint != "http://192.168.1.30:9000" {
+		t.Fatalf("unexpected endpoint: %s", storage.Endpoint)
+	}
+	if storage.PathPrefix != "prod/binlogs" || storage.StagingPrefix != "prod/binlogs/.staging" {
+		t.Fatalf("unexpected prefixes: %s %s", storage.PathPrefix, storage.StagingPrefix)
+	}
+	if !storage.UsePathStyle {
+		t.Fatalf("minio should use path-style addressing")
+	}
+}
+
+func TestAgentObjectStorageKeys(t *testing.T) {
+	cfg := &resolvedDatabaseArchiverConfig{
+		Storage: databaseArchiverStorage{
+			Type:          "minio",
+			Bucket:        "opshub-backup",
+			PathPrefix:    "opshub/database-archives",
+			StagingPrefix: "opshub/database-archives/.staging",
+		},
+	}
+	item := databaseArchiverAssignedStream{Stream: databaseArchiverStream{ID: 9, InstanceID: 8}}
+	key := agentObjectStorageFinalKey(cfg, item, "binlog.000001")
+	if key != "opshub/database-archives/mysql-binlog/instance-8/stream-9/finalized/binlog.000001" {
+		t.Fatalf("unexpected final key: %s", key)
+	}
+	uri := agentObjectStorageURI(cfg, item, "binlog.000001")
+	if uri != "minio://opshub-backup/"+key {
+		t.Fatalf("unexpected storage uri: %s", uri)
+	}
+}
+
+func TestAgentObjectStorageMinIOIntegration(t *testing.T) {
+	endpoint := os.Getenv("OPSHUB_TEST_MINIO_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("set OPSHUB_TEST_MINIO_ENDPOINT to run MinIO integration test")
+	}
+	accessKey := firstNonEmptyString(os.Getenv("OPSHUB_TEST_MINIO_ACCESS_KEY"), "minioadmin")
+	secretKey := firstNonEmptyString(os.Getenv("OPSHUB_TEST_MINIO_SECRET_KEY"), "minioadmin")
+	bucket := firstNonEmptyString(os.Getenv("OPSHUB_TEST_MINIO_BUCKET"), "opshub-p265-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	storage, err := resolveDatabaseArchiverStorage(databaseArchiverStorage{
+		Type:      "minio",
+		Endpoint:  endpoint,
+		Bucket:    bucket,
+		AccessKey: accessKey,
+		SecretKey: secretKey,
+	})
+	if err != nil {
+		t.Fatalf("resolve storage: %v", err)
+	}
+	client := newAgentObjectStorageS3Client(storage)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil && !strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") && !strings.Contains(err.Error(), "BucketAlreadyExists") {
+		t.Fatalf("create bucket: %v", err)
+	}
+	defer func() {
+		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String("tests/binlog.000001")})
+		_, _ = client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
+	}()
+	filePath := filepath.Join(t.TempDir(), "binlog.000001")
+	if err := os.WriteFile(filePath, []byte("opshub-binlog-object-storage-test"), 0o600); err != nil {
+		t.Fatalf("write temp artifact: %v", err)
+	}
+	checksum, err := sha256File(filePath)
+	if err != nil {
+		t.Fatalf("checksum: %v", err)
+	}
+	key := "tests/binlog.000001"
+	if err := uploadAgentObjectFile(ctx, client, bucket, key, filePath, map[string]string{"opshub-sha256": checksum}); err != nil {
+		t.Fatalf("upload object: %v", err)
+	}
+	if err := verifyAgentObject(ctx, client, bucket, key, int64(len("opshub-binlog-object-storage-test")), checksum); err != nil {
+		t.Fatalf("verify object: %v", err)
+	}
+	exists, err := agentObjectExistsAndMatches(ctx, client, bucket, key, int64(len("opshub-binlog-object-storage-test")), checksum)
+	if err != nil {
+		t.Fatalf("exists and matches: %v", err)
+	}
+	if !exists {
+		t.Fatalf("expected object to exist")
 	}
 }
