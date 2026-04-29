@@ -11,7 +11,11 @@ import (
 	"github.com/ydcloud-dy/opshub/internal/biz/database/pgwal"
 )
 
-const BackupEnginePgBaseBackup = "pg_basebackup"
+const (
+	BackupEnginePgBaseBackup = "pg_basebackup"
+	BackupEngineWALG         = "walg"
+	BackupEnginePgBackRest   = "pgbackrest"
+)
 
 type pgBaseBackupScopeConfig struct {
 	RunnerHostID uint     `json:"runnerHostId"`

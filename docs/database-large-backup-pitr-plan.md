@@ -4692,6 +4692,23 @@ P3.10 不再重新设计 pg_basebackup 恢复逻辑，只负责用真实 Postgre
 2. pgBackRest 记录可登记但有 legacy warning。
 3. 不出现“新建 pgBackRest 深接入策略”的默认入口。
 
+落地记录（2026-04-30）：
+
+1. 后端已规范 PostgreSQL external 引擎别名：
+   - `wal-g / wal_g / walg` 统一保存为 `backup_engine=walg` 或 `archive_engine=walg`。
+   - `pgBackRest / pg-backrest / pg_backrest` 统一保存为 `backup_engine=pgbackrest` 或 `archive_engine=pgbackrest`。
+2. 外部备份登记在 PostgreSQL 场景下会按 cluster 级元数据处理；WAL-G / pgBackRest full 记录可作为 PostgreSQL PITR base backup 进入恢复计划。
+3. WAL-G / pgBackRest 计划只做元数据链路校验：
+   - 校验 base backup、增量链、WAL 时间/LSN 覆盖、timeline、system_identifier、checksum 状态。
+   - 计划状态为 `warning`，表示链路可用于外部恢复演练证明，但 OpsHub 当前不自动执行 `wal-g backup-fetch`、WAL replay 或 `pgbackrest restore`。
+   - `required_artifact_json` 对 WAL-G 标记为 `managed_by_walg`，对 pgBackRest 标记为 `legacy_pgbackrest`。
+4. `run restore plan` 仍只支持：
+   - `backup_engine=barman` 走 Barman restore Runner。
+   - `backup_engine=pg_basebackup` 走 pg_basebackup artifact restore Runner。
+   - `backup_engine=walg/pgbackrest` 会被拒绝执行，并提示当前仅支持 external 元数据纳管。
+5. 前端外部备份登记已提供 WAL-G external 和 pgBackRest legacy external 选项，并补充外部备份 ID、外部 Server/Profile/Stanza、工具名字段。
+6. 前端新建 PostgreSQL 物理备份任务仍只推荐 Barman 和 pg_basebackup；pgBackRest 不出现在新建深接入策略入口。
+
 ##### P3.10：P3 联调、回归和恢复演练
 
 目标：把 P3 做成可证明恢复的闭环。

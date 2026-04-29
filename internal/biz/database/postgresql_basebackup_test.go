@@ -187,3 +187,110 @@ func TestValidateRequestedPostgreSQLBaseRecordRejectsWrongTargetTime(t *testing.
 		t.Fatalf("expected target time rejection, got %v", err)
 	}
 }
+
+func TestNormalizePostgreSQLExternalBackupEngines(t *testing.T) {
+	cases := map[string]string{
+		"wal-g":       BackupEngineWALG,
+		"wal_g":       BackupEngineWALG,
+		"WALG":        BackupEngineWALG,
+		"pgBackRest":  BackupEnginePgBackRest,
+		"pg-backrest": BackupEnginePgBackRest,
+		"pg_backrest": BackupEnginePgBackRest,
+	}
+	for input, want := range cases {
+		if got := normalizePostgreSQLPhysicalBackupEngine(input); got != want {
+			t.Fatalf("normalizePostgreSQLPhysicalBackupEngine(%q)=%q, want %q", input, got, want)
+		}
+	}
+	if got := normalizeArchiveEngine("wal-g", DatabaseArchiveTypeWAL); got != BackupEngineWALG {
+		t.Fatalf("normalizeArchiveEngine wal-g=%q", got)
+	}
+}
+
+func TestPostgreSQLExternalEnginesCanBePITRBaseRecords(t *testing.T) {
+	for _, engine := range []string{BackupEngineWALG, BackupEnginePgBackRest} {
+		record := &DatabaseBackupRecord{
+			BackupMethod: DatabaseBackupMethodExternal,
+			BackupLevel:  DatabaseBackupLevelFull,
+			BackupEngine: engine,
+			StorageURI:   "s3://bucket/pg/base",
+		}
+		if !isPostgreSQLPhysicalBaseRecord(record) {
+			t.Fatalf("%s external metadata record should be usable as PostgreSQL PITR base", engine)
+		}
+	}
+}
+
+func TestPostgreSQLWALGExternalPlanIsWarningAndMetadataOnly(t *testing.T) {
+	result := &restorePlanValidationResult{
+		BackupChainStatus: DatabaseBackupChainStatusComplete,
+		LogChainStatus:    DatabaseLogChainStatusComplete,
+		StorageStatus:     DatabaseStorageStatusAvailable,
+		ToolStatus:        DatabaseToolStatusCompatible,
+		ValidationStatus:  DatabasePlanValidationPassed,
+		BackupProofs: []restoreProofBackup{
+			{ID: 1, BackupMethod: DatabaseBackupMethodPhysical, BackupLevel: DatabaseBackupLevelFull, BackupEngine: BackupEngineWALG, StorageURI: "s3://bucket/base"},
+		},
+	}
+	finalized := finalizePostgreSQLRestoreValidation(result)
+	if finalized.ValidationStatus != DatabasePlanValidationWarning {
+		t.Fatalf("WAL-G external plan should be warning, got %s", finalized.ValidationStatus)
+	}
+
+	planJSON := buildPostgreSQLRestorePlanJSON(&DatabaseInstance{DBType: DBTypePostgreSQL}, finalized, postgreSQLRestoreTarget{
+		Type:  "time",
+		Value: "2026-04-30 10:00:00",
+	}, "isolated_restore")
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(planJSON), &payload); err != nil {
+		t.Fatalf("unmarshal plan: %v", err)
+	}
+	if payload["backupEngine"] != BackupEngineWALG || payload["externalMetadataOnly"] != true {
+		t.Fatalf("unexpected WAL-G plan payload: %#v", payload)
+	}
+	tools, _ := payload["requiredTools"].([]any)
+	foundWALG := false
+	for _, item := range tools {
+		if item == "wal-g" {
+			foundWALG = true
+		}
+	}
+	if !foundWALG {
+		t.Fatalf("WAL-G plan should require wal-g metadata tool: %#v", tools)
+	}
+
+	status, runnerPath, message := restoreArtifactReadiness(0, "s3://bucket/base", "", BackupEngineWALG)
+	if status != "managed_by_walg" || runnerPath != "" || !strings.Contains(message, "WAL-G external") {
+		t.Fatalf("unexpected WAL-G artifact readiness status=%s path=%s message=%s", status, runnerPath, message)
+	}
+}
+
+func TestPostgreSQLPgBackRestExternalPlanIsLegacyWarning(t *testing.T) {
+	result := finalizePostgreSQLRestoreValidation(&restorePlanValidationResult{
+		BackupChainStatus: DatabaseBackupChainStatusComplete,
+		LogChainStatus:    DatabaseLogChainStatusComplete,
+		StorageStatus:     DatabaseStorageStatusAvailable,
+		ToolStatus:        DatabaseToolStatusCompatible,
+		BackupProofs: []restoreProofBackup{
+			{ID: 1, BackupMethod: DatabaseBackupMethodExternal, BackupLevel: DatabaseBackupLevelFull, BackupEngine: BackupEnginePgBackRest, StorageURI: "s3://bucket/pgbackrest/base"},
+		},
+	})
+	if result.ValidationStatus != DatabasePlanValidationWarning {
+		t.Fatalf("pgBackRest external plan should be warning, got %s", result.ValidationStatus)
+	}
+	planJSON := buildPostgreSQLRestorePlanJSON(&DatabaseInstance{DBType: DBTypePostgreSQL}, result, postgreSQLRestoreTarget{
+		Type:  "time",
+		Value: "2026-04-30 10:00:00",
+	}, "isolated_restore")
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(planJSON), &payload); err != nil {
+		t.Fatalf("unmarshal plan: %v", err)
+	}
+	if payload["backupEngine"] != BackupEnginePgBackRest || payload["legacyExternal"] != true {
+		t.Fatalf("unexpected pgBackRest plan payload: %#v", payload)
+	}
+	status, _, message := restoreArtifactReadiness(0, "s3://bucket/pgbackrest/base", "", BackupEnginePgBackRest)
+	if status != "legacy_pgbackrest" || !strings.Contains(message, "legacy external") {
+		t.Fatalf("unexpected pgBackRest readiness status=%s message=%s", status, message)
+	}
+}

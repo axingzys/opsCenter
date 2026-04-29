@@ -950,8 +950,27 @@ func normalizePostgreSQLPhysicalBackupEngine(value string) string {
 		return "barman"
 	case "pg_basebackup", "pgbasebackup":
 		return BackupEnginePgBaseBackup
+	case "walg", "wal_g":
+		return BackupEngineWALG
+	case "pgbackrest", "pg_backrest", "pg_back_rest":
+		return BackupEnginePgBackRest
 	default:
 		return trimText(value, 60)
+	}
+}
+
+func postgreSQLPhysicalBackupToolName(engine string) string {
+	switch normalizePostgreSQLPhysicalBackupEngine(engine) {
+	case "barman":
+		return "barman"
+	case BackupEnginePgBaseBackup:
+		return BackupEnginePgBaseBackup
+	case BackupEngineWALG:
+		return "wal-g"
+	case BackupEnginePgBackRest:
+		return BackupEnginePgBackRest
+	default:
+		return ""
 	}
 }
 

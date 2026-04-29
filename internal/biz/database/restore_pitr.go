@@ -225,6 +225,8 @@ func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *Databas
 			return uc.runPostgreSQLBarmanRestorePlan(ctx, plan, source, req, operator)
 		case BackupEnginePgBaseBackup:
 			return uc.runPostgreSQLPgBaseBackupRestorePlan(ctx, plan, source, base, req, operator)
+		case BackupEngineWALG, BackupEnginePgBackRest:
+			return nil, fmt.Errorf("PostgreSQL %s 当前仅支持 external 元数据纳管和恢复证明登记，不支持由 OpsHub 自动执行恢复", base.BackupEngine)
 		default:
 			return nil, fmt.Errorf("PostgreSQL 恢复暂不支持备份引擎: %s", base.BackupEngine)
 		}

@@ -3416,22 +3416,61 @@
           </el-col>
           <el-col :span="8">
             <el-form-item label="备份引擎" prop="backupEngine">
-              <el-input v-model="externalBackupForm.backupEngine" placeholder="xtrabackup / wal-g / external" />
+              <el-select
+                v-model="externalBackupForm.backupEngine"
+                filterable
+                allow-create
+                default-first-option
+                style="width: 100%;"
+                placeholder="选择或输入外部备份引擎"
+              >
+                <el-option
+                  v-for="item in externalBackupEngineOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
             </el-form-item>
           </el-col>
         </el-row>
+        <el-alert
+          v-if="isPgBackRestExternalBackup"
+          title="pgBackRest 已按 legacy external 纳管：只登记已有链路、演练结果和风险提示，不作为新建 PostgreSQL 策略默认推荐，也不由 OpsHub 自动执行恢复。"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
         <el-row :gutter="16">
-          <el-col :span="12">
+          <el-col :span="8">
+            <el-form-item label="外部备份ID">
+              <el-input v-model="externalBackupForm.externalBackupId" placeholder="WAL-G backup name / pgBackRest stanza backup ID" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="外部Server">
+              <el-input v-model="externalBackupForm.externalServerName" placeholder="Barman server / WAL-G profile / pgBackRest stanza" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
             <el-form-item label="链路 ID">
               <el-input v-model="externalBackupForm.chainId" placeholder="同一全量+增量链路的稳定 ID，可选" />
             </el-form-item>
           </el-col>
-          <el-col :span="6">
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="工具名">
+              <el-input v-model="externalBackupForm.toolName" placeholder="可选，如 wal-g / pgbackrest" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
             <el-form-item label="基础记录">
               <el-input-number v-model="externalBackupForm.baseRecordId" :min="0" class="form-number-full" />
             </el-form-item>
           </el-col>
-          <el-col :span="6">
+          <el-col :span="8">
             <el-form-item label="父记录">
               <el-input-number v-model="externalBackupForm.parentRecordId" :min="0" class="form-number-full" />
             </el-form-item>
@@ -3731,7 +3770,21 @@
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="归档引擎" prop="archiveEngine">
-              <el-input v-model="logArchiveStreamForm.archiveEngine" placeholder="external_binlog / mysqlbinlog_polling / wal-g" />
+              <el-select
+                v-model="logArchiveStreamForm.archiveEngine"
+                filterable
+                allow-create
+                default-first-option
+                style="width: 100%;"
+                placeholder="选择或输入归档引擎"
+              >
+                <el-option
+                  v-for="item in logArchiveEngineOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
             </el-form-item>
           </el-col>
           <el-col :span="12">
@@ -3754,6 +3807,14 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-alert
+          v-if="isPgBackRestLogArchiveStream"
+          title="pgBackRest WAL 归档流仅按 legacy external 元数据纳管，用于已有链路登记和风险提示，不作为新建 PostgreSQL 默认方案。"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
         <el-form-item label="配置 JSON">
           <el-input v-model="logArchiveStreamForm.configJson" type="textarea" :rows="3" placeholder="可选，只保存非敏感配置。密钥后续接 secret_profile。" />
         </el-form-item>
@@ -5306,6 +5367,8 @@ const externalBackupForm = reactive<DatabaseExternalBackupRecordPayload>({
   backupMethod: 'physical',
   backupLevel: 'full',
   backupEngine: 'external',
+  externalBackupId: '',
+  externalServerName: '',
   toolName: '',
   toolVersion: '',
   storageProfileId: undefined,
@@ -5806,6 +5869,53 @@ const isBarmanRestoreRun = computed(() =>
 const isPgBaseBackupRestoreRun = computed(() =>
   isPostgreSQLRestoreRun.value && restoreRunBackupEngine.value === 'pg_basebackup'
 )
+
+const normalizeToolEngineValue = (value?: string) =>
+  String(value || '').trim().toLowerCase().replace(/[-.]/g, '_')
+
+const isPgBackRestEngineValue = (value?: string) =>
+  ['pgbackrest', 'pg_backrest', 'pg_back_rest'].includes(normalizeToolEngineValue(value))
+
+const externalBackupEngineOptions = [
+  { label: '外部引擎', value: 'external' },
+  { label: 'XtraBackup', value: 'xtrabackup' },
+  { label: 'mariadb-backup', value: 'mariadb_backup' },
+  { label: 'Barman', value: 'barman' },
+  { label: 'WAL-G external', value: 'walg' },
+  { label: 'pg_basebackup', value: 'pg_basebackup' },
+  { label: 'pgBackRest legacy external', value: 'pgbackrest' }
+]
+
+const logArchiveEngineOptions = computed(() => {
+  if (logArchiveStreamForm.archiveType === 'wal') {
+    return [
+      { label: '外部 WAL', value: 'external_wal' },
+      { label: 'Barman WAL', value: 'barman' },
+      { label: 'WAL-G external WAL', value: 'walg' },
+      { label: 'pg_receivewal', value: 'pg_receivewal' },
+      { label: 'pgBackRest legacy WAL', value: 'pgbackrest' }
+    ]
+  }
+  return [
+    { label: '外部 binlog', value: 'external_binlog' },
+    { label: 'mysqlbinlog polling', value: 'mysqlbinlog_polling' },
+    { label: 'mysqlbinlog streaming', value: 'mysqlbinlog_streaming' }
+  ]
+})
+
+const isPgBackRestExternalBackup = computed(() =>
+  isPgBackRestEngineValue(externalBackupForm.backupEngine)
+)
+
+const isPgBackRestLogArchiveStream = computed(() =>
+  isPgBackRestEngineValue(logArchiveStreamForm.archiveEngine)
+)
+
+const normalizeLogArchiveEngineForType = () => {
+  if (!logArchiveEngineOptions.value.some(item => item.value === logArchiveStreamForm.archiveEngine)) {
+    logArchiveStreamForm.archiveEngine = logArchiveStreamForm.archiveType === 'wal' ? 'external_wal' : 'external_binlog'
+  }
+}
 
 const postgresqlRestoreRunAlertTitle = computed(() => {
   if (isPgBaseBackupRestoreRun.value) {
@@ -6910,6 +7020,8 @@ const resetExternalBackupForm = () => {
   externalBackupForm.backupMethod = 'physical'
   externalBackupForm.backupLevel = 'full'
   externalBackupForm.backupEngine = 'external'
+  externalBackupForm.externalBackupId = ''
+  externalBackupForm.externalServerName = ''
   externalBackupForm.toolName = ''
   externalBackupForm.toolVersion = ''
   externalBackupForm.storageProfileId = undefined
@@ -6974,7 +7086,7 @@ const resetLogArchiveStreamForm = () => {
   logArchiveStreamForm.engine = ''
   logArchiveStreamForm.archiveType = archiveTypeForInstance(logArchiveStreamForm.instanceId)
   logArchiveStreamForm.archiveMode = 'external'
-  logArchiveStreamForm.archiveEngine = 'external'
+  logArchiveStreamForm.archiveEngine = logArchiveStreamForm.archiveType === 'wal' ? 'external_wal' : 'external_binlog'
   logArchiveStreamForm.runnerHostId = undefined
   logArchiveStreamForm.storageProfileId = undefined
   logArchiveStreamForm.secretProfileId = undefined
@@ -9985,7 +10097,13 @@ watch(
   () => logArchiveStreamForm.instanceId,
   (instanceId) => {
     logArchiveStreamForm.archiveType = archiveTypeForInstance(instanceId)
+    normalizeLogArchiveEngineForType()
   }
+)
+
+watch(
+  () => logArchiveStreamForm.archiveType,
+  () => normalizeLogArchiveEngineForType()
 )
 
 watch(

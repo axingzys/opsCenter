@@ -799,6 +799,18 @@ func (uc *UseCase) RegisterExternalBackupRecord(ctx context.Context, req *Databa
 	if durationMs < 0 {
 		durationMs = 0
 	}
+	backupEngine := normalizeBackupEngine(req.BackupEngine, backupMethod)
+	backupScope := normalizeBackupScope(req.BackupScope)
+	toolName := trimText(strings.TrimSpace(req.ToolName), 60)
+	if normalizeDBType(instance.DBType) == DBTypePostgreSQL && (backupMethod == DatabaseBackupMethodPhysical || backupMethod == DatabaseBackupMethodExternal) {
+		backupEngine = normalizePostgreSQLPhysicalBackupEngine(backupEngine)
+		if backupScope == "database" {
+			backupScope = "cluster"
+		}
+		if toolName == "" {
+			toolName = postgreSQLPhysicalBackupToolName(backupEngine)
+		}
+	}
 	item := &DatabaseBackupRecord{
 		TaskID:                 req.TaskID,
 		InstanceID:             req.InstanceID,
@@ -809,11 +821,11 @@ func (uc *UseCase) RegisterExternalBackupRecord(ctx context.Context, req *Databa
 		ParentRecordID:         req.ParentRecordID,
 		BackupMethod:           backupMethod,
 		BackupLevel:            backupLevel,
-		BackupEngine:           normalizeBackupEngine(req.BackupEngine, backupMethod),
+		BackupEngine:           backupEngine,
 		ExternalBackupID:       trimText(strings.TrimSpace(req.ExternalBackupID), 120),
 		ExternalServerName:     trimText(strings.TrimSpace(req.ExternalServerName), 120),
-		BackupScope:            normalizeBackupScope(req.BackupScope),
-		ToolName:               trimText(strings.TrimSpace(req.ToolName), 60),
+		BackupScope:            backupScope,
+		ToolName:               toolName,
 		ToolVersion:            trimText(strings.TrimSpace(req.ToolVersion), 120),
 		SourceInstanceID:       sourceID,
 		SourceRole:             normalizeSourceRole(req.SourceRole),
@@ -1373,15 +1385,21 @@ func selectPostgreSQLBarmanBaseRecord(records []*DatabaseBackupRecord, target po
 
 func isPostgreSQLPhysicalBaseRecord(item *DatabaseBackupRecord) bool {
 	if item == nil ||
-		normalizeBackupMethod(item.BackupMethod) != DatabaseBackupMethodPhysical ||
 		normalizeBackupLevel(item.BackupLevel) != DatabaseBackupLevelFull {
 		return false
 	}
-	switch normalizePostgreSQLPhysicalBackupEngine(item.BackupEngine) {
+	method := normalizeBackupMethod(item.BackupMethod)
+	backupEngine := normalizePostgreSQLPhysicalBackupEngine(item.BackupEngine)
+	if method != DatabaseBackupMethodPhysical && !(method == DatabaseBackupMethodExternal && isPostgreSQLExternalMetadataBackupEngine(backupEngine)) {
+		return false
+	}
+	switch backupEngine {
 	case "barman":
 		return strings.TrimSpace(item.ExternalBackupID) != ""
 	case BackupEnginePgBaseBackup:
 		return strings.TrimSpace(item.StorageURI) != "" || strings.TrimSpace(item.FilePath) != ""
+	case BackupEngineWALG, BackupEnginePgBackRest:
+		return strings.TrimSpace(item.ExternalBackupID) != "" || strings.TrimSpace(item.StorageURI) != "" || strings.TrimSpace(item.FilePath) != ""
 	default:
 		return false
 	}
@@ -1393,6 +1411,15 @@ func isPostgreSQLBarmanBaseRecord(item *DatabaseBackupRecord) bool {
 		normalizeBackupLevel(item.BackupLevel) == DatabaseBackupLevelFull &&
 		normalizePostgreSQLPhysicalBackupEngine(item.BackupEngine) == "barman" &&
 		strings.TrimSpace(item.ExternalBackupID) != ""
+}
+
+func isPostgreSQLExternalMetadataBackupEngine(engine string) bool {
+	switch normalizePostgreSQLPhysicalBackupEngine(engine) {
+	case BackupEngineWALG, BackupEnginePgBackRest:
+		return true
+	default:
+		return false
+	}
 }
 
 func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *DatabaseInstance, records []*DatabaseBackupRecord, base *DatabaseBackupRecord, target postgreSQLRestoreTarget) *restorePlanValidationResult {
@@ -1478,6 +1505,10 @@ func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *
 			result.ToolStatus = DatabaseToolStatusMissingTool
 			result.Messages = append(result.Messages, "pg_basebackup 记录未包含 runner://runner-host-N 存储 URI，恢复执行前需登记 Runner 可读 artifact")
 		}
+	case BackupEngineWALG:
+		result.Messages = append(result.Messages, "WAL-G 作为 external metadata 纳管：OpsHub 校验备份/WAL 元数据链路，但 P3.9 不执行 wal-g backup-fetch 或 WAL replay")
+	case BackupEnginePgBackRest:
+		result.Messages = append(result.Messages, "pgBackRest 仅作为 legacy external 纳管：新方案不默认推荐，OpsHub P3.9 不执行 pgBackRest restore")
 	}
 	serverSystemID := ""
 	if server != nil {
@@ -1504,7 +1535,7 @@ func (uc *UseCase) validatePostgreSQLRestorePlan(ctx context.Context, instance *
 		return finalizePostgreSQLRestoreValidation(result)
 	}
 	externalServerName := ""
-	if backupEngine == "barman" {
+	if backupEngine == "barman" || isPostgreSQLExternalMetadataBackupEngine(backupEngine) {
 		externalServerName = base.ExternalServerName
 	}
 	logs = filterPostgreSQLWALArchives(logs, expectedSystemID, expectedTimeline, externalServerName)
@@ -1564,10 +1595,18 @@ func finalizePostgreSQLRestoreValidation(result *restorePlanValidationResult) *r
 		result.LogChainStatus == DatabaseLogChainStatusComplete &&
 		result.StorageStatus == DatabaseStorageStatusAvailable &&
 		result.ToolStatus == DatabaseToolStatusCompatible {
-		result.ValidationStatus = DatabasePlanValidationPassed
-		if postgreSQLPlanBackupEngine(result) == BackupEnginePgBaseBackup {
+		switch postgreSQLPlanBackupEngine(result) {
+		case BackupEnginePgBaseBackup:
+			result.ValidationStatus = DatabasePlanValidationPassed
 			result.Messages = append(result.Messages, "PostgreSQL pg_basebackup PITR 恢复计划预校验通过，可作为后续隔离恢复 Runner 输入")
-		} else {
+		case BackupEngineWALG:
+			result.ValidationStatus = DatabasePlanValidationWarning
+			result.Messages = append(result.Messages, "PostgreSQL WAL-G external PITR 元数据预校验完成；当前版本只记录计划和证明，不自动执行 WAL-G 恢复")
+		case BackupEnginePgBackRest:
+			result.ValidationStatus = DatabasePlanValidationWarning
+			result.Messages = append(result.Messages, "PostgreSQL pgBackRest legacy external PITR 元数据预校验完成；pgBackRest 不作为新方案默认推荐，当前版本不自动执行恢复")
+		default:
+			result.ValidationStatus = DatabasePlanValidationPassed
 			result.Messages = append(result.Messages, "PostgreSQL Barman PITR 恢复计划预校验通过，可下发 barman restore 到隔离目录或隔离实例")
 		}
 		return result
@@ -2039,13 +2078,20 @@ func buildPostgreSQLRestorePlanJSON(source *DatabaseInstance, result *restorePla
 	}
 	requiredTools := []string{"barman", "docker", "psql"}
 	restoreSteps := []string{"barman restore", "start isolated PostgreSQL container", "run validation SQL", "generate proof"}
-	if backupEngine == BackupEnginePgBaseBackup {
+	switch backupEngine {
+	case BackupEnginePgBaseBackup:
 		requiredTools = []string{"pg_basebackup"}
 		restoreSteps = []string{"restore pg_basebackup artifact to isolated directory", "apply WAL to target", "generate proof"}
 		if len(incrementals) > 0 {
 			requiredTools = append(requiredTools, "pg_combinebackup")
 			restoreSteps = append([]string{"pg_combinebackup synthetic full"}, restoreSteps...)
 		}
+	case BackupEngineWALG:
+		requiredTools = []string{"wal-g"}
+		restoreSteps = []string{"external WAL-G backup-fetch/WAL replay outside OpsHub", "register restore drill proof", "generate metadata proof"}
+	case BackupEnginePgBackRest:
+		requiredTools = []string{"pgbackrest"}
+		restoreSteps = []string{"legacy external pgBackRest restore outside OpsHub", "register restore drill proof", "generate metadata proof"}
 	}
 	payload := map[string]any{
 		"engine":       DBTypePostgreSQL,
@@ -2058,9 +2104,11 @@ func buildPostgreSQLRestorePlanJSON(source *DatabaseInstance, result *restorePla
 			}
 			return 0
 		}(),
-		"barmanServerId":   result.BarmanServerID,
-		"barmanServerName": result.BarmanServerName,
-		"runnerHostId":     result.RunnerHostID,
+		"barmanServerId":       result.BarmanServerID,
+		"barmanServerName":     result.BarmanServerName,
+		"runnerHostId":         result.RunnerHostID,
+		"externalMetadataOnly": isPostgreSQLExternalMetadataBackupEngine(backupEngine),
+		"legacyExternal":       backupEngine == BackupEnginePgBackRest,
 		"target": map[string]any{
 			"type":       target.Type,
 			"value":      target.Value,
@@ -2150,10 +2198,18 @@ func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanV
 	}
 	tools := make([]map[string]any, 0, 3)
 	seen := map[string]struct{}{}
+	engine := ""
+	if source != nil {
+		engine = normalizeDBType(source.DBType)
+	}
 	for _, item := range result.BackupProofs {
 		tool := strings.TrimSpace(item.ToolName)
 		if tool == "" {
-			tool = mysqlPhysicalBackupToolName(item.BackupEngine, "")
+			if engine == DBTypePostgreSQL {
+				tool = postgreSQLPhysicalBackupToolName(item.BackupEngine)
+			} else {
+				tool = mysqlPhysicalBackupToolName(item.BackupEngine, "")
+			}
 		}
 		if tool == "" {
 			continue
@@ -2163,15 +2219,15 @@ func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanV
 			continue
 		}
 		seen[key] = struct{}{}
+		requiredBy := "physical_backup_prepare"
+		if engine == DBTypePostgreSQL && isPostgreSQLExternalMetadataBackupEngine(item.BackupEngine) {
+			requiredBy = "external_metadata"
+		}
 		tools = append(tools, map[string]any{
 			"name":       tool,
 			"version":    item.ToolVersion,
-			"requiredBy": "physical_backup_prepare",
+			"requiredBy": requiredBy,
 		})
-	}
-	engine := ""
-	if source != nil {
-		engine = normalizeDBType(source.DBType)
 	}
 	if engine == DBTypeMySQL || engine == DBTypeMariaDB {
 		tools = append(tools, map[string]any{"name": "docker", "requiredBy": "isolated_instance"})
@@ -2191,6 +2247,16 @@ func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanV
 			if len(result.BackupProofs) > 1 {
 				tools = append(tools, map[string]any{"name": "pg_combinebackup", "requiredBy": "incremental_combine"})
 			}
+		} else if backupEngine == BackupEngineWALG {
+			tools = append(tools,
+				map[string]any{"name": "wal-g", "requiredBy": "external_restore_or_drill", "externalOnly": true},
+				map[string]any{"name": "psql", "requiredBy": "external_drill_validation", "optional": true},
+			)
+		} else if backupEngine == BackupEnginePgBackRest {
+			tools = append(tools,
+				map[string]any{"name": "pgbackrest", "requiredBy": "legacy_external_restore_or_drill", "externalOnly": true, "legacy": true},
+				map[string]any{"name": "psql", "requiredBy": "external_drill_validation", "optional": true},
+			)
 		} else {
 			tools = append(tools, map[string]any{"name": "barman", "requiredBy": "barman_restore"})
 			tools = append(tools, map[string]any{"name": "docker", "requiredBy": "isolated_postgresql"})
@@ -2206,6 +2272,10 @@ func buildRestoreRequiredArtifactJSON(result *restorePlanValidationResult) strin
 		return "[]"
 	}
 	artifacts := make([]map[string]any, 0, len(result.BackupProofs)+len(result.LogProofs))
+	logArtifactEngine := ""
+	if engine := postgreSQLPlanBackupEngine(result); isPostgreSQLExternalMetadataBackupEngine(engine) {
+		logArtifactEngine = engine
+	}
 	for _, item := range result.BackupProofs {
 		artifact := map[string]any{
 			"type":               "backup",
@@ -2244,7 +2314,7 @@ func buildRestoreRequiredArtifactJSON(result *restorePlanValidationResult) strin
 			"segmentNo":          item.SegmentNo,
 			"timelineHistoryUri": item.TimelineHistoryURI,
 		}
-		attachRestoreArtifactReadiness(artifact, result.RunnerHostID, item.StorageURI, "", "")
+		attachRestoreArtifactReadiness(artifact, result.RunnerHostID, item.StorageURI, "", logArtifactEngine)
 		artifacts = append(artifacts, artifact)
 	}
 	data, _ := json.Marshal(artifacts)
@@ -2263,8 +2333,17 @@ func attachRestoreArtifactReadiness(artifact map[string]any, runnerHostID uint, 
 }
 
 func restoreArtifactReadiness(runnerHostID uint, storageURI, filePath, backupEngine string) (string, string, string) {
-	if strings.EqualFold(strings.TrimSpace(backupEngine), "barman") {
+	normalizedBackupEngine := ""
+	if strings.TrimSpace(backupEngine) != "" {
+		normalizedBackupEngine = normalizePostgreSQLPhysicalBackupEngine(backupEngine)
+	}
+	switch normalizedBackupEngine {
+	case "barman":
 		return "managed_by_barman", "", "Barman artifact 由 Barman server/catalog 管理，不要求 Runner 直接读取单个备份文件"
+	case BackupEngineWALG:
+		return "managed_by_walg", "", "WAL-G external artifact 由既有 WAL-G 链路管理，OpsHub 只记录元数据和恢复证明"
+	case BackupEnginePgBackRest:
+		return "legacy_pgbackrest", "", "pgBackRest artifact 仅按 legacy external 纳管，OpsHub 不自动执行恢复"
 	}
 	if runnerHostID == 0 {
 		return "unknown", "", "恢复计划尚未绑定 Runner，执行时需要选择可读取 artifact 的 Runner"
@@ -2358,7 +2437,9 @@ func validateIncrementalBackupChain(records []*DatabaseBackupRecord, base *Datab
 		if normalizeBackupMethod(item.BackupMethod) != normalizeBackupMethod(base.BackupMethod) {
 			continue
 		}
-		if strings.TrimSpace(item.BackupEngine) != "" && strings.TrimSpace(base.BackupEngine) != "" && !strings.EqualFold(strings.TrimSpace(item.BackupEngine), strings.TrimSpace(base.BackupEngine)) {
+		if strings.TrimSpace(item.BackupEngine) != "" &&
+			strings.TrimSpace(base.BackupEngine) != "" &&
+			normalizeExternalToolEngineName(item.BackupEngine) != normalizeExternalToolEngineName(base.BackupEngine) {
 			continue
 		}
 		if normalizeBackupLevel(item.BackupLevel) != DatabaseBackupLevelIncremental {
@@ -3070,7 +3151,7 @@ func normalizeBackupLevel(value string) string {
 }
 
 func normalizeBackupEngine(value, method string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
+	value = normalizeExternalToolEngineName(value)
 	if value != "" {
 		return trimText(value, 60)
 	}
@@ -3081,6 +3162,24 @@ func normalizeBackupEngine(value, method string) string {
 		return "external"
 	default:
 		return "logical"
+	}
+}
+
+func normalizeExternalToolEngineName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, ".", "_")
+	switch value {
+	case "wal_g":
+		return BackupEngineWALG
+	case "pg_backrest", "pg_back_rest":
+		return BackupEnginePgBackRest
+	case "mariadb_backup", "mariabackup":
+		return BackupEngineMariaDB
+	case "pg_basebackup", "pgbasebackup":
+		return BackupEnginePgBaseBackup
+	default:
+		return value
 	}
 }
 
@@ -3160,7 +3259,7 @@ func normalizeArchiveMode(value string) string {
 }
 
 func normalizeArchiveEngine(value, archiveType string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
+	value = normalizeExternalToolEngineName(value)
 	if value != "" {
 		return trimText(value, 60)
 	}
