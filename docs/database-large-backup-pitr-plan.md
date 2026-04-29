@@ -1834,7 +1834,25 @@ GET  /api/v1/databases/restore-jobs/{id}/proof
 | `listenPort` | int | 否 | 隔离实例端口，不填则随机分配 |
 | `expiresInHours` | int | 否 | 临时恢复库保留时间 |
 | `validationSql` | array | 否 | 额外校验 SQL，只允许只读语句 |
+| `validationAssertions` | array | 否 | 带断言的校验 SQL，断言失败会让 proof 标记 `validation_status=failed` |
 | `cleanupOnFailure` | bool | 否 | 失败后是否自动清理临时目录 |
+
+`validationAssertions` 元素结构：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sql` | string | 是 | 只读校验 SQL，仍受 SQL 安全分析和默认 LIMIT 保护 |
+| `expectedRows` | int | 否 | 期望结果行数，不包含表头；适合校验明细查询返回几行 |
+| `expectedContains` | string | 否 | 期望校验输出包含固定文本；按原始 tabular 输出做 fixed-string 匹配 |
+| `expectedScalar` | string | 否 | 期望首行首列值；适合 `SELECT COUNT(*)`、`SELECT MAX(id)` 等聚合校验 |
+
+断言规则：
+
+1. `validationSql` 只判断 SQL 是否成功执行，并把输出写入 proof。
+2. `validationAssertions` 至少配置 `expectedRows / expectedContains / expectedScalar` 之一。
+3. 同一条断言可以同时配置多个 expected 字段，必须全部满足才算通过。
+4. `expectedRows` 统计结果集数据行数，不包含表头；如果要判断 `COUNT(*) = 2`，应使用 `expectedScalar=2`。
+5. SQL 执行失败或任一断言失败，恢复任务仍可能已经成功拉起隔离库，但 proof 的 `validationStatus` 会标记为 `failed`，恢复计划状态保持为“已恢复但未验证通过”。
 
 权限建议：
 
@@ -1878,7 +1896,7 @@ GET  /api/v1/databases/restore-jobs/{id}/proof
 6. `fetch_binlog_chain`：拉取恢复目标需要的 binlog 文件，校验 checksum 和连续性。
 7. `start_isolated_instance`：启动隔离 MySQL/MariaDB 实例，只暴露给 Runner 或受控网络。
 8. `apply_binlog_to_target`：用 mysqlbinlog 回放到目标时间或 GTID。
-9. `run_validation_sql`：执行默认和用户配置的只读校验 SQL。
+9. `run_validation_sql`：执行默认、用户配置的只读校验 SQL，以及带 `expectedRows / expectedContains / expectedScalar` 的断言校验。
 10. `generate_proof`：生成最终 proof_json 和 proof 文件。
 
 #### P2.7 物理备份 prepare 规则
@@ -2021,6 +2039,19 @@ proof 必须包含：
 16. `startedAt / finishedAt / durationMs`
 17. `operator`
 18. `finalStatus`
+
+`validationResults` 中每条校验结果建议包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| `sql` | 实际执行的校验 SQL |
+| `status` | SQL 执行与断言综合状态，`success / failed` |
+| `outputPreview` | 校验输出预览，用于人工复核 |
+| `expectedRows / expectedContains / expectedScalar` | 用户配置的断言 |
+| `actualRows` | 实际结果行数，不含表头 |
+| `actualScalar` | 实际首行首列 |
+| `assertionStatus` | `not_configured / passed / failed / unknown` |
+| `assertionMessage` | 断言失败原因 |
 
 proof 文件建议同时保存：
 

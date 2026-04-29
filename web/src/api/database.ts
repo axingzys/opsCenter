@@ -513,12 +513,20 @@ export interface DatabaseRestorePlanPayload {
   restoreTargetInclusive?: boolean
 }
 
+export interface DatabaseRestoreValidationAssertionPayload {
+  sql: string
+  expectedRows?: number
+  expectedContains?: string
+  expectedScalar?: string
+}
+
 export interface DatabaseRestorePlanRunPayload {
   runnerHostId: number
   containerImage?: string
   listenPort?: number
   expiresInHours?: number
   validationSql?: string[]
+  validationAssertions?: DatabaseRestoreValidationAssertionPayload[]
   cleanupOnFailure?: boolean
 }
 

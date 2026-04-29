@@ -19,12 +19,20 @@ const (
 )
 
 type DatabaseRestorePlanRunRequest struct {
-	RunnerHostID     uint     `json:"runnerHostId" binding:"required"`
-	ContainerImage   string   `json:"containerImage" binding:"omitempty,max=255"`
-	ListenPort       int      `json:"listenPort" binding:"omitempty,min=0,max=65535"`
-	ExpiresInHours   int      `json:"expiresInHours" binding:"omitempty,min=1,max=168"`
-	ValidationSQL    []string `json:"validationSql" binding:"omitempty,max=20"`
-	CleanupOnFailure bool     `json:"cleanupOnFailure"`
+	RunnerHostID         uint                                 `json:"runnerHostId" binding:"required"`
+	ContainerImage       string                               `json:"containerImage" binding:"omitempty,max=255"`
+	ListenPort           int                                  `json:"listenPort" binding:"omitempty,min=0,max=65535"`
+	ExpiresInHours       int                                  `json:"expiresInHours" binding:"omitempty,min=1,max=168"`
+	ValidationSQL        []string                             `json:"validationSql" binding:"omitempty,max=20"`
+	ValidationAssertions []DatabaseRestoreValidationAssertion `json:"validationAssertions" binding:"omitempty,max=20"`
+	CleanupOnFailure     bool                                 `json:"cleanupOnFailure"`
+}
+
+type DatabaseRestoreValidationAssertion struct {
+	SQL              string  `json:"sql" binding:"required,max=4000"`
+	ExpectedRows     *int    `json:"expectedRows,omitempty"`
+	ExpectedContains *string `json:"expectedContains,omitempty" binding:"omitempty,max=1000"`
+	ExpectedScalar   *string `json:"expectedScalar,omitempty" binding:"omitempty,max=1000"`
 }
 
 type physicalRestoreArtifact struct {
@@ -52,8 +60,15 @@ type physicalRestoreScriptInput struct {
 	Base             physicalRestoreArtifact
 	Incrementals     []physicalRestoreArtifact
 	Logs             []physicalRestoreArtifact
-	ValidationSQL    []string
+	ValidationChecks []restoreValidationCheck
 	CleanupOnFailure bool
+}
+
+type restoreValidationCheck struct {
+	SQL              string  `json:"sql"`
+	ExpectedRows     *int    `json:"expectedRows,omitempty"`
+	ExpectedContains *string `json:"expectedContains,omitempty"`
+	ExpectedScalar   *string `json:"expectedScalar,omitempty"`
 }
 
 type physicalRestoreStep struct {
@@ -63,10 +78,18 @@ type physicalRestoreStep struct {
 }
 
 type physicalRestoreValidationResult struct {
-	Index         int    `json:"index"`
-	Status        string `json:"status"`
-	SHA256        string `json:"sha256"`
-	OutputPreview string `json:"outputPreview"`
+	Index            int     `json:"index"`
+	SQL              string  `json:"sql,omitempty"`
+	Status           string  `json:"status"`
+	SHA256           string  `json:"sha256"`
+	OutputPreview    string  `json:"outputPreview"`
+	ExpectedRows     *int    `json:"expectedRows,omitempty"`
+	ExpectedContains *string `json:"expectedContains,omitempty"`
+	ExpectedScalar   *string `json:"expectedScalar,omitempty"`
+	ActualRows       *int    `json:"actualRows,omitempty"`
+	ActualScalar     string  `json:"actualScalar,omitempty"`
+	AssertionStatus  string  `json:"assertionStatus,omitempty"`
+	AssertionMessage string  `json:"assertionMessage,omitempty"`
 }
 
 type physicalRestoreRunnerResult struct {
@@ -163,7 +186,7 @@ func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *Databas
 		_ = uc.restorePlanRepo.Update(ctx, plan)
 		return nil, fmt.Errorf("执行前恢复计划复检未通过: %s", plan.ErrorMessage)
 	}
-	validationSQL, err := normalizeRestoreValidationSQL(source.DBType, append(validationSQLForRestorePlan(source), req.ValidationSQL...))
+	validationChecks, err := normalizeRestoreValidationChecks(source.DBType, validationSQLForRestorePlan(source), req.ValidationSQL, req.ValidationAssertions)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +249,7 @@ func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *Databas
 		LogPath:          job.LogPath,
 		OperatorID:       operator.ID,
 		OperatorName:     trimText(operator.Username, 120),
-		RequestJSON:      physicalRestoreRequestJSON(plan, job, host, validationSQL, req.CleanupOnFailure, operator),
+		RequestJSON:      physicalRestoreRequestJSON(plan, job, host, validationChecks, req.CleanupOnFailure, operator),
 	}
 	if err := uc.runnerJobRepo.Create(ctx, runnerJob); err != nil {
 		job.Status = DatabaseBackupStatusFailed
@@ -241,7 +264,7 @@ func (uc *UseCase) RunRestorePlan(ctx context.Context, planID uint, req *Databas
 	plan.ErrorMessage = "隔离恢复任务已下发 Runner"
 	_ = uc.restorePlanRepo.Update(ctx, plan)
 
-	go uc.executePhysicalRestoreJob(context.Background(), plan.ID, job.ID, runnerJob.ID, validationSQL, req.CleanupOnFailure)
+	go uc.executePhysicalRestoreJob(context.Background(), plan.ID, job.ID, runnerJob.ID, validationChecks, req.CleanupOnFailure)
 	return uc.toRestoreJobVO(job, source.Name, "", "", host.Name), nil
 }
 
@@ -383,7 +406,7 @@ func (uc *UseCase) CleanupRestoreJob(ctx context.Context, jobID uint, operator Q
 	return uc.GetRestoreJob(ctx, job.ID)
 }
 
-func (uc *UseCase) executePhysicalRestoreJob(ctx context.Context, planID, restoreJobID, runnerJobID uint, validationSQL []string, cleanupOnFailure bool) {
+func (uc *UseCase) executePhysicalRestoreJob(ctx context.Context, planID, restoreJobID, runnerJobID uint, validationChecks []restoreValidationCheck, cleanupOnFailure bool) {
 	plan, planErr := uc.restorePlanRepo.GetByID(ctx, planID)
 	restoreJob, restoreErr := uc.restoreJobRepo.GetByID(ctx, restoreJobID)
 	runnerJob, runnerErr := uc.runnerJobRepo.GetByID(ctx, runnerJobID)
@@ -403,7 +426,7 @@ func (uc *UseCase) executePhysicalRestoreJob(ctx context.Context, planID, restor
 	_ = uc.runnerJobRepo.Update(ctx, runnerJob)
 	_ = uc.restorePlanRepo.Update(ctx, plan)
 
-	result, exitCode, runErr := uc.runPhysicalRestoreRunnerScript(ctx, plan, restoreJob, validationSQL, cleanupOnFailure, started)
+	result, exitCode, runErr := uc.runPhysicalRestoreRunnerScript(ctx, plan, restoreJob, validationChecks, cleanupOnFailure, started)
 	finished := time.Now()
 	status := DatabaseBackupStatusSuccess
 	restoreStatus := DatabaseRestoreStatusVerified
@@ -468,7 +491,7 @@ func (uc *UseCase) executePhysicalRestoreJob(ctx context.Context, planID, restor
 	}
 }
 
-func (uc *UseCase) runPhysicalRestoreRunnerScript(ctx context.Context, plan *DatabaseRestorePlan, restoreJob *DatabaseRestoreJob, validationSQL []string, cleanupOnFailure bool, started time.Time) (physicalRestoreRunnerResult, int, error) {
+func (uc *UseCase) runPhysicalRestoreRunnerScript(ctx context.Context, plan *DatabaseRestorePlan, restoreJob *DatabaseRestoreJob, validationChecks []restoreValidationCheck, cleanupOnFailure bool, started time.Time) (physicalRestoreRunnerResult, int, error) {
 	result := physicalRestoreRunnerResult{
 		RestorePlanID:    plan.ID,
 		RestoreJobID:     restoreJob.ID,
@@ -526,7 +549,7 @@ func (uc *UseCase) runPhysicalRestoreRunnerScript(ctx context.Context, plan *Dat
 		Base:             baseArtifact,
 		Incrementals:     incrementals,
 		Logs:             logs,
-		ValidationSQL:    validationSQL,
+		ValidationChecks: validationChecks,
 		CleanupOnFailure: cleanupOnFailure,
 	}
 	script, err := buildPhysicalRestoreScript(input)
@@ -535,6 +558,7 @@ func (uc *UseCase) runPhysicalRestoreRunnerScript(ctx context.Context, plan *Dat
 	}
 	stdout, stderr, exitCode, runErr := executeSSHRunnerScript(ctx, host.Host, host.Port, runnerCredential, script, time.Duration(normalizeRunnerTimeoutMinutes(host.TimeoutMinutes))*time.Minute)
 	parsed := parsePhysicalRestoreOutput(stdout)
+	parsed.ValidationResults = attachRestoreValidationChecks(parsed.ValidationResults, validationChecks)
 	parsed.RestorePlanID = plan.ID
 	parsed.RestoreJobID = restoreJob.ID
 	parsed.RunnerHostID = host.ID
@@ -618,7 +642,7 @@ func buildPhysicalRestoreScript(input physicalRestoreScriptInput) (string, error
 		`trap cleanup_failure EXIT`,
 		`fail_step() { step "$1" "failed"; echo "$2" >> "$LOG_FILE"; exit 1; }`,
 		`copy_artifact() { label="$1"; src="$2"; dest="$3"; expected_sha="$4"; expected_size="$5"; step "fetch_${label}" "running"; if [ ! -f "$src" ]; then fail_step "fetch_${label}" "artifact not found: $src"; fi; cp "$src" "$dest"; actual_size="$(wc -c < "$dest" | tr -d ' ')"; if [ "$expected_size" != "0" ] && [ "$actual_size" != "$expected_size" ]; then fail_step "fetch_${label}" "size mismatch: $actual_size != $expected_size"; fi; if [ -n "$expected_sha" ]; then actual_sha="$(sha256sum "$dest" | awk '{print $1}')"; if [ "$actual_sha" != "$expected_sha" ]; then fail_step "fetch_${label}" "sha256 mismatch"; fi; fi; step "fetch_${label}" "success"; }`,
-		`run_validation() { idx="$1"; sql="$2"; out="$WORK_DIR/validation-$idx.out"; step "validation_${idx}" "running"; set +e; if command -v timeout >/dev/null 2>&1; then timeout 30 "$MYSQL_CLI" -h127.0.0.1 -P "$LISTEN_PORT" -uroot --batch --raw -e "$sql" > "$out" 2>&1; else "$MYSQL_CLI" -h127.0.0.1 -P "$LISTEN_PORT" -uroot --batch --raw -e "$sql" > "$out" 2>&1; fi; code="$?"; set -e; sha="$(sha256sum "$out" | awk '{print $1}')"; preview="$(head -c 1200 "$out" | base64 | tr -d '\n')"; if [ "$code" = "0" ]; then status="success"; step "validation_${idx}" "success"; else status="failed"; step "validation_${idx}" "failed"; validation_failed=1; fi; printf 'OPSHUB_RESTORE_VALIDATION=%s|%s|%s|%s\n' "$idx" "$status" "$sha" "$preview"; }`,
+		`run_validation() { idx="$1"; sql="$2"; expected_rows_enabled="$3"; expected_rows="$4"; expected_contains_enabled="$5"; expected_contains="$6"; expected_scalar_enabled="$7"; expected_scalar="$8"; out="$WORK_DIR/validation-$idx.out"; clean="$WORK_DIR/validation-$idx.data"; step "validation_${idx}" "running"; set +e; if command -v timeout >/dev/null 2>&1; then timeout 30 "$MYSQL_CLI" -h127.0.0.1 -P "$LISTEN_PORT" -uroot --batch --raw -e "$sql" < /dev/null > "$out" 2>&1; else "$MYSQL_CLI" -h127.0.0.1 -P "$LISTEN_PORT" -uroot --batch --raw -e "$sql" < /dev/null > "$out" 2>&1; fi; code="$?"; set -e; grep -v '^WARNING:' "$out" > "$clean" || true; sha="$(sha256sum "$out" | awk '{print $1}')"; preview="$(head -c 1200 "$out" | base64 | tr -d '\n')"; actual_rows="$(awk 'NR>1 {count++} END {print count+0}' "$clean")"; actual_scalar="$(awk 'NR>1 {print; exit}' "$clean" | awk -F '\t' '{print $1}')"; status="success"; assertion_status="not_configured"; assertion_message=""; if [ "$code" != "0" ]; then status="failed"; assertion_status="failed"; assertion_message="SQL execution failed"; else if [ "$expected_rows_enabled" = "1" ] || [ "$expected_contains_enabled" = "1" ] || [ "$expected_scalar_enabled" = "1" ]; then assertion_status="passed"; fi; if [ "$expected_rows_enabled" = "1" ] && [ "$actual_rows" != "$expected_rows" ]; then assertion_status="failed"; assertion_message="${assertion_message}expectedRows=$expected_rows actualRows=$actual_rows; "; fi; if [ "$expected_contains_enabled" = "1" ] && ! grep -F -- "$expected_contains" "$clean" >/dev/null 2>&1; then assertion_status="failed"; assertion_message="${assertion_message}expectedContains not found; "; fi; if [ "$expected_scalar_enabled" = "1" ] && [ "$actual_scalar" != "$expected_scalar" ]; then assertion_status="failed"; assertion_message="${assertion_message}expectedScalar=$expected_scalar actualScalar=$actual_scalar; "; fi; if [ "$assertion_status" = "failed" ]; then status="failed"; fi; fi; actual_scalar_b64="$(printf '%s' "$actual_scalar" | base64 | tr -d '\n')"; assertion_message_b64="$(printf '%s' "$assertion_message" | base64 | tr -d '\n')"; if [ "$status" = "success" ]; then step "validation_${idx}" "success"; else step "validation_${idx}" "failed"; validation_failed=1; fi; printf 'OPSHUB_RESTORE_VALIDATION=%s|%s|%s|%s|%s|%s|%s|%s\n' "$idx" "$status" "$sha" "$preview" "$assertion_status" "$actual_rows" "$actual_scalar_b64" "$assertion_message_b64"; }`,
 		`printf 'OPSHUB_WORK_DIR=%s\n' "$WORK_DIR"`,
 		`printf 'OPSHUB_PREPARED_DATADIR=%s\n' "$BASE_DIR"`,
 		`printf 'OPSHUB_CONTAINER_NAME=%s\n' "$CONTAINER_NAME"`,
@@ -684,7 +708,7 @@ func buildPhysicalRestoreScript(input physicalRestoreScriptInput) (string, error
 		`"$DOCKER" rm -f "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true`,
 		`chown -R 999:999 "$BASE_DIR" >> "$LOG_FILE" 2>&1 || true`,
 		`"$DOCKER" run -d --name "$CONTAINER_NAME" -p "127.0.0.1:$LISTEN_PORT:3306" -v "$BASE_DIR:/var/lib/mysql" "$CONTAINER_IMAGE" --skip-grant-tables --skip-networking=0 >> "$LOG_FILE" 2>&1 || fail_step "start_isolated_instance" "docker run failed"`,
-		`ready=0; for i in $(seq 1 60); do if "$MYSQL_CLI" -h127.0.0.1 -P "$LISTEN_PORT" -uroot -e "SELECT 1" >/dev/null 2>&1; then ready=1; break; fi; sleep 2; done; if [ "$ready" != "1" ]; then "$DOCKER" logs "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true; fail_step "start_isolated_instance" "isolated mysql not ready"; fi`,
+		`ready=0; for i in $(seq 1 60); do if "$MYSQL_CLI" -h127.0.0.1 -P "$LISTEN_PORT" -uroot -e "SELECT 1" < /dev/null >/dev/null 2>&1; then ready=1; break; fi; sleep 2; done; if [ "$ready" != "1" ]; then "$DOCKER" logs "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true; fail_step "start_isolated_instance" "isolated mysql not ready"; fi`,
 		`step "start_isolated_instance" "success"`,
 	)
 	if len(input.Logs) > 0 {
@@ -713,14 +737,25 @@ func buildPhysicalRestoreScript(input physicalRestoreScriptInput) (string, error
 		)
 	}
 	lines = append(lines, `validation_failed=0`)
-	for idx, sqlText := range input.ValidationSQL {
-		lines = append(lines, fmt.Sprintf("run_validation %d %s", idx+1, shellSingleQuote(sqlText)))
+	for idx, check := range input.ValidationChecks {
+		expectedRowsEnabled, expectedRowsValue := validationExpectedRowsArgs(check.ExpectedRows)
+		expectedContainsEnabled, expectedContainsValue := validationExpectedStringArgs(check.ExpectedContains)
+		expectedScalarEnabled, expectedScalarValue := validationExpectedStringArgs(check.ExpectedScalar)
+		lines = append(lines, fmt.Sprintf("run_validation %d %s %s %s %s %s %s %s",
+			idx+1,
+			shellSingleQuote(check.SQL),
+			shellSingleQuote(expectedRowsEnabled),
+			shellSingleQuote(expectedRowsValue),
+			shellSingleQuote(expectedContainsEnabled),
+			shellSingleQuote(expectedContainsValue),
+			shellSingleQuote(expectedScalarEnabled),
+			shellSingleQuote(expectedScalarValue),
+		))
 	}
 	lines = append(lines,
 		`if [ "$validation_failed" = "0" ]; then printf 'OPSHUB_VALIDATION_STATUS=passed\n'; else printf 'OPSHUB_VALIDATION_STATUS=failed\n'; fi`,
-		`cat > "$PROOF_FILE" <<EOF`,
-		`{"restoreJobId":$RESTORE_JOB_ID,"restorePlanId":$RESTORE_PLAN_ID,"workDir":"$WORK_DIR","containerName":"$CONTAINER_NAME","containerImage":"$CONTAINER_IMAGE","listenHost":"127.0.0.1","listenPort":$LISTEN_PORT,"generatedAt":"$(date '+%Y-%m-%d %H:%M:%S')"}`,
-		`EOF`,
+		`GENERATED_AT="$(date '+%Y-%m-%d %H:%M:%S')"`,
+		`printf '{"restoreJobId":%s,"restorePlanId":%s,"workDir":"%s","containerName":"%s","containerImage":"%s","listenHost":"127.0.0.1","listenPort":%s,"generatedAt":"%s"}\n' "$RESTORE_JOB_ID" "$RESTORE_PLAN_ID" "$WORK_DIR" "$CONTAINER_NAME" "$CONTAINER_IMAGE" "$LISTEN_PORT" "$GENERATED_AT" > "$PROOF_FILE"`,
 		`printf 'OPSHUB_ARTIFACT_URI=runner://runner-host-`+strconv.Itoa(int(input.RunnerHostID))+`%s\n' "$PROOF_FILE"`,
 		`step "generate_proof" "success"`,
 	)
@@ -795,16 +830,29 @@ func parsePhysicalRestoreOutput(stdout string) physicalRestoreRunnerResult {
 			continue
 		}
 		if value, ok := strings.CutPrefix(line, "OPSHUB_RESTORE_VALIDATION="); ok {
-			parts := strings.SplitN(value, "|", 4)
-			if len(parts) == 4 {
+			parts := strings.SplitN(value, "|", 8)
+			if len(parts) >= 4 {
 				idx, _ := strconv.Atoi(parts[0])
 				previewBytes, _ := base64.StdEncoding.DecodeString(parts[3])
-				result.ValidationResults = append(result.ValidationResults, physicalRestoreValidationResult{
+				item := physicalRestoreValidationResult{
 					Index:         idx,
 					Status:        parts[1],
 					SHA256:        parts[2],
 					OutputPreview: trimText(string(previewBytes), 1200),
-				})
+				}
+				if len(parts) == 8 {
+					item.AssertionStatus = parts[4]
+					if actualRows, err := strconv.Atoi(strings.TrimSpace(parts[5])); err == nil {
+						item.ActualRows = &actualRows
+					}
+					if scalarBytes, err := base64.StdEncoding.DecodeString(parts[6]); err == nil {
+						item.ActualScalar = string(scalarBytes)
+					}
+					if messageBytes, err := base64.StdEncoding.DecodeString(parts[7]); err == nil {
+						item.AssertionMessage = trimText(string(messageBytes), 1000)
+					}
+				}
+				result.ValidationResults = append(result.ValidationResults, item)
 			}
 		}
 	}
@@ -918,32 +966,158 @@ func resolveRunnerReadableArtifactPath(storageURI, filePath string, runnerHostID
 }
 
 func normalizeRestoreValidationSQL(dbType string, values []string) ([]string, error) {
-	result := make([]string, 0, len(values))
+	checks, err := normalizeRestoreValidationChecks(dbType, nil, values, nil)
+	if err != nil {
+		return nil, err
+	}
+	return validationCheckSQLs(checks), nil
+}
+
+func normalizeRestoreValidationChecks(dbType string, defaultSQL, values []string, assertions []DatabaseRestoreValidationAssertion) ([]restoreValidationCheck, error) {
+	checks := make([]restoreValidationCheck, 0, len(defaultSQL)+len(values)+len(assertions))
 	seen := map[string]struct{}{}
-	for _, sqlText := range values {
-		sqlText = strings.TrimSpace(sqlText)
-		if sqlText == "" {
+	for _, sqlText := range append(defaultSQL, values...) {
+		cleaned, err := normalizeSingleRestoreValidationSQL(dbType, sqlText)
+		if err != nil {
+			return nil, err
+		}
+		if cleaned == "" {
 			continue
 		}
-		safety := AnalyzeReadOnlySQLByDB(dbType, sqlText, defaultRestoreValidationLimit)
-		if !safety.Allowed {
-			return nil, fmt.Errorf("校验 SQL 不安全: %s", safety.Message)
-		}
-		cleaned := strings.TrimSpace(safety.SQLText)
-		key := strings.ToLower(cleaned)
+		key := "sql:" + strings.ToLower(cleaned)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		result = append(result, cleaned)
+		checks = append(checks, restoreValidationCheck{SQL: cleaned})
 	}
-	if len(result) == 0 {
+	for _, assertion := range assertions {
+		check, err := normalizeRestoreValidationAssertion(dbType, assertion)
+		if err != nil {
+			return nil, err
+		}
+		key := restoreValidationCheckKey(check)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		checks = append(checks, check)
+	}
+	if len(checks) == 0 {
 		return nil, fmt.Errorf("校验 SQL 不能为空")
 	}
-	if len(result) > 20 {
+	if len(checks) > 20 {
 		return nil, fmt.Errorf("校验 SQL 最多 20 条")
 	}
-	return result, nil
+	return checks, nil
+}
+
+func normalizeSingleRestoreValidationSQL(dbType, sqlText string) (string, error) {
+	sqlText = strings.TrimSpace(sqlText)
+	if sqlText == "" {
+		return "", nil
+	}
+	safety := AnalyzeReadOnlySQLByDB(dbType, sqlText, defaultRestoreValidationLimit)
+	if !safety.Allowed {
+		return "", fmt.Errorf("校验 SQL 不安全: %s", safety.Message)
+	}
+	return strings.TrimSpace(safety.SQLText), nil
+}
+
+func normalizeRestoreValidationAssertion(dbType string, assertion DatabaseRestoreValidationAssertion) (restoreValidationCheck, error) {
+	cleaned, err := normalizeSingleRestoreValidationSQL(dbType, assertion.SQL)
+	if err != nil {
+		return restoreValidationCheck{}, err
+	}
+	if cleaned == "" {
+		return restoreValidationCheck{}, fmt.Errorf("断言校验 SQL 不能为空")
+	}
+	check := restoreValidationCheck{SQL: cleaned}
+	if assertion.ExpectedRows != nil {
+		if *assertion.ExpectedRows < 0 {
+			return restoreValidationCheck{}, fmt.Errorf("expectedRows 不能小于 0")
+		}
+		value := *assertion.ExpectedRows
+		check.ExpectedRows = &value
+	}
+	if assertion.ExpectedContains != nil {
+		value := trimText(strings.TrimSpace(*assertion.ExpectedContains), 1000)
+		if value == "" {
+			return restoreValidationCheck{}, fmt.Errorf("expectedContains 不能为空")
+		}
+		check.ExpectedContains = &value
+	}
+	if assertion.ExpectedScalar != nil {
+		value := trimText(strings.TrimSpace(*assertion.ExpectedScalar), 1000)
+		check.ExpectedScalar = &value
+	}
+	if check.ExpectedRows == nil && check.ExpectedContains == nil && check.ExpectedScalar == nil {
+		return restoreValidationCheck{}, fmt.Errorf("断言校验至少需要 expectedRows、expectedContains 或 expectedScalar 之一")
+	}
+	return check, nil
+}
+
+func restoreValidationCheckKey(check restoreValidationCheck) string {
+	parts := []string{strings.ToLower(check.SQL)}
+	if check.ExpectedRows != nil {
+		parts = append(parts, "rows="+strconv.Itoa(*check.ExpectedRows))
+	}
+	if check.ExpectedContains != nil {
+		parts = append(parts, "contains="+*check.ExpectedContains)
+	}
+	if check.ExpectedScalar != nil {
+		parts = append(parts, "scalar="+*check.ExpectedScalar)
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func validationCheckSQLs(checks []restoreValidationCheck) []string {
+	values := make([]string, 0, len(checks))
+	for _, check := range checks {
+		if strings.TrimSpace(check.SQL) != "" {
+			values = append(values, check.SQL)
+		}
+	}
+	return values
+}
+
+func validationExpectedRowsArgs(value *int) (string, string) {
+	if value == nil {
+		return "0", ""
+	}
+	return "1", strconv.Itoa(*value)
+}
+
+func validationExpectedStringArgs(value *string) (string, string) {
+	if value == nil {
+		return "0", ""
+	}
+	return "1", *value
+}
+
+func attachRestoreValidationChecks(results []physicalRestoreValidationResult, checks []restoreValidationCheck) []physicalRestoreValidationResult {
+	if len(results) == 0 || len(checks) == 0 {
+		return results
+	}
+	for idx := range results {
+		checkIdx := results[idx].Index - 1
+		if checkIdx < 0 || checkIdx >= len(checks) {
+			continue
+		}
+		check := checks[checkIdx]
+		results[idx].SQL = check.SQL
+		results[idx].ExpectedRows = check.ExpectedRows
+		results[idx].ExpectedContains = check.ExpectedContains
+		results[idx].ExpectedScalar = check.ExpectedScalar
+		if results[idx].AssertionStatus == "" {
+			if check.ExpectedRows != nil || check.ExpectedContains != nil || check.ExpectedScalar != nil {
+				results[idx].AssertionStatus = "unknown"
+			} else {
+				results[idx].AssertionStatus = "not_configured"
+			}
+		}
+	}
+	return results
 }
 
 func defaultRestoreContainerImage(source *DatabaseInstance, configured string) string {
@@ -1043,7 +1217,7 @@ func buildPhysicalRestoreProofJSON(plan *DatabaseRestorePlan, job *DatabaseResto
 	return marshalBackupPlanJSON(proof)
 }
 
-func physicalRestoreRequestJSON(plan *DatabaseRestorePlan, job *DatabaseRestoreJob, host *DatabaseRunnerHost, validationSQL []string, cleanupOnFailure bool, operator QueryOperator) string {
+func physicalRestoreRequestJSON(plan *DatabaseRestorePlan, job *DatabaseRestoreJob, host *DatabaseRunnerHost, validationChecks []restoreValidationCheck, cleanupOnFailure bool, operator QueryOperator) string {
 	payload := map[string]any{
 		"restorePlanId":    plan.ID,
 		"restoreJobId":     job.ID,
@@ -1056,7 +1230,8 @@ func physicalRestoreRequestJSON(plan *DatabaseRestorePlan, job *DatabaseRestoreJ
 		"workDir":          job.WorkDir,
 		"targetType":       job.RestoreTargetType,
 		"targetValue":      job.RestoreTargetValue,
-		"validationSql":    validationSQL,
+		"validationSql":    validationCheckSQLs(validationChecks),
+		"validationChecks": validationChecks,
 		"cleanupOnFailure": cleanupOnFailure,
 		"operatorId":       operator.ID,
 		"operatorName":     operator.Username,

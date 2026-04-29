@@ -3976,6 +3976,42 @@
             placeholder="每行一条，只允许 SELECT / SHOW / DESC / DESCRIBE / EXPLAIN"
           />
         </el-form-item>
+        <el-form-item label="断言校验">
+          <div class="restore-assertions">
+            <div class="restore-assertions-header">
+              <span class="field-tip">expectedRows 校验结果行数；expectedScalar 校验首行首列；expectedContains 校验输出中包含固定文本。</span>
+              <el-button size="small" type="primary" plain @click="addRestoreValidationAssertion">添加断言</el-button>
+            </div>
+            <div v-if="!restorePlanRunForm.validationAssertions?.length" class="restore-empty-tip">未配置断言时，只记录校验 SQL 输出和执行状态。</div>
+            <div
+              v-for="(item, index) in restorePlanRunForm.validationAssertions"
+              :key="index"
+              class="restore-assertion-item"
+            >
+              <div class="restore-assertion-toolbar">
+                <span>断言 {{ index + 1 }}</span>
+                <el-button link type="danger" @click="removeRestoreValidationAssertion(index)">删除</el-button>
+              </div>
+              <el-input
+                v-model="item.sql"
+                type="textarea"
+                :rows="2"
+                placeholder="只允许只读 SQL，例如 SELECT COUNT(*) FROM orders"
+              />
+              <el-row :gutter="10" class="restore-assertion-fields">
+                <el-col :span="8">
+                  <el-input-number v-model="item.expectedRows" :min="0" :max="1000000000" placeholder="expectedRows" class="assertion-number" />
+                </el-col>
+                <el-col :span="8">
+                  <el-input v-model="item.expectedScalar" placeholder="expectedScalar" clearable />
+                </el-col>
+                <el-col :span="8">
+                  <el-input v-model="item.expectedContains" placeholder="expectedContains" clearable />
+                </el-col>
+              </el-row>
+            </div>
+          </div>
+        </el-form-item>
         <el-form-item label="风险确认" prop="confirmIsolated">
           <el-checkbox v-model="restorePlanRunForm.confirmIsolated">
             我确认本次只恢复到隔离库，不覆盖生产数据。
@@ -4435,6 +4471,7 @@ import {
   type DatabaseRestorePlanPayload,
   type DatabaseRestorePlanRunPayload,
   type DatabaseRestorePlanResult,
+  type DatabaseRestoreValidationAssertionPayload,
   type DatabaseRunLogArchiveCatchUpPayload,
   type DatabaseRunLogArchiveOncePayload,
   type DatabaseRunnerHostPayload,
@@ -5067,6 +5104,7 @@ const restorePlanRunForm = reactive<DatabaseRestorePlanRunPayload & { validation
   listenPort: undefined,
   expiresInHours: 24,
   validationSql: [],
+  validationAssertions: [],
   validationSqlText: '',
   cleanupOnFailure: false,
   confirmIsolated: false
@@ -7011,6 +7049,7 @@ const openRunRestorePlanDialog = (row: DatabaseRestorePlanResult) => {
   restorePlanRunForm.expiresInHours = 24
   restorePlanRunForm.validationSqlText = ''
   restorePlanRunForm.validationSql = []
+  restorePlanRunForm.validationAssertions = []
   restorePlanRunForm.cleanupOnFailure = false
   restorePlanRunForm.confirmIsolated = false
   restorePlanRunDialogVisible.value = true
@@ -7024,9 +7063,24 @@ const resetRestorePlanRunForm = () => {
   restorePlanRunForm.expiresInHours = 24
   restorePlanRunForm.validationSqlText = ''
   restorePlanRunForm.validationSql = []
+  restorePlanRunForm.validationAssertions = []
   restorePlanRunForm.cleanupOnFailure = false
   restorePlanRunForm.confirmIsolated = false
   restorePlanRunFormRef.value?.clearValidate()
+}
+
+const addRestoreValidationAssertion = () => {
+  if (!restorePlanRunForm.validationAssertions) restorePlanRunForm.validationAssertions = []
+  restorePlanRunForm.validationAssertions.push({
+    sql: '',
+    expectedRows: undefined,
+    expectedContains: '',
+    expectedScalar: ''
+  })
+}
+
+const removeRestoreValidationAssertion = (index: number) => {
+  restorePlanRunForm.validationAssertions?.splice(index, 1)
 }
 
 const submitRunRestorePlan = async () => {
@@ -7038,12 +7092,25 @@ const submitRunRestorePlan = async () => {
       .split('\n')
       .map(item => item.trim())
       .filter(Boolean)
+    const validationAssertions = (restorePlanRunForm.validationAssertions || [])
+      .map((item): DatabaseRestoreValidationAssertionPayload => ({
+        sql: String(item.sql || '').trim(),
+        expectedRows: typeof item.expectedRows === 'number' ? item.expectedRows : undefined,
+        expectedContains: String(item.expectedContains || '').trim() || undefined,
+        expectedScalar: String(item.expectedScalar || '').trim() || undefined
+      }))
+      .filter(item => Boolean(item.sql) && (
+        typeof item.expectedRows === 'number' ||
+        Boolean(item.expectedContains) ||
+        item.expectedScalar !== undefined
+      ))
     const payload: DatabaseRestorePlanRunPayload = {
       runnerHostId: restorePlanRunForm.runnerHostId,
       containerImage: restorePlanRunForm.containerImage || undefined,
       listenPort: restorePlanRunForm.listenPort || undefined,
       expiresInHours: restorePlanRunForm.expiresInHours || 24,
       validationSql,
+      validationAssertions,
       cleanupOnFailure: restorePlanRunForm.cleanupOnFailure === true
     }
     await runDatabaseRestorePlan(restorePlanRunSource.value.id, payload)
@@ -9939,6 +10006,50 @@ onBeforeUnmount(() => {
 
 .backup-dialog-alert {
   margin-bottom: 16px;
+}
+
+.restore-assertions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.restore-assertions-header,
+.restore-assertion-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.restore-empty-tip {
+  color: #909399;
+  font-size: 12px;
+}
+
+.restore-assertion-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.restore-assertion-toolbar {
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.restore-assertion-fields {
+  width: 100%;
+}
+
+.assertion-number {
+  width: 100%;
 }
 
 .form-number-full {
