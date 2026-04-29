@@ -4583,6 +4583,78 @@ P3.8.0 阶段未做边界：
 3. 对象存储 artifact 自动拉取到 Runner staging 仍留到后续存储增强；P3.8.3/P3.8.4 仍依赖 Runner 可读 artifact。
 4. 真实 PostgreSQL 环境的 full + incremental + WAL 长链路端到端演练归入 P3.10 总体验收。
 
+###### P3.8.9：pg_basebackup 恢复执行就绪性门禁
+
+目标：
+
+把 P3.8 已能生成和执行的 `pg_basebackup` 恢复链路补上执行前可见的 readiness gate，避免“恢复计划预校验通过，但下发 Runner 后才发现 artifact 不可读或工具清单不完整”。
+
+实现范围：
+
+1. 恢复计划 required tools 补齐 `pg_basebackup` 恢复真实依赖：
+   - `pg_basebackup`
+   - `tar`
+   - `sha256sum`
+   - `docker`
+   - `psql`
+   - `pg_verifybackup`，可选
+   - 如有 incremental，增加 `pg_combinebackup`
+2. Runner 探测补充 PostgreSQL 恢复工具：
+   - `pg_basebackup`
+   - `pg_combinebackup`
+   - `pg_verifybackup`
+   - `psql`
+   - `docker`
+   - `tar`
+   - `sha256sum`
+3. `required_artifact_json` 增加 artifact 可读性矩阵：
+   - `runnerHostId`
+   - `runnerReadable`
+   - `runnerPath`
+   - `readinessStatus`
+   - `readinessMessage`
+4. readiness 状态定义：
+   - `ready`：当前 Runner 可直接读取 `runner://`、`local://`、`file://` 或绝对路径 artifact。
+   - `pending_download`：S3/MinIO/OSS/COS 等对象存储 URI 已登记，但自动拉取到 Runner staging 尚未启用。
+   - `metadata_only`：`metadata://` 仅能做计划证明，不能作为实际恢复输入。
+   - `missing`：未登记可用路径。
+   - `unreadable`：路径属于其它 Runner 或格式不可被当前 Runner 读取。
+   - `unknown`：计划尚未绑定 Runner，执行时再确认。
+   - `managed_by_barman`：Barman artifact 由 Barman server/catalog 管理，不要求 Runner 直接读单个备份文件。
+5. `pg_basebackup_restore` 下发前同步预检：
+   - base artifact 必须 Runner 可读。
+   - incremental artifact 必须 Runner 可读。
+   - 启动隔离实例时，WAL artifact 也必须 Runner 可读。
+   - 任一不可读则拒绝下发恢复任务，而不是让后台 Job 排队后失败。
+6. 前端恢复计划列表展示 Artifact readiness：
+   - 全部 ready 显示“就绪”。
+   - 对象存储未拉取显示“待拉取”，阻止执行。
+   - missing/unreadable/metadata_only 显示“不可读”，阻止执行。
+   - unknown 不阻止旧计划，但提示执行时确认 Runner。
+
+不做：
+
+1. 不在本阶段实现对象存储自动下载到 Runner staging。
+2. 不把对象存储密钥下发给 backend 或写入恢复计划。
+3. 不新增生产库切换、回填或清理原始 artifact 的动作。
+4. 不把 Runner 探测结果做成强约束缓存；实际恢复脚本仍以执行时 `command -v` 和文件校验为准。
+
+验收：
+
+1. 新生成的 pg_basebackup 恢复计划能在 `required_artifact_json` 中看到每个 base/incremental/WAL artifact 的 readiness。
+2. `runner://runner-host-N/...` 且 Runner 匹配时显示 ready。
+3. `s3://` / `minio://` artifact 显示 pending_download，并阻止直接执行。
+4. Runner 探测输出包含 pg_basebackup 恢复所需工具。
+5. 执行 pg_basebackup + WAL 隔离恢复前，如果 WAL artifact 不是 Runner 可读路径，会直接拒绝下发并返回清晰错误。
+
+2026-04-30 P3.8.9 已落地：
+
+1. 后端 required tools 已补齐 `pg_basebackup` 恢复执行真实依赖。
+2. 后端 required artifacts 已生成 Runner readiness 矩阵。
+3. `pg_basebackup_restore` 下发前会同步预检 WAL artifact 可读性。
+4. Runner 探测命令已补充 PostgreSQL 恢复工具。
+5. 前端恢复计划列表已展示 Artifact readiness，并对不可读或待拉取对象阻止直接执行。
+
 建议执行顺序：
 
 1. P3.8.1：先恢复目录，验证 artifact 可用。

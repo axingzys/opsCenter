@@ -65,8 +65,10 @@ func TestBuildRunnerProbeCommandIsFixedAndQuoted(t *testing.T) {
 	if !strings.Contains(command, "opshub-runner-ok") {
 		t.Fatalf("probe marker missing: %s", command)
 	}
-	if !strings.Contains(command, "command -v xtrabackup || true") {
-		t.Fatalf("tool probe missing: %s", command)
+	for _, want := range []string{"command -v xtrabackup || true", "command -v pg_basebackup || true", "command -v pg_combinebackup || true", "command -v docker || true"} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("tool probe %q missing: %s", want, command)
+		}
 	}
 	if !strings.Contains(command, "runner'\\''s") {
 		t.Fatalf("work dir was not shell-quoted: %s", command)

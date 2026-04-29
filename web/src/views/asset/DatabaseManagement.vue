@@ -2326,6 +2326,13 @@
                       <el-tag size="small" :type="restoreValidationStatusTag(row.storageStatus)">{{ row.storageStatusText || row.storageStatus || '-' }}</el-tag>
                     </template>
                   </el-table-column>
+                  <el-table-column label="Artifact" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tooltip :content="restorePlanArtifactReadiness(row).message" placement="top">
+                        <el-tag size="small" :type="restorePlanArtifactReadiness(row).tag">{{ restorePlanArtifactReadiness(row).text }}</el-tag>
+                      </el-tooltip>
+                    </template>
+                  </el-table-column>
                   <el-table-column label="工具" width="120" align="center">
                     <template #default="{ row }">
                       <el-tag size="small" :type="restoreValidationStatusTag(row.toolStatus)">{{ row.toolStatusText || row.toolStatus || '-' }}</el-tag>
@@ -2353,7 +2360,7 @@
                         size="small"
                         type="warning"
                         link
-                        :disabled="row.validationStatus !== 'passed' || ['queued', 'running'].includes(row.restoreStatus)"
+                        :disabled="row.validationStatus !== 'passed' || ['queued', 'running'].includes(row.restoreStatus) || restorePlanArtifactReadiness(row).blocking"
                         @click="openRunRestorePlanDialog(row)"
                       >
                         执行恢复
@@ -9689,6 +9696,63 @@ const restoreValidationStatusTag = (status?: string) => {
       return 'info'
     default:
       return 'info'
+  }
+}
+
+const restorePlanArtifactReadiness = (row?: DatabaseRestorePlanResult) => {
+  const fallback = { status: 'unknown', text: '-', tag: 'info', message: '恢复计划尚未生成 artifact 可读性矩阵', blocking: false }
+  if (!row?.requiredArtifactJson) return fallback
+  let artifacts: any[] = []
+  try {
+    const parsed = JSON.parse(row.requiredArtifactJson)
+    artifacts = Array.isArray(parsed) ? parsed : []
+  } catch {
+    return { ...fallback, message: 'artifact 可读性矩阵 JSON 格式异常', blocking: true, tag: 'danger', text: '异常' }
+  }
+  if (!artifacts.length) return fallback
+  const statuses = artifacts.map(item => String(item.readinessStatus || '').trim()).filter(Boolean)
+  if (!statuses.length) return fallback
+  const blockingStatuses = new Set(['missing', 'unreadable', 'metadata_only'])
+  const blocking = artifacts.filter(item => blockingStatuses.has(String(item.readinessStatus || '').trim()))
+  if (blocking.length) {
+    return {
+      status: 'blocked',
+      text: `不可读 ${blocking.length}`,
+      tag: 'danger',
+      blocking: true,
+      message: blocking.map(item => `${item.fileName || item.id || '-'}: ${item.readinessMessage || item.readinessStatus}`).join('；')
+    }
+  }
+  const pending = artifacts.filter(item => String(item.readinessStatus || '').trim() === 'pending_download')
+  if (pending.length) {
+    return {
+      status: 'pending_download',
+      text: `待拉取 ${pending.length}`,
+      tag: 'warning',
+      blocking: true,
+      message: pending.map(item => `${item.fileName || item.id || '-'}: ${item.readinessMessage || '对象存储 artifact 尚未拉取到 Runner'}`).join('；')
+    }
+  }
+  const unknown = artifacts.filter(item => String(item.readinessStatus || '').trim() === 'unknown')
+  if (unknown.length) {
+    return {
+      status: 'unknown',
+      text: `待确认 ${unknown.length}`,
+      tag: 'info',
+      blocking: false,
+      message: unknown.map(item => `${item.fileName || item.id || '-'}: ${item.readinessMessage || '执行时确认 Runner'}`).join('；')
+    }
+  }
+  const ready = artifacts.filter(item => String(item.readinessStatus || '').trim() === 'ready')
+  if (ready.length === artifacts.length) {
+    return { status: 'ready', text: `就绪 ${ready.length}`, tag: 'success', blocking: false, message: '所有 artifact 已登记为 Runner 可直接读取' }
+  }
+  return {
+    status: 'managed',
+    text: '托管',
+    tag: 'info',
+    blocking: false,
+    message: artifacts.map(item => `${item.fileName || item.id || '-'}: ${item.readinessMessage || item.readinessStatus || '托管 artifact'}`).join('；')
   }
 }
 

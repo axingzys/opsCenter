@@ -122,6 +122,11 @@ func (uc *UseCase) runPostgreSQLPgBaseBackupRestorePlan(ctx context.Context, pla
 	if req.PostgresStartInstance != nil {
 		startInstance = *req.PostgresStartInstance
 	}
+	if startInstance {
+		if _, err := uc.restoreLogArtifacts(ctx, plan.SelectedLogArchiveIDs, host.ID); err != nil {
+			return nil, fmt.Errorf("PostgreSQL WAL artifact 执行前预检失败: %w", err)
+		}
+	}
 	validationChecks := []restoreValidationCheck{}
 	if startInstance {
 		validationChecks, err = normalizeRestoreValidationChecks(source.DBType, validationSQLForRestorePlan(source), req.ValidationSQL, req.ValidationAssertions)

@@ -2180,7 +2180,14 @@ func buildRestoreRequiredToolJSON(source *DatabaseInstance, result *restorePlanV
 	} else if engine == DBTypePostgreSQL {
 		backupEngine := postgreSQLPlanBackupEngine(result)
 		if backupEngine == BackupEnginePgBaseBackup {
-			tools = append(tools, map[string]any{"name": "pg_basebackup", "requiredBy": "physical_backup"})
+			tools = append(tools,
+				map[string]any{"name": "pg_basebackup", "requiredBy": "physical_backup"},
+				map[string]any{"name": "tar", "requiredBy": "artifact_extract"},
+				map[string]any{"name": "sha256sum", "requiredBy": "artifact_checksum"},
+				map[string]any{"name": "docker", "requiredBy": "isolated_postgresql_if_start_instance"},
+				map[string]any{"name": "psql", "requiredBy": "validation_sql_if_start_instance"},
+				map[string]any{"name": "pg_verifybackup", "requiredBy": "backup_manifest_verify", "optional": true},
+			)
 			if len(result.BackupProofs) > 1 {
 				tools = append(tools, map[string]any{"name": "pg_combinebackup", "requiredBy": "incremental_combine"})
 			}
@@ -2200,7 +2207,7 @@ func buildRestoreRequiredArtifactJSON(result *restorePlanValidationResult) strin
 	}
 	artifacts := make([]map[string]any, 0, len(result.BackupProofs)+len(result.LogProofs))
 	for _, item := range result.BackupProofs {
-		artifacts = append(artifacts, map[string]any{
+		artifact := map[string]any{
 			"type":               "backup",
 			"id":                 item.ID,
 			"fileName":           item.FileName,
@@ -2217,10 +2224,12 @@ func buildRestoreRequiredArtifactJSON(result *restorePlanValidationResult) strin
 			"endLsn":             item.EndLSN,
 			"walStart":           item.WALStart,
 			"walEnd":             item.WALEnd,
-		})
+		}
+		attachRestoreArtifactReadiness(artifact, result.RunnerHostID, item.StorageURI, "", item.BackupEngine)
+		artifacts = append(artifacts, artifact)
 	}
 	for _, item := range result.LogProofs {
-		artifacts = append(artifacts, map[string]any{
+		artifact := map[string]any{
 			"type":               item.ArchiveType,
 			"id":                 item.ID,
 			"fileName":           item.FileName,
@@ -2234,10 +2243,49 @@ func buildRestoreRequiredArtifactJSON(result *restorePlanValidationResult) strin
 			"endLsn":             item.EndLSN,
 			"segmentNo":          item.SegmentNo,
 			"timelineHistoryUri": item.TimelineHistoryURI,
-		})
+		}
+		attachRestoreArtifactReadiness(artifact, result.RunnerHostID, item.StorageURI, "", "")
+		artifacts = append(artifacts, artifact)
 	}
 	data, _ := json.Marshal(artifacts)
 	return string(data)
+}
+
+func attachRestoreArtifactReadiness(artifact map[string]any, runnerHostID uint, storageURI, filePath, backupEngine string) {
+	status, runnerPath, message := restoreArtifactReadiness(runnerHostID, storageURI, filePath, backupEngine)
+	artifact["runnerHostId"] = runnerHostID
+	artifact["runnerReadable"] = status == "ready"
+	artifact["readinessStatus"] = status
+	artifact["readinessMessage"] = message
+	if runnerPath != "" {
+		artifact["runnerPath"] = runnerPath
+	}
+}
+
+func restoreArtifactReadiness(runnerHostID uint, storageURI, filePath, backupEngine string) (string, string, string) {
+	if strings.EqualFold(strings.TrimSpace(backupEngine), "barman") {
+		return "managed_by_barman", "", "Barman artifact 由 Barman server/catalog 管理，不要求 Runner 直接读取单个备份文件"
+	}
+	if runnerHostID == 0 {
+		return "unknown", "", "恢复计划尚未绑定 Runner，执行时需要选择可读取 artifact 的 Runner"
+	}
+	storageURI = strings.TrimSpace(storageURI)
+	filePath = strings.TrimSpace(filePath)
+	if storageURI == "" && filePath == "" {
+		return "missing", "", "artifact 未登记 storage URI 或本地路径"
+	}
+	path, err := resolveRunnerReadableArtifactPath(storageURI, filePath, runnerHostID)
+	if err == nil {
+		return "ready", path, "Runner 可直接读取 artifact"
+	}
+	source := strings.ToLower(firstNonEmpty(storageURI, filePath))
+	if strings.HasPrefix(source, "s3://") || strings.HasPrefix(source, "minio://") || strings.HasPrefix(source, "oss://") || strings.HasPrefix(source, "cos://") {
+		return "pending_download", "", "对象存储 artifact 自动拉取到 Runner staging 尚未启用，当前需要先登记 runner:// 或 Runner 本地可读路径"
+	}
+	if strings.HasPrefix(source, "metadata://") {
+		return "metadata_only", "", "metadata URI 仅用于计划证明，不能作为实际恢复输入"
+	}
+	return "unreadable", "", err.Error()
 }
 
 func estimateRestoreBytes(result *restorePlanValidationResult) int64 {

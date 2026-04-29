@@ -467,6 +467,13 @@ func buildRunnerProbeCommand(workDir string) string {
 		"command -v mysqlbinlog || true",
 		"command -v barman || true",
 		"command -v wal-g || true",
+		"command -v pg_basebackup || true",
+		"command -v pg_combinebackup || true",
+		"command -v pg_verifybackup || true",
+		"command -v psql || true",
+		"command -v docker || true",
+		"command -v tar || true",
+		"command -v sha256sum || true",
 	}, "\n")
 }
 

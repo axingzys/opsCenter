@@ -71,6 +71,73 @@ func TestBuildPostgreSQLRestorePlanJSONIncludesPgCombinebackup(t *testing.T) {
 	}
 }
 
+func TestBuildRestoreRequiredToolJSONPgBaseBackupIncludesExecutionTools(t *testing.T) {
+	payload := buildRestoreRequiredToolJSON(&DatabaseInstance{DBType: DBTypePostgreSQL}, &restorePlanValidationResult{
+		BackupProofs: []restoreProofBackup{
+			{ID: 1, BackupMethod: DatabaseBackupMethodPhysical, BackupLevel: DatabaseBackupLevelFull, BackupEngine: BackupEnginePgBaseBackup},
+			{ID: 2, BackupMethod: DatabaseBackupMethodPhysical, BackupLevel: DatabaseBackupLevelIncremental, BackupEngine: BackupEnginePgBaseBackup},
+		},
+	})
+	var tools []map[string]any
+	if err := json.Unmarshal([]byte(payload), &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	names := map[string]bool{}
+	for _, item := range tools {
+		names[item["name"].(string)] = true
+	}
+	for _, want := range []string{"pg_basebackup", "pg_combinebackup", "docker", "psql", "tar", "sha256sum", "pg_verifybackup"} {
+		if !names[want] {
+			t.Fatalf("required tool %s not found in %#v", want, tools)
+		}
+	}
+}
+
+func TestBuildRestoreRequiredArtifactJSONIncludesRunnerReadiness(t *testing.T) {
+	payload := buildRestoreRequiredArtifactJSON(&restorePlanValidationResult{
+		RunnerHostID: 3,
+		BackupProofs: []restoreProofBackup{
+			{
+				ID:           1,
+				FileName:     "pg-base.tar.gz",
+				StorageURI:   "runner://runner-host-3/backups/pg-base.tar.gz",
+				BackupLevel:  DatabaseBackupLevelFull,
+				BackupEngine: BackupEnginePgBaseBackup,
+			},
+		},
+		LogProofs: []restoreProofLogArchive{
+			{
+				ID:          9,
+				ArchiveType: DatabaseArchiveTypeWAL,
+				FileName:    "000000010000000000000001",
+				StorageURI:  "runner://runner-host-3/wal/000000010000000000000001",
+			},
+		},
+	})
+	var artifacts []map[string]any
+	if err := json.Unmarshal([]byte(payload), &artifacts); err != nil {
+		t.Fatalf("unmarshal artifacts: %v", err)
+	}
+	if len(artifacts) != 2 {
+		t.Fatalf("expected two artifacts, got %#v", artifacts)
+	}
+	for _, item := range artifacts {
+		if item["runnerReadable"] != true || item["readinessStatus"] != "ready" {
+			t.Fatalf("artifact should be runner ready: %#v", item)
+		}
+		if !strings.HasPrefix(item["runnerPath"].(string), "/") {
+			t.Fatalf("runner path should be absolute: %#v", item)
+		}
+	}
+}
+
+func TestRestoreArtifactReadinessMarksObjectStoragePendingDownload(t *testing.T) {
+	status, runnerPath, message := restoreArtifactReadiness(3, "s3://bucket/path/pg-base.tar.gz", "", BackupEnginePgBaseBackup)
+	if status != "pending_download" || runnerPath != "" || !strings.Contains(message, "Runner staging") {
+		t.Fatalf("expected pending object storage download, got status=%s path=%s message=%s", status, runnerPath, message)
+	}
+}
+
 func TestValidatePgBaseBackupIncrementalMetadataRequiresParentAndManifest(t *testing.T) {
 	base := &DatabaseBackupRecord{BackupLevel: DatabaseBackupLevelFull, BackupEngine: BackupEnginePgBaseBackup, BackupManifestChecksum: strings.Repeat("b", 64)}
 	base.ID = 1
