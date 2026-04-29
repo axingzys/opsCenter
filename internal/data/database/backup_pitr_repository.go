@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -218,11 +219,84 @@ func (r *logArchiveEventRepo) List(ctx context.Context, req *dbbiz.DatabaseLogAr
 	return items, total, nil
 }
 
+func (r *logArchiveEventRepo) UpsertRollup(ctx context.Context, item *dbbiz.DatabaseLogArchiveEventRollup) error {
+	if item == nil || item.StreamID == 0 || item.EventType == "" || item.BucketStart.IsZero() {
+		return nil
+	}
+	var existing dbbiz.DatabaseLogArchiveEventRollup
+	err := r.db.WithContext(ctx).
+		Where("stream_id = ? AND event_type = ? AND bucket_start = ?", item.StreamID, item.EventType, item.BucketStart).
+		First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return r.db.WithContext(ctx).Create(item).Error
+	}
+	if err != nil {
+		return err
+	}
+	existing.InstanceID = item.InstanceID
+	existing.SourceInstanceID = item.SourceInstanceID
+	existing.RunnerHostID = item.RunnerHostID
+	existing.RunnerID = item.RunnerID
+	existing.EventCount += item.EventCount
+	existing.WarningCount += item.WarningCount
+	existing.ErrorCount += item.ErrorCount
+	existing.Level = maxLogArchiveEventLevel(existing.Level, item.Level)
+	if existing.MinLagSeconds == 0 || (item.MinLagSeconds > 0 && item.MinLagSeconds < existing.MinLagSeconds) {
+		existing.MinLagSeconds = item.MinLagSeconds
+	}
+	if item.MaxLagSeconds > existing.MaxLagSeconds {
+		existing.MaxLagSeconds = item.MaxLagSeconds
+	}
+	if item.LastOccurredAt.After(existing.LastOccurredAt) || existing.LastOccurredAt.IsZero() {
+		existing.LastCursorFile = item.LastCursorFile
+		existing.LastCursorPos = item.LastCursorPos
+		existing.LastActiveFile = item.LastActiveFile
+		existing.LastMessage = item.LastMessage
+		existing.LastPayloadJSON = item.LastPayloadJSON
+		existing.LastOccurredAt = item.LastOccurredAt
+	}
+	return r.db.WithContext(ctx).Save(&existing).Error
+}
+
+func maxLogArchiveEventLevel(a, b string) string {
+	rank := func(level string) int {
+		switch strings.ToLower(strings.TrimSpace(level)) {
+		case dbbiz.DatabaseLogArchiveEventLevelError:
+			return 3
+		case dbbiz.DatabaseLogArchiveEventLevelWarning:
+			return 2
+		default:
+			return 1
+		}
+	}
+	if rank(b) > rank(a) {
+		return b
+	}
+	if strings.TrimSpace(a) == "" {
+		return dbbiz.DatabaseLogArchiveEventLevelInfo
+	}
+	return a
+}
+
 func (r *logArchiveEventRepo) DeleteBefore(ctx context.Context, before time.Time, streamID uint) (int64, error) {
 	if before.IsZero() {
 		return 0, nil
 	}
 	query := r.db.WithContext(ctx).Where("occurred_at < ?", before)
+	if streamID > 0 {
+		query = query.Where("stream_id = ?", streamID)
+	} else {
+		query = query.Where("stream_id = 0")
+	}
+	result := query.Unscoped().Delete(&dbbiz.DatabaseLogArchiveEvent{})
+	return result.RowsAffected, result.Error
+}
+
+func (r *logArchiveEventRepo) DeleteHighFrequencyBefore(ctx context.Context, before time.Time, streamID uint, eventTypes []string) (int64, error) {
+	if before.IsZero() || len(eventTypes) == 0 {
+		return 0, nil
+	}
+	query := r.db.WithContext(ctx).Where("occurred_at < ?", before).Where("event_type IN ?", eventTypes)
 	if streamID > 0 {
 		query = query.Where("stream_id = ?", streamID)
 	} else {

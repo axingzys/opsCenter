@@ -1258,8 +1258,18 @@ curl -H "X-OpsHub-Runner-Auth: $AUTH" \
    - `mysqlbinlog.stdout.log`
    - `mysqlbinlog.stderr.log`
 7. 启动、异常退出、手动停止都会写入 `agent_message` 事件，payload 只保存 pid、目录、日志路径、active file、restart count 和错误摘要。
-8. 前端 Runner Agent 配置模板默认生成 `stopNeverEnabled: true`，但 Agent 运行时仍要求本地配置显式开启，不对旧配置自动启用。
-9. 单元测试覆盖：
+8. 每轮 running streaming 进程都会写入 `checkpoint` 事件，payload 包含：
+   - pid
+   - startedAt
+   - restartCount
+   - stdout/stderr log path
+   - streaming spool path
+   - streaming spool size
+   - spoolUpdatedAt / lastGrowthAt
+   - source file / source position
+   - serverUUID / serverID（能读取到时）
+9. 前端 Runner Agent 配置模板默认生成 `stopNeverEnabled: true`，但 Agent 运行时仍要求本地配置显式开启，不对旧配置自动启用。
+10. 单元测试覆盖：
    - 配置默认值和边界裁剪。
    - 滚动日志。
    - stop-never 子进程启动、复用和停止。
@@ -1285,6 +1295,267 @@ P2.6.7 完成后，后续顺序保持：
 5. P2.6.12：对象存储安全姿态检测。
    - S3/MinIO 版本化、对象锁、默认加密、KMS、bucket policy 只读检测。
    - UI 展示登记值和检测值差异。
+
+### 2026-04-29 P2.6.8：streaming spool 轮转 finalize
+
+目标：在 `mysqlbinlog --stop-never` 已经由 Agent 托管后，把已经轮转完成的 streaming spool 文件安全提交为 finalized binlog。P2.6.8 只处理“不再是当前活跃 binlog”的文件；当前活跃文件仍只作为运行态 spool，不进入 PITR 恢复链。
+
+#### P2.6.8 落地范围
+
+1. Agent 每轮读取源库 `SHOW BINARY LOGS` 后，继续用现有 `selectAgentBinlogsForArchive` 选择待归档文件。
+2. 对 `streaming + stopNeverEnabled=true` 的归档流，优先查找：
+
+   ```text
+   <storageRoot>/mysql-binlog/instance-{id}/stream-{id}/spool/streaming/{binlog_file}
+   ```
+
+3. 只有满足以下条件才从 streaming spool 提交：
+   - 文件名安全。
+   - 文件存在且不是目录。
+   - 文件大小等于源库 `SHOW BINARY LOGS` 中该文件的大小。
+   - binlog magic header 正确。
+   - 所有 event header 完整。
+   - 所有 event size 合法。
+   - 文件末尾落在完整 event 边界。
+   - 如果能识别 CRC32 checksum，则逐事件校验 checksum。
+4. 提交流程：
+   - 复制 streaming spool 到 finalized 临时目录。
+   - 通过 `commitAgentBinlogFile` 原子提交到 `finalized/`。
+   - 生成 `.sha256` 和 `.manifest.json`。
+   - 如启用 S3/MinIO，则沿用 P2.6.5 的 staging + verify + final key 发布。
+   - 通过 Runner Agent API 登记 `database_log_archives`。
+   - 登记成功后更新归档流 cursor。
+5. 校验失败或 streaming spool 不存在时：
+   - 写入 `agent_message` warning。
+   - 如果本地存在无法校验的 streaming spool，则移动到 `spool/quarantine/`，避免后续继续误用。
+   - 回退到已有完整远程拉取逻辑。
+   - 回退成功后仍登记 finalized archive。
+
+#### P2.6.8 不做的事
+
+1. 不提交当前 active file。
+2. 不提交 `.partial` 文件。
+3. 不在 checksum 不确定时伪造 checksum 结论；只能证明 event 边界完整。
+4. 不删除源库 binlog。
+5. 不改变 PITR 计划选择规则。
+
+#### 2026-04-29 P2.6.8 已落地范围
+
+已实现：
+
+1. Agent 新增 streaming spool finalize 优先路径。
+2. finalized 前执行 binlog 文件结构校验。
+3. 校验失败自动回退到完整远程拉取。
+4. 校验失败时会把已存在的 invalid streaming spool 移入 quarantine，不登记 archive。
+5. finalized 成功后仍使用现有对象存储发布和归档登记流程。
+6. 单元测试覆盖有效 streaming spool 文件提交、sidecar 生成、spool 清理和 invalid spool quarantine。
+
+### 2026-04-29 P2.6.9：active spool append/resume 前置验证
+
+目标：为 active spool resume 提供严格前置验证。P2.6.9 不默认启用 resume；只有 Agent 本地显式配置 `spoolResumeEnabled=true`，并且现有 partial 与 resume candidate 都通过校验时，才允许 append。任何不确定情况都回退到完整重拉。
+
+#### P2.6.9 校验模型
+
+新增 Agent 侧 binlog validator，校验内容：
+
+1. 文件必须以 binlog magic header 开始：
+
+   ```text
+   fe 62 69 6e
+   ```
+
+2. event header 必须完整，长度按 MySQL binlog event header 19 字节解析。
+3. `event_size` 必须大于等于 19。
+4. `event_size` 不能越过文件末尾。
+5. 文件末尾必须刚好落在完整 event 边界。
+6. 如果第一个 event 可识别 CRC32 checksum，则后续 event 全部按 CRC32 校验。
+7. append candidate 必须与现有 partial 连续：
+   - 现有 partial 的 `LastCompletePos` 作为 resume 起点。
+   - candidate 第一个 event 的 `end_log_pos - event_size` 必须等于 `LastCompletePos`。
+   - candidate 如果带 binlog magic header，只追加 magic 之后的 event payload。
+   - 合并后的完整文件必须再次通过整文件校验。
+
+#### P2.6.9 落地范围
+
+1. Agent 配置新增：
+   - `spoolResumeEnabled`：是否允许 active spool resume，默认 `false`。
+2. 非 stop-never 的 active spool 流程中，如果：
+   - `spool/<file>.partial` 已存在；
+   - 源库 active binlog 比 partial 更大；
+   - `spoolResumeEnabled=true`；
+   - partial 校验通过；
+   - `mysqlbinlog --raw --start-position=<LastCompletePos>` 产物校验通过；
+   - 合并后整文件校验通过；
+
+   则使用 append/resume 结果原子替换 partial。
+3. 任一校验失败：
+   - 不修改现有 partial。
+   - 回退到 P2.6.6 的完整重拉并原子替换。
+4. `spool_updated` 事件 payload 增加：
+   - `resumed`
+   - `resumeFrom`
+   - `appendBytes`
+   - `validationMode`
+   - `lastCompletePos`
+   - `serverUUID`
+   - `serverID`
+5. 前端 Runner Agent 配置模板加入 `spoolResumeEnabled: false`，要求用户明确评估后再打开。
+
+#### P2.6.9 不做的事
+
+1. 不让 `spoolResumeEnabled` 默认开启。
+2. 不对 `mysqlbinlog --stop-never` 子进程启动参数做 resume；长期进程 resume 需要 pidfile、fingerprint 和输出目录锁，后续单独处理。
+3. 不把 active partial 登记为 finalized archive。
+4. 不将 partial 纳入 PITR 计划。
+5. 不解析所有 MySQL/MariaDB event body 语义，只校验文件结构、event 边界、position 连续性和可识别 checksum。
+
+#### 2026-04-29 P2.6.9 已落地范围
+
+已实现：
+
+1. `binlog_validator`：
+   - magic header 校验。
+   - event header / event size / 完整边界校验。
+   - 可识别 CRC32 checksum 时逐事件校验。
+   - append candidate 连续性校验。
+2. active spool resume：
+   - 显式开关。
+   - partial manifest：
+     - `fileName`
+     - `sourceSize`
+     - `lastCompletePos`
+     - `checksumMode`
+     - `serverUUID`
+     - `serverID`
+     - `updatedAt`
+   - resume 前会校验 manifest 文件名、server_uuid、server_id，发现漂移即回退完整重拉。
+   - `--start-position=<LastCompletePos>` 拉取增量候选。
+   - candidate 可带 magic header，也可直接是 event stream。
+   - 合并后再次整文件校验。
+   - 原子替换 partial。
+   - 失败回退完整重拉。
+3. 单元测试覆盖：
+   - CRC binlog 校验。
+   - 截断文件拒绝。
+   - resume candidate 带 magic header 的 append。
+   - position 不连续拒绝。
+   - active spool resume 合并结果。
+   - partial manifest identity 漂移拒绝。
+
+### 2026-04-29 P2.6.10：对象存储上传重试队列与基础限速
+
+目标：对象存储临时不可用时，不让已经 finalized 的本地 binlog 归档丢失，也不让归档链因为一次 S3/MinIO 上传失败而中断。P2.6.10 的边界是“本地 finalized 是事实来源，远端对象存储发布可以异步补偿”；真正跨主机复制、严格 IO 调度和集中任务队列仍留到后续 Runner 平台化阶段。
+
+#### P2.6.10 配置
+
+Agent 配置新增：
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `uploadRetryEnabled` | `true` | 对象存储发布失败时写入本地 durable queue |
+| `uploadRetryBaseSeconds` | `60` | 首次重试退避 |
+| `uploadRetryMaxSeconds` | `3600` | 最大重试退避 |
+| `uploadRetryMaxAttempts` | `0` | 最大重试次数，`0` 表示不限制 |
+| `uploadBandwidthBytesPerSecond` | `0` | Go 侧上传 reader 基础限速，`0` 表示不限速 |
+
+#### P2.6.10 落地范围
+
+1. finalized 文件先落地本地 `finalized/`，并生成 sidecar。
+2. 对象存储启用时，发布流程为：
+   - 上传 staging key。
+   - 校验 staging 对象大小和 `opshub-sha256` metadata。
+   - final key 不存在或不匹配时，从 staging copy 到 final key。
+   - 校验 final 对象。
+   - 上传 `.sha256` 和 `.manifest.json` sidecar。
+   - 删除 staging key，避免 staging 长期堆积。
+3. 对象存储上传失败时：
+   - 不删除本地 finalized 文件。
+   - 不登记损坏对象。
+   - 写入本地 queue：
+
+     ```text
+     <storageRoot>/mysql-binlog/upload-queue/*.json
+     ```
+
+   - queue item 保存 stream、instance、runner、文件名、本地路径、目标 URI、大小、checksum、事件时间、重试次数、下次重试时间和最后错误。
+4. Agent 每轮 heartbeat 后处理 upload queue：
+   - 到期才重试。
+   - 上传前重新校验本地文件大小和 checksum。
+   - 成功后删除 queue item。
+   - 通过 `agent_message` 写入“对象存储补传成功”事件。
+   - 失败后按指数退避更新 `nextAttemptAt`。
+5. 对象存储失败时，backend 仍可登记本地 `runner://` storage URI；补传成功后通过事件证明远端对象已补齐。后续如需要强一致展示，可再增加 archive storage URI 回填接口。
+
+#### P2.6.10 不做的事
+
+1. 不承诺 `mysqlbinlog` 下载流严格限速。
+2. 不直接使用系统级 cgroup/ionice 配额；第一版只提供 Go 侧上传 reader 限速。
+3. 不自动删除 final 对象。
+4. 不在 backend 容器中执行对象存储补偿；补偿由 Agent 侧 durable queue 完成。
+
+#### P2.6.10 验收标准
+
+1. S3/MinIO 临时不可用时，本地 finalized 文件和 sidecar 保留。
+2. 上传失败会生成 queue JSON。
+3. 存储恢复后 Agent 能自动补传。
+4. 同一文件重复上传幂等：final 对象已存在且 size/checksum 匹配时直接通过。
+5. staging 对象成功发布后会被删除。
+
+### 2026-04-29 P2.6.11：高频事件小时级 rollup
+
+目标：`checkpoint`、`spool_updated`、部分 `agent_message` 会在长期 streaming 归档中高频产生。P2.6.11 把这些事件同步汇总为小时级摘要，原始明细保留短窗口，避免事件表无限增长，同时保留恢复审计所需的状态轨迹。
+
+#### P2.6.11 数据模型
+
+新增表：
+
+```text
+database_log_archive_event_rollups
+```
+
+核心字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `stream_id` | 归档流 |
+| `event_type` | `checkpoint / spool_updated / agent_message` |
+| `bucket_start` / `bucket_end` | 小时窗口 |
+| `event_count` | 事件总数 |
+| `warning_count` / `error_count` | 警告和错误数 |
+| `min_lag_seconds` / `max_lag_seconds` | 窗口内延迟范围 |
+| `last_cursor_file` / `last_cursor_pos` | 窗口内最后游标 |
+| `last_active_file` | 窗口内最后 active file |
+| `last_message` | 最后一条消息 |
+| `last_payload_json` | 最后一条事件 payload 摘要 |
+| `last_occurred_at` | 最后一条事件时间 |
+
+唯一键：
+
+```text
+(stream_id, event_type, bucket_start)
+```
+
+#### P2.6.11 落地范围
+
+1. `recordLogArchiveEvent` 写入原始事件后，如果事件类型属于高频类型，同步 upsert 小时级 rollup。
+2. rollup 更新策略：
+   - `event_count` 累加。
+   - warning/error 计数累加。
+   - level 保存窗口内最高严重等级。
+   - lag 保存窗口内 min/max。
+   - cursor、active file、message、payload 保存最后发生事件的值。
+3. 高频原始事件压缩策略：
+   - 归档流整体事件仍按 stream retention 删除。
+   - 当 stream retention 大于 7 天时，高频原始事件只保留最近 7 天。
+   - 小时级 rollup 用于长期趋势和运行证明。
+4. `archive_success`、`archive_failed`、`purge_gap`、`state_changed` 等关键事件仍按原 retention 保留原始明细。
+
+#### P2.6.11 不做的事
+
+1. 第一版不新增 rollup 列表 UI。
+2. 不把 error/warning 全部压缩掉。
+3. 不改变现有事件列表接口返回结构。
+4. 不把 rollup 当作 PITR 恢复输入；PITR 仍只使用 finalized archive 和日志链元数据。
 
 ### 2026-04-29 P2.7 详细方案：隔离恢复 Runner
 

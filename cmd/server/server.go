@@ -228,6 +228,7 @@ func autoMigrate(db *gorm.DB) error {
 		&databasemodel.DatabaseLogArchiveStream{},
 		&databasemodel.DatabaseLogArchive{},
 		&databasemodel.DatabaseLogArchiveEvent{},
+		&databasemodel.DatabaseLogArchiveEventRollup{},
 		&databasemodel.DatabaseRestorePlan{},
 		&databasemodel.DatabaseStorageProfile{},
 		&databasemodel.DatabaseSecretProfile{},

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -264,15 +266,287 @@ func TestSpoolAgentActiveBinlogReusesUnchangedPartial(t *testing.T) {
 		t.Fatalf("mkdir spool: %v", err)
 	}
 	target := filepath.Join(spoolDir, "binlog.000001.partial")
-	if err := os.WriteFile(target, []byte(strings.Repeat("x", 100)), 0o600); err != nil {
+	data := testAgentBinlogFile(true, []byte("format"), []byte("rows"))
+	if err := os.WriteFile(target, data, 0o600); err != nil {
 		t.Fatalf("write partial: %v", err)
 	}
-	result, err := spoolAgentActiveBinlog(context.Background(), cfg, item, databaseArchiverCredential{}, "missing-mysqlbinlog", "binlog.000001", 80)
+	result, err := spoolAgentActiveBinlog(context.Background(), cfg, item, databaseArchiverCredential{}, agentMySQLServerIdentity{ServerUUID: "uuid-1", ServerID: "11"}, "missing-mysqlbinlog", "binlog.000001", int64(len(data)))
 	if err != nil {
 		t.Fatalf("spool should reuse unchanged partial without invoking tool: %v", err)
 	}
-	if !result.Reused || result.Size != 100 || result.SourceSize != 80 {
+	if !result.Reused || result.Size != int64(len(data)) || result.SourceSize != int64(len(data)) || result.LastCompletePos != int64(len(data)) {
 		t.Fatalf("unexpected spool result: %#v", result)
+	}
+	manifest, err := readAgentPartialManifest(target)
+	if err != nil {
+		t.Fatalf("read partial manifest: %v", err)
+	}
+	if manifest.FileName != "binlog.000001" || manifest.ServerUUID != "uuid-1" || manifest.ServerID != "11" {
+		t.Fatalf("unexpected manifest: %#v", manifest)
+	}
+}
+
+func TestValidateAgentBinlogFileCRCAndTruncation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "binlog.000001")
+	data := testAgentBinlogFile(true, []byte("format"), []byte("rows"))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write binlog: %v", err)
+	}
+	result, err := validateAgentBinlogFile(path)
+	if err != nil {
+		t.Fatalf("validate binlog: %v", err)
+	}
+	if result.EventCount != 2 || result.ChecksumMode != "crc32" || result.LastCompletePos != int64(len(data)) {
+		t.Fatalf("unexpected validation result: %#v", result)
+	}
+	truncated := filepath.Join(t.TempDir(), "binlog.000001")
+	if err := os.WriteFile(truncated, data[:len(data)-2], 0o600); err != nil {
+		t.Fatalf("write truncated binlog: %v", err)
+	}
+	if _, err := validateAgentBinlogFile(truncated); err == nil {
+		t.Fatalf("expected truncated binlog to fail validation")
+	}
+}
+
+func TestValidateAgentBinlogAppendCandidateWithMagicHeader(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "binlog.000001.partial")
+	first := testAgentBinlogFile(true, []byte("format"))
+	if err := os.WriteFile(existing, first, 0o600); err != nil {
+		t.Fatalf("write existing: %v", err)
+	}
+	candidate := filepath.Join(root, "binlog.000001")
+	second := append([]byte(agentBinlogMagic), testAgentBinlogEvent(30, uint32(len(first)), []byte("next"), true)...)
+	if err := os.WriteFile(candidate, second, 0o600); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+	plan, err := validateAgentBinlogAppendCandidate(existing, candidate)
+	if err != nil {
+		t.Fatalf("validate append candidate: %v", err)
+	}
+	if plan.PayloadOffset != int64(len(agentBinlogMagic)) || plan.FirstStartPos != int64(len(first)) || plan.PayloadBytes <= 0 {
+		t.Fatalf("unexpected append plan: %#v", plan)
+	}
+	badCandidate := filepath.Join(root, "bad-binlog.000001")
+	bad := append([]byte(agentBinlogMagic), testAgentBinlogEvent(30, 4, []byte("bad"), true)...)
+	if err := os.WriteFile(badCandidate, bad, 0o600); err != nil {
+		t.Fatalf("write bad candidate: %v", err)
+	}
+	if _, err := validateAgentBinlogAppendCandidate(existing, badCandidate); err == nil {
+		t.Fatalf("expected non-contiguous candidate to fail")
+	}
+}
+
+func TestSpoolAgentActiveBinlogResumeAppendsValidatedCandidate(t *testing.T) {
+	root := t.TempDir()
+	cfg := &resolvedDatabaseArchiverConfig{
+		StorageRoot:          root,
+		WorkDir:              filepath.Join(root, "work"),
+		SpoolResumeEnabled:   true,
+		Interval:             30 * time.Second,
+		StreamingLogMaxBytes: 1024 * 1024,
+		StreamingLogMaxFiles: 2,
+	}
+	item := databaseArchiverAssignedStream{
+		Stream:         databaseArchiverStream{ID: 2, InstanceID: 1},
+		SourceInstance: databaseArchiverSource{ID: 1, Host: "127.0.0.1", Port: 3306},
+	}
+	spoolDir := agentBinlogSpoolDir(cfg, item)
+	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
+		t.Fatalf("mkdir spool: %v", err)
+	}
+	existing := testAgentBinlogFile(true, []byte("format"))
+	target := filepath.Join(spoolDir, "binlog.000001.partial")
+	if err := os.WriteFile(target, existing, 0o600); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+	candidatePath := filepath.Join(root, "candidate.binlog")
+	candidate := append([]byte(agentBinlogMagic), testAgentBinlogEvent(30, uint32(len(existing)), []byte("next"), true)...)
+	if err := os.WriteFile(candidatePath, candidate, 0o600); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+	tool := filepath.Join(root, "fake-mysqlbinlog")
+	script := "#!/bin/sh\nout=''\nfor arg in \"$@\"; do case \"$arg\" in --result-file=*) out=${arg#--result-file=} ;; esac; done\ncp " + candidatePath + " \"$out/binlog.000001\"\n"
+	if err := os.WriteFile(tool, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake mysqlbinlog: %v", err)
+	}
+	result, err := spoolAgentActiveBinlog(context.Background(), cfg, item, databaseArchiverCredential{Username: "u"}, agentMySQLServerIdentity{}, tool, "binlog.000001", int64(len(existing)+len(candidate)-len(agentBinlogMagic)))
+	if err != nil {
+		t.Fatalf("resume spool: %v", err)
+	}
+	if !result.Resumed || result.ResumeFrom != int64(len(existing)) || result.AppendedBytes != int64(len(candidate)-len(agentBinlogMagic)) {
+		t.Fatalf("unexpected resume result: %#v", result)
+	}
+	combined, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read combined: %v", err)
+	}
+	expected := append(append([]byte{}, existing...), candidate[len(agentBinlogMagic):]...)
+	if string(combined) != string(expected) {
+		t.Fatalf("combined binlog mismatch")
+	}
+	if _, err := validateAgentBinlogFile(target); err != nil {
+		t.Fatalf("combined validation: %v", err)
+	}
+	manifest, err := readAgentPartialManifest(target)
+	if err != nil {
+		t.Fatalf("read partial manifest: %v", err)
+	}
+	if manifest.LastCompletePos != int64(len(expected)) || manifest.FileName != "binlog.000001" {
+		t.Fatalf("unexpected manifest after resume: %#v", manifest)
+	}
+}
+
+func TestValidateAgentPartialManifestRejectsIdentityDrift(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "binlog.000001.partial")
+	data := testAgentBinlogFile(true, []byte("format"))
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+	validation, err := validateAgentBinlogFile(target)
+	if err != nil {
+		t.Fatalf("validate partial: %v", err)
+	}
+	if err := writeAgentPartialManifest(target, "binlog.000001", int64(len(data)), validation, agentMySQLServerIdentity{ServerUUID: "server-a", ServerID: "7"}); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := validateAgentPartialManifestForResume(target, "binlog.000001", agentMySQLServerIdentity{ServerUUID: "server-a", ServerID: "7"}); err != nil {
+		t.Fatalf("matching identity should pass: %v", err)
+	}
+	if err := validateAgentPartialManifestForResume(target, "binlog.000001", agentMySQLServerIdentity{ServerUUID: "server-b", ServerID: "7"}); err == nil {
+		t.Fatalf("expected server_uuid drift to fail")
+	}
+	if err := validateAgentPartialManifestForResume(target, "binlog.000002", agentMySQLServerIdentity{ServerUUID: "server-a", ServerID: "7"}); err == nil {
+		t.Fatalf("expected filename drift to fail")
+	}
+}
+
+func TestArchiveAgentStreamingSpoolFileFinalizesValidRotatedFile(t *testing.T) {
+	root := t.TempDir()
+	cfg := &resolvedDatabaseArchiverConfig{StorageRoot: root}
+	item := databaseArchiverAssignedStream{
+		Stream: databaseArchiverStream{ID: 3, InstanceID: 9},
+		Runner: databaseArchiverRunnerConfig{ID: 5},
+	}
+	spoolDir := agentBinlogStreamingSpoolDir(cfg, item)
+	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
+		t.Fatalf("mkdir spool: %v", err)
+	}
+	data := testAgentBinlogFile(true, []byte("format"), []byte("rows"))
+	spoolPath := filepath.Join(spoolDir, "binlog.000010")
+	if err := os.WriteFile(spoolPath, data, 0o600); err != nil {
+		t.Fatalf("write spool: %v", err)
+	}
+	artifact, err := archiveAgentStreamingSpoolFile(context.Background(), cfg, item, "missing-mysqlbinlog", agentBinlogArchiveSelection{
+		FileName: "binlog.000010",
+		FileSize: int64(len(data)),
+		Previous: "binlog.000009",
+		Next:     "binlog.000011",
+	})
+	if err != nil {
+		t.Fatalf("finalize streaming spool: %v", err)
+	}
+	if artifact.FileName != "binlog.000010" || artifact.FileSize != int64(len(data)) || artifact.ChecksumSHA256 == "" {
+		t.Fatalf("unexpected artifact: %#v", artifact)
+	}
+	if _, err := os.Stat(filepath.Join(agentBinlogFinalDir(cfg, item), "binlog.000010")); err != nil {
+		t.Fatalf("finalized file missing: %v", err)
+	}
+	if _, err := os.Stat(spoolPath); !os.IsNotExist(err) {
+		t.Fatalf("spool file should be removed after finalize, err=%v", err)
+	}
+}
+
+func TestQuarantineAgentStreamingSpoolFileMovesInvalidFile(t *testing.T) {
+	root := t.TempDir()
+	cfg := &resolvedDatabaseArchiverConfig{StorageRoot: root}
+	item := databaseArchiverAssignedStream{Stream: databaseArchiverStream{ID: 4, InstanceID: 10}}
+	spoolDir := agentBinlogStreamingSpoolDir(cfg, item)
+	if err := os.MkdirAll(spoolDir, 0o755); err != nil {
+		t.Fatalf("mkdir spool: %v", err)
+	}
+	spoolPath := filepath.Join(spoolDir, "binlog.000011")
+	if err := os.WriteFile(spoolPath, []byte("invalid"), 0o600); err != nil {
+		t.Fatalf("write spool: %v", err)
+	}
+	quarantinePath, err := quarantineAgentStreamingSpoolFile(cfg, item, "binlog.000011")
+	if err != nil {
+		t.Fatalf("quarantine spool: %v", err)
+	}
+	if quarantinePath == "" {
+		t.Fatalf("expected quarantine path")
+	}
+	if _, err := os.Stat(spoolPath); !os.IsNotExist(err) {
+		t.Fatalf("source spool should be moved, err=%v", err)
+	}
+	if _, err := os.Stat(quarantinePath); err != nil {
+		t.Fatalf("quarantine file missing: %v", err)
+	}
+}
+
+func TestAgentUploadRetryQueuePersistsAndValidatesArtifact(t *testing.T) {
+	root := t.TempDir()
+	retryEnabled := true
+	cfg := &resolvedDatabaseArchiverConfig{
+		StorageRoot:        root,
+		RunnerID:           "runner-a",
+		UploadRetryEnabled: retryEnabled,
+		UploadRetryBase:    time.Second,
+		UploadRetryMax:     10 * time.Second,
+		Storage: databaseArchiverStorage{
+			Type:       "minio",
+			Bucket:     "backup",
+			PathPrefix: "archives",
+		},
+	}
+	item := databaseArchiverAssignedStream{
+		Stream: databaseArchiverStream{ID: 8, InstanceID: 3, SourceInstanceID: 2},
+		Runner: databaseArchiverRunnerConfig{ID: 9},
+	}
+	filePath := filepath.Join(root, "binlog.000001")
+	data := testAgentBinlogFile(true, []byte("format"))
+	if err := os.WriteFile(filePath, data, 0o600); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	checksum, err := sha256File(filePath)
+	if err != nil {
+		t.Fatalf("checksum: %v", err)
+	}
+	artifact := agentBinlogArtifact{
+		FileName:       "binlog.000001",
+		Path:           filePath,
+		StorageURI:     "s3://backup/archives/binlog.000001",
+		FileSize:       int64(len(data)),
+		ChecksumSHA256: checksum,
+		FirstEventTime: time.Now(),
+		LastEventTime:  time.Now(),
+	}
+	if err := enqueueAgentUploadRetry(cfg, item, artifact, errors.New("temporary unavailable")); err != nil {
+		t.Fatalf("enqueue upload retry: %v", err)
+	}
+	entries, err := os.ReadDir(agentUploadQueueDir(cfg))
+	if err != nil {
+		t.Fatalf("read queue dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one queue item, got %d", len(entries))
+	}
+	queueItem, err := readAgentUploadQueueItem(filepath.Join(agentUploadQueueDir(cfg), entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read queue item: %v", err)
+	}
+	if queueItem.StreamID != 8 || queueItem.FileName != "binlog.000001" || queueItem.ChecksumSHA256 != checksum || queueItem.NextAttemptAt == "" {
+		t.Fatalf("unexpected queue item: %#v", queueItem)
+	}
+	if err := validateAgentQueuedArtifact(artifact); err != nil {
+		t.Fatalf("validate queued artifact: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("tampered"), 0o600); err != nil {
+		t.Fatalf("tamper artifact: %v", err)
+	}
+	if err := validateAgentQueuedArtifact(artifact); err == nil {
+		t.Fatalf("expected tampered artifact validation to fail")
 	}
 }
 
@@ -382,6 +656,9 @@ func TestAgentObjectStorageMinIOIntegration(t *testing.T) {
 	}
 	defer func() {
 		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String("tests/binlog.000001")})
+		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-34/binlog.000001")})
+		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-34/binlog.000001.sha256")})
+		_, _ = client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(defaultDatabaseArchiverObjectPrefix + "/mysql-binlog/instance-12/stream-34/binlog.000001.manifest.json")})
 		_, _ = client.DeleteBucket(context.Background(), &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
 	}()
 	filePath := filepath.Join(t.TempDir(), "binlog.000001")
@@ -406,4 +683,68 @@ func TestAgentObjectStorageMinIOIntegration(t *testing.T) {
 	if !exists {
 		t.Fatalf("expected object to exist")
 	}
+	cfg := &resolvedDatabaseArchiverConfig{Storage: storage}
+	item := databaseArchiverAssignedStream{
+		Stream: databaseArchiverStream{ID: 34, InstanceID: 12, SourceInstanceID: 12},
+	}
+	artifact := agentBinlogArtifact{
+		FileName:       "binlog.000001",
+		Path:           filePath,
+		StorageURI:     agentObjectStorageURI(cfg, item, "binlog.000001"),
+		FileSize:       int64(len("opshub-binlog-object-storage-test")),
+		ChecksumSHA256: checksum,
+		FirstEventTime: time.Now(),
+		LastEventTime:  time.Now(),
+	}
+	if err := writeAgentBinlogSidecars(artifact); err != nil {
+		t.Fatalf("write sidecars: %v", err)
+	}
+	if err := publishAgentBinlogArtifact(ctx, cfg, item, artifact); err != nil {
+		t.Fatalf("publish binlog artifact: %v", err)
+	}
+	finalKey := agentObjectStorageFinalKey(cfg, item, artifact.FileName)
+	if err := verifyAgentObject(ctx, client, bucket, finalKey, artifact.FileSize, artifact.ChecksumSHA256); err != nil {
+		t.Fatalf("verify published final object: %v", err)
+	}
+	stagingKey := agentObjectStorageStagingKey(cfg, item, artifact.FileName)
+	if _, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(stagingKey)}); err == nil {
+		t.Fatalf("staging object should be removed after publish")
+	}
+}
+
+func testAgentBinlogFile(withChecksum bool, payloads ...[]byte) []byte {
+	result := []byte(agentBinlogMagic)
+	pos := uint32(len(result))
+	for index, payload := range payloads {
+		eventType := byte(30)
+		if index == 0 {
+			eventType = 15
+		}
+		event := testAgentBinlogEvent(eventType, pos, payload, withChecksum)
+		result = append(result, event...)
+		pos += uint32(len(event))
+	}
+	return result
+}
+
+func testAgentBinlogEvent(eventType byte, startPos uint32, payload []byte, withChecksum bool) []byte {
+	eventSize := agentBinlogEventHeaderLen + len(payload)
+	if withChecksum {
+		eventSize += 4
+	}
+	event := make([]byte, agentBinlogEventHeaderLen+len(payload))
+	binary.LittleEndian.PutUint32(event[0:4], uint32(time.Now().Unix()))
+	event[4] = eventType
+	binary.LittleEndian.PutUint32(event[5:9], 1)
+	binary.LittleEndian.PutUint32(event[9:13], uint32(eventSize))
+	binary.LittleEndian.PutUint32(event[13:17], startPos+uint32(eventSize))
+	binary.LittleEndian.PutUint16(event[17:19], 0)
+	copy(event[agentBinlogEventHeaderLen:], payload)
+	if withChecksum {
+		sum := crc32.ChecksumIEEE(event)
+		checksum := make([]byte, 4)
+		binary.LittleEndian.PutUint32(checksum, sum)
+		event = append(event, checksum...)
+	}
+	return event
 }

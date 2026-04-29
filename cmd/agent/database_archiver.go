@@ -44,28 +44,36 @@ const (
 	defaultDatabaseArchiverMaxBackoffSec   = 300
 	defaultDatabaseArchiverLogMaxBytes     = 10 * 1024 * 1024
 	defaultDatabaseArchiverLogMaxFiles     = 5
+	defaultDatabaseArchiverUploadRetryBase = 60
+	defaultDatabaseArchiverUploadRetryMax  = 3600
 )
 
 type databaseArchiverConfig struct {
-	Enabled                  bool                         `json:"enabled"`
-	BaseURL                  string                       `json:"baseUrl"`
-	RunnerID                 string                       `json:"runnerId"`
-	RunnerAuth               string                       `json:"runnerAuth"`
-	IntervalSeconds          int                          `json:"intervalSeconds"`
-	LeaseTTLSeconds          int                          `json:"leaseTtlSeconds"`
-	MaxFilesPerLoop          int                          `json:"maxFilesPerLoop"`
-	MaxConcurrentStreams     int                          `json:"maxConcurrentStreams"`
-	FailureBackoffSeconds    int                          `json:"failureBackoffSeconds"`
-	MaxFailureBackoffSeconds int                          `json:"maxFailureBackoffSeconds"`
-	StopNeverEnabled         bool                         `json:"stopNeverEnabled"`
-	StreamingLogMaxBytes     int64                        `json:"streamingLogMaxBytes"`
-	StreamingLogMaxFiles     int                          `json:"streamingLogMaxFiles"`
-	IncludeCurrent           bool                         `json:"includeCurrent"`
-	WorkDir                  string                       `json:"workDir"`
-	StorageRoot              string                       `json:"storageRoot"`
-	Storage                  databaseArchiverStorage      `json:"storage"`
-	MySQLBinlogPath          string                       `json:"mysqlBinlogPath"`
-	Credentials              []databaseArchiverCredential `json:"credentials"`
+	Enabled                       bool                         `json:"enabled"`
+	BaseURL                       string                       `json:"baseUrl"`
+	RunnerID                      string                       `json:"runnerId"`
+	RunnerAuth                    string                       `json:"runnerAuth"`
+	IntervalSeconds               int                          `json:"intervalSeconds"`
+	LeaseTTLSeconds               int                          `json:"leaseTtlSeconds"`
+	MaxFilesPerLoop               int                          `json:"maxFilesPerLoop"`
+	MaxConcurrentStreams          int                          `json:"maxConcurrentStreams"`
+	FailureBackoffSeconds         int                          `json:"failureBackoffSeconds"`
+	MaxFailureBackoffSeconds      int                          `json:"maxFailureBackoffSeconds"`
+	StopNeverEnabled              bool                         `json:"stopNeverEnabled"`
+	SpoolResumeEnabled            bool                         `json:"spoolResumeEnabled"`
+	UploadRetryEnabled            *bool                        `json:"uploadRetryEnabled"`
+	UploadRetryBaseSeconds        int                          `json:"uploadRetryBaseSeconds"`
+	UploadRetryMaxSeconds         int                          `json:"uploadRetryMaxSeconds"`
+	UploadRetryMaxAttempts        int                          `json:"uploadRetryMaxAttempts"`
+	UploadBandwidthBytesPerSecond int64                        `json:"uploadBandwidthBytesPerSecond"`
+	StreamingLogMaxBytes          int64                        `json:"streamingLogMaxBytes"`
+	StreamingLogMaxFiles          int                          `json:"streamingLogMaxFiles"`
+	IncludeCurrent                bool                         `json:"includeCurrent"`
+	WorkDir                       string                       `json:"workDir"`
+	StorageRoot                   string                       `json:"storageRoot"`
+	Storage                       databaseArchiverStorage      `json:"storage"`
+	MySQLBinlogPath               string                       `json:"mysqlBinlogPath"`
+	Credentials                   []databaseArchiverCredential `json:"credentials"`
 }
 
 type databaseArchiverStorage struct {
@@ -92,26 +100,32 @@ type databaseArchiverCredential struct {
 }
 
 type resolvedDatabaseArchiverConfig struct {
-	Enabled              bool
-	OpsHubBaseURL        string
-	EndpointBaseURL      string
-	RunnerID             string
-	RunnerAuth           string
-	Interval             time.Duration
-	LeaseTTLSeconds      int
-	MaxFilesPerLoop      int
-	MaxConcurrentStreams int
-	FailureBackoff       time.Duration
-	MaxFailureBackoff    time.Duration
-	StopNeverEnabled     bool
-	StreamingLogMaxBytes int64
-	StreamingLogMaxFiles int
-	IncludeCurrent       bool
-	WorkDir              string
-	StorageRoot          string
-	Storage              databaseArchiverStorage
-	MySQLBinlogPath      string
-	Credentials          []databaseArchiverCredential
+	Enabled                       bool
+	OpsHubBaseURL                 string
+	EndpointBaseURL               string
+	RunnerID                      string
+	RunnerAuth                    string
+	Interval                      time.Duration
+	LeaseTTLSeconds               int
+	MaxFilesPerLoop               int
+	MaxConcurrentStreams          int
+	FailureBackoff                time.Duration
+	MaxFailureBackoff             time.Duration
+	StopNeverEnabled              bool
+	SpoolResumeEnabled            bool
+	UploadRetryEnabled            bool
+	UploadRetryBase               time.Duration
+	UploadRetryMax                time.Duration
+	UploadRetryMaxAttempts        int
+	UploadBandwidthBytesPerSecond int64
+	StreamingLogMaxBytes          int64
+	StreamingLogMaxFiles          int
+	IncludeCurrent                bool
+	WorkDir                       string
+	StorageRoot                   string
+	Storage                       databaseArchiverStorage
+	MySQLBinlogPath               string
+	Credentials                   []databaseArchiverCredential
 }
 
 type databaseArchiverAPIResponse struct {
@@ -236,6 +250,11 @@ type agentMySQLBinaryLogStatus struct {
 	ExecutedGTIDSet string
 }
 
+type agentMySQLServerIdentity struct {
+	ServerUUID string
+	ServerID   string
+}
+
 type agentBinlogArchiveSelection struct {
 	FileName string
 	FileSize int64
@@ -256,11 +275,16 @@ type agentBinlogArtifact struct {
 }
 
 type agentSpoolResult struct {
-	FileName   string
-	Path       string
-	Size       int64
-	SourceSize int64
-	Reused     bool
+	FileName        string
+	Path            string
+	Size            int64
+	SourceSize      int64
+	Reused          bool
+	Resumed         bool
+	ResumeFrom      int64
+	AppendedBytes   int64
+	ValidationMode  string
+	LastCompletePos int64
 }
 
 type agentStreamingProcess struct {
@@ -406,6 +430,41 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 	if streamingLogMaxFiles > 50 {
 		streamingLogMaxFiles = 50
 	}
+	uploadRetryBaseSeconds := raw.UploadRetryBaseSeconds
+	if uploadRetryBaseSeconds <= 0 {
+		uploadRetryBaseSeconds = defaultDatabaseArchiverUploadRetryBase
+	}
+	if uploadRetryBaseSeconds < 5 {
+		uploadRetryBaseSeconds = 5
+	}
+	if uploadRetryBaseSeconds > 3600 {
+		uploadRetryBaseSeconds = 3600
+	}
+	uploadRetryMaxSeconds := raw.UploadRetryMaxSeconds
+	if uploadRetryMaxSeconds <= 0 {
+		uploadRetryMaxSeconds = defaultDatabaseArchiverUploadRetryMax
+	}
+	if uploadRetryMaxSeconds < uploadRetryBaseSeconds {
+		uploadRetryMaxSeconds = uploadRetryBaseSeconds
+	}
+	if uploadRetryMaxSeconds > 86400 {
+		uploadRetryMaxSeconds = 86400
+	}
+	uploadRetryEnabled := true
+	if raw.UploadRetryEnabled != nil {
+		uploadRetryEnabled = *raw.UploadRetryEnabled
+	}
+	uploadRetryMaxAttempts := raw.UploadRetryMaxAttempts
+	if uploadRetryMaxAttempts < 0 {
+		uploadRetryMaxAttempts = 0
+	}
+	if uploadRetryMaxAttempts > 10000 {
+		uploadRetryMaxAttempts = 10000
+	}
+	uploadBandwidthBytesPerSecond := raw.UploadBandwidthBytesPerSecond
+	if uploadBandwidthBytesPerSecond < 0 {
+		uploadBandwidthBytesPerSecond = 0
+	}
 	workDir := strings.TrimSpace(raw.WorkDir)
 	if workDir == "" {
 		workDir = defaultDatabaseArchiverWorkDir
@@ -420,26 +479,32 @@ func resolveDatabaseArchiverConfig(cfg *agentConfig) (*resolvedDatabaseArchiverC
 	}
 	endpointBase := strings.TrimRight(opsHubBaseURL, "/") + "/api/v1/public/databases/runner-agents/" + url.PathEscape(runnerID)
 	return &resolvedDatabaseArchiverConfig{
-		Enabled:              true,
-		OpsHubBaseURL:        strings.TrimRight(opsHubBaseURL, "/"),
-		EndpointBaseURL:      endpointBase,
-		RunnerID:             runnerID,
-		RunnerAuth:           runnerAuth,
-		Interval:             time.Duration(intervalSeconds) * time.Second,
-		LeaseTTLSeconds:      leaseTTLSeconds,
-		MaxFilesPerLoop:      maxFiles,
-		MaxConcurrentStreams: maxConcurrent,
-		FailureBackoff:       time.Duration(backoffSeconds) * time.Second,
-		MaxFailureBackoff:    time.Duration(maxBackoffSeconds) * time.Second,
-		StopNeverEnabled:     raw.StopNeverEnabled,
-		StreamingLogMaxBytes: streamingLogMaxBytes,
-		StreamingLogMaxFiles: streamingLogMaxFiles,
-		IncludeCurrent:       raw.IncludeCurrent,
-		WorkDir:              workDir,
-		StorageRoot:          storageRoot,
-		Storage:              storage,
-		MySQLBinlogPath:      strings.TrimSpace(raw.MySQLBinlogPath),
-		Credentials:          append([]databaseArchiverCredential{}, raw.Credentials...),
+		Enabled:                       true,
+		OpsHubBaseURL:                 strings.TrimRight(opsHubBaseURL, "/"),
+		EndpointBaseURL:               endpointBase,
+		RunnerID:                      runnerID,
+		RunnerAuth:                    runnerAuth,
+		Interval:                      time.Duration(intervalSeconds) * time.Second,
+		LeaseTTLSeconds:               leaseTTLSeconds,
+		MaxFilesPerLoop:               maxFiles,
+		MaxConcurrentStreams:          maxConcurrent,
+		FailureBackoff:                time.Duration(backoffSeconds) * time.Second,
+		MaxFailureBackoff:             time.Duration(maxBackoffSeconds) * time.Second,
+		StopNeverEnabled:              raw.StopNeverEnabled,
+		SpoolResumeEnabled:            raw.SpoolResumeEnabled,
+		UploadRetryEnabled:            uploadRetryEnabled,
+		UploadRetryBase:               time.Duration(uploadRetryBaseSeconds) * time.Second,
+		UploadRetryMax:                time.Duration(uploadRetryMaxSeconds) * time.Second,
+		UploadRetryMaxAttempts:        uploadRetryMaxAttempts,
+		UploadBandwidthBytesPerSecond: uploadBandwidthBytesPerSecond,
+		StreamingLogMaxBytes:          streamingLogMaxBytes,
+		StreamingLogMaxFiles:          streamingLogMaxFiles,
+		IncludeCurrent:                raw.IncludeCurrent,
+		WorkDir:                       workDir,
+		StorageRoot:                   storageRoot,
+		Storage:                       storage,
+		MySQLBinlogPath:               strings.TrimSpace(raw.MySQLBinlogPath),
+		Credentials:                   append([]databaseArchiverCredential{}, raw.Credentials...),
 	}, nil
 }
 
@@ -539,6 +604,7 @@ func (a *agentApp) runDatabaseArchiverOnce(ctx context.Context, cfg *resolvedDat
 		a.stopAllDatabaseArchiverStreamingProcesses(ctx, cfg, "heartbeat failed")
 		return
 	}
+	a.processAgentUploadRetryQueue(ctx, cfg)
 	streams, err := a.databaseArchiverListStreams(ctx, cfg)
 	if err != nil {
 		log.Printf("database archiver list streams failed: %v", err)
@@ -903,6 +969,73 @@ func (a *agentApp) stopDatabaseArchiverStreamingProcess(ctx context.Context, cfg
 	})
 }
 
+func (a *agentApp) postDatabaseArchiverStreamingCheckpoint(
+	ctx context.Context,
+	cfg *resolvedDatabaseArchiverConfig,
+	item databaseArchiverAssignedStream,
+	processStatus agentStreamingProcessStatus,
+	current agentMySQLBinaryLog,
+	sourceStatus agentMySQLBinaryLogStatus,
+	identity agentMySQLServerIdentity,
+) {
+	if !processStatus.Running || item.Stream.ID == 0 {
+		return
+	}
+	snapshot := agentStreamingSpoolSnapshot(cfg, item, firstNonEmptyString(processStatus.ActiveFile, current.Name))
+	payload := map[string]any{
+		"pid":              processStatus.PID,
+		"activeFile":       firstNonEmptyString(processStatus.ActiveFile, current.Name),
+		"outputDir":        processStatus.OutputDir,
+		"stdoutLog":        processStatus.StdoutLog,
+		"stderrLog":        processStatus.StderrLog,
+		"startedAt":        processStatus.StartedAt.Format(time.RFC3339),
+		"restartCount":     processStatus.RestartCount,
+		"sourceFile":       firstNonEmptyString(sourceStatus.File, current.Name),
+		"sourcePos":        firstNonZeroInt64Agent(sourceStatus.Position, current.Size),
+		"sourceSize":       current.Size,
+		"serverUUID":       identity.ServerUUID,
+		"serverID":         identity.ServerID,
+		"spoolPath":        snapshot.Path,
+		"spoolExists":      snapshot.Exists,
+		"spoolSize":        snapshot.Size,
+		"spoolUpdatedAt":   snapshot.UpdatedAt,
+		"lastGrowthAt":     snapshot.UpdatedAt,
+		"streamingManaged": true,
+	}
+	_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+		EventType:   "checkpoint",
+		Level:       "info",
+		Message:     "streaming mysqlbinlog 进程 checkpoint",
+		ActiveFile:  firstNonEmptyString(processStatus.ActiveFile, current.Name),
+		PayloadJSON: databaseArchiverEventPayloadJSON(payload),
+		OccurredAt:  time.Now().Format("2006-01-02 15:04:05"),
+	})
+}
+
+type agentStreamingSpoolSnapshotResult struct {
+	Path      string
+	Exists    bool
+	Size      int64
+	UpdatedAt string
+}
+
+func agentStreamingSpoolSnapshot(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, activeFile string) agentStreamingSpoolSnapshotResult {
+	if !isSafeAgentBinlogFileName(activeFile) {
+		return agentStreamingSpoolSnapshotResult{}
+	}
+	path := filepath.Join(agentBinlogStreamingSpoolDir(cfg, item), activeFile)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return agentStreamingSpoolSnapshotResult{Path: path}
+	}
+	return agentStreamingSpoolSnapshotResult{
+		Path:      path,
+		Exists:    true,
+		Size:      info.Size(),
+		UpdatedAt: info.ModTime().Format(time.RFC3339),
+	}
+}
+
 func (a *agentApp) detachDatabaseArchiverStreamingProcess(streamID uint) *agentStreamingProcess {
 	a.databaseArchiverProcessMu.Lock()
 	defer a.databaseArchiverProcessMu.Unlock()
@@ -998,10 +1131,17 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 		return err
 	}
 	status, _ := agentReadMySQLBinaryLogStatus(ctx, db)
+	identity := agentReadMySQLServerIdentity(ctx, db)
 	current := currentAgentBinaryLog(logs)
 	eventActive = activeFileForMode(mode, current.Name)
 	eventPayload["sourceFile"] = firstNonEmptyString(status.File, current.Name)
 	eventPayload["sourcePos"] = firstNonZeroInt64Agent(status.Position, current.Size)
+	if identity.ServerUUID != "" {
+		eventPayload["serverUUID"] = identity.ServerUUID
+	}
+	if identity.ServerID != "" {
+		eventPayload["serverID"] = identity.ServerID
+	}
 	lastArchived := strings.TrimSpace(item.Stream.LastArchiveName)
 	if lastArchived == "" {
 		lastArchived = strings.TrimSpace(item.Stream.CursorFile)
@@ -1107,8 +1247,9 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 					OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
 				})
 			}
+			a.postDatabaseArchiverStreamingCheckpoint(ctx, cfg, item, processStatus, current, status, identity)
 		} else {
-			spool, err := spoolAgentActiveBinlog(ctx, cfg, item, credential, tool, current.Name, current.Size)
+			spool, err := spoolAgentActiveBinlog(ctx, cfg, item, credential, identity, tool, current.Name, current.Size)
 			if err != nil {
 				_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
 					DaemonStatus:        "degraded",
@@ -1131,11 +1272,18 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 				Message:    message,
 				ActiveFile: current.Name,
 				PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
-					"activeFile": current.Name,
-					"sourcePos":  firstNonZeroInt64Agent(status.Position, current.Size),
-					"sourceSize": spool.SourceSize,
-					"spoolSize":  spool.Size,
-					"reused":     spool.Reused,
+					"activeFile":      current.Name,
+					"sourcePos":       firstNonZeroInt64Agent(status.Position, current.Size),
+					"sourceSize":      spool.SourceSize,
+					"spoolSize":       spool.Size,
+					"reused":          spool.Reused,
+					"resumed":         spool.Resumed,
+					"resumeFrom":      spool.ResumeFrom,
+					"appendBytes":     spool.AppendedBytes,
+					"validationMode":  spool.ValidationMode,
+					"lastCompletePos": spool.LastCompletePos,
+					"serverUUID":      identity.ServerUUID,
+					"serverID":        identity.ServerID,
 				}),
 				OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
 			})
@@ -1144,7 +1292,7 @@ func (a *agentApp) processDatabaseArchiverStream(ctx context.Context, cfg *resol
 	var lastArtifact *agentBinlogArtifact
 	for _, selection := range selections {
 		eventFile = selection.FileName
-		artifact, err := archiveAgentBinlogFile(ctx, cfg, item, credential, tool, selection)
+		artifact, err := a.archiveAgentBinlogSelection(ctx, cfg, item, credential, tool, selection, mode == "streaming" && cfg.StopNeverEnabled)
 		if err != nil {
 			_ = a.databaseArchiverCheckpoint(ctx, cfg, item, databaseArchiverCheckpointRequest{
 				DaemonStatus:        "degraded",
@@ -1359,6 +1507,27 @@ func agentScanMySQLBinaryLogStatus(ctx context.Context, db *sql.DB, query string
 	}, nil
 }
 
+func agentReadMySQLServerIdentity(ctx context.Context, db *sql.DB) agentMySQLServerIdentity {
+	if db == nil {
+		return agentMySQLServerIdentity{}
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var uuidValue, idValue sql.NullString
+	if err := db.QueryRowContext(queryCtx, "SELECT @@server_uuid, @@server_id").Scan(&uuidValue, &idValue); err == nil {
+		return agentMySQLServerIdentity{
+			ServerUUID: strings.TrimSpace(uuidValue.String),
+			ServerID:   strings.TrimSpace(idValue.String),
+		}
+	}
+	queryCtx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel2()
+	if err := db.QueryRowContext(queryCtx2, "SELECT @@server_id").Scan(&idValue); err == nil {
+		return agentMySQLServerIdentity{ServerID: strings.TrimSpace(idValue.String)}
+	}
+	return agentMySQLServerIdentity{}
+}
+
 func currentAgentBinaryLog(logs []agentMySQLBinaryLog) agentMySQLBinaryLog {
 	if len(logs) == 0 {
 		return agentMySQLBinaryLog{}
@@ -1435,6 +1604,50 @@ func resolveMySQLBinlogTool(configured string) (string, error) {
 	return "", errors.New("mysqlbinlog/mariadb-binlog not found")
 }
 
+func (a *agentApp) archiveAgentBinlogSelection(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool string, selection agentBinlogArchiveSelection, preferStreamingSpool bool) (agentBinlogArtifact, error) {
+	if preferStreamingSpool {
+		artifact, err := archiveAgentStreamingSpoolFile(ctx, cfg, item, tool, selection)
+		if err == nil {
+			_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+				EventType:  "agent_message",
+				Level:      "info",
+				Message:    "streaming spool 已校验并提交为 finalized binlog",
+				FileName:   selection.FileName,
+				ActiveFile: item.Stream.ActiveFile,
+				PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
+					"fileName":       artifact.FileName,
+					"fileSize":       artifact.FileSize,
+					"checksumSha256": artifact.ChecksumSHA256,
+					"storageUri":     artifact.StorageURI,
+					"source":         "streaming_spool",
+				}),
+				OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
+			})
+			return artifact, nil
+		}
+		payload := map[string]any{
+			"fileName": selection.FileName,
+			"source":   "streaming_spool",
+			"fallback": "remote_full_download",
+		}
+		if quarantinePath, quarantineErr := quarantineAgentStreamingSpoolFile(cfg, item, selection.FileName); quarantineErr == nil && quarantinePath != "" {
+			payload["quarantinePath"] = quarantinePath
+		} else if quarantineErr != nil {
+			payload["quarantineError"] = quarantineErr.Error()
+		}
+		_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+			EventType:   "agent_message",
+			Level:       "warning",
+			Message:     "streaming spool 无法直接提交，回退为完整拉取: " + err.Error(),
+			FileName:    selection.FileName,
+			ActiveFile:  item.Stream.ActiveFile,
+			PayloadJSON: databaseArchiverEventPayloadJSON(payload),
+			OccurredAt:  time.Now().Format("2006-01-02 15:04:05"),
+		})
+	}
+	return archiveAgentBinlogFile(ctx, cfg, item, credential, tool, selection)
+}
+
 func archiveAgentBinlogFile(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool string, selection agentBinlogArchiveSelection) (agentBinlogArtifact, error) {
 	finalDir := agentBinlogFinalDir(cfg, item)
 	if err := os.MkdirAll(finalDir, 0o755); err != nil {
@@ -1457,21 +1670,91 @@ func archiveAgentBinlogFile(ctx context.Context, cfg *resolvedDatabaseArchiverCo
 	if err != nil {
 		return agentBinlogArtifact{}, err
 	}
-	if cfg.objectStorageEnabled() {
-		artifact.StorageURI = agentObjectStorageURI(cfg, item, artifact.FileName)
+	return finalizeAgentBinlogArtifact(ctx, cfg, item, artifact)
+}
+
+func archiveAgentStreamingSpoolFile(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, tool string, selection agentBinlogArchiveSelection) (agentBinlogArtifact, error) {
+	if !isSafeAgentBinlogFileName(selection.FileName) {
+		return agentBinlogArtifact{}, fmt.Errorf("binlog 文件名不合法: %s", selection.FileName)
 	}
-	if err := writeAgentBinlogSidecars(artifact); err != nil {
+	sourcePath := filepath.Join(agentBinlogStreamingSpoolDir(cfg, item), selection.FileName)
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return agentBinlogArtifact{}, fmt.Errorf("streaming spool 文件不存在: %w", err)
+	}
+	if info.IsDir() || info.Size() <= 0 {
+		return agentBinlogArtifact{}, fmt.Errorf("streaming spool 文件无效: %s", sourcePath)
+	}
+	if selection.FileSize > 0 && info.Size() != selection.FileSize {
+		return agentBinlogArtifact{}, fmt.Errorf("streaming spool 文件大小 %d 与源库记录 %d 不一致", info.Size(), selection.FileSize)
+	}
+	validation, err := validateAgentBinlogFile(sourcePath)
+	if err != nil {
+		return agentBinlogArtifact{}, fmt.Errorf("streaming spool binlog 校验失败: %w", err)
+	}
+	if validation.LastCompletePos != info.Size() {
+		return agentBinlogArtifact{}, fmt.Errorf("streaming spool 末尾不是完整事件边界: complete=%d size=%d", validation.LastCompletePos, info.Size())
+	}
+	finalDir := agentBinlogFinalDir(cfg, item)
+	if err := os.MkdirAll(finalDir, 0o755); err != nil {
 		return agentBinlogArtifact{}, err
 	}
-	if cfg.objectStorageEnabled() {
-		if err := publishAgentBinlogArtifact(ctx, cfg, item, artifact); err != nil {
-			return agentBinlogArtifact{}, err
-		}
+	tmpDir, err := os.MkdirTemp(finalDir, ".opshub-streaming-finalize-")
+	if err != nil {
+		return agentBinlogArtifact{}, err
 	}
+	defer os.RemoveAll(tmpDir)
+	tmpPath := filepath.Join(tmpDir, selection.FileName)
+	if err := copyAgentFile(sourcePath, tmpPath, 0o600); err != nil {
+		return agentBinlogArtifact{}, err
+	}
+	finalPath := filepath.Join(finalDir, selection.FileName)
+	if err := commitAgentBinlogFile(tmpPath, finalPath); err != nil {
+		return agentBinlogArtifact{}, err
+	}
+	artifact, err := buildAgentBinlogArtifact(ctx, tool, finalPath, selection, item)
+	if err != nil {
+		return agentBinlogArtifact{}, err
+	}
+	artifact, err = finalizeAgentBinlogArtifact(ctx, cfg, item, artifact)
+	if err != nil {
+		return agentBinlogArtifact{}, err
+	}
+	_ = os.Remove(sourcePath)
 	return artifact, nil
 }
 
-func spoolAgentActiveBinlog(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool, fileName string, sourceSize int64) (agentSpoolResult, error) {
+func quarantineAgentStreamingSpoolFile(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, fileName string) (string, error) {
+	if !isSafeAgentBinlogFileName(fileName) {
+		return "", fmt.Errorf("binlog 文件名不合法: %s", fileName)
+	}
+	sourcePath := filepath.Join(agentBinlogStreamingSpoolDir(cfg, item), fileName)
+	info, err := os.Stat(sourcePath)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", nil
+	}
+	quarantineDir := filepath.Join(agentBinlogSpoolDir(cfg, item), "quarantine")
+	if err := os.MkdirAll(quarantineDir, 0o755); err != nil {
+		return "", err
+	}
+	targetPath := filepath.Join(quarantineDir, fmt.Sprintf("%s.%s.invalid", fileName, time.Now().UTC().Format("20060102T150405Z")))
+	if err := os.Rename(sourcePath, targetPath); err != nil {
+		return "", err
+	}
+	manifestPath := sourcePath + ".manifest.json"
+	if _, err := os.Stat(manifestPath); err == nil {
+		_ = os.Rename(manifestPath, targetPath+".manifest.json")
+	}
+	return targetPath, nil
+}
+
+func spoolAgentActiveBinlog(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, identity agentMySQLServerIdentity, tool, fileName string, sourceSize int64) (agentSpoolResult, error) {
 	if !isSafeAgentBinlogFileName(fileName) {
 		return agentSpoolResult{}, fmt.Errorf("binlog 文件名不合法: %s", fileName)
 	}
@@ -1482,13 +1765,26 @@ func spoolAgentActiveBinlog(ctx context.Context, cfg *resolvedDatabaseArchiverCo
 	target := filepath.Join(spoolDir, fileName+".partial")
 	if sourceSize > 0 {
 		if info, err := os.Stat(target); err == nil && info.Size() >= sourceSize {
-			return agentSpoolResult{
-				FileName:   fileName,
-				Path:       target,
-				Size:       info.Size(),
-				SourceSize: sourceSize,
-				Reused:     true,
-			}, nil
+			validation, validationErr := validateAgentBinlogFile(target)
+			if validationErr == nil {
+				if err := writeAgentPartialManifest(target, fileName, sourceSize, validation, identity); err != nil {
+					return agentSpoolResult{}, err
+				}
+				return agentSpoolResult{
+					FileName:        fileName,
+					Path:            target,
+					Size:            info.Size(),
+					SourceSize:      sourceSize,
+					Reused:          true,
+					ValidationMode:  validation.ChecksumMode,
+					LastCompletePos: validation.LastCompletePos,
+				}, nil
+			}
+		}
+	}
+	if cfg.SpoolResumeEnabled && sourceSize > 0 {
+		if result, err := resumeAgentActiveBinlogSpool(ctx, cfg, item, credential, identity, tool, fileName, sourceSize, target); err == nil {
+			return result, nil
 		}
 	}
 	tmpDir, err := os.MkdirTemp(spoolDir, ".opshub-spool-")
@@ -1507,12 +1803,157 @@ func spoolAgentActiveBinlog(ctx context.Context, cfg *resolvedDatabaseArchiverCo
 	if info, err := os.Stat(target); err == nil {
 		size = info.Size()
 	}
+	validationMode := ""
+	lastCompletePos := int64(0)
+	if validation, validationErr := validateAgentBinlogFile(target); validationErr == nil {
+		validationMode = validation.ChecksumMode
+		lastCompletePos = validation.LastCompletePos
+		if err := writeAgentPartialManifest(target, fileName, sourceSize, validation, identity); err != nil {
+			return agentSpoolResult{}, err
+		}
+	}
 	return agentSpoolResult{
-		FileName:   fileName,
-		Path:       target,
-		Size:       size,
-		SourceSize: sourceSize,
+		FileName:        fileName,
+		Path:            target,
+		Size:            size,
+		SourceSize:      sourceSize,
+		ValidationMode:  validationMode,
+		LastCompletePos: lastCompletePos,
 	}, nil
+}
+
+func resumeAgentActiveBinlogSpool(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, identity agentMySQLServerIdentity, tool, fileName string, sourceSize int64, target string) (agentSpoolResult, error) {
+	info, err := os.Stat(target)
+	if err != nil {
+		return agentSpoolResult{}, err
+	}
+	if info.IsDir() || info.Size() <= 4 || info.Size() >= sourceSize {
+		return agentSpoolResult{}, fmt.Errorf("partial 文件大小不适合 resume: size=%d source=%d", info.Size(), sourceSize)
+	}
+	if err := validateAgentPartialManifestForResume(target, fileName, identity); err != nil {
+		return agentSpoolResult{}, err
+	}
+	existingValidation, err := validateAgentBinlogFile(target)
+	if err != nil {
+		return agentSpoolResult{}, fmt.Errorf("partial binlog 校验失败: %w", err)
+	}
+	if existingValidation.LastCompletePos != info.Size() {
+		return agentSpoolResult{}, fmt.Errorf("partial 末尾不是完整事件边界: complete=%d size=%d", existingValidation.LastCompletePos, info.Size())
+	}
+	tmpDir, err := os.MkdirTemp(filepath.Dir(target), ".opshub-resume-")
+	if err != nil {
+		return agentSpoolResult{}, err
+	}
+	defer os.RemoveAll(tmpDir)
+	if err := runAgentMysqlbinlogRawFromPosition(ctx, cfg, item, credential, tool, tmpDir, fileName, existingValidation.LastCompletePos); err != nil {
+		return agentSpoolResult{}, err
+	}
+	candidatePath := filepath.Join(tmpDir, fileName)
+	appendPlan, err := validateAgentBinlogAppendCandidate(target, candidatePath)
+	if err != nil {
+		return agentSpoolResult{}, err
+	}
+	combinedPath := filepath.Join(tmpDir, fileName+".combined")
+	if err := combineAgentBinlogAppend(target, candidatePath, appendPlan.PayloadOffset, combinedPath); err != nil {
+		return agentSpoolResult{}, err
+	}
+	combinedValidation, err := validateAgentBinlogFile(combinedPath)
+	if err != nil {
+		return agentSpoolResult{}, fmt.Errorf("resume 合并后 binlog 校验失败: %w", err)
+	}
+	if combinedValidation.LastCompletePos <= existingValidation.LastCompletePos {
+		return agentSpoolResult{}, fmt.Errorf("resume 未产生新增完整事件: before=%d after=%d", existingValidation.LastCompletePos, combinedValidation.LastCompletePos)
+	}
+	if err := replaceAgentBinlogFile(combinedPath, target); err != nil {
+		return agentSpoolResult{}, err
+	}
+	if err := writeAgentPartialManifest(target, fileName, sourceSize, combinedValidation, identity); err != nil {
+		return agentSpoolResult{}, err
+	}
+	size := int64(0)
+	if info, err := os.Stat(target); err == nil {
+		size = info.Size()
+	}
+	return agentSpoolResult{
+		FileName:        fileName,
+		Path:            target,
+		Size:            size,
+		SourceSize:      sourceSize,
+		Resumed:         true,
+		ResumeFrom:      existingValidation.LastCompletePos,
+		AppendedBytes:   appendPlan.PayloadBytes,
+		ValidationMode:  combinedValidation.ChecksumMode,
+		LastCompletePos: combinedValidation.LastCompletePos,
+	}, nil
+}
+
+type agentPartialManifest struct {
+	FileName        string `json:"fileName"`
+	SourceSize      int64  `json:"sourceSize"`
+	LastCompletePos int64  `json:"lastCompletePos"`
+	ChecksumMode    string `json:"checksumMode"`
+	ServerUUID      string `json:"serverUUID,omitempty"`
+	ServerID        string `json:"serverID,omitempty"`
+	UpdatedAt       string `json:"updatedAt"`
+}
+
+func agentPartialManifestPath(partialPath string) string {
+	return partialPath + ".manifest.json"
+}
+
+func readAgentPartialManifest(partialPath string) (agentPartialManifest, error) {
+	data, err := os.ReadFile(agentPartialManifestPath(partialPath))
+	if err != nil {
+		return agentPartialManifest{}, err
+	}
+	var manifest agentPartialManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return agentPartialManifest{}, err
+	}
+	return manifest, nil
+}
+
+func writeAgentPartialManifest(partialPath, fileName string, sourceSize int64, validation agentBinlogValidationResult, identity agentMySQLServerIdentity) error {
+	if partialPath == "" {
+		return nil
+	}
+	manifest := agentPartialManifest{
+		FileName:        fileName,
+		SourceSize:      sourceSize,
+		LastCompletePos: validation.LastCompletePos,
+		ChecksumMode:    validation.ChecksumMode,
+		ServerUUID:      strings.TrimSpace(identity.ServerUUID),
+		ServerID:        strings.TrimSpace(identity.ServerID),
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(agentPartialManifestPath(partialPath), append(data, '\n'), 0o600)
+}
+
+func validateAgentPartialManifestForResume(partialPath, fileName string, identity agentMySQLServerIdentity) error {
+	manifest, err := readAgentPartialManifest(partialPath)
+	if err != nil {
+		if os.IsNotExist(err) && strings.TrimSpace(identity.ServerUUID) == "" && strings.TrimSpace(identity.ServerID) == "" {
+			return nil
+		}
+		if os.IsNotExist(err) {
+			return errors.New("partial manifest 不存在，不能确认 server identity，回退完整拉取")
+		}
+		return fmt.Errorf("读取 partial manifest 失败: %w", err)
+	}
+	if strings.TrimSpace(manifest.FileName) != fileName {
+		return fmt.Errorf("partial manifest 文件名漂移: manifest=%s current=%s", manifest.FileName, fileName)
+	}
+	if manifest.ServerUUID != "" && identity.ServerUUID != "" && manifest.ServerUUID != identity.ServerUUID {
+		return fmt.Errorf("partial manifest server_uuid 漂移: manifest=%s current=%s", manifest.ServerUUID, identity.ServerUUID)
+	}
+	if manifest.ServerID != "" && identity.ServerID != "" && manifest.ServerID != identity.ServerID {
+		return fmt.Errorf("partial manifest server_id 漂移: manifest=%s current=%s", manifest.ServerID, identity.ServerID)
+	}
+	return nil
 }
 
 func runAgentMysqlbinlogRaw(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool, resultDir, fileName string) error {
@@ -1535,6 +1976,42 @@ func runAgentMysqlbinlogRaw(ctx context.Context, cfg *resolvedDatabaseArchiverCo
 	outPath := filepath.Join(resultDir, fileName)
 	if info, err := os.Stat(outPath); err != nil || info.Size() <= 0 {
 		return fmt.Errorf("mysqlbinlog 未生成有效文件: %s", fileName)
+	}
+	return nil
+}
+
+func runAgentMysqlbinlogRawFromPosition(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, credential databaseArchiverCredential, tool, resultDir, fileName string, startPosition int64) error {
+	if !isSafeAgentBinlogFileName(fileName) {
+		return fmt.Errorf("binlog 文件名不合法: %s", fileName)
+	}
+	if startPosition <= 4 {
+		return runAgentMysqlbinlogRaw(ctx, cfg, item, credential, tool, resultDir, fileName)
+	}
+	defaultsFile, err := writeAgentMySQLDefaultsFile(cfg.WorkDir, item.SourceInstance, credential)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(defaultsFile)
+	commandCtx, cancel := context.WithTimeout(ctx, maxDuration(cfg.Interval*2, 60*time.Second))
+	defer cancel()
+	cmd := exec.CommandContext(
+		commandCtx,
+		tool,
+		"--defaults-extra-file="+defaultsFile,
+		"--read-from-remote-server",
+		"--raw",
+		"--start-position="+strconv.FormatInt(startPosition, 10),
+		"--result-file="+ensureTrailingPathSeparator(resultDir),
+		fileName,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mysqlbinlog resume 拉取 %s@%d 失败: %w: %s", fileName, startPosition, err, strings.TrimSpace(stderr.String()))
+	}
+	outPath := filepath.Join(resultDir, fileName)
+	if info, err := os.Stat(outPath); err != nil || info.Size() <= 0 {
+		return fmt.Errorf("mysqlbinlog resume 未生成有效文件: %s", fileName)
 	}
 	return nil
 }
@@ -1768,6 +2245,30 @@ func buildAgentBinlogArtifact(ctx context.Context, tool, path string, selection 
 		Previous:       selection.Previous,
 		Next:           selection.Next,
 	}, nil
+}
+
+func finalizeAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, artifact agentBinlogArtifact) (agentBinlogArtifact, error) {
+	publishArtifact := artifact
+	if cfg.objectStorageEnabled() {
+		publishArtifact.StorageURI = agentObjectStorageURI(cfg, item, artifact.FileName)
+	}
+	if err := writeAgentBinlogSidecars(publishArtifact); err != nil {
+		return agentBinlogArtifact{}, err
+	}
+	if !cfg.objectStorageEnabled() {
+		return artifact, nil
+	}
+	if err := publishAgentBinlogArtifact(ctx, cfg, item, publishArtifact); err != nil {
+		if cfg.UploadRetryEnabled {
+			if queueErr := enqueueAgentUploadRetry(cfg, item, publishArtifact, err); queueErr != nil {
+				return agentBinlogArtifact{}, fmt.Errorf("对象存储上传失败且写入重试队列失败: upload=%v queue=%w", err, queueErr)
+			}
+			log.Printf("database archiver object upload queued for retry: stream=%d file=%s err=%v", item.Stream.ID, artifact.FileName, err)
+			return artifact, nil
+		}
+		return agentBinlogArtifact{}, err
+	}
+	return publishArtifact, nil
 }
 
 func writeAgentBinlogSidecars(artifact agentBinlogArtifact) error {
@@ -2023,6 +2524,258 @@ func (cfg *resolvedDatabaseArchiverConfig) objectStorageEnabled() bool {
 	return storageType == "s3" || storageType == "minio"
 }
 
+type agentUploadQueueItem struct {
+	ID               string `json:"id"`
+	StreamID         uint   `json:"streamId"`
+	InstanceID       uint   `json:"instanceId"`
+	SourceInstanceID uint   `json:"sourceInstanceId"`
+	RunnerHostID     uint   `json:"runnerHostId"`
+	RunnerID         string `json:"runnerId"`
+	FileName         string `json:"fileName"`
+	LocalPath        string `json:"localPath"`
+	ObjectURI        string `json:"objectUri"`
+	FileSize         int64  `json:"fileSize"`
+	ChecksumSHA256   string `json:"checksumSha256"`
+	FirstEventTime   string `json:"firstEventTime"`
+	LastEventTime    string `json:"lastEventTime"`
+	PreviousFileName string `json:"previousFileName,omitempty"`
+	NextFileName     string `json:"nextFileName,omitempty"`
+	Attempts         int    `json:"attempts"`
+	MaxAttempts      int    `json:"maxAttempts"`
+	NextAttemptAt    string `json:"nextAttemptAt"`
+	LastError        string `json:"lastError,omitempty"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
+func agentUploadQueueDir(cfg *resolvedDatabaseArchiverConfig) string {
+	return filepath.Join(cfg.StorageRoot, "mysql-binlog", "upload-queue")
+}
+
+func agentUploadQueuePath(cfg *resolvedDatabaseArchiverConfig, id string) string {
+	return filepath.Join(agentUploadQueueDir(cfg), sanitizeAgentQueueFileName(id)+".json")
+}
+
+func sanitizeAgentQueueFileName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "upload"
+	}
+	re := regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+	return strings.Trim(re.ReplaceAllString(value, "-"), "-")
+}
+
+func agentUploadQueueID(item databaseArchiverAssignedStream, artifact agentBinlogArtifact) string {
+	sum := artifact.ChecksumSHA256
+	if len(sum) > 16 {
+		sum = sum[:16]
+	}
+	return fmt.Sprintf("stream-%d-%s-%s", item.Stream.ID, artifact.FileName, sum)
+}
+
+func enqueueAgentUploadRetry(cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, artifact agentBinlogArtifact, cause error) error {
+	if cfg == nil || !cfg.objectStorageEnabled() {
+		return nil
+	}
+	if err := os.MkdirAll(agentUploadQueueDir(cfg), 0o755); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	queueItem := agentUploadQueueItem{
+		ID:               agentUploadQueueID(item, artifact),
+		StreamID:         item.Stream.ID,
+		InstanceID:       item.Stream.InstanceID,
+		SourceInstanceID: item.Stream.SourceInstanceID,
+		RunnerHostID:     item.Runner.ID,
+		RunnerID:         cfg.RunnerID,
+		FileName:         artifact.FileName,
+		LocalPath:        artifact.Path,
+		ObjectURI:        artifact.StorageURI,
+		FileSize:         artifact.FileSize,
+		ChecksumSHA256:   artifact.ChecksumSHA256,
+		FirstEventTime:   artifact.FirstEventTime.Format("2006-01-02 15:04:05"),
+		LastEventTime:    artifact.LastEventTime.Format("2006-01-02 15:04:05"),
+		PreviousFileName: artifact.Previous,
+		NextFileName:     artifact.Next,
+		MaxAttempts:      cfg.UploadRetryMaxAttempts,
+		CreatedAt:        now.Format(time.RFC3339),
+	}
+	path := agentUploadQueuePath(cfg, queueItem.ID)
+	if existing, err := readAgentUploadQueueItem(path); err == nil {
+		queueItem.Attempts = existing.Attempts
+		queueItem.CreatedAt = existing.CreatedAt
+	}
+	queueItem.LastError = agentErrorString(cause)
+	queueItem.UpdatedAt = now.Format(time.RFC3339)
+	queueItem.NextAttemptAt = now.Add(agentUploadRetryDelay(cfg, queueItem.Attempts)).Format(time.RFC3339)
+	return writeAgentUploadQueueItem(path, queueItem)
+}
+
+func readAgentUploadQueueItem(path string) (agentUploadQueueItem, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return agentUploadQueueItem{}, err
+	}
+	var item agentUploadQueueItem
+	if err := json.Unmarshal(data, &item); err != nil {
+		return agentUploadQueueItem{}, err
+	}
+	return item, nil
+}
+
+func writeAgentUploadQueueItem(path string, item agentUploadQueueItem) error {
+	data, err := json.MarshalIndent(item, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func agentUploadRetryDelay(cfg *resolvedDatabaseArchiverConfig, attempts int) time.Duration {
+	delay := cfg.UploadRetryBase
+	if delay <= 0 {
+		delay = time.Duration(defaultDatabaseArchiverUploadRetryBase) * time.Second
+	}
+	for i := 0; i < attempts; i++ {
+		delay *= 2
+		if cfg.UploadRetryMax > 0 && delay >= cfg.UploadRetryMax {
+			return cfg.UploadRetryMax
+		}
+	}
+	if cfg.UploadRetryMax > 0 && delay > cfg.UploadRetryMax {
+		delay = cfg.UploadRetryMax
+	}
+	return delay
+}
+
+func (a *agentApp) processAgentUploadRetryQueue(ctx context.Context, cfg *resolvedDatabaseArchiverConfig) {
+	if cfg == nil || !cfg.objectStorageEnabled() || !cfg.UploadRetryEnabled {
+		return
+	}
+	entries, err := os.ReadDir(agentUploadQueueDir(cfg))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("database archiver read upload queue failed: %v", err)
+		}
+		return
+	}
+	now := time.Now().UTC()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(agentUploadQueueDir(cfg), entry.Name())
+		queueItem, err := readAgentUploadQueueItem(path)
+		if err != nil {
+			log.Printf("database archiver read upload queue item failed: %s err=%v", path, err)
+			continue
+		}
+		if queueItem.NextAttemptAt != "" {
+			nextAttempt, parseErr := time.Parse(time.RFC3339, queueItem.NextAttemptAt)
+			if parseErr == nil && nextAttempt.After(now) {
+				continue
+			}
+		}
+		if queueItem.MaxAttempts > 0 && queueItem.Attempts >= queueItem.MaxAttempts {
+			continue
+		}
+		if err := a.processAgentUploadQueueItem(ctx, cfg, path, queueItem); err != nil {
+			log.Printf("database archiver upload retry failed: stream=%d file=%s err=%v", queueItem.StreamID, queueItem.FileName, err)
+		}
+	}
+}
+
+func (a *agentApp) processAgentUploadQueueItem(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, queuePath string, queueItem agentUploadQueueItem) error {
+	item := databaseArchiverAssignedStream{
+		Stream: databaseArchiverStream{
+			ID:               queueItem.StreamID,
+			InstanceID:       queueItem.InstanceID,
+			SourceInstanceID: queueItem.SourceInstanceID,
+		},
+		Runner: databaseArchiverRunnerConfig{ID: queueItem.RunnerHostID},
+	}
+	firstEvent, _ := time.ParseInLocation("2006-01-02 15:04:05", queueItem.FirstEventTime, time.Local)
+	lastEvent, _ := time.ParseInLocation("2006-01-02 15:04:05", queueItem.LastEventTime, time.Local)
+	artifact := agentBinlogArtifact{
+		FileName:       queueItem.FileName,
+		Path:           queueItem.LocalPath,
+		StorageURI:     queueItem.ObjectURI,
+		FileSize:       queueItem.FileSize,
+		ChecksumSHA256: queueItem.ChecksumSHA256,
+		FirstEventTime: firstEvent,
+		LastEventTime:  lastEvent,
+		Previous:       queueItem.PreviousFileName,
+		Next:           queueItem.NextFileName,
+	}
+	if artifact.FirstEventTime.IsZero() {
+		artifact.FirstEventTime = time.Now()
+	}
+	if artifact.LastEventTime.IsZero() {
+		artifact.LastEventTime = artifact.FirstEventTime
+	}
+	if err := validateAgentQueuedArtifact(artifact); err != nil {
+		queueItem.Attempts++
+		queueItem.LastError = err.Error()
+		queueItem.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		queueItem.NextAttemptAt = time.Now().UTC().Add(agentUploadRetryDelay(cfg, queueItem.Attempts)).Format(time.RFC3339)
+		_ = writeAgentUploadQueueItem(queuePath, queueItem)
+		return err
+	}
+	if err := publishAgentBinlogArtifact(ctx, cfg, item, artifact); err != nil {
+		queueItem.Attempts++
+		queueItem.LastError = err.Error()
+		queueItem.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		queueItem.NextAttemptAt = time.Now().UTC().Add(agentUploadRetryDelay(cfg, queueItem.Attempts)).Format(time.RFC3339)
+		_ = writeAgentUploadQueueItem(queuePath, queueItem)
+		return err
+	}
+	if err := os.Remove(queuePath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	_ = a.databaseArchiverPostEvent(ctx, cfg, item, databaseArchiverEventRequest{
+		EventType: "agent_message",
+		Level:     "info",
+		Message:   "对象存储补传成功",
+		FileName:  queueItem.FileName,
+		PayloadJSON: databaseArchiverEventPayloadJSON(map[string]any{
+			"fileName":       queueItem.FileName,
+			"storageUri":     queueItem.ObjectURI,
+			"attempts":       queueItem.Attempts + 1,
+			"checksumSha256": queueItem.ChecksumSHA256,
+			"queueId":        queueItem.ID,
+		}),
+		OccurredAt: time.Now().Format("2006-01-02 15:04:05"),
+	})
+	return nil
+}
+
+func validateAgentQueuedArtifact(artifact agentBinlogArtifact) error {
+	info, err := os.Stat(artifact.Path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("queued artifact path is a directory: %s", artifact.Path)
+	}
+	if artifact.FileSize > 0 && info.Size() != artifact.FileSize {
+		return fmt.Errorf("queued artifact size mismatch: got=%d expected=%d", info.Size(), artifact.FileSize)
+	}
+	if artifact.ChecksumSHA256 != "" {
+		checksum, err := sha256File(artifact.Path)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(checksum, artifact.ChecksumSHA256) {
+			return fmt.Errorf("queued artifact checksum mismatch: got=%s expected=%s", checksum, artifact.ChecksumSHA256)
+		}
+	}
+	return nil
+}
+
 func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiverConfig, item databaseArchiverAssignedStream, artifact agentBinlogArtifact) error {
 	if !cfg.objectStorageEnabled() {
 		return nil
@@ -2041,7 +2794,7 @@ func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiv
 		"opshub-first-event-at": artifact.FirstEventTime.Format(time.RFC3339),
 		"opshub-last-event-at":  artifact.LastEventTime.Format(time.RFC3339),
 	}
-	if err := uploadAgentObjectFile(ctx, client, bucket, stagingKey, artifact.Path, metadata); err != nil {
+	if err := uploadAgentObjectFileLimited(ctx, client, bucket, stagingKey, artifact.Path, metadata, cfg.UploadBandwidthBytesPerSecond); err != nil {
 		return fmt.Errorf("上传 binlog staging 对象失败: %w", err)
 	}
 	if err := verifyAgentObject(ctx, client, bucket, stagingKey, artifact.FileSize, artifact.ChecksumSHA256); err != nil {
@@ -2052,7 +2805,13 @@ func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiv
 		return fmt.Errorf("校验已存在 binlog final 对象失败: %w", err)
 	}
 	if !exists {
-		if err := uploadAgentObjectFile(ctx, client, bucket, finalKey, artifact.Path, metadata); err != nil {
+		copySource := encodeAgentS3CopySource(bucket, stagingKey)
+		if _, err := client.CopyObject(ctx, &s3.CopyObjectInput{
+			Bucket:     aws.String(bucket),
+			Key:        aws.String(finalKey),
+			CopySource: aws.String(copySource),
+			Metadata:   metadata,
+		}); err != nil {
 			return fmt.Errorf("提交 binlog final 对象失败: %w", err)
 		}
 		if err := verifyAgentObject(ctx, client, bucket, finalKey, artifact.FileSize, artifact.ChecksumSHA256); err != nil {
@@ -2069,6 +2828,12 @@ func publishAgentBinlogArtifact(ctx context.Context, cfg *resolvedDatabaseArchiv
 		log.Printf("database archiver remove staging object failed: bucket=%s key=%s err=%v", bucket, stagingKey, err)
 	}
 	return nil
+}
+
+func encodeAgentS3CopySource(bucket, key string) string {
+	encodedKey := url.PathEscape(key)
+	encodedKey = strings.ReplaceAll(encodedKey, "%2F", "/")
+	return url.PathEscape(bucket) + "/" + encodedKey
 }
 
 func publishAgentBinlogSidecar(ctx context.Context, client *s3.Client, bucket, key, filePath string, baseMetadata map[string]string) error {
@@ -2088,7 +2853,7 @@ func publishAgentBinlogSidecar(ctx context.Context, client *s3.Client, bucket, k
 	if exists {
 		return nil
 	}
-	if err := uploadAgentObjectFile(ctx, client, bucket, key, filePath, metadata); err != nil {
+	if err := uploadAgentObjectFileLimited(ctx, client, bucket, key, filePath, metadata, 0); err != nil {
 		return fmt.Errorf("上传 binlog sidecar %s 失败: %w", filepath.Base(filePath), err)
 	}
 	if err := verifyAgentObject(ctx, client, bucket, key, info.Size(), ""); err != nil {
@@ -2117,6 +2882,10 @@ func newAgentObjectStorageS3Client(storage databaseArchiverStorage) *s3.Client {
 }
 
 func uploadAgentObjectFile(ctx context.Context, client *s3.Client, bucket, key, filePath string, metadata map[string]string) error {
+	return uploadAgentObjectFileLimited(ctx, client, bucket, key, filePath, metadata, 0)
+}
+
+func uploadAgentObjectFileLimited(ctx context.Context, client *s3.Client, bucket, key, filePath string, metadata map[string]string, bytesPerSecond int64) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -2126,15 +2895,49 @@ func uploadAgentObjectFile(ctx context.Context, client *s3.Client, bucket, key, 
 	if err != nil {
 		return err
 	}
+	var body io.Reader = file
+	if bytesPerSecond > 0 {
+		body = &agentRateLimitedReader{reader: file, bytesPerSecond: bytesPerSecond}
+	}
 	uploader := manager.NewUploader(client)
 	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(bucket),
 		Key:           aws.String(key),
-		Body:          file,
+		Body:          body,
 		ContentLength: aws.Int64(info.Size()),
 		Metadata:      metadata,
 	})
 	return err
+}
+
+type agentRateLimitedReader struct {
+	reader         io.Reader
+	bytesPerSecond int64
+}
+
+func (r *agentRateLimitedReader) Read(p []byte) (int, error) {
+	if r == nil || r.reader == nil {
+		return 0, io.EOF
+	}
+	if r.bytesPerSecond <= 0 {
+		return r.reader.Read(p)
+	}
+	maxChunk := r.bytesPerSecond / 10
+	if maxChunk < 1 {
+		maxChunk = 1
+	}
+	if int64(len(p)) > maxChunk {
+		p = p[:maxChunk]
+	}
+	started := time.Now()
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		expected := time.Duration(int64(n) * int64(time.Second) / r.bytesPerSecond)
+		if elapsed := time.Since(started); expected > elapsed {
+			time.Sleep(expected - elapsed)
+		}
+	}
+	return n, err
 }
 
 func verifyAgentObject(ctx context.Context, client *s3.Client, bucket, key string, expectedSize int64, expectedChecksum string) error {

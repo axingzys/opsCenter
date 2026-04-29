@@ -652,6 +652,35 @@ func (DatabaseLogArchiveEvent) TableName() string {
 	return "database_log_archive_events"
 }
 
+// DatabaseLogArchiveEventRollup 高频归档流事件的小时级摘要，用于长期保留 checkpoint/spool 状态。
+type DatabaseLogArchiveEventRollup struct {
+	gorm.Model
+	StreamID         uint      `gorm:"column:stream_id;uniqueIndex:idx_log_archive_event_rollup_bucket;index;comment:归档流ID" json:"streamId"`
+	InstanceID       uint      `gorm:"column:instance_id;index;comment:主实例ID" json:"instanceId"`
+	SourceInstanceID uint      `gorm:"column:source_instance_id;index;comment:来源实例ID" json:"sourceInstanceId"`
+	RunnerHostID     uint      `gorm:"column:runner_host_id;index;comment:Runner主机ID" json:"runnerHostId"`
+	RunnerID         string    `gorm:"column:runner_id;type:varchar(120);index;comment:Runner标识" json:"runnerId"`
+	EventType        string    `gorm:"column:event_type;type:varchar(60);uniqueIndex:idx_log_archive_event_rollup_bucket;index;comment:事件类型" json:"eventType"`
+	Level            string    `gorm:"type:varchar(20);default:'info';index;comment:最高级别" json:"level"`
+	BucketStart      time.Time `gorm:"column:bucket_start;uniqueIndex:idx_log_archive_event_rollup_bucket;index;comment:摘要窗口开始" json:"bucketStart"`
+	BucketEnd        time.Time `gorm:"column:bucket_end;index;comment:摘要窗口结束" json:"bucketEnd"`
+	EventCount       int64     `gorm:"column:event_count;type:bigint;default:0;comment:事件数" json:"eventCount"`
+	WarningCount     int64     `gorm:"column:warning_count;type:bigint;default:0;comment:警告数" json:"warningCount"`
+	ErrorCount       int64     `gorm:"column:error_count;type:bigint;default:0;comment:错误数" json:"errorCount"`
+	MinLagSeconds    int       `gorm:"column:min_lag_seconds;type:int;default:0;comment:最小归档延迟" json:"minLagSeconds"`
+	MaxLagSeconds    int       `gorm:"column:max_lag_seconds;type:int;default:0;comment:最大归档延迟" json:"maxLagSeconds"`
+	LastCursorFile   string    `gorm:"column:last_cursor_file;type:varchar(255);comment:最后游标文件" json:"lastCursorFile"`
+	LastCursorPos    int64     `gorm:"column:last_cursor_pos;type:bigint;default:0;comment:最后游标position" json:"lastCursorPos"`
+	LastActiveFile   string    `gorm:"column:last_active_file;type:varchar(255);comment:最后活跃文件" json:"lastActiveFile"`
+	LastMessage      string    `gorm:"column:last_message;type:varchar(1000);comment:最后消息" json:"lastMessage"`
+	LastPayloadJSON  string    `gorm:"column:last_payload_json;type:text;comment:最后事件摘要JSON" json:"lastPayloadJson"`
+	LastOccurredAt   time.Time `gorm:"column:last_occurred_at;index;comment:最后事件时间" json:"lastOccurredAt"`
+}
+
+func (DatabaseLogArchiveEventRollup) TableName() string {
+	return "database_log_archive_event_rollups"
+}
+
 // DatabaseRestorePlan PITR 恢复计划和预校验结果
 type DatabaseRestorePlan struct {
 	gorm.Model

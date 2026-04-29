@@ -1659,6 +1659,9 @@ func (uc *UseCase) recordLogArchiveEvent(ctx context.Context, item *DatabaseLogA
 	if err := uc.logArchiveEventRepo.Create(ctx, item); err != nil {
 		return err
 	}
+	if isHighFrequencyLogArchiveEvent(item.EventType) {
+		_ = uc.logArchiveEventRepo.UpsertRollup(ctx, buildLogArchiveEventRollup(item))
+	}
 	uc.pruneLogArchiveEvents(ctx, item.StreamID)
 	return nil
 }
@@ -1680,7 +1683,71 @@ func (uc *UseCase) pruneLogArchiveEvents(ctx context.Context, streamID uint) {
 		retentionDays = 3650
 	}
 	before := time.Now().AddDate(0, 0, -retentionDays)
+	highFrequencyRetentionDays := retentionDays
+	if highFrequencyRetentionDays > 7 {
+		highFrequencyRetentionDays = 7
+	}
+	if highFrequencyRetentionDays > 0 && highFrequencyRetentionDays < retentionDays {
+		_, _ = uc.logArchiveEventRepo.DeleteHighFrequencyBefore(ctx, time.Now().AddDate(0, 0, -highFrequencyRetentionDays), streamID, highFrequencyLogArchiveEventTypes())
+	}
 	_, _ = uc.logArchiveEventRepo.DeleteBefore(ctx, before, streamID)
+}
+
+func highFrequencyLogArchiveEventTypes() []string {
+	return []string{
+		DatabaseLogArchiveEventCheckpoint,
+		DatabaseLogArchiveEventSpoolUpdated,
+		DatabaseLogArchiveEventAgentMessage,
+	}
+}
+
+func isHighFrequencyLogArchiveEvent(eventType string) bool {
+	eventType = normalizeLogArchiveEventType(eventType)
+	for _, candidate := range highFrequencyLogArchiveEventTypes() {
+		if eventType == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func buildLogArchiveEventRollup(item *DatabaseLogArchiveEvent) *DatabaseLogArchiveEventRollup {
+	if item == nil {
+		return nil
+	}
+	occurredAt := time.Now()
+	if item.OccurredAt != nil && !item.OccurredAt.IsZero() {
+		occurredAt = *item.OccurredAt
+	}
+	bucketStart := occurredAt.Truncate(time.Hour)
+	level := normalizeLogArchiveEventLevel(item.Level)
+	rollup := &DatabaseLogArchiveEventRollup{
+		StreamID:         item.StreamID,
+		InstanceID:       item.InstanceID,
+		SourceInstanceID: item.SourceInstanceID,
+		RunnerHostID:     item.RunnerHostID,
+		RunnerID:         item.RunnerID,
+		EventType:        normalizeLogArchiveEventType(item.EventType),
+		Level:            level,
+		BucketStart:      bucketStart,
+		BucketEnd:        bucketStart.Add(time.Hour),
+		EventCount:       1,
+		MinLagSeconds:    item.ArchiveLagSeconds,
+		MaxLagSeconds:    item.ArchiveLagSeconds,
+		LastCursorFile:   item.CursorFile,
+		LastCursorPos:    item.CursorPos,
+		LastActiveFile:   item.ActiveFile,
+		LastMessage:      item.Message,
+		LastPayloadJSON:  item.PayloadJSON,
+		LastOccurredAt:   occurredAt,
+	}
+	if level == DatabaseLogArchiveEventLevelWarning {
+		rollup.WarningCount = 1
+	}
+	if level == DatabaseLogArchiveEventLevelError {
+		rollup.ErrorCount = 1
+	}
+	return rollup
 }
 
 func (uc *UseCase) archiveInstanceNames(ctx context.Context, instanceID, sourceID uint) (string, string) {
