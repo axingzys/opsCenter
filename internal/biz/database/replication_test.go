@@ -1,6 +1,9 @@
 package database
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParsePostgreSQLDelaySeconds(t *testing.T) {
 	cases := []struct {
@@ -39,6 +42,19 @@ func TestRedactReplicaValue(t *testing.T) {
 	got := redactReplicaValue("conninfo", raw)
 	if got == raw || got != "user=opshub password=****** host=127.0.0.1" {
 		t.Fatalf("redactReplicaValue() = %q", got)
+	}
+}
+
+func TestPostgreSQLWALReceiverStatusQueryUsesPortableLSNColumns(t *testing.T) {
+	query := postgreSQLWALReceiverStatusQuery()
+	if strings.Contains(query, "received_lsn::") {
+		t.Fatalf("pg_stat_wal_receiver has no received_lsn column on supported PostgreSQL versions")
+	}
+	if !strings.Contains(query, "written_lsn::text") {
+		t.Fatalf("expected query to use written_lsn as the received_lsn compatibility alias")
+	}
+	if !strings.Contains(query, "flushed_lsn::text") {
+		t.Fatalf("expected query to expose flushed_lsn for standby receiver diagnostics")
 	}
 }
 

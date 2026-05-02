@@ -284,16 +284,7 @@ FROM pg_stat_replication`)
 	}
 
 	raw := map[string]any{"role": "standby"}
-	walReceiver, _, receiverErr := querySingleRowMap(ctx, db, `
-SELECT
-	COALESCE(status, '') AS status,
-	COALESCE(receive_start_lsn::text, '') AS receive_start_lsn,
-	COALESCE(received_lsn::text, '') AS received_lsn,
-	COALESCE(latest_end_lsn::text, '') AS latest_end_lsn,
-	COALESCE(latest_end_time::text, '') AS latest_end_time,
-	COALESCE(conninfo, '') AS conninfo
-FROM pg_stat_wal_receiver
-LIMIT 1`)
+	walReceiver, _, receiverErr := querySingleRowMap(ctx, db, postgreSQLWALReceiverStatusQuery())
 	if receiverErr != nil {
 		raw["pg_stat_wal_receiver_error"] = receiverErr.Error()
 	} else {
@@ -338,6 +329,20 @@ LIMIT 1`)
 	}
 	_ = applicationName
 	return check, nil
+}
+
+func postgreSQLWALReceiverStatusQuery() string {
+	return `
+SELECT
+	COALESCE(status, '') AS status,
+	COALESCE(receive_start_lsn::text, '') AS receive_start_lsn,
+	COALESCE(written_lsn::text, '') AS received_lsn,
+	COALESCE(flushed_lsn::text, '') AS flushed_lsn,
+	COALESCE(latest_end_lsn::text, '') AS latest_end_lsn,
+	COALESCE(latest_end_time::text, '') AS latest_end_time,
+	COALESCE(conninfo, '') AS conninfo
+FROM pg_stat_wal_receiver
+LIMIT 1`
 }
 
 func (uc *UseCase) buildReplicaRelationFromCheck(ctx context.Context, item *DatabaseInstance, check *DatabaseReplicationCheck) *DatabaseInstanceReplica {
