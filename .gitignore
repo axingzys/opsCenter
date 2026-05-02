@@ -58,3 +58,6 @@ web/node_modules/
 node_modules/
 dist/
 build/
+
+# PITR rehearsal runtime output
+scripts/pitr-e2e/results/

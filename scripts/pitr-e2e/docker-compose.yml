@@ -1,0 +1,66 @@
+name: opshub-pitr-e2e
+
+services:
+  postgres:
+    image: ${PITR_POSTGRES_IMAGE:-postgres:16}
+    container_name: opshub-pitr-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - listen_addresses=*
+      - -c
+      - timezone=UTC
+    ports:
+      - "${PITR_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - pitr-postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  barman-runner:
+    build:
+      context: ./runner
+      args:
+        POSTGRES_IMAGE: ${PITR_POSTGRES_IMAGE:-postgres:16}
+    image: opshub-pitr-barman-runner:latest
+    container_name: opshub-pitr-barman-runner
+    network_mode: host
+    environment:
+      PITR_SSH_PORT: ${PITR_SSH_PORT:-2222}
+      PITR_SSH_PASSWORD: ${PITR_SSH_PASSWORD:-opshub}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /var/lib/opshub-pitr-e2e:/var/lib/opshub-pitr-e2e
+      - ./runner/barman.conf:/etc/barman.conf:ro
+      - pitr-barman-home:/var/lib/barman
+      - pitr-barman-log:/var/log/barman
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sshd >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  pitr-postgres-data:
+  pitr-barman-home:
+  pitr-barman-log:

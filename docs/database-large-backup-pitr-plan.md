@@ -4754,6 +4754,102 @@ P3.10 不再重新设计 pg_basebackup 恢复逻辑，只负责用真实 Postgre
 8. 执行 timeline mismatch 失败演练。
 9. 更新文档和操作手册。
 
+###### P3.10.1：真实 PostgreSQL + Barman 演练环境
+
+目标：准备一套可重复启动、可由 OpsHub 真实调用的 PostgreSQL + Barman + SSH Runner 环境，不再只依赖 mock / 单元测试证明 P3 链路。
+
+2026-05-02 已落地：
+
+1. 新增 `scripts/pitr-e2e/docker-compose.yml`：
+   - `opshub-pitr-postgres`：PostgreSQL 16，开启 `wal_level=replica`、`max_wal_senders`、`max_replication_slots`，暴露 `55432` 给 OpsHub backend 容器访问。
+   - `opshub-pitr-barman-runner`：Barman + SSH Server，使用 host network，暴露 SSH `2222`，挂载 `/var/run/docker.sock` 和宿主 `/usr/bin/docker`，用于执行 Barman 命令和启动隔离恢复容器。
+   - `/var/lib/opshub-pitr-e2e` 在宿主和 Runner 中保持同路径挂载，保证 Runner 下发的恢复目录可以被宿主 Docker 作为 bind mount 使用。
+2. 新增 PostgreSQL 初始化脚本：
+   - 创建 `opshub_pitr` 数据库。
+   - 创建 `opshub` 校验用户和 `barman` 备份/复制用户。
+   - 创建 `pitr_marker` 测试表。
+   - 追加 `pg_hba.conf` replication 规则，允许 Barman streaming 连接。
+3. 新增 Barman 配置：
+   - server name 固定为 `pg-main`。
+   - 使用 `backup_method=postgres`。
+   - 使用 `streaming_archiver=on` 和 replication slot `opshub_pitr_barman`。
+   - 演练环境 `minimum_redundancy=0`，避免第一次备份前健康检查必然失败；生产环境仍应按保留策略设置大于 0 的冗余要求。
+4. 新增 `scripts/pitr-e2e/p3-10-target-time.sh`：
+   - 自动启动演练环境。
+   - 自动启动 `barman receive-wal`。
+   - 自动登录 OpsHub。
+   - 自动登记临时凭据、PostgreSQL 实例、SSH Runner、Barman Server。
+   - 自动触发 Barman check / backup / catalog sync / WAL sync。
+   - 默认清理本演练创建的 compose volume 和 `opshub-pg-restore-*` 隔离恢复容器，保证脚本可重复执行。
+5. 演练脚本默认使用 `barmanGetWal=false`：
+   - Barman restore 会预取所需 WAL 到恢复目录。
+   - 隔离 PostgreSQL 容器不需要内置 `barman` CLI。
+   - 如果后续要验证 `barman get-wal` 模式，可设置 `PITR_BARMAN_GET_WAL=true`，但恢复镜像必须能执行 `barman get-wal`。
+
+P3.10.1 过程中修复的问题：
+
+1. PostgreSQL 默认 `pg_hba.conf` 没有 replication 规则，导致 Barman `receive-wal` 报 `no pg_hba.conf entry for replication connection`；已通过初始化脚本补齐。
+2. 测试脚本原 `pkill -f "barman receive-wal pg-main"` 会匹配到自身 shell 命令并导致脚本 SIGTERM；已改为 `[b]arman receive-wal pg-main` 安全匹配。
+3. Debian `docker.io` 包在该基础镜像中没有提供 `/usr/bin/docker` CLI；已改为挂载宿主 `/usr/bin/docker`。
+4. Barman `minimum_redundancy=1` 会让第一次备份前的 check 失败；演练环境改为 0，真实生产策略仍按恢复要求配置。
+
+验收标准：
+
+1. `docker compose -f scripts/pitr-e2e/docker-compose.yml up -d` 能启动 PostgreSQL 和 Barman Runner。
+2. Runner 可通过 SSH 从 OpsHub backend 连接。
+3. Barman `check pg-main` 除首次无备份场景外不应有连接、WAL streaming、slot、工具兼容错误。
+4. OpsHub 能登记 PostgreSQL 实例、Runner Host 和 Barman Server。
+5. OpsHub 能触发 Barman backup，并同步 catalog / WAL metadata。
+
+###### P3.10.2：Barman target time 真实恢复演练
+
+目标：用真实 PostgreSQL、真实 Barman backup、真实 WAL streaming 和 OpsHub restore plan，恢复到指定 target time 的隔离 PostgreSQL，并用 SQL 断言证明恢复结果。
+
+2026-05-02 已跑通：
+
+1. 源库写入 `before_backup`。
+2. 通过 OpsHub 触发 Barman full backup。
+3. backup 后强制 `pg_switch_wal()`，让 Barman receive-wal 尽快拿到一致性所需 WAL。
+4. 记录 target time。
+5. target time 后写入 `after_target`。
+6. 再次 `pg_switch_wal()` 并同步 Barman catalog / WAL metadata。
+7. 通过 OpsHub 创建 `restoreTargetType=time` 的 PostgreSQL / Barman PITR restore plan。
+8. 通过 OpsHub 下发 Barman restore Runner：
+   - `targetAction=pause`
+   - `postgresStartInstance=true`
+   - `barmanGetWal=false`
+   - 启动隔离 PostgreSQL 容器。
+9. 校验 SQL 断言：
+   - `before_backup` 行数必须为 1。
+   - `after_target` 行数必须为 0。
+   - marker 汇总结果必须包含 `before_backup`。
+10. 演练输出保存到 `scripts/pitr-e2e/results/p3-10-target-time-<run_id>.json`，该目录不入库。
+
+实际通过记录：
+
+1. run id：`20260502133755`
+2. target time：`2026-05-02T13:38:44Z`
+3. restore job：`30`
+4. restore status：`success`
+5. restored labels：`before_backup`
+6. 三个业务断言全部 `passed`。
+
+P3.10.2 过程中修复的问题：
+
+1. Barman `list-backup <server>` 文本输出在当前版本中第一列为 server name，旧逻辑会把 `pg-main` 误当成 backup id；已修复为识别标准 `YYYYMMDDTHHMMSS` backup id，并保留 JSON catalog 解析。
+2. Barman restore 生成的 `restore_command` 会使用 Runner 视角的绝对路径；隔离 PostgreSQL 容器内只能看到 `/var/lib/postgresql/data`。已在 Barman restore Runner 启动容器前重写 `postgresql.auto.conf` 中的 restored datadir 前缀。
+3. `--get-wal` 模式要求恢复容器内存在 `barman` CLI；P3.10.2 默认改为 `--no-get-wal`，让 Barman 预取 WAL，隔离容器只负责 PostgreSQL replay 和查询校验。
+
+验收标准：
+
+1. 恢复计划 `validationStatus=passed`。
+2. Barman restore、PGDATA 校验、隔离 PostgreSQL 启动步骤全部成功。
+3. 隔离库处于 target time 之前的数据状态：
+   - `before_backup` 存在。
+   - `after_target` 不存在。
+4. `validationJson` 中断言状态为 `passed`。
+5. `proofJson` 写入 restore job，包含 backup id、target time、Runner、容器、步骤和校验结果。
+
 验收：
 
 1. Barman 备份记录能同步到 OpsHub。

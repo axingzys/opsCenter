@@ -21,8 +21,9 @@ const (
 )
 
 var (
-	barmanServerNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
-	barmanBackupIDPattern   = regexp.MustCompile(`^[A-Za-z0-9_.:+-]+$`)
+	barmanServerNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
+	barmanBackupIDPattern    = regexp.MustCompile(`^[A-Za-z0-9_.:+-]+$`)
+	barmanTimestampIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}([.][0-9]+)?$`)
 )
 
 type DatabaseBarmanServerListRequest struct {
@@ -1527,6 +1528,7 @@ func buildBarmanCatalogSyncScript(server *DatabaseBarmanServer, maxBackups int) 
 		`run_barman() { if [ -n "$CONFIG_PATH" ]; then barman -c "$CONFIG_PATH" "$@"; else barman "$@"; fi; }`,
 		`run_list_json() { run_barman -f json list-backup "$SERVER" > "$tmp/list.json" 2> "$tmp/list.err"; code="$?"; if [ "$code" != "0" ]; then run_barman -f json list-backups "$SERVER" > "$tmp/list.json" 2>> "$tmp/list.err"; code="$?"; fi; return "$code"; }`,
 		`run_list_text() { run_barman list-backup "$SERVER" > "$tmp/list.txt" 2> "$tmp/list-text.err"; code="$?"; if [ "$code" != "0" ]; then run_barman list-backups "$SERVER" > "$tmp/list.txt" 2>> "$tmp/list-text.err"; code="$?"; fi; return "$code"; }`,
+		`extract_backup_ids() { awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]([.][0-9]+)?$/) {print $i; break}}' "$tmp/list.txt"; }`,
 		"set +e",
 		`run_list_json`,
 		`list_exit="$?"`,
@@ -1537,7 +1539,7 @@ func buildBarmanCatalogSyncScript(server *DatabaseBarmanServer, maxBackups int) 
 		`printf 'OPSHUB_BARMAN_LIST_JSON_B64=%s\n' "$(b64 "$tmp/list.json")"`,
 		`printf 'OPSHUB_BARMAN_LIST_OUTPUT_B64=%s\n' "$(b64 "$tmp/list.txt")"`,
 		`printf 'OPSHUB_BARMAN_LIST_ERROR_B64=%s\n' "$(b64 "$tmp/list.err")"`,
-		`awk '{print $1}' "$tmp/list.txt" | grep -E '^[A-Za-z0-9_.:+-]+$' | head -n "$MAX_BACKUPS" > "$tmp/ids.txt" || true`,
+		`extract_backup_ids | grep -E '^[A-Za-z0-9_.:+-]+$' | head -n "$MAX_BACKUPS" > "$tmp/ids.txt" || true`,
 		`while IFS= read -r backup_id; do`,
 		`  [ -n "$backup_id" ] || continue`,
 		`  case "$backup_id" in *[!A-Za-z0-9_.:+-]* ) continue ;; esac`,
@@ -1567,6 +1569,7 @@ func buildBarmanWALSyncScript(server *DatabaseBarmanServer, maxBackups int) stri
 		`run_barman() { if [ -n "$CONFIG_PATH" ]; then barman -c "$CONFIG_PATH" "$@"; else barman "$@"; fi; }`,
 		`run_list_json() { run_barman -f json list-backup "$SERVER" > "$tmp/list.json" 2> "$tmp/list.err"; code="$?"; if [ "$code" != "0" ]; then run_barman -f json list-backups "$SERVER" > "$tmp/list.json" 2>> "$tmp/list.err"; code="$?"; fi; return "$code"; }`,
 		`run_list_text() { run_barman list-backup "$SERVER" > "$tmp/list.txt" 2> "$tmp/list-text.err"; code="$?"; if [ "$code" != "0" ]; then run_barman list-backups "$SERVER" > "$tmp/list.txt" 2>> "$tmp/list-text.err"; code="$?"; fi; return "$code"; }`,
+		`extract_backup_ids() { awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]([.][0-9]+)?$/) {print $i; break}}' "$tmp/list.txt"; }`,
 		"set +e",
 		`run_list_json`,
 		`list_exit="$?"`,
@@ -1577,7 +1580,7 @@ func buildBarmanWALSyncScript(server *DatabaseBarmanServer, maxBackups int) stri
 		`printf 'OPSHUB_BARMAN_LIST_JSON_B64=%s\n' "$(b64 "$tmp/list.json")"`,
 		`printf 'OPSHUB_BARMAN_LIST_OUTPUT_B64=%s\n' "$(b64 "$tmp/list.txt")"`,
 		`printf 'OPSHUB_BARMAN_LIST_ERROR_B64=%s\n' "$(b64 "$tmp/list.err")"`,
-		`awk '{print $1}' "$tmp/list.txt" | grep -E '^[A-Za-z0-9_.:+-]+$' | head -n "$MAX_BACKUPS" > "$tmp/ids.txt" || true`,
+		`extract_backup_ids | grep -E '^[A-Za-z0-9_.:+-]+$' | head -n "$MAX_BACKUPS" > "$tmp/ids.txt" || true`,
 		`while IFS= read -r backup_id; do`,
 		`  [ -n "$backup_id" ] || continue`,
 		`  case "$backup_id" in *[!A-Za-z0-9_.:+-]* ) continue ;; esac`,
@@ -1608,6 +1611,7 @@ func buildBarmanBackupScript(server *DatabaseBarmanServer) string {
 		`run_barman() { if [ -n "$CONFIG_PATH" ]; then barman -c "$CONFIG_PATH" "$@"; else barman "$@"; fi; }`,
 		`run_list_json() { run_barman -f json list-backup "$SERVER" > "$tmp/list.json" 2> "$tmp/list.err"; code="$?"; if [ "$code" != "0" ]; then run_barman -f json list-backups "$SERVER" > "$tmp/list.json" 2>> "$tmp/list.err"; code="$?"; fi; return "$code"; }`,
 		`run_list_text() { run_barman list-backup "$SERVER" > "$tmp/list.txt" 2> "$tmp/list-text.err"; code="$?"; if [ "$code" != "0" ]; then run_barman list-backups "$SERVER" > "$tmp/list.txt" 2>> "$tmp/list-text.err"; code="$?"; fi; return "$code"; }`,
+		`extract_backup_ids() { awk '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]([.][0-9]+)?$/) {print $i; break}}' "$tmp/list.txt"; }`,
 		"set +e",
 		`run_barman backup "$SERVER" > "$tmp/backup.txt" 2> "$tmp/backup.err"`,
 		`backup_exit="$?"`,
@@ -1615,7 +1619,7 @@ func buildBarmanBackupScript(server *DatabaseBarmanServer) string {
 		`list_exit="$?"`,
 		`run_list_text`,
 		`list_text_exit="$?"`,
-		`backup_id="$(awk '{print $1}' "$tmp/list.txt" | grep -E '^[A-Za-z0-9_.:+-]+$' | head -n 1)"`,
+		`backup_id="$(extract_backup_ids | grep -E '^[A-Za-z0-9_.:+-]+$' | head -n 1)"`,
 		`printf 'OPSHUB_BARMAN_BACKUP_EXIT=%s\n' "$backup_exit"`,
 		`printf 'OPSHUB_BARMAN_BACKUP_OUTPUT_B64=%s\n' "$(b64 "$tmp/backup.txt")"`,
 		`printf 'OPSHUB_BARMAN_BACKUP_ERROR_B64=%s\n' "$(b64 "$tmp/backup.err")"`,
@@ -2134,7 +2138,17 @@ func extractBarmanBackupIDs(listJSON, listText string) []string {
 		if len(fields) == 0 {
 			continue
 		}
-		add(fields[0])
+		lineAdded := false
+		for _, field := range fields {
+			if barmanTimestampIDPattern.MatchString(field) {
+				add(field)
+				lineAdded = true
+				break
+			}
+		}
+		if !lineAdded && len(fields) == 1 {
+			add(fields[0])
+		}
 	}
 	var root any
 	if err := json.Unmarshal([]byte(listJSON), &root); err == nil {

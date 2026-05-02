@@ -1129,6 +1129,7 @@ func buildBarmanRestoreScript(input barmanRestoreScriptInput) (string, error) {
 		`  PSQL_BIN="$(command -v psql || true)"`,
 		`  if [ -z "$DOCKER_BIN" ]; then fail_step "start_isolated_postgres" "docker not found"; fi`,
 		`  if [ -z "$PSQL_BIN" ]; then fail_step "start_isolated_postgres" "psql not found"; fi`,
+		`  if [ -f "$DEST_DIR/postgresql.auto.conf" ]; then escaped_dest="$(printf '%s' "$DEST_DIR" | sed 's/[\/&|]/\\&/g')"; sed -i "s|$escaped_dest/|/var/lib/postgresql/data/|g" "$DEST_DIR/postgresql.auto.conf" || fail_step "start_isolated_postgres" "rewrite restore_command path failed"; fi`,
 		`  "$DOCKER_BIN" rm -f "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true`,
 		`  chown -R 999:999 "$DEST_DIR" >> "$LOG_FILE" 2>&1 || true`,
 		`  "$DOCKER_BIN" run -d --name "$CONTAINER_NAME" -p "127.0.0.1:$LISTEN_PORT:5432" -v "$DEST_DIR:/var/lib/postgresql/data" "$CONTAINER_IMAGE" -c listen_addresses='*' -c port=5432 >> "$LOG_FILE" 2>&1 || fail_step "start_isolated_postgres" "docker run failed"`,
