@@ -16,6 +16,8 @@ RUN apt-get update \
 
 RUN mkdir -p /run/sshd /var/lib/barman /var/log/barman /etc/barman.d /var/lib/opshub-pitr-e2e/runner \
   && chown -R barman:barman /var/lib/barman /var/log/barman /var/lib/opshub-pitr-e2e \
+  && pg_bin="/usr/lib/postgresql/${PG_MAJOR}/bin" \
+  && if [ -d "$pg_bin" ]; then for tool in pg_basebackup pg_combinebackup pg_verifybackup pg_controldata pg_waldump psql; do if [ -x "$pg_bin/$tool" ]; then ln -sf "$pg_bin/$tool" "/usr/local/bin/$tool"; fi; done; fi \
   && sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \
   && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
   && sed -i 's/^#\?UsePAM .*/UsePAM no/' /etc/ssh/sshd_config

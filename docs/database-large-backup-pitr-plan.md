@@ -4859,6 +4859,192 @@ P3.10.2 过程中修复的问题：
 5. 能恢复到指定 target LSN 的隔离 PostgreSQL 实例。
 6. 如使用原生增量，恢复计划必须包含 `pg_combinebackup` 步骤。
 
+###### P3.10.3：Barman target LSN / WAL gap / timeline mismatch 演练
+
+目标：证明 Barman 深接入链路不仅能恢复到 target time，也能恢复到 target LSN，并且不会把 WAL 缺口或 timeline 不匹配误判为可恢复。
+
+演练脚本：
+
+```bash
+scripts/pitr-e2e/p3-10-barman-lsn-negative.sh
+```
+
+执行内容：
+
+1. 复用 P3.10 PostgreSQL + Barman Runner 环境。
+2. 通过 OpsHub 触发 Barman full backup，并同步 Barman catalog/WAL。
+3. 在 base backup 之后写入 `lsn_target` marker，记录 `pg_current_wal_lsn()` 作为恢复目标。
+4. 在目标 LSN 之后写入 `after_lsn` marker，并强制 `pg_switch_wal()` 使 WAL 可归档。
+5. 创建 `restoreTargetType=lsn` 的恢复计划，要求 `validation_status=passed`、`log_chain_status=complete`，并且 `plan_json.target.targetLsn` 与目标 LSN 一致。
+6. 下发 Barman restore 到隔离 PostgreSQL 容器。
+7. 使用校验 SQL 断言 `before_backup` 存在、`lsn_target` 存在、`after_lsn` 不存在。
+8. 构造超前 target LSN，验证恢复计划失败，状态应为 `validation_status=failed`、`log_chain_status=missing_wal`。
+9. 构造 `targetTimelineId=2`，验证恢复计划失败，状态应为 `validation_status=failed`、`log_chain_status=timeline_mismatch`。
+10. 额外登记一条 `status=missing` 的 WAL segment 和一条 timeline=2 的 WAL metadata，用于前端 WAL 状态页观察缺口和 timeline 切换。
+
+验收标准：
+
+1. target LSN 隔离恢复成功，恢复后的 marker 精确等于 `before_backup,lsn_target`。
+2. WAL gap 计划不能通过预校验，不能下发 Runner。
+3. timeline mismatch 计划不能通过预校验，不能下发 Runner。
+4. 失败原因在恢复计划 `message`、`plan_json.messages`、`proof_json.messages` 中可读。
+5. 前端 WAL 状态页能通过 `/api/v1/databases/log-archives?archiveType=wal` 的元数据看到缺口和 timeline 切换。
+
+输出证明：
+
+```text
+scripts/pitr-e2e/results/p3-10-barman-lsn-negative-<run_id>.json
+```
+
+2026-05-02 实际通过记录：
+
+1. 单项通过：
+   - result：`scripts/pitr-e2e/results/p3-10-barman-lsn-negative-20260502142001.json`
+   - target LSN 恢复成功，隔离库 marker 为 `before_backup,lsn_target`。
+   - WAL gap 预校验失败，`logChainStatus=missing_wal`。
+   - timeline mismatch 预校验失败，`logChainStatus=timeline_mismatch`。
+2. P3.10 总入口通过：
+   - result：`scripts/pitr-e2e/results/p3-10-barman-lsn-negative-20260502150802-lsn.json`
+   - 同时登记了 `status=missing` WAL 和 timeline=2 WAL metadata，用于前端 WAL 状态页展示缺口和 timeline 切换。
+
+###### P3.10.4：pg_basebackup full / incremental 演练
+
+目标：证明 `pg_basebackup` 轻量备用链路具备真实 artifact 恢复能力，full + WAL 和 full + incremental + `pg_combinebackup` + WAL 都能恢复到目标时间点。
+
+演练脚本：
+
+```bash
+scripts/pitr-e2e/p3-10-pg-basebackup.sh
+```
+
+环境要求：
+
+1. PostgreSQL 镜像需要支持原生 incremental；默认使用 `registry.cn-guangzhou.aliyuncs.com/xingcangku/postgres:17`。
+2. Runner 侧必须能执行 `pg_basebackup`、`pg_combinebackup`、`pg_verifybackup`、`pg_controldata`、`psql` 和 `docker`。
+3. PostgreSQL 17 incremental 需要开启 WAL summarizer；脚本会检测 `SHOW summarize_wal`，未开启时执行 `ALTER SYSTEM SET summarize_wal = on` 并重启测试 PostgreSQL。
+4. WAL artifact 必须是 Runner 可直接读取的 `runner://runner-host-<id>/path/to/wal`，不使用 `barman://` 作为 `pg_basebackup` 自动恢复输入。
+
+执行内容：
+
+1. 创建 OpsHub PostgreSQL 实例、SSH Runner、Barman server 和专用 WAL external stream。
+2. 写入 `before_full` marker，通过 OpsHub `backup_engine=pg_basebackup` 备份任务生成 full base artifact。
+3. 写入 `full_target` marker，记录 target time，再写入 `after_full_target`。
+4. 从 Runner 的 Barman WAL 目录登记 finalized WAL 文件，记录 `storage_uri`、`pg_system_identifier`、`timeline_id`、`start_lsn/end_lsn`、`checksum_sha256` 和事件时间窗口。
+5. 创建固定 `baseRecordId=<full record id>` 的 target time 恢复计划。
+6. 下发 `pg_basebackup_restore` 到隔离 PostgreSQL 容器，并断言 `before_full/full_target` 存在、`after_full_target` 不存在。
+7. 构造一个 `runner://` 指向不存在文件的 pg_basebackup full 记录，验证 artifact readiness gate：后端必须在创建恢复任务前通过 SSH Runner 同步检查文件存在性、大小和 checksum，文件不可读时拒绝下发。
+8. 在源库继续写入 `before_incremental`，用 `pg_basebackup --incremental=<base backup_manifest>` 生成 incremental artifact。
+9. 登记 incremental backup record，要求 `backup_level=incremental`、`backup_engine=pg_basebackup`、`base_record_id=<full>`、`parent_record_id=<full>`、`backup_manifest_checksum` 和 Runner 可读 `storage_uri`。
+10. 写入 `incremental_target` marker，记录 target time，再写入 `after_incremental_target`，并登记新的 Runner 可读 WAL。
+11. 创建 target time 恢复计划，要求 `selected_backup_record_ids` 包含 full + incremental，`plan_json.restoreSteps` 包含 `pg_combinebackup synthetic full`，`required_tool_json` 包含 `pg_combinebackup`。
+12. 下发恢复任务，Runner 解包 full/incremental，执行 `pg_combinebackup` 合成 synthetic full，再配置 WAL `restore_command`，启动隔离 PostgreSQL 并执行校验 SQL 断言。
+
+验收标准：
+
+1. full + WAL 可以恢复到 target time。
+2. full + incremental + `pg_combinebackup` + WAL 可以恢复到 target time。
+3. 不可读 artifact 在恢复任务创建前被后端拒绝，不进入 Runner 队列。
+4. incremental 恢复计划明确展示 `pg_combinebackup` 步骤。
+5. incremental proof 明确记录 `combineBackupStatus=success`、`combineBackupVersion` 和 `syntheticFullPath`。
+6. 校验 SQL 断言可以自动判断行数、包含内容和标量值，不需要人工翻 proof。
+
+输出证明：
+
+```text
+scripts/pitr-e2e/results/p3-10-pg-basebackup-<run_id>.json
+```
+
+2026-05-02 过程中修复的问题：
+
+1. Runner 镜像中的 PostgreSQL 17 工具不在默认 `PATH`：
+   - `pg_combinebackup`、`pg_verifybackup`、`pg_controldata` 等工具实际位于 `/usr/lib/postgresql/<major>/bin`。
+   - Runner Dockerfile 改为把这些工具软链到 `/usr/local/bin`。
+   - Barman 配置不再硬编码 PostgreSQL 16 的 `path_prefix`，避免 PostgreSQL 17 演练时工具版本不匹配。
+2. `pg_basebackup` 需要 replication 连接：
+   - 初始化脚本为 `opshub` 用户补充 `host replication` 规则。
+   - 否则 full backup 会报 `no pg_hba.conf entry for replication connection`。
+3. WAL 时间窗口登记需要统一时区语义：
+   - OpsHub MySQL 连接使用 `loc=Local`，演练脚本登记 WAL `firstEventTime/lastEventTime` 时按本地时间写入。
+   - 避免把本地时间用 `date -u -d` 误当 UTC 解析，造成 WAL 时间窗口漂移到未来。
+4. Barman streaming WAL 轮转后可能还在 `streaming/` 目录：
+   - 演练脚本除了 `wals/` 目录，也会纳入 `streaming/` 中已经完整命名、非 `.partial` 的 WAL segment。
+   - PITR 计划仍只使用 finalized/完整 segment，不使用 active partial。
+5. Barman `wals/` 中的历史 WAL 可能是 gzip 压缩文件：
+   - `pg_basebackup` 自动恢复输入需要 raw WAL segment。
+   - 演练脚本会把压缩 WAL 解到 `/var/lib/opshub-pitr-e2e/runner/wal-raw/<run_id>/`，登记 raw 文件的 `runner://` URI、大小和 checksum。
+6. `pg_basebackup_restore` Runner 的隔离容器需要读取预取 WAL：
+   - 恢复 Runner 启动容器时显式挂载 `$WAL_DIR:$WAL_DIR:ro`。
+   - 启动前对 WAL 目录执行只读权限放开，避免容器内 PostgreSQL 无法读取 `restore_command` 文件。
+7. 隔离 PostgreSQL 容器失败时不能长时间等待：
+   - readiness 循环增加 Docker container running 状态检查。
+   - 容器退出时立即采集日志并失败，不再等满 120 次轮询。
+8. target time 需要避免秒级截断误差：
+   - 演练 marker 写入后使用 `created_at + interval '1 second'` 作为目标时间。
+   - 避免 OpsHub 将 RFC3339 归一化到秒时，把刚写入的 marker 排除在恢复目标之外。
+9. 脚本通过 heredoc 下发到 `docker exec` 时必须使用 `-i`：
+   - WAL raw 转换和 incremental artifact 生成都需要把 shell 脚本传入 Runner 容器。
+   - 缺少 `-i` 会导致命令体没有执行，进而出现空 JSON 或无 WAL 文件。
+
+2026-05-02 实际通过记录：
+
+1. 单项通过：
+   - result：`scripts/pitr-e2e/results/p3-10-pg-basebackup-20260502150615.json`
+   - full + WAL target time 恢复成功。
+   - bad artifact gate 成功阻止不可读 `runner://` artifact 下发。
+   - full + incremental + `pg_combinebackup` + WAL target time 恢复成功。
+   - incremental proof 记录 `combineBackupStatus=success`。
+2. P3.10 总入口通过：
+   - result：`scripts/pitr-e2e/results/p3-10-pg-basebackup-20260502150802-pgbase.json`
+   - full restore job 和 incremental restore job 均为 `success`。
+   - validation assertions 自动通过，不需要人工检查 proof 输出。
+
+###### P3.10.5：P3.10 总体验收脚本和运行证明
+
+目标：把 P3.10 的 target time、target LSN、失败链路和 pg_basebackup full/incremental 演练串成可重复回归入口。
+
+总入口：
+
+```bash
+scripts/pitr-e2e/p3-10-all.sh
+```
+
+执行顺序：
+
+1. `p3-10-target-time.sh`
+2. `p3-10-barman-lsn-negative.sh`
+3. `p3-10-pg-basebackup.sh`
+
+验收标准：
+
+1. 三个脚本都能独立执行，也能通过总入口顺序执行。
+2. 每个脚本使用独立 `PITR_RUN_ID`，避免 OpsHub 实例名、凭据名、恢复端口和结果文件互相覆盖。
+3. 结果 JSON 保存在 `scripts/pitr-e2e/results/`，该目录继续由 `.gitignore` 忽略。
+4. P3.10.5 不新增生产功能，只作为联调、回归和证明入口。
+
+2026-05-02 实际通过记录：
+
+```bash
+PITR_BUILD_RUNNER=auto scripts/pitr-e2e/p3-10-all.sh
+```
+
+通过结果：
+
+```text
+P3.10 full rehearsal suite passed: 20260502150802
+```
+
+本次总入口生成的证明文件：
+
+1. `scripts/pitr-e2e/results/p3-10-target-time-20260502150802-time.json`
+2. `scripts/pitr-e2e/results/p3-10-barman-lsn-negative-20260502150802-lsn.json`
+3. `scripts/pitr-e2e/results/p3-10-pg-basebackup-20260502150802-pgbase.json`
+
+配套常规验证：
+
+1. `go test ./internal/biz/database` 通过。
+2. `npm run build` 在 `web/` 目录通过。
+3. `npm run typecheck` 仍失败，失败点为项目既有大量 TypeScript 严格检查问题，集中在 monitor、nginx、ssl-cert、kubernetes、system 等模块；本次 P3.10 改造未引入新的前端类型检查基线。
+
 #### P3 总体验收
 
 1. PostgreSQL 物理备份任务页面明确显示 cluster 级。

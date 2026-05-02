@@ -165,6 +165,7 @@ start_rehearsal_environment() {
   fi
   if [ "${PITR_CLEANUP_RESTORE_CONTAINERS:-true}" = "true" ]; then
     docker ps -aq --filter "name=opshub-pg-restore-" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker ps -aq --filter "name=opshub-pgbase-restore-" | xargs -r docker rm -f >/dev/null 2>&1 || true
   fi
   if [ "${PITR_BUILD_RUNNER:-auto}" = "true" ] || { [ "${PITR_BUILD_RUNNER:-auto}" = "auto" ] && ! docker image inspect opshub-pitr-barman-runner:latest >/dev/null 2>&1; }; then
     docker compose -f "$COMPOSE_FILE" build barman-runner
@@ -249,8 +250,10 @@ create_opshub_resources() {
 
 sync_barman_catalog_and_wal() {
   local job
+  docker exec opshub-pitr-barman-runner barman archive-wal "$BARMAN_SERVER_NAME" >/dev/null 2>&1 || true
   job="$(api_data POST "/api/v1/databases/barman-servers/${BARMAN_ID}/sync-catalog")"
   wait_runner_job "$(jq -r '.id' <<<"$job")" "barman-catalog-sync" 300 >/dev/null
+  docker exec opshub-pitr-barman-runner barman archive-wal "$BARMAN_SERVER_NAME" >/dev/null 2>&1 || true
   job="$(api_data POST "/api/v1/databases/barman-servers/${BARMAN_ID}/sync-wal")"
   wait_runner_job "$(jq -r '.id' <<<"$job")" "barman-wal-sync" 300 >/dev/null
 }
@@ -341,4 +344,6 @@ main() {
   run_target_time_rehearsal
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

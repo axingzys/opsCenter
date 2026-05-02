@@ -112,20 +112,31 @@ func (uc *UseCase) runPostgreSQLPgBaseBackupRestorePlan(ctx context.Context, pla
 	if recheck.RunnerHostID > 0 && recheck.RunnerHostID != host.ID {
 		return nil, fmt.Errorf("pg_basebackup artifact 属于 runnerHostId=%d，当前选择 Runner 为 %d", recheck.RunnerHostID, host.ID)
 	}
-	if _, err := restoreArtifactFromBackupRecord(base, host.ID, "base"); err != nil {
+	baseArtifact, err := restoreArtifactFromBackupRecord(base, host.ID, "base")
+	if err != nil {
 		return nil, err
 	}
-	if _, err := uc.restoreBackupArtifacts(ctx, plan.SelectedBackupRecordIDs, host.ID, base.ID); err != nil {
+	incrementals, err := uc.restoreBackupArtifacts(ctx, plan.SelectedBackupRecordIDs, host.ID, base.ID)
+	if err != nil {
 		return nil, err
 	}
 	startInstance := true
 	if req.PostgresStartInstance != nil {
 		startInstance = *req.PostgresStartInstance
 	}
+	logs := []physicalRestoreArtifact{}
 	if startInstance {
-		if _, err := uc.restoreLogArtifacts(ctx, plan.SelectedLogArchiveIDs, host.ID); err != nil {
+		logs, err = uc.restoreLogArtifacts(ctx, plan.SelectedLogArchiveIDs, host.ID)
+		if err != nil {
 			return nil, fmt.Errorf("PostgreSQL WAL artifact 执行前预检失败: %w", err)
 		}
+	}
+	artifacts := make([]physicalRestoreArtifact, 0, 1+len(incrementals)+len(logs))
+	artifacts = append(artifacts, baseArtifact)
+	artifacts = append(artifacts, incrementals...)
+	artifacts = append(artifacts, logs...)
+	if err := uc.verifyRunnerRestoreArtifactsReadable(ctx, host, artifacts); err != nil {
+		return nil, fmt.Errorf("PostgreSQL artifact 执行前预检失败: %w", err)
 	}
 	validationChecks := []restoreValidationCheck{}
 	if startInstance {
@@ -618,9 +629,10 @@ func buildPgBaseBackupRestoreScript(input pgBaseBackupRestoreScriptInput) (strin
 		`  if [ -z "$DOCKER_BIN" ]; then fail_step "start_isolated_postgres" "docker not found"; fi`,
 		`  if [ -z "$PSQL_BIN" ]; then fail_step "start_isolated_postgres" "psql not found"; fi`,
 		`  "$DOCKER_BIN" rm -f "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true`,
+		`  chmod -R a+rX "$WAL_DIR" >> "$LOG_FILE" 2>&1 || true`,
 		`  chown -R 999:999 "$PGDATA_DIR" >> "$LOG_FILE" 2>&1 || true`,
-		`  "$DOCKER_BIN" run -d --name "$CONTAINER_NAME" -p "127.0.0.1:$LISTEN_PORT:5432" -v "$PGDATA_DIR:/var/lib/postgresql/data" "$CONTAINER_IMAGE" -c listen_addresses='*' -c port=5432 >> "$LOG_FILE" 2>&1 || fail_step "start_isolated_postgres" "docker run failed"`,
-		`  ready=0; for i in $(seq 1 120); do if PGPASSWORD="$PGPASSWORD_VALUE" "$PSQL_BIN" -h 127.0.0.1 -p "$LISTEN_PORT" -U "$PGUSER_NAME" -d "$PGDATABASE_NAME" -At -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1; then ready=1; break; fi; sleep 2; done`,
+		`  "$DOCKER_BIN" run -d --name "$CONTAINER_NAME" -p "127.0.0.1:$LISTEN_PORT:5432" -v "$PGDATA_DIR:/var/lib/postgresql/data" -v "$WAL_DIR:$WAL_DIR:ro" "$CONTAINER_IMAGE" -c listen_addresses='*' -c port=5432 >> "$LOG_FILE" 2>&1 || fail_step "start_isolated_postgres" "docker run failed"`,
+		`  ready=0; for i in $(seq 1 120); do running="$("$DOCKER_BIN" inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)"; if [ "$running" = "false" ]; then "$DOCKER_BIN" logs "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true; fail_step "start_isolated_postgres" "isolated postgres exited before ready"; fi; if PGPASSWORD="$PGPASSWORD_VALUE" "$PSQL_BIN" -h 127.0.0.1 -p "$LISTEN_PORT" -U "$PGUSER_NAME" -d "$PGDATABASE_NAME" -At -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1; then ready=1; break; fi; sleep 2; done`,
 		`  if [ "$ready" != "1" ]; then "$DOCKER_BIN" logs "$CONTAINER_NAME" >> "$LOG_FILE" 2>&1 || true; fail_step "start_isolated_postgres" "isolated postgres not ready"; fi`,
 		`  recovery_summary="$(PGPASSWORD="$PGPASSWORD_VALUE" "$PSQL_BIN" -h 127.0.0.1 -p "$LISTEN_PORT" -U "$PGUSER_NAME" -d "$PGDATABASE_NAME" -At -F '|' -c "SELECT pg_is_in_recovery(), pg_last_wal_replay_lsn(), pg_last_xact_replay_timestamp()" 2>/dev/null || true)"`,
 		`  printf 'OPSHUB_RECOVERY_SUMMARY=%s\n' "$recovery_summary"`,

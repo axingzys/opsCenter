@@ -1636,6 +1636,46 @@ func resolveRunnerReadableArtifactPath(storageURI, filePath string, runnerHostID
 	return "", fmt.Errorf("缺少 runner/local/file 可访问路径")
 }
 
+func (uc *UseCase) verifyRunnerRestoreArtifactsReadable(ctx context.Context, host *DatabaseRunnerHost, artifacts []physicalRestoreArtifact) error {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	if host == nil {
+		return fmt.Errorf("Runner 主机不存在")
+	}
+	if uc.credentialResolver == nil {
+		return fmt.Errorf("连接凭据解析器未配置")
+	}
+	credential, err := uc.credentialResolver(ctx, host.CredentialID)
+	if err != nil {
+		return fmt.Errorf("解析 Runner 凭据失败: %w", err)
+	}
+	lines := []string{
+		"set -eu",
+		`check_artifact() { label="$1"; path="$2"; expected_sha="$3"; expected_size="$4"; if [ ! -f "$path" ]; then echo "$label not found: $path"; exit 11; fi; actual_size="$(wc -c < "$path" | tr -d ' ')"; if [ "$expected_size" != "0" ] && [ "$actual_size" != "$expected_size" ]; then echo "$label size mismatch: $actual_size != $expected_size"; exit 12; fi; if [ -n "$expected_sha" ]; then actual_sha="$(sha256sum "$path" | awk '{print $1}')"; if [ "$actual_sha" != "$expected_sha" ]; then echo "$label sha256 mismatch"; exit 13; fi; fi; }`,
+	}
+	for _, artifact := range artifacts {
+		label := strings.TrimSpace(artifact.Kind)
+		if artifact.ID > 0 {
+			label = fmt.Sprintf("%s#%d", firstNonEmpty(label, "artifact"), artifact.ID)
+		}
+		if label == "" {
+			label = "artifact"
+		}
+		lines = append(lines, fmt.Sprintf("check_artifact %s %s %s %s",
+			shellSingleQuote(label),
+			shellSingleQuote(artifact.SourcePath),
+			shellSingleQuote(strings.TrimSpace(artifact.ChecksumSHA256)),
+			shellSingleQuote(strconv.FormatInt(artifact.FileSize, 10)),
+		))
+	}
+	stdout, stderr, _, runErr := executeSSHRunnerScript(ctx, host.Host, host.Port, credential, strings.Join(lines, "\n"), 2*time.Minute)
+	if runErr != nil {
+		return fmt.Errorf("%s", trimText(firstNonEmpty(stdout, stderr, runErr.Error()), 1000))
+	}
+	return nil
+}
+
 func normalizeRestoreValidationSQL(dbType string, values []string) ([]string, error) {
 	checks, err := normalizeRestoreValidationChecks(dbType, nil, values, nil)
 	if err != nil {
