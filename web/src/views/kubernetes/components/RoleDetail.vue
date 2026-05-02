@@ -137,7 +137,7 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Folder, Document, Operation, Delete, Plus, Search } from '@element-plus/icons-vue'
-import { getRoleDetail, bindUserToRole, unbindUserFromRole, getAvailableUsers, type BoundUser, type AvailableUser } from '@/api/kubernetes'
+import { getRoleDetail, getRoleBoundUsers, bindUserToRole, unbindUserFromRole, getAvailableUsers, type BoundUser, type AvailableUser } from '@/api/kubernetes'
 
 interface Role {
   name: string

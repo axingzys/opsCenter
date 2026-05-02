@@ -50,6 +50,8 @@ const (
 	permDatabaseCapacityCollect = "database:capacity:collect"
 	permDatabaseInspectionView  = "database:inspection:view"
 	permDatabaseInspectionRun   = "database:inspection:run"
+	permDatabaseReplicaView     = "database:replica:view"
+	permDatabaseReplicaCheck    = "database:replica:check"
 )
 
 var databaseUIPermissionCodes = map[string]string{
@@ -75,6 +77,8 @@ var databaseUIPermissionCodes = map[string]string{
 	"restoreRun":                 permDatabaseRestoreRun,
 	"capacityCollect":            permDatabaseCapacityCollect,
 	"inspectionRun":              permDatabaseInspectionRun,
+	"replicaView":                permDatabaseReplicaView,
+	"replicaCheck":               permDatabaseReplicaCheck,
 	"instancePermissionView":     permDatabaseInstanceView,
 	"instancePermissionManage":   permDatabaseInstanceUpdate,
 	"instanceObjectPermissionUI": permDatabaseInstanceUpdate,
@@ -112,6 +116,8 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	runnerHostRepo := dbdata.NewRunnerHostRepo(db)
 	runnerJobRepo := dbdata.NewRunnerJobRepo(db)
 	barmanServerRepo := dbdata.NewBarmanServerRepo(db)
+	instanceReplicaRepo := dbdata.NewInstanceReplicaRepo(db)
+	replicationCheckRepo := dbdata.NewReplicationCheckRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
 	configRepo := systemdata.NewConfigRepo(db)
 	loginAttemptRepo := systemdata.NewLoginAttemptRepo(db)
@@ -187,6 +193,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		runnerJobRepo,
 		barmanServerRepo,
 	)
+	useCase.SetReplicaGovernanceRepos(instanceReplicaRepo, replicationCheckRepo)
 
 	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
 		Interval:        time.Minute,
@@ -322,6 +329,8 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
 		databases.POST("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionRun), s.service.GenerateInspectionReport)
 		databases.GET("/inspection-reports/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.GetInspectionReport)
+		databases.GET("/replicas", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicas)
+		databases.GET("/replication-checks", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicationChecks)
 
 		instances := databases.Group("/instances")
 		{
@@ -344,6 +353,9 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.GET("/:id/sessions", s.authMiddleware.RequireMenuPermission(permDatabaseDiagnosisView), s.service.ListDiagnosisSessions)
 			instances.GET("/:id/slow-queries", s.authMiddleware.RequireMenuPermission(permDatabaseDiagnosisView), s.service.ListSlowQueries)
 			instances.GET("/:id/topology", s.authMiddleware.RequireMenuPermission(permDatabaseTopologyView), s.service.GetTopology)
+			instances.GET("/:id/replicas", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListInstanceReplicas)
+			instances.GET("/:id/replication-status", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.GetInstanceReplicationStatus)
+			instances.POST("/:id/replication-check", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaCheck), s.service.CheckInstanceReplication)
 			instances.GET("/:id/capacity-trend", s.authMiddleware.RequireMenuPermission(permDatabaseCapacityView), s.service.GetCapacityTrend)
 			instances.POST("/:id/capacity-snapshots", s.authMiddleware.RequireMenuPermission(permDatabaseCapacityCollect), s.service.CollectCapacitySnapshot)
 			instances.POST("/:id/query/format", s.authMiddleware.RequireMenuPermission(permDatabaseQueryExecute), s.service.FormatQuerySQL)

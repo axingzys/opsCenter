@@ -215,6 +215,8 @@ func autoMigrate(db *gorm.DB) error {
 		// 数据库管理相关表
 		&databasemodel.DatabaseInstance{},
 		&databasemodel.DatabaseInstancePermission{},
+		&databasemodel.DatabaseInstanceReplica{},
+		&databasemodel.DatabaseReplicationCheck{},
 		&databasemodel.DatabaseSchema{},
 		&databasemodel.DatabaseTable{},
 		&databasemodel.DatabaseColumn{},
@@ -547,6 +549,8 @@ func ensureDatabaseManagementMenu(db *gorm.DB) error {
 		{Name: "采集容量快照", Code: "database:capacity:collect", Type: 3, ParentID: menu.ID, Sort: 128, Visible: 0, Status: 1},
 		{Name: "查看巡检报告", Code: "database:inspection:view", Type: 3, ParentID: menu.ID, Sort: 129, Visible: 0, Status: 1},
 		{Name: "生成巡检报告", Code: "database:inspection:run", Type: 3, ParentID: menu.ID, Sort: 130, Visible: 0, Status: 1},
+		{Name: "查看副本治理", Code: "database:replica:view", Type: 3, ParentID: menu.ID, Sort: 131, Visible: 0, Status: 1},
+		{Name: "采集副本状态", Code: "database:replica:check", Type: 3, ParentID: menu.ID, Sort: 132, Visible: 0, Status: 1},
 	}
 	for _, item := range buttons {
 		var button rbacmodel.SysMenu

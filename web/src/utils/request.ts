@@ -1,7 +1,20 @@
 import axios from 'axios'
+import type { AxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
 
-const request = axios.create({
+type ApiRequestInstance = {
+  <T = any>(config: AxiosRequestConfig): Promise<T>
+  request<T = any>(config: AxiosRequestConfig): Promise<T>
+  get<T = any, R = T>(url: string, config?: AxiosRequestConfig): Promise<R>
+  delete<T = any, R = T>(url: string, config?: AxiosRequestConfig): Promise<R>
+  head<T = any, R = T>(url: string, config?: AxiosRequestConfig): Promise<R>
+  options<T = any, R = T>(url: string, config?: AxiosRequestConfig): Promise<R>
+  post<T = any, R = T, D = any>(url: string, data?: D, config?: AxiosRequestConfig<D>): Promise<R>
+  put<T = any, R = T, D = any>(url: string, data?: D, config?: AxiosRequestConfig<D>): Promise<R>
+  patch<T = any, R = T, D = any>(url: string, data?: D, config?: AxiosRequestConfig<D>): Promise<R>
+}
+
+const service = axios.create({
   baseURL: '/',
   timeout: 60000, // 60秒超时
   withCredentials: true // 携带cookie（用于MFA信任设备等）
@@ -11,7 +24,7 @@ const request = axios.create({
 let isRedirecting = false
 
 // 请求拦截器
-request.interceptors.request.use(
+service.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token')
     if (token) {
@@ -25,7 +38,7 @@ request.interceptors.request.use(
 )
 
 // 响应拦截器
-request.interceptors.response.use(
+service.interceptors.response.use(
   (response) => {
     // blob类型响应直接返回
     if (response.config.responseType === 'blob') {
@@ -125,5 +138,7 @@ request.interceptors.response.use(
     return Promise.reject(error)
   }
 )
+
+const request = service as unknown as ApiRequestInstance
 
 export default request

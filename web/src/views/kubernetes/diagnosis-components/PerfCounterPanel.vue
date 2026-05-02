@@ -131,10 +131,10 @@ const displayCounters = computed(() => {
 
 // 移除 ANSI 转义码
 const stripAnsi = (str: string): string => {
-  // 匹配 ANSI 转义序列: \x1b[...m 或 \033[...m 或 [数字;数字m 格式
+  // 匹配 ANSI 转义序列: \x1b[...m 或 \x1b[...m 或 [数字;数字m 格式
   return str
     .replace(/\x1b\[[0-9;]*m/g, '')
-    .replace(/\033\[[0-9;]*m/g, '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
     .replace(/\[\d+;\d+m/g, '')
     .replace(/\[\d+m/g, '')
     .replace(/\[0m/g, '')

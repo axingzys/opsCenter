@@ -1220,6 +1220,222 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="副本治理" name="replication">
+        <div class="backup-panel">
+          <el-alert
+            title="P4.1 仅做副本关系发现和只读状态展示。这里不会执行 pause、resume、promote、failover 或切换动作。"
+            type="info"
+            show-icon
+            :closable="false"
+          />
+
+          <div class="backup-card">
+            <div class="section-title">
+              <span>副本关系</span>
+              <el-tag size="small" type="info">{{ replicationReplicaTotal }}</el-tag>
+            </div>
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <el-select v-model="replicationReplicaQuery.instanceId" placeholder="实例" clearable filterable class="audit-search-input" @change="loadReplicationReplicas">
+                  <el-option
+                    v-for="item in replicationInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+                <el-select v-model="replicationReplicaQuery.engine" placeholder="引擎" clearable class="audit-select" @change="loadReplicationReplicas">
+                  <el-option label="MySQL" value="mysql" />
+                  <el-option label="MariaDB" value="mariadb" />
+                  <el-option label="PostgreSQL" value="postgresql" />
+                </el-select>
+                <el-select v-model="replicationReplicaQuery.replicaRole" placeholder="角色" clearable class="audit-select" @change="loadReplicationReplicas">
+                  <el-option label="实时副本" value="realtime_replica" />
+                  <el-option label="延迟副本" value="delayed_replica" />
+                  <el-option label="Standby" value="standby" />
+                  <el-option label="未知" value="unknown" />
+                </el-select>
+                <el-select v-model="replicationReplicaQuery.status" placeholder="健康状态" clearable class="audit-select" @change="loadReplicationReplicas">
+                  <el-option label="健康" value="healthy" />
+                  <el-option label="警告" value="warning" />
+                  <el-option label="异常" value="critical" />
+                  <el-option label="未知" value="unknown" />
+                </el-select>
+              </div>
+              <div class="backup-toolbar-group">
+                <el-button type="primary" plain :loading="replicationLoading" @click="loadReplicationReplicas">刷新关系</el-button>
+                <el-button type="warning" :loading="replicationCheckLoading" @click="handleCheckAllReplication">全量采集</el-button>
+              </div>
+            </div>
+
+            <el-table :data="replicationReplicas" v-loading="replicationLoading" stripe class="modern-table">
+              <el-table-column label="主库" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.primaryInstanceName || '来源未匹配' }}</span>
+                    <span class="muted-text">{{ row.primaryEndpoint || `${row.sourceHost || '-'}:${row.sourcePort || '-'}` }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="副本" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.replicaInstanceName || `#${row.replicaInstanceId}` }}</span>
+                    <span class="muted-text">{{ row.replicaEndpoint || '-' }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="引擎" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="dbTypeTag(row.engine)">{{ row.engineText || row.engine || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="角色" width="130">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="replicationRoleTag(row.replicaRole)">{{ row.replicaRoleText || row.replicaRole || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="110">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="replicationHealthTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="配置延迟" width="110" align="right">
+                <template #default="{ row }">{{ replicationDelayText(row.configuredDelaySeconds) }}</template>
+              </el-table-column>
+              <el-table-column label="发现来源" width="120">
+                <template #default="{ row }">{{ row.discoverySourceText || row.discoverySource || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="最近检查" width="170">
+                <template #default="{ row }">{{ row.lastCheckedAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="最近错误" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.lastError || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="170" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="primary" :loading="replicationCheckingId === row.replicaInstanceId" @click="handleCheckReplication(row.replicaInstanceId)">采集</el-button>
+                  <el-button link type="info" @click="handleViewReplicationStatus(row.replicaInstanceId)">详情</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div class="pagination-wrapper">
+              <el-pagination
+                v-model:current-page="replicationReplicaQuery.page"
+                v-model:page-size="replicationReplicaQuery.pageSize"
+                :total="replicationReplicaTotal"
+                :page-sizes="[10, 20, 50]"
+                layout="total, sizes, prev, pager, next"
+                @size-change="loadReplicationReplicas"
+                @current-change="loadReplicationReplicas"
+              />
+            </div>
+          </div>
+
+          <div class="backup-card">
+            <div class="section-title">
+              <span>最近采集</span>
+              <el-tag size="small" type="info">{{ replicationCheckTotal }}</el-tag>
+            </div>
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <el-select v-model="replicationCheckQuery.instanceId" placeholder="实例" clearable filterable class="audit-search-input" @change="loadReplicationChecks">
+                  <el-option
+                    v-for="item in replicationInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+                <el-select v-model="replicationCheckQuery.roleDetected" placeholder="检测角色" clearable class="audit-select" @change="loadReplicationChecks">
+                  <el-option label="主库" value="primary" />
+                  <el-option label="从库" value="replica" />
+                  <el-option label="Standby" value="standby" />
+                  <el-option label="未知" value="unknown" />
+                </el-select>
+                <el-select v-model="replicationCheckQuery.healthStatus" placeholder="健康状态" clearable class="audit-select" @change="loadReplicationChecks">
+                  <el-option label="健康" value="healthy" />
+                  <el-option label="警告" value="warning" />
+                  <el-option label="异常" value="critical" />
+                  <el-option label="未知" value="unknown" />
+                </el-select>
+              </div>
+              <div class="backup-toolbar-group">
+                <el-button type="primary" plain :loading="replicationCheckLoading" @click="loadReplicationChecks">刷新采集</el-button>
+              </div>
+            </div>
+
+            <el-table :data="replicationChecks" v-loading="replicationCheckLoading" stripe class="modern-table">
+              <el-table-column label="实例" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.instanceName || `#${row.instanceId}` }}</span>
+                    <span class="muted-text">{{ row.instanceEndpoint || '-' }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="引擎" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="dbTypeTag(row.engine)">{{ row.engineText || row.engine || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="检测角色" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="replicationRoleTag(row.roleDetected)">{{ row.roleDetectedText || row.roleDetected || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="来源实例" min-width="140" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.sourceInstanceName || '未匹配' }}</template>
+              </el-table-column>
+              <el-table-column label="健康" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="replicationHealthTag(row.healthStatus)">{{ row.healthStatusText || row.healthStatus || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="lag" width="120" align="right">
+                <template #default="{ row }">
+                  <span v-if="row.engine === 'postgresql'">{{ row.pgReplayLagMs ? `${row.pgReplayLagMs} ms` : '-' }}</span>
+                  <span v-else>{{ replicationDelayText(row.secondsBehindSource) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="remaining" width="120" align="right">
+                <template #default="{ row }">{{ replicationDelayText(row.remainingDelaySeconds) }}</template>
+              </el-table-column>
+              <el-table-column label="IO / SQL" width="130">
+                <template #default="{ row }">
+                  <span class="muted-text">{{ row.replicaIoRunning || '-' }} / {{ row.replicaSqlRunning || '-' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="Replay LSN / 时间" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.pgLastWalReplayLsn || row.pgLastXactReplayTimestamp || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="检查时间" width="170">
+                <template #default="{ row }">{{ row.checkedAt || row.createdAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="错误/风险" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.errorMessage || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="90" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="info" @click="handleViewReplicationRaw(row)">原始</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div class="pagination-wrapper">
+              <el-pagination
+                v-model:current-page="replicationCheckQuery.page"
+                v-model:page-size="replicationCheckQuery.pageSize"
+                :total="replicationCheckTotal"
+                :page-sizes="[10, 20, 50]"
+                layout="total, sizes, prev, pager, next"
+                @size-change="loadReplicationChecks"
+                @current-change="loadReplicationChecks"
+              />
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="备份任务" name="backup">
         <div class="backup-panel">
           <el-alert
@@ -5013,6 +5229,19 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="replicationRawDialogVisible" :title="replicationRawDialogTitle" width="860px">
+      <el-input
+        v-model="replicationRawDialogContent"
+        type="textarea"
+        :rows="22"
+        readonly
+        class="mono-textarea"
+      />
+      <template #footer>
+        <el-button @click="replicationRawDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="permissionDialogVisible"
       :title="permissionForm.id ? '编辑实例权限' : '添加实例权限'"
@@ -5076,6 +5305,7 @@ import {
   DATABASE_PERMISSION,
   backupDatabaseBarmanServer,
   checkDatabaseBarmanServer,
+  checkDatabaseReplication,
   checkDatabaseStorageProfilePosture,
   cleanupDatabaseRestoreJob,
   createDatabaseBarmanServer,
@@ -5102,6 +5332,7 @@ import {
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
+  getDatabaseReplicationStatus,
   getDatabaseRestoreJobProof,
   getDatabaseTopology,
   getDatabaseUIPermissions,
@@ -5133,6 +5364,8 @@ import {
   listDatabaseSchemas,
   listDatabaseSlowQueries,
   listDatabaseTables,
+  listDatabaseReplicas,
+  listDatabaseReplicationChecks,
   pauseDatabaseLogArchiveStream,
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
@@ -5175,7 +5408,10 @@ import {
   type DatabaseInspectionSection,
   type DatabaseInspectionReportResult,
   type DatabaseInstancePayload,
+  type DatabaseInstanceReplicaResult,
   type DatabaseQueryPayload,
+  type DatabaseReplicationCheckResult,
+  type DatabaseReplicationStatusResult,
   type DatabaseRestoreDryRunPayload,
   type DatabaseRestoreJobResult,
   type DatabaseRestorePlanPayload,
@@ -5359,6 +5595,17 @@ const capacityChartRef = ref<HTMLElement>()
 const topologyInstanceId = ref<number>()
 const topologyLoading = ref(false)
 const topologyResult = ref<DatabaseTopologyResult>()
+const replicationLoading = ref(false)
+const replicationCheckLoading = ref(false)
+const replicationCheckingId = ref(0)
+const replicationReplicas = ref<DatabaseInstanceReplicaResult[]>([])
+const replicationReplicaTotal = ref(0)
+const replicationChecks = ref<DatabaseReplicationCheckResult[]>([])
+const replicationCheckTotal = ref(0)
+const replicationStatusDetail = ref<DatabaseReplicationStatusResult>()
+const replicationRawDialogVisible = ref(false)
+const replicationRawDialogTitle = ref('')
+const replicationRawDialogContent = ref('')
 const backupTaskLoading = ref(false)
 const backupTaskSubmitting = ref(false)
 const backupTaskDialogVisible = ref(false)
@@ -5527,6 +5774,8 @@ const auditActions = [
   { label: '恢复演练', value: 'restore_dry_run' },
   { label: '容量趋势查看', value: 'capacity_view' },
   { label: '巡检报告生成', value: 'inspection_generate' },
+  { label: '副本状态查看', value: 'replica_status_view' },
+  { label: '副本状态采集', value: 'replica_check_run' },
   { label: '实例权限保存', value: 'instance_permission_upsert' },
   { label: '实例权限删除', value: 'instance_permission_delete' },
   { label: '数据字典导出', value: 'metadata_export' },
@@ -5657,6 +5906,24 @@ const walStatusQuery = reactive({
   pageSize: 100,
   streamId: undefined as number | undefined,
   instanceId: undefined as number | undefined
+})
+
+const replicationReplicaQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  instanceId: undefined as number | undefined,
+  engine: '',
+  replicaRole: '',
+  status: ''
+})
+
+const replicationCheckQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  instanceId: undefined as number | undefined,
+  engine: '',
+  roleDetected: '',
+  healthStatus: ''
 })
 
 const runnerHostQuery = reactive({
@@ -6208,6 +6475,10 @@ const topologyInstances = computed(() =>
   instances.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.TOPOLOGY, 'topologyEnabled'))
 )
 
+const replicationInstances = computed(() =>
+  instances.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.TOPOLOGY))
+)
+
 const supportedBackupInstances = computed(() =>
   instances.value.filter(item => ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
@@ -6507,6 +6778,15 @@ const formattedStoragePostureJson = computed(() => {
     return raw
   }
 })
+
+const formatJSONText = (raw: string) => {
+  if (!raw) return ''
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
 
 const sshCredentialOptions = computed(() =>
   credentials.value.filter((item: any) => (item.protocol || 'ssh') === 'ssh')
@@ -6890,6 +7170,12 @@ const loadInstances = async () => {
       topologyInstanceId.value = undefined
       topologyResult.value = undefined
     }
+    if (replicationReplicaQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationReplicaQuery.instanceId)) {
+      replicationReplicaQuery.instanceId = undefined
+    }
+    if (replicationCheckQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationCheckQuery.instanceId)) {
+      replicationCheckQuery.instanceId = undefined
+    }
     if (backupTaskQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskQuery.instanceId)) {
       backupTaskQuery.instanceId = undefined
     }
@@ -7206,6 +7492,98 @@ const loadTopology = async () => {
   } finally {
     topologyLoading.value = false
   }
+}
+
+const loadReplicationReplicas = async () => {
+  replicationLoading.value = true
+  try {
+    const res: any = await listDatabaseReplicas(replicationReplicaQuery)
+    replicationReplicas.value = res.list || []
+    replicationReplicaTotal.value = res.total || 0
+    if (res.page) replicationReplicaQuery.page = res.page
+    if (res.pageSize) replicationReplicaQuery.pageSize = res.pageSize
+  } finally {
+    replicationLoading.value = false
+  }
+}
+
+const loadReplicationChecks = async () => {
+  replicationCheckLoading.value = true
+  try {
+    const res: any = await listDatabaseReplicationChecks(replicationCheckQuery)
+    replicationChecks.value = res.list || []
+    replicationCheckTotal.value = res.total || 0
+    if (res.page) replicationCheckQuery.page = res.page
+    if (res.pageSize) replicationCheckQuery.pageSize = res.pageSize
+  } finally {
+    replicationCheckLoading.value = false
+  }
+}
+
+const refreshReplicationState = async () => {
+  await Promise.all([loadReplicationReplicas(), loadReplicationChecks()])
+}
+
+const handleCheckReplication = async (instanceId?: number) => {
+  if (!instanceId) return
+  replicationCheckingId.value = instanceId
+  try {
+    await checkDatabaseReplication(instanceId)
+    ElMessage.success('副本状态采集完成')
+    await refreshReplicationState()
+  } finally {
+    replicationCheckingId.value = 0
+  }
+}
+
+const handleCheckAllReplication = async () => {
+  if (!replicationInstances.value.length) {
+    ElMessage.warning('当前没有可采集的 MySQL / MariaDB / PostgreSQL 实例')
+    return
+  }
+  replicationCheckLoading.value = true
+  let success = 0
+  let failed = 0
+  try {
+    for (const item of replicationInstances.value) {
+      try {
+        replicationCheckingId.value = item.id
+        await checkDatabaseReplication(item.id)
+        success += 1
+      } catch {
+        failed += 1
+      }
+    }
+    await refreshReplicationState()
+    if (failed > 0) {
+      ElMessage.warning(`副本状态采集完成：成功 ${success}，失败 ${failed}`)
+    } else {
+      ElMessage.success(`副本状态采集完成：成功 ${success}`)
+    }
+  } finally {
+    replicationCheckingId.value = 0
+    replicationCheckLoading.value = false
+  }
+}
+
+const handleViewReplicationStatus = async (instanceId?: number) => {
+  if (!instanceId) return
+  replicationCheckLoading.value = true
+  try {
+    replicationStatusDetail.value = await getDatabaseReplicationStatus(instanceId) as DatabaseReplicationStatusResult
+    const last = replicationStatusDetail.value?.lastCheck
+    replicationRawDialogTitle.value = `副本状态详情 - ${replicationStatusDetail.value?.instance?.name || instanceId}`
+    replicationRawDialogContent.value = last?.rawStatusJson ? formatJSONText(last.rawStatusJson) : JSON.stringify(replicationStatusDetail.value, null, 2)
+    replicationRawDialogVisible.value = true
+  } finally {
+    replicationCheckLoading.value = false
+  }
+}
+
+const handleViewReplicationRaw = (row: DatabaseReplicationCheckResult) => {
+  replicationRawDialogTitle.value = `副本状态原始采集 #${row.id}`
+  replicationRawDialogContent.value = row.rawStatusJson ? formatJSONText(row.rawStatusJson) : '{}'
+  replicationRawDialogVisible.value = true
 }
 
 const loadBackupTasks = async () => {
@@ -10392,6 +10770,46 @@ const topologyStateTag = (state: string) => {
   return 'info'
 }
 
+const replicationHealthTag = (status?: string) => {
+  switch (status) {
+    case 'healthy':
+      return 'success'
+    case 'warning':
+      return 'warning'
+    case 'critical':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const replicationRoleTag = (role?: string) => {
+  switch (role) {
+    case 'delayed_replica':
+      return 'warning'
+    case 'realtime_replica':
+    case 'replica':
+    case 'standby':
+      return 'primary'
+    case 'primary':
+      return 'success'
+    default:
+      return 'info'
+  }
+}
+
+const replicationDelayText = (value?: number) => {
+  const seconds = Number(value ?? -1)
+  if (seconds < 0) return '-'
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  if (minutes < 60) return rest ? `${minutes}m ${rest}s` : `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const minuteRest = minutes % 60
+  return minuteRest ? `${hours}h ${minuteRest}m` : `${hours}h`
+}
+
 const auditStatusTag = (status: string) => {
   switch (status) {
     case 'success':
@@ -10923,6 +11341,9 @@ watch(activeTab, async (tab) => {
   if (tab === 'topology') {
     await ensureTopologyInstance()
   }
+  if (tab === 'replication') {
+    await refreshReplicationState()
+  }
   if (tab === 'backup') {
     await Promise.all([
       loadBackupTasks(),
@@ -11375,6 +11796,12 @@ onBeforeUnmount(() => {
 }
 
 .sql-editor :deep(.el-textarea__inner) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  line-height: 1.6;
+  color: #111827;
+}
+
+.mono-textarea :deep(.el-textarea__inner) {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   line-height: 1.6;
   color: #111827;

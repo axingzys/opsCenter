@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { pluginManager } from '@/plugins/manager'
 
 const router = createRouter({
@@ -243,7 +243,7 @@ export function registerPluginRoutes() {
 
       // 添加插件的子路由到 Layout
       routes.forEach(route => {
-        router.addRoute('Layout', route)
+        router.addRoute('Layout', route as RouteRecordRaw)
       })
     }
   }

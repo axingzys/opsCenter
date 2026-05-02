@@ -982,7 +982,8 @@ import {
   Delete,
   Warning,
   Plus,
-  Check
+  Check,
+  Download
 } from '@element-plus/icons-vue'
 import { getClusterList, type Cluster, getNodes, type NodeInfo } from '@/api/kubernetes'
 
@@ -2168,8 +2169,7 @@ const handleShellOpened = async () => {
     theme: {
       background: '#000000',
       foreground: '#d4af37',
-      cursor: '#d4af37',
-      selection: '#ffffff40'
+      cursor: '#d4af37'
     },
     fontFamily: 'Monaco, Menlo, Courier New, monospace',
     fontSize: 14,
@@ -2177,6 +2177,7 @@ const handleShellOpened = async () => {
     cursorBlink: true,
     scrollback: 1000
   })
+  const shellTerminal = terminal
 
   // 加载插件
   fitAddon = new FitAddon()
@@ -2194,19 +2195,19 @@ const handleShellOpened = async () => {
   ws = new WebSocket(wsUrl)
 
   ws.onopen = () => {
-    terminal.writeln('连接成功...\r\n')
+    shellTerminal.writeln('连接成功...\r\n')
   }
 
   ws.onmessage = (event) => {
-    terminal.write(event.data)
+    shellTerminal.write(event.data)
   }
 
   ws.onerror = (error) => {
-    terminal.writeln('\r\n\x1b[31m连接错误\x1b[0m')
+    shellTerminal.writeln('\r\n\x1b[31m连接错误\x1b[0m')
   }
 
   ws.onclose = () => {
-    terminal.writeln('\r\n\x1b[33m连接已关闭\x1b[0m')
+    shellTerminal.writeln('\r\n\x1b[33m连接已关闭\x1b[0m')
   }
 
   // 监听终端输入

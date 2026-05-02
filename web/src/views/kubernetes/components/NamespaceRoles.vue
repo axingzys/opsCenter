@@ -211,7 +211,13 @@ const loadNamespaceRoles = async () => {
       }
     }
 
-    roleList.value = roles || []
+    roleList.value = (roles || []).map(role => ({
+      name: role.name,
+      namespace: role.namespace || selectedNamespace.value,
+      labels: role.labels || {},
+      age: role.age || '',
+      rules: role.rules || []
+    }))
   } catch (error: any) {
     ElMessage.error(error.response?.data?.data?.message || '加载命名空间角色失败')
   } finally {

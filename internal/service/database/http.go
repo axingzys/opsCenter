@@ -254,6 +254,12 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseQueryHistoryRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseInstanceReplicaListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseReplicationCheckListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	}
 }
 

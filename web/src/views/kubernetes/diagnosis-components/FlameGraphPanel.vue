@@ -294,7 +294,7 @@ const parseThreadListOutput = (output: string): {id: string; name: string}[] => 
   for (const line of lines) {
     const trimmedLine = line.trim()
       .replace(/\x1b\[[0-9;]*m/g, '')
-      .replace(/\033\[[0-9;]*m/g, '')
+      .replace(/\x1b\[[0-9;]*m/g, '')
 
     if (!trimmedLine || trimmedLine.startsWith('[INFO]') || trimmedLine.startsWith('[arthas@')) {
       continue
@@ -390,7 +390,7 @@ const startProfiling = async () => {
       // 检查输出中是否有错误信息
       const cleanedOutput = output
         .replace(/\x1b\[[0-9;]*m/g, '')
-        .replace(/\033\[[0-9;]*m/g, '')
+        .replace(/\x1b\[[0-9;]*m/g, '')
 
       if (cleanedOutput.includes('[ERROR]')) {
         // 提取错误信息
@@ -431,7 +431,7 @@ const extractHtmlContent = (output: string): string => {
   // 移除 ANSI 转义码
   let cleaned = output
     .replace(/\x1b\[[0-9;]*m/g, '')
-    .replace(/\033\[[0-9;]*m/g, '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
     .replace(/\[\d+;\d+m/g, '')
     .replace(/\[\d+m/g, '')
 

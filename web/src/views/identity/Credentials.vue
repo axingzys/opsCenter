@@ -172,7 +172,7 @@ const handleAdd = () => {
   dialogVisible.value = true
 }
 
-const handleEdit = (cred: Credential) => {
+const handleEdit = (cred: UserCredential) => {
   isEdit.value = true
   dialogTitle.value = '编辑凭证'
   Object.assign(form, {
@@ -191,11 +191,22 @@ const handleSubmit = async () => {
     if (!valid) return
     submitLoading.value = true
     try {
+      if (!form.appId) {
+        ElMessage.warning('请选择应用')
+        submitLoading.value = false
+        return
+      }
+      const payload = {
+        appId: form.appId,
+        username: form.username,
+        password: form.password,
+        extraData: form.extraData
+      }
       if (isEdit.value) {
-        await updateUserCredential(form.id, form)
+        await updateUserCredential(form.id, payload)
         ElMessage.success('更新成功')
       } else {
-        await createUserCredential(form)
+        await createUserCredential(payload)
         ElMessage.success('添加成功')
       }
       dialogVisible.value = false
@@ -208,7 +219,7 @@ const handleSubmit = async () => {
   })
 }
 
-const handleDelete = (cred: Credential) => {
+const handleDelete = (cred: UserCredential) => {
   ElMessageBox.confirm(`确定要删除该凭证吗？`, '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',

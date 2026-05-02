@@ -128,12 +128,15 @@ interface Container {
   image: string
   imagePullPolicy?: string
   workingDir?: string
-  command?: string[]
-  args?: string[]
+  command: string[]
+  args: string[]
   env?: any[]
   resources?: any
   ports?: any[]
   volumeMounts?: any[]
+  livenessProbe?: any
+  readinessProbe?: any
+  startupProbe?: any
   stdin?: boolean
   tty?: boolean
   activeTab?: string

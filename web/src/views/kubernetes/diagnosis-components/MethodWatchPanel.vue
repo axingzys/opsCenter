@@ -268,7 +268,7 @@ const outputLineCount = computed(() => {
 const cleanOutput = computed(() => {
   return rawOutput.value
     .replace(/\x1b\[[0-9;]*m/g, '')
-    .replace(/\033\[[0-9;]*m/g, '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
     .replace(/\[\d+;\d+m/g, '')
     .replace(/\[\d+m/g, '')
     .replace(/\[0m/g, '')

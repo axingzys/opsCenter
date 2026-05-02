@@ -235,7 +235,7 @@ const formatBytes = (bytes: number) => {
 // 计算错误率
 const calculateErrorRate = (row: NginxDailyStats) => {
   const total = row.status2xx + row.status3xx + row.status4xx + row.status5xx
-  if (total === 0) return 0
+  if (total === 0) return '0'
   const errors = row.status4xx + row.status5xx
   return ((errors / total) * 100).toFixed(2)
 }

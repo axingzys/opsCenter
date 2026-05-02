@@ -214,7 +214,7 @@ const tableData = ref<any[]>([])
 const form = reactive({
   id: 0,
   name: '',
-  channelType: 'email',
+  channelType: 'email' as AlertChannel['channelType'],
   enabled: true,
   config: {
     smtpHost: '',
@@ -385,7 +385,7 @@ const handleSubmit = async () => {
           channelType: form.channelType,
           enabled: form.enabled,
           config: JSON.stringify(form.config)
-        }
+        } as AlertChannel
 
         if (form.id) {
           await updateAlertChannel(form.id, submitData)

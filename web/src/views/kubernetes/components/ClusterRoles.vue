@@ -126,7 +126,13 @@ const loadClusterRoles = async () => {
   try {
     loading.value = true
     const roles = await getClusterRoles(props.clusterId)
-    roleList.value = roles || []
+    roleList.value = (roles || []).map(role => ({
+      name: role.name,
+      labels: role.labels || {},
+      age: role.age || '',
+      rules: role.rules || [],
+      isCustom: Boolean(role.isCustom)
+    }))
   } catch (error: any) {
     ElMessage.error(error.response?.data?.message || '加载集群角色失败')
   } finally {

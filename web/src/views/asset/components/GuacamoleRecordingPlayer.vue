@@ -167,7 +167,7 @@ const applyCanvasDrawImageCompatPatch = () => {
     return
   }
 
-  contextPrototype.drawImage = function patchedDrawImage(...args: Parameters<CanvasRenderingContext2D['drawImage']>) {
+  contextPrototype.drawImage = function patchedDrawImage(this: CanvasRenderingContext2D, ...args: any[]) {
     const source = args[0] as any
     const isCanvasSource = typeof HTMLCanvasElement !== 'undefined' && source instanceof HTMLCanvasElement
     const sourceWidth = Number(source?.width || 0)
@@ -178,8 +178,8 @@ const applyCanvasDrawImageCompatPatch = () => {
       return
     }
 
-    return originalDrawImage.apply(this, args)
-  }
+    return (originalDrawImage as any).apply(this, args)
+  } as CanvasRenderingContext2D['drawImage']
 
   runtimeWindow[CANVAS_DRAWIMAGE_PATCH_FLAG] = true
 }

@@ -490,8 +490,8 @@ const handleEditForm = async (row: ConfigMapInfo) => {
       namespace: configMap.metadata?.namespace || '',
       data: configMap.data ? Object.entries(configMap.data).map(([key, value]) => ({ key, value: String(value) })) : [],
       binaryData: configMap.binaryData ? Object.entries(configMap.binaryData).map(([key, value]) => ({ key, value: String(value) })) : [],
-      labels: configMap.metadata?.labels ? Object.entries(configMap.metadata.labels).map(([key, value]) => ({ key, value })) : [],
-      annotations: configMap.metadata?.annotations ? Object.entries(configMap.metadata.annotations).map(([key, value]) => ({ key, value })) : []
+      labels: configMap.metadata?.labels ? Object.entries(configMap.metadata.labels).map(([key, value]) => ({ key, value: String(value) })) : [],
+      annotations: configMap.metadata?.annotations ? Object.entries(configMap.metadata.annotations).map(([key, value]) => ({ key, value: String(value) })) : []
     }
 
 

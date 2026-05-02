@@ -14,6 +14,23 @@ type InstanceRepo interface {
 	ListEnabled(ctx context.Context) ([]*DatabaseInstance, error)
 }
 
+type InstanceReplicaRepo interface {
+	Create(ctx context.Context, item *DatabaseInstanceReplica) error
+	Update(ctx context.Context, item *DatabaseInstanceReplica) error
+	GetByID(ctx context.Context, id uint) (*DatabaseInstanceReplica, error)
+	GetByReplicaInstanceID(ctx context.Context, replicaInstanceID uint) (*DatabaseInstanceReplica, error)
+	UpsertByReplicaInstance(ctx context.Context, item *DatabaseInstanceReplica) (*DatabaseInstanceReplica, error)
+	List(ctx context.Context, req *DatabaseInstanceReplicaListRequest) ([]*DatabaseInstanceReplica, int64, error)
+}
+
+type ReplicationCheckRepo interface {
+	Create(ctx context.Context, item *DatabaseReplicationCheck) error
+	Update(ctx context.Context, item *DatabaseReplicationCheck) error
+	GetByID(ctx context.Context, id uint) (*DatabaseReplicationCheck, error)
+	LatestByInstanceID(ctx context.Context, instanceID uint) (*DatabaseReplicationCheck, error)
+	List(ctx context.Context, req *DatabaseReplicationCheckListRequest) ([]*DatabaseReplicationCheck, int64, error)
+}
+
 type DatabasePermissionRepo interface {
 	HasAnyRules(ctx context.Context) (bool, error)
 	IsAdmin(ctx context.Context, userID uint) (bool, error)

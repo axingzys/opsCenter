@@ -527,9 +527,9 @@ const loadHosts = async () => {
 // 加载集群列表
 const loadClusters = async () => {
   try {
-    const res = await getClusterList()
+    const res = await getClusterList() as any
     // request.ts 拦截器已解包，res 直接是 data 内容
-    clusters.value = res.list || res || []
+    clusters.value = Array.isArray(res) ? res : (res.list || [])
   } catch (error) {
     console.error('获取集群列表失败:', error)
   }

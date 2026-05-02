@@ -541,13 +541,16 @@ const handleSaveChannels = async () => {
 
     // 获取当前已保存的通道关联
     const currentRelations = await listReceiverChannels(receiverId)
-    const currentChannelIds = new Set(currentRelations.map((r: any) => r.channelId))
+    const currentChannelIds = new Set<number>(
+      (currentRelations as any[]).map((r: any) => Number(r.channelId)).filter(Number.isFinite)
+    )
 
     // 新选中的通道
-    const newChannelIds = new Set(
+    const newChannelIds = new Set<number>(
       Array.from(selectedReceiverChannels.value.entries())
         .filter(([_, isSelected]) => isSelected)
-        .map(([channelId]) => channelId)
+        .map(([channelId]) => Number(channelId))
+        .filter(Number.isFinite)
     )
 
     // 删除未选中的关联

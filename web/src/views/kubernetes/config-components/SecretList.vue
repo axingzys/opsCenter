@@ -519,8 +519,8 @@ const handleEditForm = async (row: SecretInfo) => {
       namespace: secret.metadata?.namespace || '',
       type: secret.type || 'Opaque',
       data: secret.data ? Object.entries(secret.data).map(([key, value]) => ({ key, value: String(value) })) : [],
-      labels: secret.metadata?.labels ? Object.entries(secret.metadata.labels).map(([key, value]) => ({ key, value })) : [],
-      annotations: secret.metadata?.annotations ? Object.entries(secret.metadata.annotations).map(([key, value]) => ({ key, value })) : []
+      labels: secret.metadata?.labels ? Object.entries(secret.metadata.labels).map(([key, value]) => ({ key, value: String(value) })) : [],
+      annotations: secret.metadata?.annotations ? Object.entries(secret.metadata.annotations).map(([key, value]) => ({ key, value: String(value) })) : []
     }
 
 

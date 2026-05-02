@@ -5043,7 +5043,7 @@ P3.10 full rehearsal suite passed: 20260502150802
 
 1. `go test ./internal/biz/database` 通过。
 2. `npm run build` 在 `web/` 目录通过。
-3. `npm run typecheck` 仍失败，失败点为项目既有大量 TypeScript 严格检查问题，集中在 monitor、nginx、ssl-cert、kubernetes、system 等模块；本次 P3.10 改造未引入新的前端类型检查基线。
+3. `npm run typecheck` 在 `web/` 目录通过；前端 typecheck CI 门禁通过 `.github/workflows/frontend-typecheck.yml` 开启。
 
 #### P3 总体验收
 
@@ -5056,26 +5056,377 @@ P3.10 full rehearsal suite passed: 20260502150802
 
 ### P4：副本治理和误操作事故剧本
 
-目标：把实时从库、延迟从库纳入灾备闭环。
+目标：把实时从库、延迟从库纳入数据库灾备闭环，让 OpsHub 能回答“这个主库有没有可用副本、有没有误删缓冲窗口、当前副本是否健康、事故发生时应该先看哪台延迟副本”。P4.1-P4.3 只读和生成指引，不执行暂停、切换、提升或重建；P4.4 才单独评审暂停 apply 执行。
 
-范围：
+P4 适配当前代码基线：
 
-1. 实时从库状态采集。
-2. 延迟从库状态采集。
-3. replication lag 展示。
-4. remaining delay 展示。
-5. relay log / WAL 积压展示。
-6. 误删事故操作指引。
-7. 暂停 apply 命令建议。
-8. 暂停 apply 执行动作预留权限和审批。
+1. 后端已有数据库实例、权限、审计、Runner Job、PITR、日志归档和恢复计划模型，P4 应继续放在 `internal/biz/database`、`internal/data/database`、`internal/service/database`、`internal/server/database` 这一组边界内。
+2. 前端数据库管理入口仍是 `web/src/views/asset/DatabaseManagement.vue`，建议在数据库管理页新增一级页签“副本治理”，或在 PITR 区域新增“副本状态 / 事故指引”子页签。
+3. MySQL/MariaDB 无法可靠地从主库侧直接列出所有 replica；首版应扫描 OpsHub 已登记的数据库实例，对每个实例执行 replica/standby 状态采集，再用 source host、source port、server UUID、application_name、system_identifier 等信息归并拓扑。
+4. PostgreSQL primary 侧 `pg_stat_replication` 只能看到当前连接的 standby；standby 侧 `pg_stat_wal_receiver`、`pg_is_in_recovery()`、`pg_last_wal_replay_lsn()`、`pg_last_xact_replay_timestamp()` 能补齐当前实例角色和 replay 状态。
+5. 延迟副本 remaining delay 不是所有引擎都能精确给出。MySQL/MariaDB 可优先使用 `SQL_Remaining_Delay`；PostgreSQL 需要结合 `recovery_min_apply_delay`、replay timestamp 和主备时间差做近似展示，并明确标注估算。
+
+#### P4 数据模型
+
+新增 `database_instance_replicas`，记录 OpsHub 归并后的副本关系。
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 主键 |
+| `primary_instance_id` | 推断或人工绑定的主库实例 |
+| `replica_instance_id` | 从库 / standby 实例 |
+| `engine` | `mysql / mariadb / postgresql` |
+| `replica_role` | `realtime_replica / delayed_replica / standby / unknown` |
+| `source_host` / `source_port` | MySQL/MariaDB source host/port 或 PostgreSQL primary conninfo 摘要 |
+| `source_server_uuid` | MySQL/MariaDB source UUID，可选 |
+| `pg_system_identifier` | PostgreSQL cluster system identifier，可选 |
+| `application_name` | PostgreSQL standby application_name，可选 |
+| `configured_delay_seconds` | 配置延迟，MySQL `SQL_Delay` / PostgreSQL `recovery_min_apply_delay` |
+| `discovery_source` | `replica_status / primary_stat / manual / inferred` |
+| `status` | `healthy / warning / critical / unknown` |
+| `last_check_id` | 最近一次检查记录 |
+| `last_checked_at` | 最近检查时间 |
+| `last_error` | 最近错误摘要 |
+
+新增 `database_replication_checks`，保存每次采集的原始和标准化状态。
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 主键 |
+| `instance_id` | 被采集实例 |
+| `replica_id` | 归并后的副本关系，可为空 |
+| `engine` | 数据库类型 |
+| `role_detected` | `primary / replica / standby / unknown` |
+| `source_instance_id` | 推断来源实例，可为空 |
+| `replica_io_running` | MySQL/MariaDB IO 线程状态 |
+| `replica_sql_running` | MySQL/MariaDB SQL apply 线程状态 |
+| `seconds_behind_source` | MySQL/MariaDB replication lag |
+| `configured_delay_seconds` | 配置延迟 |
+| `remaining_delay_seconds` | 剩余延迟 |
+| `relay_log_bytes` | relay log 积压，能采集时记录 |
+| `pg_write_lag_ms` / `pg_flush_lag_ms` / `pg_replay_lag_ms` | PostgreSQL primary 侧 lag |
+| `pg_last_wal_replay_lsn` | PostgreSQL standby 最近 replay LSN |
+| `pg_last_xact_replay_timestamp` | PostgreSQL standby 最近 replay 事务时间 |
+| `wal_backlog_bytes` | PostgreSQL WAL 积压估算，能采集时记录 |
+| `health_status` | `healthy / warning / critical / unknown` |
+| `risk_flags_json` | 风险标记数组 |
+| `raw_status_json` | 原始采集结果，脱敏后保存 |
+| `checked_at` | 检查时间 |
+| `error_message` | 错误 |
+
+新增 `database_replica_incident_guides`，记录误删事故指引。
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 主键 |
+| `incident_no` | 事故编号 |
+| `primary_instance_id` | 事故主库 |
+| `preferred_replica_id` | 推荐检查的延迟副本 |
+| `incident_time` | 事故发生时间 |
+| `incident_type` | `delete / update / release / other` |
+| `affected_objects` | 影响表、库或 SQL 摘要 |
+| `reason` | 用户填写的事故原因，必填 |
+| `can_intercept` | 当前延迟副本是否还有机会截停 |
+| `replay_time` | 当前 replay/apply 时间 |
+| `remaining_delay_seconds` | 剩余保护窗口 |
+| `guide_markdown` | 生成的操作指引 |
+| `command_templates_json` | 暂停 apply 命令模板，只展示不执行 |
+| `fallback_plan_json` | PITR 兜底建议 |
+| `operator_id` / `operator_name` | 操作人 |
+| `created_at` | 创建时间 |
+
+P4.4 如进入执行阶段，再新增 `database_replica_actions`，专门记录 pause/resume apply 操作。
+
+#### P4 API 草案
+
+副本发现和状态：
+
+```text
+GET  /api/v1/databases/instances/{id}/replicas
+GET  /api/v1/databases/instances/{id}/replication-status
+POST /api/v1/databases/instances/{id}/replication-check
+GET  /api/v1/databases/replicas
+GET  /api/v1/databases/replication-checks
+```
+
+事故指引：
+
+```text
+POST /api/v1/databases/replica-incident-guides
+GET  /api/v1/databases/replica-incident-guides
+GET  /api/v1/databases/replica-incident-guides/{id}
+```
+
+P4.4 执行动作，先预留，不在 P4.1-P4.3 实现：
+
+```text
+POST /api/v1/databases/replicas/{id}/pause-apply
+POST /api/v1/databases/replicas/{id}/resume-apply
+```
+
+#### P4 权限和审计
+
+新增权限：
+
+```text
+database:replica:view
+database:replica:check
+database:replica:incident-guide
+database:replica:pause-apply
+database:replica:resume-apply
+```
+
+P4.1-P4.3 只需要 `view/check/incident-guide`。`pause-apply/resume-apply` 只在 P4.4 单独启用。
+
+新增审计动作：
+
+```text
+replica_status_view
+replica_check_run
+replica_incident_guide
+replica_pause_apply
+replica_resume_apply
+```
+
+审计必须记录实例、操作人、采集来源、事故编号、用户填写原因、生成的命令模板和执行结果摘要。P4.1-P4.3 不记录任何已执行暂停命令，因为它们不执行命令。
+
+#### P4.1：副本发现和状态展示
+
+目标：先知道 OpsHub 已登记数据库实例里哪些是主库、实时从库、延迟从库或 PostgreSQL standby，并展示它们是否健康。
+
+后端采集：
+
+1. MySQL/MariaDB：
+   - 优先执行 `SHOW REPLICA STATUS`。
+   - 兼容旧版本 `SHOW SLAVE STATUS`。
+   - 读取 `Source_Host` / `Master_Host`、`Source_Port` / `Master_Port`。
+   - 读取 `Seconds_Behind_Source` / `Seconds_Behind_Master`。
+   - 读取 `SQL_Delay`、`SQL_Remaining_Delay`。
+   - 读取 `Replica_IO_Running` / `Slave_IO_Running`。
+   - 读取 `Replica_SQL_Running` / `Slave_SQL_Running`。
+   - 读取 `Retrieved_Gtid_Set`、`Executed_Gtid_Set`、`Relay_Log_File`、`Relay_Log_Pos`，能拿到时记录。
+2. PostgreSQL primary：
+   - 执行 `SELECT * FROM pg_stat_replication`。
+   - 采集 `application_name`、`client_addr`、`state`、`sync_state`、`write_lag`、`flush_lag`、`replay_lag`、`sent_lsn`、`write_lsn`、`flush_lsn`、`replay_lsn`。
+3. PostgreSQL standby：
+   - 执行 `SELECT pg_is_in_recovery()` 判断角色。
+   - 读取 `pg_stat_wal_receiver`。
+   - 读取 `pg_last_wal_receive_lsn()`、`pg_last_wal_replay_lsn()`、`pg_last_xact_replay_timestamp()`。
+   - 执行 `SHOW recovery_min_apply_delay`，能读取时映射为 configured delay。
+4. 归并逻辑：
+   - MySQL/MariaDB 先按 source host/port 匹配已登记实例；有 server UUID 时优先 UUID。
+   - PostgreSQL 先按 `pg_system_identifier`、primary conninfo、host/port、application_name 归并。
+   - 匹配不到主库时仍保存 replica 状态，但 `primary_instance_id` 为空，前端显示“来源未登记或无法匹配”。
+
+前端内容：
+
+1. 数据库管理新增“副本治理”页签。
+2. 首屏展示副本关系表：
+   - 主库实例。
+   - 副本实例。
+   - 引擎。
+   - 角色：实时 / 延迟 / standby / 未知。
+   - 复制状态。
+   - lag。
+   - remaining delay。
+   - replay/apply 时间。
+   - 最近检查时间。
+   - 最近错误。
+3. 支持手动刷新单实例和全量刷新。
+4. 异常状态用明确标签展示：
+   - IO 线程异常。
+   - SQL/apply 线程异常。
+   - lag 过大。
+   - 来源主库未匹配。
+   - PostgreSQL timeline/system identifier 不明确。
 
 验收：
 
-1. 能识别一个实例是否存在延迟副本。
-2. 能展示延迟配置和实际 apply/replay 时间。
-3. 用户可以生成误删事故指引。
-4. 指引生成写入审计。
-5. 第一版不会在未授权情况下自动暂停副本 apply。
+1. 能识别 MySQL/MariaDB 从库。
+2. 能识别 PostgreSQL standby。
+3. 能展示健康、异常、延迟过大和来源未匹配。
+4. 不执行任何 pause、resume、promote、failover、切换动作。
+5. 原始状态脱敏后可在详情中查看，便于排障。
+
+P4.1 已落地内容：
+
+1. 后端新增 `database_instance_replicas` 和 `database_replication_checks` 自动迁移模型。
+2. 后端新增只读 API：
+   - `GET /api/v1/databases/replicas`
+   - `GET /api/v1/databases/replication-checks`
+   - `GET /api/v1/databases/instances/{id}/replicas`
+   - `GET /api/v1/databases/instances/{id}/replication-status`
+   - `POST /api/v1/databases/instances/{id}/replication-check`
+3. MySQL/MariaDB 采集优先 `SHOW REPLICA STATUS`，失败后兼容 `SHOW SLAVE STATUS`；采集 IO/SQL 线程、source host/port、lag、configured delay、remaining delay、GTID 和 relay 摘要。
+4. PostgreSQL 采集使用 `pg_is_in_recovery()` 区分 primary/standby；primary 侧读取 `pg_stat_replication`，standby 侧读取 `pg_stat_wal_receiver`、`pg_last_wal_receive_lsn()`、`pg_last_wal_replay_lsn()`、`pg_last_xact_replay_timestamp()` 和 `recovery_min_apply_delay`。
+5. 副本关系归并按已登记实例 host/port 推断主库；匹配不到仍保留采集记录，并在 UI 显示“来源未匹配”。
+6. 原始采集结果写入 `raw_status_json` 前会对 `password` / `conninfo password=` 做脱敏。
+7. 前端新增“副本治理”页签，包含副本关系表、最近采集表、单实例采集、全量采集和原始状态详情。
+8. 新增 UI 权限 `database:replica:view`、`database:replica:check`，并纳入 admin 菜单初始化。
+9. P4.1 仍然只读；代码中没有实现 pause/resume/promote/failover/switchover 路由或命令。
+
+#### P4.2：延迟副本监控和风险提示
+
+目标：把延迟副本变成可见的误操作保护能力，让用户能一眼看到当前库是否还有“误删缓冲窗口”。
+
+识别规则：
+
+1. MySQL/MariaDB：
+   - `SQL_Delay > 0` 判定为 delayed replica。
+   - `SQL_Remaining_Delay > 0` 表示当前还有剩余保护窗口。
+   - `Replica_SQL_Running != Yes` 时必须标记 apply 异常。
+2. PostgreSQL：
+   - `recovery_min_apply_delay > 0` 判定为 delayed standby。
+   - `pg_last_xact_replay_timestamp()` 与当前时间、配置延迟结合估算保护窗口。
+   - standby 未处于 recovery 状态时必须标记角色异常。
+
+阈值配置：
+
+1. `lag_warning_seconds`：默认 300。
+2. `lag_critical_seconds`：默认 1800。
+3. `remaining_delay_warning_seconds`：默认 300。
+4. `relay_log_backlog_warning_bytes`：可选。
+5. `wal_backlog_warning_bytes`：可选。
+
+风险提示：
+
+1. 没有延迟副本：当前主库没有短窗口误删保护。
+2. 延迟副本已追上：当前 remaining delay 为 0，无法截停刚才的误操作。
+3. apply 线程异常：副本可能已经不可用，需先排障。
+4. lag 过大：副本数据太旧，回填风险升高。
+5. relay log / WAL 积压过大：磁盘和恢复窗口存在风险。
+6. 主从时钟不一致：PostgreSQL remaining delay 估算可能不可靠。
+
+前端内容：
+
+1. 在副本治理页增加“误操作保护窗口”卡片。
+2. 对每个主库展示：
+   - 是否有延迟副本。
+   - 最佳延迟副本。
+   - configured delay。
+   - remaining delay。
+   - replay/apply time。
+   - 当前风险。
+3. 提供“生成事故指引”入口。
+
+验收：
+
+1. 用户能看到每个主库是否有延迟副本。
+2. 用户能看到剩余保护窗口和 replay/apply 时间。
+3. 延迟副本不健康时有明确风险提示。
+4. 所有状态只读，不触发高风险命令。
+
+#### P4.3：误删事故指引
+
+目标：发生误删、误更新或错误发布时，OpsHub 先生成可审计的操作剧本，指导用户判断是否还能通过延迟副本截停；如果不能，则提示转 PITR 兜底。
+
+输入：
+
+1. 事故实例。
+2. 事故时间。
+3. 事故类型：误删 / 误更新 / 错误发布 / 其他。
+4. 影响库、表、SQL 摘要或业务对象。
+5. 事故原因，必填。
+6. 期望恢复方式：导出回填 / 整库回滚 / 暂不确定。
+
+输出：
+
+1. 推荐立即检查哪个延迟副本。
+2. 当前延迟副本 replay/apply 时间。
+3. 当前 remaining delay。
+4. 是否还有机会截停。
+5. MySQL/MariaDB 暂停 apply 命令模板：
+   - MySQL 8+：`STOP REPLICA SQL_THREAD;`
+   - MySQL 旧版：`STOP SLAVE SQL_THREAD;`
+6. PostgreSQL 暂停 replay 命令模板：
+   - `SELECT pg_wal_replay_pause();`
+7. 导出/回填建议：
+   - 先只读连接延迟副本。
+   - 校验误操作是否尚未 replay。
+   - 导出影响表或影响行。
+   - 回填前先在生产执行预检和审计。
+8. PITR 兜底建议：
+   - 选择事故前时间点。
+   - 生成 PITR 恢复计划。
+   - 恢复到隔离库。
+   - 执行校验 SQL。
+   - 导出缺失对象或准备整体切换。
+
+指引格式：
+
+1. 页面详情。
+2. 可复制 Markdown。
+3. 写入 `database_replica_incident_guides.guide_markdown`。
+4. 写入审计 `replica_incident_guide`。
+
+权限边界：
+
+1. 只需要 `database:replica:incident-guide`。
+2. 不需要 `database:replica:pause-apply`。
+3. 不自动执行命令。
+4. 命令模板必须标注“需在确认目标是 replica/standby 后执行”。
+
+验收：
+
+1. 用户必须填写事故原因才能生成。
+2. 指引中明确显示是否还有截停机会。
+3. 指引写入审计。
+4. 指引能关联最近一次 replication check。
+5. 不执行任何 pause/resume 命令。
+
+#### P4.4：暂停 apply 执行，单独评审
+
+目标：在 P4.1-P4.3 稳定后，再允许 OpsHub 通过 Runner 执行 pause/resume apply。这个阶段风险最高，必须独立评审、独立权限、独立验收，不和只读监控混在一起做。
+
+新增权限：
+
+```text
+database:replica:pause-apply
+database:replica:resume-apply
+```
+
+执行前置条件：
+
+1. 目标实例必须被最近一次检查确认是 replica/standby。
+2. 目标实例不能是 primary。
+3. 最近检查时间不能超过阈值，例如 60 秒。
+4. 用户必须输入事故编号。
+5. 用户必须输入暂停或恢复原因。
+6. 用户必须确认影响范围。
+7. Runner 必须在允许主机和允许命令白名单内。
+
+命令白名单：
+
+1. MySQL 8+ pause：`STOP REPLICA SQL_THREAD;`
+2. MySQL 8+ resume：`START REPLICA SQL_THREAD;`
+3. MySQL 旧版 pause：`STOP SLAVE SQL_THREAD;`
+4. MySQL 旧版 resume：`START SLAVE SQL_THREAD;`
+5. PostgreSQL pause：`SELECT pg_wal_replay_pause();`
+6. PostgreSQL resume：`SELECT pg_wal_replay_resume();`
+
+执行流程：
+
+```text
+1. 用户从事故指引或副本详情进入 pause/resume。
+2. 后端重新加载最近 replication check。
+3. 校验目标不是 primary。
+4. 校验权限和二次确认。
+5. 生成 Runner Job，allowed_command 固定为 replica_pause_apply 或 replica_resume_apply。
+6. Runner 执行白名单命令。
+7. 执行后立即重新采集 replication status。
+8. 保存前后状态、stdout/stderr 摘要和审计。
+9. 前端显示“apply 已暂停 / 已恢复 / 执行失败”。
+```
+
+验收：
+
+1. 只能对确认是 replica/standby 的实例执行。
+2. 不能对 primary 执行。
+3. 所有命令必须来自白名单模板，不能输入任意 SQL。
+4. 执行失败能保留 stdout/stderr 摘要。
+5. 前端有明显“已暂停 apply”状态。
+6. 恢复 apply 也必须审计。
+7. P4.4 上线前必须有真实 MySQL/MariaDB 和 PostgreSQL standby 演练。
 
 ## 迁移策略
 

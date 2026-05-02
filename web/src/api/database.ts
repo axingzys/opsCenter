@@ -28,6 +28,21 @@ export interface DatabaseInstancePayload {
   remark?: string
 }
 
+export interface DatabaseInstanceResult extends DatabaseInstancePayload {
+  id: number
+  dbTypeText: string
+  engine: string
+  version: string
+  endpoint: string
+  status: 'enabled' | 'disabled'
+  statusText: string
+  lastTestAt?: string
+  lastSyncAt?: string
+  permissions?: number
+  createdAt: string
+  updatedAt: string
+}
+
 export const DATABASE_PERMISSION = {
   VIEW: 1,
   QUERY: 2,
@@ -726,6 +741,76 @@ export interface DatabaseBarmanServerResult {
   updatedAt: string
 }
 
+export interface DatabaseInstanceReplicaResult {
+  id: number
+  primaryInstanceId: number
+  primaryInstanceName: string
+  primaryEndpoint: string
+  replicaInstanceId: number
+  replicaInstanceName: string
+  replicaEndpoint: string
+  engine: string
+  engineText: string
+  replicaRole: string
+  replicaRoleText: string
+  sourceHost: string
+  sourcePort: number
+  sourceServerUuid?: string
+  pgSystemIdentifier?: string
+  applicationName?: string
+  configuredDelaySeconds: number
+  discoverySource: string
+  discoverySourceText: string
+  status: string
+  statusText: string
+  lastCheckId: number
+  lastCheckedAt: string
+  lastError: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseReplicationCheckResult {
+  id: number
+  instanceId: number
+  instanceName: string
+  instanceEndpoint: string
+  replicaId: number
+  engine: string
+  engineText: string
+  roleDetected: string
+  roleDetectedText: string
+  sourceInstanceId: number
+  sourceInstanceName: string
+  replicaIoRunning: string
+  replicaSqlRunning: string
+  secondsBehindSource: number
+  configuredDelaySeconds: number
+  remainingDelaySeconds: number
+  relayLogBytes: number
+  pgWriteLagMs: number
+  pgFlushLagMs: number
+  pgReplayLagMs: number
+  pgLastWalReplayLsn: string
+  pgLastXactReplayTimestamp: string
+  walBacklogBytes: number
+  healthStatus: string
+  healthStatusText: string
+  riskFlagsJson: string
+  rawStatusJson: string
+  checkedAt: string
+  errorMessage: string
+  createdAt: string
+}
+
+export interface DatabaseReplicationStatusResult {
+  instance?: DatabaseInstanceResult
+  replicas: DatabaseInstanceReplicaResult[]
+  checks: DatabaseReplicationCheckResult[]
+  lastCheck?: DatabaseReplicationCheckResult
+  message: string
+}
+
 export interface DatabaseBackupRunResult {
   taskId: number
   taskName: string
@@ -1249,6 +1334,27 @@ export const getDatabaseInspectionReport = (id: number) =>
 export const generateDatabaseInspectionReport = (data: { instanceId: number }) =>
   request.post('/api/v1/databases/inspection-reports', data)
 
+export const listDatabaseReplicas = (params?: {
+  page?: number
+  pageSize?: number
+  instanceId?: number
+  primaryInstanceId?: number
+  replicaInstanceId?: number
+  engine?: string
+  replicaRole?: string
+  status?: string
+}) => request.get('/api/v1/databases/replicas', { params })
+
+export const listDatabaseReplicationChecks = (params?: {
+  page?: number
+  pageSize?: number
+  instanceId?: number
+  replicaId?: number
+  engine?: string
+  roleDetected?: string
+  healthStatus?: string
+}) => request.get('/api/v1/databases/replication-checks', { params })
+
 export const createDatabaseInstance = (data: DatabaseInstancePayload) =>
   request.post('/api/v1/databases/instances', data)
 
@@ -1305,6 +1411,19 @@ export const listDatabaseSlowQueries = (id: number, params?: DatabaseDiagnosisLi
 
 export const getDatabaseTopology = (id: number) =>
   request.get(`/api/v1/databases/instances/${id}/topology`)
+
+export const listDatabaseInstanceReplicas = (id: number, params?: {
+  page?: number
+  pageSize?: number
+  status?: string
+  replicaRole?: string
+}) => request.get(`/api/v1/databases/instances/${id}/replicas`, { params })
+
+export const getDatabaseReplicationStatus = (id: number) =>
+  request.get(`/api/v1/databases/instances/${id}/replication-status`)
+
+export const checkDatabaseReplication = (id: number) =>
+  request.post(`/api/v1/databases/instances/${id}/replication-check`)
 
 export const getDatabaseCapacityTrend = (id: number, params?: { range?: string; topLimit?: number }) =>
   request.get(`/api/v1/databases/instances/${id}/capacity-trend`, { params })

@@ -147,7 +147,7 @@ const cleanStackOutput = computed(() => {
   if (!stackOutput.value) return ''
   return stackOutput.value
     .replace(/\x1b\[[0-9;]*m/g, '')
-    .replace(/\033\[[0-9;]*m/g, '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
     .replace(/\[\d+;\d+m/g, '')
     .replace(/\[\d+m/g, '')
     .replace(/\[0m/g, '')
@@ -197,7 +197,7 @@ const parseThreadListOutput = (output: string): ThreadInfo[] => {
   for (const line of lines) {
     const trimmedLine = line.trim()
       .replace(/\x1b\[[0-9;]*m/g, '')
-      .replace(/\033\[[0-9;]*m/g, '')
+      .replace(/\x1b\[[0-9;]*m/g, '')
 
     if (!trimmedLine || trimmedLine.startsWith('[INFO]') || trimmedLine.startsWith('[arthas@')) {
       continue

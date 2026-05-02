@@ -3,16 +3,16 @@ import request from '@/utils/request'
 export interface DomainMonitor {
   id?: number
   domain: string
-  status: string
-  responseTime: number
-  sslValid: boolean
-  sslExpiry: string
+  status?: string
+  responseTime?: number
+  sslValid?: boolean
+  sslExpiry?: string
   checkInterval: number
   enableSSL: boolean
   enableAlert: boolean
   responseThreshold?: number
   sslExpiryDays?: number
-  lastCheck: string
+  lastCheck?: string
   nextCheck?: string
   createdAt?: string
   updatedAt?: string

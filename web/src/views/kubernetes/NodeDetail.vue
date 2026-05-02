@@ -455,8 +455,8 @@ const loadNodeMetrics = async () => {
       headers: { Authorization: `Bearer ${token}` }
     })
     const metrics = response.data.data
-    cpuUsage.value = metrics.cpuUsage ? (metrics.cpuUsage * 100).toFixed(1) : 0
-    memoryUsage.value = metrics.memoryUsage ? (metrics.memoryUsage * 100).toFixed(1) : 0
+    cpuUsage.value = metrics.cpuUsage ? Number((metrics.cpuUsage * 100).toFixed(1)) : 0
+    memoryUsage.value = metrics.memoryUsage ? Number((metrics.memoryUsage * 100).toFixed(1)) : 0
   } catch (error) {
   }
 }

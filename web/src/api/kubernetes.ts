@@ -465,14 +465,14 @@ export function createDefaultClusterRoles(clusterId: number) {
 /**
  * 创建默认命名空间角色（ClusterRole）
  */
-export function createDefaultNamespaceRoles(clusterId: number) {
+export function createDefaultNamespaceRoles(clusterId: number, namespace?: string) {
   return request<{
     created: string[]
     existing: string[]
   }>({
     url: '/api/v1/plugins/kubernetes/roles/create-defaults-namespace',
     method: 'post',
-    params: { clusterId }
+    params: { clusterId, namespace }
   })
 }
 
@@ -578,7 +578,7 @@ export function getRoleBoundUsers(clusterId: number, roleName: string, roleNames
 /**
  * 获取可绑定的用户列表
  */
-export function getAvailableUsers(keyword: string, page: number, pageSize: number) {
+export function getAvailableUsers(keyword: string, page: number = 1, pageSize: number = 20) {
   return request<{
     list: AvailableUser[]
     total: number
@@ -2131,4 +2131,3 @@ export function deletePodDisruptionBudget(clusterId: number, namespace: string, 
     data: { clusterId }
   })
 }
-

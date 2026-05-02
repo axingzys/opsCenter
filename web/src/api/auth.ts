@@ -18,6 +18,9 @@ export interface RegisterParams {
 export interface LoginResponse {
   token: string
   user: any
+  requireMfa?: boolean
+  mfaToken?: string
+  requireSetup?: boolean
 }
 
 // 登录

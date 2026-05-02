@@ -269,7 +269,7 @@ let ws: WebSocket | null = null
 const cleanOutput = computed(() => {
   return rawOutput.value
     .replace(/\x1b\[[0-9;]*m/g, '')
-    .replace(/\033\[[0-9;]*m/g, '')
+    .replace(/\x1b\[[0-9;]*m/g, '')
     .replace(/\[\d+;\d+m/g, '')
     .replace(/\[\d+m/g, '')
     .replace(/\[0m/g, '')
@@ -310,7 +310,7 @@ const parseMonitorOutput = (content: string) => {
   for (const line of lines) {
     const trimmedLine = line.trim()
       .replace(/\x1b\[[0-9;]*m/g, '')
-      .replace(/\033\[[0-9;]*m/g, '')
+      .replace(/\x1b\[[0-9;]*m/g, '')
 
     // 跳过表头和空行
     if (!trimmedLine || trimmedLine.startsWith('timestamp') ||

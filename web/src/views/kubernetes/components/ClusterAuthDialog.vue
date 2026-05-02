@@ -481,7 +481,7 @@ const handleDownloadKubeConfig = () => {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `kubeconfig-${currentUser?.username || 'user'}-${props.cluster?.name || 'cluster'}.yaml`
+  a.download = `kubeconfig-${currentUser.value?.username || 'user'}-${props.cluster?.name || 'cluster'}.yaml`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)

@@ -224,7 +224,7 @@ const searchForm = reactive({
 })
 
 // 日期范围
-const dateRange = ref<[string, string]>([])
+const dateRange = ref<[string, string] | []>([])
 
 // 监听日期范围变化
 watch(dateRange, (newVal) => {

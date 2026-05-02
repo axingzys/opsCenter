@@ -435,7 +435,7 @@ const loadHostList = async () => {
 const loadTemplates = async () => {
   templatesLoading.value = true
   try {
-    const response = await getAllJobTemplates()
+    const response: any = await getAllJobTemplates()
     if (Array.isArray(response)) {
       allTemplates.value = response
     } else if (response.list && Array.isArray(response.list)) {

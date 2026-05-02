@@ -64,6 +64,8 @@ type UseCase struct {
 	runnerHostRepo         RunnerHostRepo
 	runnerJobRepo          RunnerJobRepo
 	barmanServerRepo       BarmanServerRepo
+	instanceReplicaRepo    InstanceReplicaRepo
+	replicationCheckRepo   ReplicationCheckRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
 	writePolicyResolver    func(ctx context.Context) (*DatabaseWritePolicy, error)
@@ -145,6 +147,17 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	uc.runnerHostRepo = runnerHostRepo
 	uc.runnerJobRepo = runnerJobRepo
 	uc.barmanServerRepo = barmanServerRepo
+}
+
+func (uc *UseCase) SetReplicaGovernanceRepos(
+	instanceReplicaRepo InstanceReplicaRepo,
+	replicationCheckRepo ReplicationCheckRepo,
+) {
+	if uc == nil {
+		return
+	}
+	uc.instanceReplicaRepo = instanceReplicaRepo
+	uc.replicationCheckRepo = replicationCheckRepo
 }
 
 type DatabaseInstanceRequest struct {
@@ -236,6 +249,31 @@ type DatabaseInstancePermissionListRequest struct {
 	RoleID     uint   `form:"roleId"`
 	InstanceID uint   `form:"instanceId"`
 	Keyword    string `form:"keyword"`
+}
+
+type DatabaseInstanceReplicaListRequest struct {
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	InstanceID         uint   `form:"instanceId"`
+	PrimaryInstanceID  uint   `form:"primaryInstanceId"`
+	ReplicaInstanceID  uint   `form:"replicaInstanceId"`
+	Engine             string `form:"engine"`
+	ReplicaRole        string `form:"replicaRole"`
+	Status             string `form:"status"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
+}
+
+type DatabaseReplicationCheckListRequest struct {
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	InstanceID         uint   `form:"instanceId"`
+	ReplicaID          uint   `form:"replicaId"`
+	Engine             string `form:"engine"`
+	RoleDetected       string `form:"roleDetected"`
+	HealthStatus       string `form:"healthStatus"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
 type DatabaseInstancePermissionRequest struct {
@@ -360,6 +398,76 @@ type DatabaseInstancePermissionVO struct {
 	Permissions  uint   `json:"permissions"`
 	CreatedAt    string `json:"createdAt"`
 	UpdatedAt    string `json:"updatedAt"`
+}
+
+type DatabaseInstanceReplicaVO struct {
+	ID                     uint   `json:"id"`
+	PrimaryInstanceID      uint   `json:"primaryInstanceId"`
+	PrimaryInstanceName    string `json:"primaryInstanceName"`
+	PrimaryEndpoint        string `json:"primaryEndpoint"`
+	ReplicaInstanceID      uint   `json:"replicaInstanceId"`
+	ReplicaInstanceName    string `json:"replicaInstanceName"`
+	ReplicaEndpoint        string `json:"replicaEndpoint"`
+	Engine                 string `json:"engine"`
+	EngineText             string `json:"engineText"`
+	ReplicaRole            string `json:"replicaRole"`
+	ReplicaRoleText        string `json:"replicaRoleText"`
+	SourceHost             string `json:"sourceHost"`
+	SourcePort             int    `json:"sourcePort"`
+	SourceServerUUID       string `json:"sourceServerUuid"`
+	PGSystemIdentifier     string `json:"pgSystemIdentifier"`
+	ApplicationName        string `json:"applicationName"`
+	ConfiguredDelaySeconds int    `json:"configuredDelaySeconds"`
+	DiscoverySource        string `json:"discoverySource"`
+	DiscoverySourceText    string `json:"discoverySourceText"`
+	Status                 string `json:"status"`
+	StatusText             string `json:"statusText"`
+	LastCheckID            uint   `json:"lastCheckId"`
+	LastCheckedAt          string `json:"lastCheckedAt"`
+	LastError              string `json:"lastError"`
+	CreatedAt              string `json:"createdAt"`
+	UpdatedAt              string `json:"updatedAt"`
+}
+
+type DatabaseReplicationCheckVO struct {
+	ID                        uint   `json:"id"`
+	InstanceID                uint   `json:"instanceId"`
+	InstanceName              string `json:"instanceName"`
+	InstanceEndpoint          string `json:"instanceEndpoint"`
+	ReplicaID                 uint   `json:"replicaId"`
+	Engine                    string `json:"engine"`
+	EngineText                string `json:"engineText"`
+	RoleDetected              string `json:"roleDetected"`
+	RoleDetectedText          string `json:"roleDetectedText"`
+	SourceInstanceID          uint   `json:"sourceInstanceId"`
+	SourceInstanceName        string `json:"sourceInstanceName"`
+	ReplicaIORunning          string `json:"replicaIoRunning"`
+	ReplicaSQLRunning         string `json:"replicaSqlRunning"`
+	SecondsBehindSource       int    `json:"secondsBehindSource"`
+	ConfiguredDelaySeconds    int    `json:"configuredDelaySeconds"`
+	RemainingDelaySeconds     int    `json:"remainingDelaySeconds"`
+	RelayLogBytes             int64  `json:"relayLogBytes"`
+	PGWriteLagMs              int64  `json:"pgWriteLagMs"`
+	PGFlushLagMs              int64  `json:"pgFlushLagMs"`
+	PGReplayLagMs             int64  `json:"pgReplayLagMs"`
+	PGLastWALReplayLSN        string `json:"pgLastWalReplayLsn"`
+	PGLastXactReplayTimestamp string `json:"pgLastXactReplayTimestamp"`
+	WALBacklogBytes           int64  `json:"walBacklogBytes"`
+	HealthStatus              string `json:"healthStatus"`
+	HealthStatusText          string `json:"healthStatusText"`
+	RiskFlagsJSON             string `json:"riskFlagsJson"`
+	RawStatusJSON             string `json:"rawStatusJson"`
+	CheckedAt                 string `json:"checkedAt"`
+	ErrorMessage              string `json:"errorMessage"`
+	CreatedAt                 string `json:"createdAt"`
+}
+
+type DatabaseReplicationStatusVO struct {
+	Instance  *DatabaseInstanceVO           `json:"instance,omitempty"`
+	Replicas  []*DatabaseInstanceReplicaVO  `json:"replicas"`
+	Checks    []*DatabaseReplicationCheckVO `json:"checks"`
+	LastCheck *DatabaseReplicationCheckVO   `json:"lastCheck,omitempty"`
+	Message   string                        `json:"message"`
 }
 
 type SupportedTypeVO struct {
@@ -2143,6 +2251,10 @@ func QueryAuditActionText(action string) string {
 		return "实例权限保存"
 	case DatabaseAuditActionPermissionDelete:
 		return "实例权限删除"
+	case DatabaseAuditActionReplicaStatusView:
+		return "副本状态查看"
+	case DatabaseAuditActionReplicaCheckRun:
+		return "副本状态采集"
 	default:
 		return strings.TrimSpace(action)
 	}
@@ -2188,6 +2300,10 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionPermissionUpsert
 	case DatabaseAuditActionPermissionDelete:
 		return DatabaseAuditActionPermissionDelete
+	case DatabaseAuditActionReplicaStatusView:
+		return DatabaseAuditActionReplicaStatusView
+	case DatabaseAuditActionReplicaCheckRun:
+		return DatabaseAuditActionReplicaCheckRun
 	default:
 		return strings.ToLower(strings.TrimSpace(action))
 	}

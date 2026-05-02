@@ -59,6 +59,8 @@ const (
 	DatabaseAuditActionInspectionGenerate = "inspection_generate"
 	DatabaseAuditActionPermissionUpsert   = "instance_permission_upsert"
 	DatabaseAuditActionPermissionDelete   = "instance_permission_delete"
+	DatabaseAuditActionReplicaStatusView  = "replica_status_view"
+	DatabaseAuditActionReplicaCheckRun    = "replica_check_run"
 
 	DatabaseBackupTypeLogical         = "logical"
 	DatabaseBackupTypeLogicalCustom   = "logical_custom"
@@ -240,6 +242,26 @@ const (
 
 	DatabaseInspectionReportManual = "manual"
 
+	DatabaseReplicaRoleRealtime = "realtime_replica"
+	DatabaseReplicaRoleDelayed  = "delayed_replica"
+	DatabaseReplicaRoleStandby  = "standby"
+	DatabaseReplicaRoleUnknown  = "unknown"
+
+	DatabaseReplicationRolePrimary = "primary"
+	DatabaseReplicationRoleReplica = "replica"
+	DatabaseReplicationRoleStandby = "standby"
+	DatabaseReplicationRoleUnknown = "unknown"
+
+	DatabaseReplicaHealthHealthy  = "healthy"
+	DatabaseReplicaHealthWarning  = "warning"
+	DatabaseReplicaHealthCritical = "critical"
+	DatabaseReplicaHealthUnknown  = "unknown"
+
+	DatabaseReplicaDiscoveryReplicaStatus = "replica_status"
+	DatabaseReplicaDiscoveryPrimaryStat   = "primary_stat"
+	DatabaseReplicaDiscoveryManual        = "manual"
+	DatabaseReplicaDiscoveryInferred      = "inferred"
+
 	DatabasePermissionView           uint = 1 << 0
 	DatabasePermissionQuery          uint = 1 << 1
 	DatabasePermissionExport         uint = 1 << 2
@@ -291,6 +313,61 @@ type DatabaseInstance struct {
 
 func (DatabaseInstance) TableName() string {
 	return "database_instances"
+}
+
+// DatabaseInstanceReplica 记录 OpsHub 归并后的数据库副本关系。
+type DatabaseInstanceReplica struct {
+	gorm.Model
+	PrimaryInstanceID      uint       `gorm:"column:primary_instance_id;index;comment:推断或人工绑定的主库实例ID" json:"primaryInstanceId"`
+	ReplicaInstanceID      uint       `gorm:"column:replica_instance_id;not null;uniqueIndex;index;comment:从库/standby实例ID" json:"replicaInstanceId"`
+	Engine                 string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
+	ReplicaRole            string     `gorm:"column:replica_role;type:varchar(30);index;default:'unknown';comment:realtime_replica/delayed_replica/standby/unknown" json:"replicaRole"`
+	SourceHost             string     `gorm:"column:source_host;type:varchar(255);comment:source host或primary conninfo摘要" json:"sourceHost"`
+	SourcePort             int        `gorm:"column:source_port;type:int;default:0;comment:source port" json:"sourcePort"`
+	SourceServerUUID       string     `gorm:"column:source_server_uuid;type:varchar(120);index;comment:MySQL source UUID" json:"sourceServerUuid"`
+	PGSystemIdentifier     string     `gorm:"column:pg_system_identifier;type:varchar(120);index;comment:PostgreSQL system identifier" json:"pgSystemIdentifier"`
+	ApplicationName        string     `gorm:"column:application_name;type:varchar(120);comment:PostgreSQL application_name" json:"applicationName"`
+	ConfiguredDelaySeconds int        `gorm:"column:configured_delay_seconds;type:int;default:0;comment:配置延迟秒数" json:"configuredDelaySeconds"`
+	DiscoverySource        string     `gorm:"column:discovery_source;type:varchar(30);index;default:'inferred';comment:发现来源" json:"discoverySource"`
+	Status                 string     `gorm:"type:varchar(30);index;default:'unknown';comment:健康状态" json:"status"`
+	LastCheckID            uint       `gorm:"column:last_check_id;index;comment:最近一次检查ID" json:"lastCheckId"`
+	LastCheckedAt          *time.Time `gorm:"column:last_checked_at;comment:最近检查时间" json:"lastCheckedAt,omitempty"`
+	LastError              string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误摘要" json:"lastError"`
+}
+
+func (DatabaseInstanceReplica) TableName() string {
+	return "database_instance_replicas"
+}
+
+// DatabaseReplicationCheck 保存一次副本状态采集的原始和标准化结果。
+type DatabaseReplicationCheck struct {
+	gorm.Model
+	InstanceID                uint       `gorm:"column:instance_id;not null;index;comment:被采集实例ID" json:"instanceId"`
+	ReplicaID                 uint       `gorm:"column:replica_id;index;comment:归并后的副本关系ID" json:"replicaId"`
+	Engine                    string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
+	RoleDetected              string     `gorm:"column:role_detected;type:varchar(30);index;default:'unknown';comment:primary/replica/standby/unknown" json:"roleDetected"`
+	SourceInstanceID          uint       `gorm:"column:source_instance_id;index;comment:推断来源实例ID" json:"sourceInstanceId"`
+	ReplicaIORunning          string     `gorm:"column:replica_io_running;type:varchar(30);comment:MySQL IO线程状态" json:"replicaIoRunning"`
+	ReplicaSQLRunning         string     `gorm:"column:replica_sql_running;type:varchar(30);comment:MySQL SQL线程状态" json:"replicaSqlRunning"`
+	SecondsBehindSource       int        `gorm:"column:seconds_behind_source;type:int;default:-1;comment:复制延迟秒数" json:"secondsBehindSource"`
+	ConfiguredDelaySeconds    int        `gorm:"column:configured_delay_seconds;type:int;default:0;comment:配置延迟秒数" json:"configuredDelaySeconds"`
+	RemainingDelaySeconds     int        `gorm:"column:remaining_delay_seconds;type:int;default:-1;comment:剩余延迟秒数" json:"remainingDelaySeconds"`
+	RelayLogBytes             int64      `gorm:"column:relay_log_bytes;type:bigint;default:0;comment:relay log积压估算" json:"relayLogBytes"`
+	PGWriteLagMs              int64      `gorm:"column:pg_write_lag_ms;type:bigint;default:0;comment:PostgreSQL write lag毫秒" json:"pgWriteLagMs"`
+	PGFlushLagMs              int64      `gorm:"column:pg_flush_lag_ms;type:bigint;default:0;comment:PostgreSQL flush lag毫秒" json:"pgFlushLagMs"`
+	PGReplayLagMs             int64      `gorm:"column:pg_replay_lag_ms;type:bigint;default:0;comment:PostgreSQL replay lag毫秒" json:"pgReplayLagMs"`
+	PGLastWALReplayLSN        string     `gorm:"column:pg_last_wal_replay_lsn;type:varchar(120);comment:standby最近replay LSN" json:"pgLastWalReplayLsn"`
+	PGLastXactReplayTimestamp *time.Time `gorm:"column:pg_last_xact_replay_timestamp;comment:standby最近replay事务时间" json:"pgLastXactReplayTimestamp,omitempty"`
+	WALBacklogBytes           int64      `gorm:"column:wal_backlog_bytes;type:bigint;default:0;comment:WAL积压估算" json:"walBacklogBytes"`
+	HealthStatus              string     `gorm:"column:health_status;type:varchar(30);index;default:'unknown';comment:健康状态" json:"healthStatus"`
+	RiskFlagsJSON             string     `gorm:"column:risk_flags_json;type:text;comment:风险标记JSON" json:"riskFlagsJson"`
+	RawStatusJSON             string     `gorm:"column:raw_status_json;type:text;comment:脱敏原始采集结果JSON" json:"rawStatusJson"`
+	CheckedAt                 *time.Time `gorm:"column:checked_at;index;comment:检查时间" json:"checkedAt,omitempty"`
+	ErrorMessage              string     `gorm:"column:error_message;type:varchar(1000);comment:错误信息" json:"errorMessage"`
+}
+
+func (DatabaseReplicationCheck) TableName() string {
+	return "database_replication_checks"
 }
 
 // DatabaseInstancePermission 角色到数据库实例的对象级权限。

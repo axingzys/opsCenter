@@ -10,15 +10,11 @@ export interface PluginMenuConfig {
 
 export interface PluginRouteConfig {
   path: string
-  name: string
-  component: () => Promise<any>
-  meta?: {
-    title?: string
-    icon?: string
-    hidden?: boolean
-    permission?: string
-    activeMenu?: string
-  }
+  name?: string
+  component?: any
+  components?: any
+  redirect?: string
+  meta?: Record<string, any>
   children?: PluginRouteConfig[]
 }
 

@@ -23,7 +23,7 @@
                   accept=".pem,.crt,.cer,.x509"
                   style="display: none"
                 />
-                <div class="upload-box" @click="$refs.certFileInput?.click()">
+                <div class="upload-box" @click="certFileInput?.click()">
                   <el-icon class="upload-icon"><DocumentCopy /></el-icon>
                   <div class="upload-text">
                     <div class="upload-title">点击选择证书文件或拖拽上传</div>
@@ -45,7 +45,7 @@
                   accept=".key,.pem"
                   style="display: none"
                 />
-                <div class="upload-box" @click="$refs.keyFileInput?.click()">
+                <div class="upload-box" @click="keyFileInput?.click()">
                   <el-icon class="upload-icon"><Key /></el-icon>
                   <div class="upload-text">
                     <div class="upload-title">点击选择私钥文件或拖拽上传</div>

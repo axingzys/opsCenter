@@ -1,4 +1,5 @@
 import type { Plugin } from './types'
+import type { RouteRecordRaw } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import router from '@/router'
 
@@ -64,7 +65,7 @@ class PluginManagerImpl {
       if (plugin.getRoutes) {
         const routes = plugin.getRoutes()
         routes.forEach(route => {
-          router.addRoute('Layout', route)
+          router.addRoute('Layout', route as RouteRecordRaw)
         })
       }
 
@@ -79,7 +80,7 @@ class PluginManagerImpl {
       if (plugin.getRoutes) {
         const routes = plugin.getRoutes()
         routes.forEach(route => {
-          router.addRoute('Layout', route)
+          router.addRoute('Layout', route as RouteRecordRaw)
         })
       }
 
