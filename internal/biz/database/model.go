@@ -319,7 +319,7 @@ func (DatabaseInstance) TableName() string {
 type DatabaseInstanceReplica struct {
 	gorm.Model
 	PrimaryInstanceID      uint       `gorm:"column:primary_instance_id;index;comment:推断或人工绑定的主库实例ID" json:"primaryInstanceId"`
-	ReplicaInstanceID      uint       `gorm:"column:replica_instance_id;not null;uniqueIndex;index;comment:从库/standby实例ID" json:"replicaInstanceId"`
+	ReplicaInstanceID      uint       `gorm:"column:replica_instance_id;not null;uniqueIndex:uk_database_instance_replicas_replica_instance_id;comment:从库/standby实例ID" json:"replicaInstanceId"`
 	Engine                 string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
 	ReplicaRole            string     `gorm:"column:replica_role;type:varchar(30);index;default:'unknown';comment:realtime_replica/delayed_replica/standby/unknown" json:"replicaRole"`
 	SourceHost             string     `gorm:"column:source_host;type:varchar(255);comment:source host或primary conninfo摘要" json:"sourceHost"`
