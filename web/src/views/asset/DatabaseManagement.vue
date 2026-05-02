@@ -2383,6 +2383,225 @@
                   />
                 </div>
               </el-tab-pane>
+
+              <el-tab-pane label="Barman Catalog" name="barmanCatalog">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-select
+                      v-model="barmanCatalogQuery.instanceId"
+                      placeholder="PostgreSQL实例"
+                      clearable
+                      filterable
+                      class="audit-search-input"
+                      @change="loadBarmanCatalogRecords"
+                    >
+                      <el-option v-for="item in postgresqlBackupInstances" :key="item.id" :label="item.name" :value="item.id" />
+                    </el-select>
+                    <el-select
+                      v-model="barmanCatalogQuery.backupEngine"
+                      placeholder="备份引擎"
+                      class="audit-select"
+                      @change="loadBarmanCatalogRecords"
+                    >
+                      <el-option label="Barman" value="barman" />
+                      <el-option label="pg_basebackup" value="pg_basebackup" />
+                      <el-option label="WAL-G (external)" value="walg" />
+                      <el-option label="pgBackRest (legacy)" value="pgbackrest" />
+                    </el-select>
+                    <el-select
+                      v-model="barmanCatalogQuery.status"
+                      placeholder="状态"
+                      clearable
+                      class="audit-select"
+                      @change="loadBarmanCatalogRecords"
+                    >
+                      <el-option label="成功" value="success" />
+                      <el-option label="执行中" value="running" />
+                      <el-option label="失败" value="failed" />
+                      <el-option label="已过期" value="expired" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetBarmanCatalogQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="barmanCatalogLoading" @click="loadBarmanCatalogRecords">刷新</el-button>
+                  </div>
+                </div>
+                <el-alert
+                  v-if="!barmanCatalogLoading && barmanCatalogRecords.length === 0"
+                  title="暂未同步到任何 PostgreSQL 物理备份记录。请在 Barman Server 页签触发『检查』和『同步』，或登记外部 WAL-G/pgBackRest 备份。"
+                  type="info"
+                  show-icon
+                  :closable="false"
+                  style="margin-bottom: 12px;"
+                />
+                <el-table :data="barmanCatalogRecords" v-loading="barmanCatalogLoading" stripe class="modern-table">
+                  <el-table-column label="备份ID" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="pitr-catalog-meta">
+                        <span class="restore-step-name">{{ row.externalBackupId || `#${row.id}` }}</span>
+                        <span v-if="row.externalServerName" class="muted-text">{{ row.externalServerName }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="实例" min-width="160">
+                    <template #default="{ row }">{{ row.instanceName || `#${row.instanceId}` }}</template>
+                  </el-table-column>
+                  <el-table-column label="引擎 / 范围" min-width="160">
+                    <template #default="{ row }">
+                      <div class="pitr-catalog-meta">
+                        <el-tag size="small" type="primary">{{ row.backupEngine || '-' }}</el-tag>
+                        <span class="muted-text">{{ row.backupScope || 'cluster' }} / {{ row.backupLevelText || row.backupLevel || '-' }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="100" align="center">
+                    <template #default="{ row }">
+                      <el-tag :type="backupStatusTag(row.status)" size="small">{{ row.statusText || row.status || '-' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="System Identifier" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.pgSystemIdentifier || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="Timeline" width="110" align="center">
+                    <template #default="{ row }">{{ row.timelineId || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="LSN 范围" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="pitr-catalog-meta">
+                        <span>{{ row.startLsn || '-' }} → {{ row.endLsn || '-' }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="WAL 范围" min-width="320" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="pitr-catalog-meta">
+                        <span>{{ row.walStart || '-' }}</span>
+                        <span class="muted-text">→ {{ row.walEnd || '-' }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="Manifest checksum" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <span v-if="row.backupManifestChecksum" class="muted-text">{{ row.backupManifestChecksum }}</span>
+                      <span v-else class="muted-text">-</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="可恢复窗口" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ recoverableWindowText(row) }}</template>
+                  </el-table-column>
+                  <el-table-column label="同步状态" width="120" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="barmanCatalogSyncTag(row).tag">{{ barmanCatalogSyncTag(row).text }}</el-tag>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="barmanCatalogQuery.page"
+                    v-model:page-size="barmanCatalogQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="barmanCatalogTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadBarmanCatalogRecords"
+                    @current-change="loadBarmanCatalogRecords"
+                  />
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="WAL 状态" name="walStatus">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-select
+                      v-model="walStatusQuery.streamId"
+                      placeholder="归档流"
+                      clearable
+                      filterable
+                      class="audit-search-input"
+                      @change="loadWalStatusArchives"
+                    >
+                      <el-option v-for="item in walLogArchiveStreamOptions" :key="item.id" :label="item.label" :value="item.id" />
+                    </el-select>
+                    <el-select
+                      v-model="walStatusQuery.instanceId"
+                      placeholder="实例"
+                      clearable
+                      filterable
+                      class="audit-select"
+                      @change="loadWalStatusArchives"
+                    >
+                      <el-option v-for="item in postgresqlBackupInstances" :key="item.id" :label="item.name" :value="item.id" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetWalStatusQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="walStatusLoading" @click="loadWalStatusArchives">刷新</el-button>
+                  </div>
+                </div>
+                <el-alert
+                  title="本视图按归档流分组展示已登记 WAL segment 链路；segment 序号不连续会标记『缺口』，timeline 切换会突出显示。WAL 文件的实际同步动作仍在 Barman Server 页签触发。"
+                  type="info"
+                  show-icon
+                  :closable="false"
+                  style="margin-bottom: 12px;"
+                />
+                <el-empty
+                  v-if="!walStatusLoading && walStatusGroups.length === 0"
+                  class="pitr-wal-stream-empty"
+                  description="暂无 WAL 归档记录"
+                />
+                <div v-else>
+                  <div
+                    v-for="group in walStatusGroups"
+                    :key="group.streamId"
+                    class="pitr-wal-stream-card"
+                    v-loading="walStatusLoading"
+                  >
+                    <div class="pitr-wal-stream-header">
+                      <div class="pitr-wal-stream-title">
+                        <span>归档流 #{{ group.streamId }}</span>
+                        <el-tag v-if="group.instanceName" size="small" type="info">{{ group.instanceName }}</el-tag>
+                        <el-tag v-if="group.timelineCount > 1" size="small" type="warning">timeline 切换 ×{{ group.timelineCount - 1 }}</el-tag>
+                        <el-tag v-if="group.gapCount > 0" size="small" type="danger">缺口 ×{{ group.gapCount }}</el-tag>
+                        <el-tag v-else size="small" type="success">链路连续</el-tag>
+                      </div>
+                      <div class="pitr-wal-stream-stats">
+                        <span>共 {{ group.segments.length }} 段</span>
+                        <span>时间窗口：{{ group.timeRange }}</span>
+                        <span v-if="group.lsnRange">LSN：{{ group.lsnRange }}</span>
+                      </div>
+                    </div>
+                    <el-table :data="group.segments" stripe size="small">
+                      <el-table-column label="WAL 文件" min-width="240" show-overflow-tooltip>
+                        <template #default="{ row }">{{ row.fileName || '-' }}</template>
+                      </el-table-column>
+                      <el-table-column label="Timeline" width="100" align="center">
+                        <template #default="{ row }">{{ row.timelineId || '-' }}</template>
+                      </el-table-column>
+                      <el-table-column label="Segment" width="120" align="right">
+                        <template #default="{ row }">#{{ row.segmentNo || '-' }}</template>
+                      </el-table-column>
+                      <el-table-column label="LSN 范围" min-width="220" show-overflow-tooltip>
+                        <template #default="{ row }">
+                          <span>{{ row.startLsn || '-' }} → {{ row.endLsn || '-' }}</span>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="时间范围" min-width="280" show-overflow-tooltip>
+                        <template #default="{ row }">{{ row.firstEventTime || '-' }} → {{ row.lastEventTime || '-' }}</template>
+                      </el-table-column>
+                      <el-table-column label="大小" width="110" align="right">
+                        <template #default="{ row }">{{ row.fileSize ? formatBytes(row.fileSize) : '-' }}</template>
+                      </el-table-column>
+                      <el-table-column label="状态" width="120" align="center">
+                        <template #default="{ row }">
+                          <el-tag size="small" :type="logArchiveStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                          <el-tag v-if="row.gapBefore" size="small" type="danger" style="margin-left: 4px;">缺口</el-tag>
+                          <el-tag v-if="row.timelineSwitch" size="small" type="warning" style="margin-left: 4px;">TL切换</el-tag>
+                        </template>
+                      </el-table-column>
+                    </el-table>
+                  </div>
+                </div>
+              </el-tab-pane>
             </el-tabs>
           </div>
 
@@ -2503,8 +2722,9 @@
               <el-table-column label="结果" min-width="260" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.message || '-' }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="170" fixed="right">
+              <el-table-column label="操作" width="220" fixed="right">
                 <template #default="{ row }">
+                  <el-button size="small" type="primary" link @click="openRestoreJobDetail(row)">详情</el-button>
                   <el-button size="small" type="primary" link :disabled="!row.proofJson" @click="viewRestoreProof(row)">Proof</el-button>
                   <el-button
                     size="small"
@@ -4276,6 +4496,128 @@
     </el-dialog>
 
     <el-dialog
+      v-model="restoreJobDetailVisible"
+      :title="restoreJobDetailTitle || '恢复任务详情'"
+      width="960px"
+      :destroy-on-close="true"
+    >
+      <div v-if="restoreJobDetailRow" class="restore-job-detail">
+        <el-descriptions :column="2" border size="small">
+          <el-descriptions-item label="任务ID">#{{ restoreJobDetailRow.id }}</el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag :type="backupStatusTag(restoreJobDetailRow.status)" size="small">
+              {{ restoreJobDetailRow.statusText || restoreJobDetailRow.status || '-' }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="来源实例">
+            {{ restoreJobDetailRow.sourceInstanceName || `#${restoreJobDetailRow.sourceInstanceId}` }}
+          </el-descriptions-item>
+          <el-descriptions-item label="目标实例">
+            {{ restoreJobDetailRow.targetInstanceName || (restoreJobDetailRow.targetInstanceId ? `#${restoreJobDetailRow.targetInstanceId}` : '-') }}
+          </el-descriptions-item>
+          <el-descriptions-item label="Runner">
+            {{ restoreJobDetailRow.runnerHostName || (restoreJobDetailRow.runnerHostId ? `#${restoreJobDetailRow.runnerHostId}` : '-') }}
+          </el-descriptions-item>
+          <el-descriptions-item label="模式 / 策略">
+            {{ restoreJobDetailRow.restoreModeText || restoreJobDetailRow.restoreMode || '-' }}
+            <span v-if="restoreJobDetailRow.restoreStrategyText || restoreJobDetailRow.restoreStrategy" class="muted-text">
+              / {{ restoreJobDetailRow.restoreStrategyText || restoreJobDetailRow.restoreStrategy }}
+            </span>
+          </el-descriptions-item>
+          <el-descriptions-item label="恢复目标">
+            {{ restoreJobDetailRow.restoreTargetType || '-' }}
+            <span v-if="restoreJobDetailRow.restoreTargetValue" class="muted-text"> / {{ restoreJobDetailRow.restoreTargetValue }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="隔离库">
+            <span v-if="restoreJobDetailRow.listenPort">
+              {{ restoreJobDetailRow.listenHost || '127.0.0.1' }}:{{ restoreJobDetailRow.listenPort }}
+            </span>
+            <span v-else>-</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="容器">{{ restoreJobDetailRow.containerName || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="镜像">{{ restoreJobDetailRow.containerImage || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="工作目录" :span="2">{{ restoreJobDetailRow.workDir || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Prepared datadir" :span="2">{{ restoreJobDetailRow.preparedDatadir || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="日志路径" :span="2">{{ restoreJobDetailRow.logPath || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Artifact" :span="2">{{ restoreJobDetailRow.artifactUri || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="开始时间">{{ restoreJobDetailRow.startedAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="完成时间">{{ restoreJobDetailRow.finishedAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="总耗时">{{ formatRestoreJobDuration(restoreJobDetailRow.durationMs) }}</el-descriptions-item>
+          <el-descriptions-item label="操作者">{{ restoreJobDetailRow.operatorName || '-' }}</el-descriptions-item>
+          <el-descriptions-item v-if="restoreJobDetailRow.message" label="结果摘要" :span="2">
+            {{ restoreJobDetailRow.message }}
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <div class="restore-job-detail-section">
+          <div class="panel-title">
+            <span>步骤时间线</span>
+            <el-tag size="small" type="info">{{ restoreJobSteps.length }}</el-tag>
+          </div>
+          <el-empty v-if="restoreJobSteps.length === 0" description="暂无步骤记录" :image-size="64" />
+          <el-timeline v-else class="restore-job-timeline">
+            <el-timeline-item
+              v-for="(step, index) in restoreJobSteps"
+              :key="`${step.name}-${index}`"
+              :type="restoreStepTimelineType(step.status)"
+              :timestamp="step.finishedAt || step.startedAt || ''"
+              placement="top"
+            >
+              <div class="restore-step-row">
+                <span class="restore-step-name">{{ step.label }}</span>
+                <el-tag size="small" :type="restoreStepTagType(step.status)">{{ step.statusText }}</el-tag>
+                <span v-if="step.durationMs !== null" class="muted-text">耗时 {{ formatRestoreJobDuration(step.durationMs) }}</span>
+              </div>
+              <div v-if="step.startedAt && step.finishedAt && step.startedAt !== step.finishedAt" class="muted-text">
+                {{ step.startedAt }} → {{ step.finishedAt }}
+              </div>
+              <div v-else-if="step.startedAt && !step.finishedAt" class="muted-text">开始于 {{ step.startedAt }}</div>
+            </el-timeline-item>
+          </el-timeline>
+        </div>
+
+        <div v-if="restoreJobValidations.length > 0" class="restore-job-detail-section">
+          <div class="panel-title">
+            <span>校验 SQL 结果</span>
+            <el-tag size="small" type="info">{{ restoreJobValidations.length }}</el-tag>
+          </div>
+          <el-table :data="restoreJobValidations" stripe size="small">
+            <el-table-column label="#" prop="index" width="50" align="center" />
+            <el-table-column label="SQL" prop="sql" min-width="240" show-overflow-tooltip />
+            <el-table-column label="执行" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.status === 'success' ? 'success' : 'danger'">
+                  {{ row.status === 'success' ? '成功' : '失败' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="断言" width="120" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.assertionStatus" size="small" :type="restoreAssertionTagType(row.assertionStatus)">
+                  {{ restoreAssertionStatusText(row.assertionStatus) }}
+                </el-tag>
+                <span v-else class="muted-text">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="期望" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">{{ formatRestoreAssertionExpected(row) }}</template>
+            </el-table-column>
+            <el-table-column label="实际" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">{{ formatRestoreAssertionActual(row) }}</template>
+            </el-table-column>
+            <el-table-column label="说明 / 输出预览" min-width="220" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.assertionMessage || row.outputPreview || '-' }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+      <template #footer>
+        <el-button v-if="restoreJobDetailRow?.proofJson" type="primary" plain @click="viewRestoreJobDetailProof">查看 Proof</el-button>
+        <el-button @click="restoreJobDetailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="runnerHostDialogVisible"
       :title="runnerHostForm.id ? '编辑 Runner 主机' : '新增 Runner 主机'"
       width="860px"
@@ -5082,6 +5424,11 @@ const runLogArchiveCatchUpStream = ref<DatabaseLogArchiveStreamResult>()
 const restorePlanLoading = ref(false)
 const restorePlans = ref<DatabaseRestorePlanResult[]>([])
 const restorePlanTotal = ref(0)
+const barmanCatalogLoading = ref(false)
+const barmanCatalogRecords = ref<DatabaseBackupRecordResult[]>([])
+const barmanCatalogTotal = ref(0)
+const walStatusLoading = ref(false)
+const walStatusArchives = ref<DatabaseLogArchiveResult[]>([])
 const restorePlanDialogVisible = ref(false)
 const restorePlanSubmitting = ref(false)
 const restorePlanFormRef = ref<FormInstance>()
@@ -5093,6 +5440,33 @@ const restorePlanRunSource = ref<DatabaseRestorePlanResult>()
 const restoreProofDialogVisible = ref(false)
 const restoreProofTitle = ref('')
 const restoreProofContent = ref('')
+const restoreJobDetailVisible = ref(false)
+const restoreJobDetailTitle = ref('')
+const restoreJobDetailRow = ref<DatabaseRestoreJobResult | null>(null)
+interface RestoreJobStepRow {
+  name: string
+  label: string
+  status: string
+  statusText: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number | null
+}
+interface RestoreJobValidationRow {
+  index: number
+  sql?: string
+  status?: string
+  outputPreview?: string
+  expectedRows?: number
+  expectedContains?: string
+  expectedScalar?: string
+  actualRows?: number | null
+  actualScalar?: string
+  assertionStatus?: string
+  assertionMessage?: string
+}
+const restoreJobSteps = ref<RestoreJobStepRow[]>([])
+const restoreJobValidations = ref<RestoreJobValidationRow[]>([])
 const runnerHostLoading = ref(false)
 const runnerHostSubmitting = ref(false)
 const runnerHostDialogVisible = ref(false)
@@ -5266,6 +5640,23 @@ const restorePlanQuery = reactive({
   targetInstanceId: undefined as number | undefined,
   validationStatus: '',
   restoreStatus: ''
+})
+
+const barmanCatalogQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  instanceId: undefined as number | undefined,
+  backupMethod: 'physical',
+  backupEngine: 'barman',
+  backupScope: 'cluster',
+  status: ''
+})
+
+const walStatusQuery = reactive({
+  page: 1,
+  pageSize: 100,
+  streamId: undefined as number | undefined,
+  instanceId: undefined as number | undefined
 })
 
 const runnerHostQuery = reactive({
@@ -6078,6 +6469,15 @@ const logArchiveStreamOptions = computed(() =>
     id: item.id,
     label: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveTypeText || item.archiveType} / ${item.archiveEngine || item.archiveMode || 'external'}`
   }))
+)
+
+const walLogArchiveStreamOptions = computed(() =>
+  logArchiveStreams.value
+    .filter(item => item.archiveType === 'wal')
+    .map(item => ({
+      id: item.id,
+      label: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveTypeText || item.archiveType} / ${item.archiveEngine || item.archiveMode || 'external'}`
+    }))
 )
 
 const runnerHostOptions = computed(() =>
@@ -6899,6 +7299,35 @@ const loadRestorePlans = async () => {
   }
 }
 
+const loadBarmanCatalogRecords = async () => {
+  barmanCatalogLoading.value = true
+  try {
+    const res: any = await listDatabaseBackupRecords(barmanCatalogQuery)
+    barmanCatalogRecords.value = res.list || []
+    barmanCatalogTotal.value = res.total || 0
+    if (res.page) barmanCatalogQuery.page = res.page
+    if (res.pageSize) barmanCatalogQuery.pageSize = res.pageSize
+  } finally {
+    barmanCatalogLoading.value = false
+  }
+}
+
+const loadWalStatusArchives = async () => {
+  walStatusLoading.value = true
+  try {
+    const res: any = await listDatabaseLogArchives({
+      page: walStatusQuery.page,
+      pageSize: walStatusQuery.pageSize,
+      streamId: walStatusQuery.streamId,
+      instanceId: walStatusQuery.instanceId,
+      archiveType: 'wal'
+    })
+    walStatusArchives.value = res.list || []
+  } finally {
+    walStatusLoading.value = false
+  }
+}
+
 const loadRunnerHosts = async () => {
   runnerHostLoading.value = true
   try {
@@ -6939,7 +7368,7 @@ const loadBarmanServers = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs()])
+  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
 }
 
 const loadRestoreJobs = async () => {
@@ -7791,6 +8220,243 @@ const viewRestoreProof = async (row: DatabaseRestoreJobResult | DatabaseRestoreP
     restoreProofContent.value = proof
   }
   restoreProofDialogVisible.value = true
+}
+
+const restoreStepLabelMap: Record<string, string> = {
+  prepare_restore_directory: '准备恢复目录',
+  extract_base_backup: '解压全量备份',
+  fetch_base_backup: '拉取全量备份',
+  verify_base_checksum: '校验全量 checksum',
+  fetch_incremental_chain: '拉取增量链',
+  verify_incremental_checksums: '校验增量 checksum',
+  prepare_physical_backup: '物理备份 prepare',
+  fetch_binlog_chain: '拉取 binlog 链',
+  verify_binlog_chain: '校验 binlog 链',
+  pg_basebackup: '执行 pg_basebackup',
+  package_backup: '打包备份',
+  pg_combinebackup: '合成增量 (pg_combinebackup)',
+  configure_recovery: '配置 recovery',
+  barman_restore: 'Barman 恢复',
+  verify_pgdata: '校验 PGDATA',
+  start_isolated_instance: '启动隔离实例',
+  start_isolated_postgres: '启动隔离 PostgreSQL',
+  apply_binlog_to_target: '回放 binlog 到目标点',
+  run_validation_sql: '执行校验 SQL',
+  generate_proof: '生成恢复证明',
+  mark_success_or_failed: '更新最终状态',
+  tool_check: '工具检测'
+}
+
+const restoreStepStatusTextMap: Record<string, string> = {
+  running: '进行中',
+  success: '成功',
+  failed: '失败',
+  skipped: '跳过',
+  warning: '告警'
+}
+
+const restoreStepLabel = (name: string) => restoreStepLabelMap[name] || name
+const restoreStepStatusText = (status: string) => restoreStepStatusTextMap[status] || status || '-'
+
+const restoreStepTagType = (status: string) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'running':
+      return 'primary'
+    case 'warning':
+      return 'warning'
+    case 'skipped':
+      return 'info'
+    default:
+      return 'info'
+  }
+}
+
+const restoreStepTimelineType = (status: string) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'running':
+      return 'primary'
+    case 'warning':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+const restoreAssertionStatusText = (status: string) => {
+  switch (status) {
+    case 'passed':
+      return '通过'
+    case 'failed':
+      return '失败'
+    case 'not_configured':
+      return '未配置'
+    case 'unknown':
+      return '未知'
+    default:
+      return status || '-'
+  }
+}
+
+const restoreAssertionTagType = (status: string) => {
+  switch (status) {
+    case 'passed':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'not_configured':
+      return 'info'
+    default:
+      return 'warning'
+  }
+}
+
+const formatRestoreAssertionExpected = (row: RestoreJobValidationRow) => {
+  const parts: string[] = []
+  if (row.expectedRows !== undefined && row.expectedRows !== null) {
+    parts.push(`rows=${row.expectedRows}`)
+  }
+  if (row.expectedScalar) {
+    parts.push(`scalar=${row.expectedScalar}`)
+  }
+  if (row.expectedContains) {
+    parts.push(`contains=${row.expectedContains}`)
+  }
+  return parts.length > 0 ? parts.join(' / ') : '-'
+}
+
+const formatRestoreAssertionActual = (row: RestoreJobValidationRow) => {
+  const parts: string[] = []
+  if (row.actualRows !== undefined && row.actualRows !== null) {
+    parts.push(`rows=${row.actualRows}`)
+  }
+  if (row.actualScalar) {
+    parts.push(`scalar=${row.actualScalar}`)
+  }
+  return parts.length > 0 ? parts.join(' / ') : '-'
+}
+
+const formatRestoreJobDuration = (ms: number | null | undefined) => {
+  if (ms === null || ms === undefined || ms <= 0) return '-'
+  if (ms < 1000) return `${ms} ms`
+  const seconds = ms / 1000
+  if (seconds < 60) return `${seconds.toFixed(1)} s`
+  const minutes = Math.floor(seconds / 60)
+  const restSeconds = Math.round(seconds - minutes * 60)
+  if (minutes < 60) return `${minutes}m ${restSeconds}s`
+  const hours = Math.floor(minutes / 60)
+  const restMinutes = minutes - hours * 60
+  return `${hours}h ${restMinutes}m`
+}
+
+const parseStepOccurredAt = (value: string): number | null => {
+  if (!value) return null
+  const normalized = value.includes('T') ? value : value.replace(' ', 'T')
+  const ts = Date.parse(normalized)
+  return Number.isNaN(ts) ? null : ts
+}
+
+const parseRestoreJobSteps = (stepJson: string | undefined): RestoreJobStepRow[] => {
+  if (!stepJson) return []
+  let raw: any
+  try {
+    raw = JSON.parse(stepJson)
+  } catch (_err) {
+    return []
+  }
+  if (!Array.isArray(raw)) return []
+  const rows: RestoreJobStepRow[] = []
+  const indexByName = new Map<string, number>()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const name: string = String(item.name || '').trim()
+    const status: string = String(item.status || '').trim()
+    const occurredAt: string = String(item.occurredAt || '').trim()
+    if (!name) continue
+    if (status === 'running') {
+      const row: RestoreJobStepRow = {
+        name,
+        label: restoreStepLabel(name),
+        status,
+        statusText: restoreStepStatusText(status),
+        startedAt: occurredAt,
+        finishedAt: '',
+        durationMs: null
+      }
+      rows.push(row)
+      indexByName.set(name, rows.length - 1)
+      continue
+    }
+    const existingIdx = indexByName.get(name)
+    if (existingIdx !== undefined) {
+      const row = rows[existingIdx]
+      if (!row) continue
+      row.status = status || row.status
+      row.statusText = restoreStepStatusText(row.status)
+      row.finishedAt = occurredAt || row.finishedAt
+      const startTs = parseStepOccurredAt(row.startedAt)
+      const endTs = parseStepOccurredAt(row.finishedAt)
+      row.durationMs = startTs !== null && endTs !== null && endTs >= startTs ? endTs - startTs : null
+      indexByName.delete(name)
+      continue
+    }
+    rows.push({
+      name,
+      label: restoreStepLabel(name),
+      status: status || 'success',
+      statusText: restoreStepStatusText(status || 'success'),
+      startedAt: '',
+      finishedAt: occurredAt,
+      durationMs: null
+    })
+  }
+  return rows
+}
+
+const parseRestoreJobValidations = (validationJson: string | undefined): RestoreJobValidationRow[] => {
+  if (!validationJson) return []
+  let raw: any
+  try {
+    raw = JSON.parse(validationJson)
+  } catch (_err) {
+    return []
+  }
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((item: any) => item && typeof item === 'object')
+    .map((item: any, index: number) => ({
+      index: typeof item.index === 'number' ? item.index : index + 1,
+      sql: item.sql,
+      status: item.status,
+      outputPreview: item.outputPreview,
+      expectedRows: item.expectedRows,
+      expectedContains: item.expectedContains,
+      expectedScalar: item.expectedScalar,
+      actualRows: item.actualRows,
+      actualScalar: item.actualScalar,
+      assertionStatus: item.assertionStatus,
+      assertionMessage: item.assertionMessage
+    }))
+}
+
+const openRestoreJobDetail = (row: DatabaseRestoreJobResult) => {
+  restoreJobDetailRow.value = row
+  restoreJobDetailTitle.value = `恢复任务 #${row.id}`
+  restoreJobSteps.value = parseRestoreJobSteps(row.stepJson)
+  restoreJobValidations.value = parseRestoreJobValidations(row.validationJson)
+  restoreJobDetailVisible.value = true
+}
+
+const viewRestoreJobDetailProof = () => {
+  if (!restoreJobDetailRow.value?.proofJson) return
+  viewRestoreProof(restoreJobDetailRow.value)
 }
 
 const cleanupRestoreJob = async (row: DatabaseRestoreJobResult) => {
@@ -9161,6 +9827,117 @@ const resetRestorePlanQuery = () => {
   loadRestorePlans()
 }
 
+const resetBarmanCatalogQuery = () => {
+  barmanCatalogQuery.page = 1
+  barmanCatalogQuery.pageSize = 10
+  barmanCatalogQuery.instanceId = undefined
+  barmanCatalogQuery.backupMethod = 'physical'
+  barmanCatalogQuery.backupEngine = 'barman'
+  barmanCatalogQuery.backupScope = 'cluster'
+  barmanCatalogQuery.status = ''
+  loadBarmanCatalogRecords()
+}
+
+const resetWalStatusQuery = () => {
+  walStatusQuery.page = 1
+  walStatusQuery.pageSize = 100
+  walStatusQuery.streamId = undefined
+  walStatusQuery.instanceId = undefined
+  loadWalStatusArchives()
+}
+
+const barmanCatalogSyncTag = (row: DatabaseBackupRecordResult) => {
+  const engine = normalizeToolEngineValue(row.backupEngine)
+  if (engine === 'pg_basebackup') {
+    return { tag: 'primary' as const, text: '本地' }
+  }
+  if (engine === 'walg' || engine === 'wal_g' || isPgBackRestEngineValue(engine)) {
+    return { tag: 'warning' as const, text: 'external' }
+  }
+  if (engine === 'barman' && row.externalBackupId) {
+    return { tag: 'success' as const, text: '已同步' }
+  }
+  if (row.externalBackupId) {
+    return { tag: 'warning' as const, text: '已登记' }
+  }
+  return { tag: 'info' as const, text: '未同步' }
+}
+
+interface WalStatusSegmentRow extends DatabaseLogArchiveResult {
+  gapBefore?: boolean
+  timelineSwitch?: boolean
+}
+
+interface WalStatusGroup {
+  streamId: number
+  instanceName: string
+  segments: WalStatusSegmentRow[]
+  gapCount: number
+  timelineCount: number
+  timeRange: string
+  lsnRange: string
+}
+
+const walStatusGroups = computed<WalStatusGroup[]>(() => {
+  const grouped = new Map<number, WalStatusSegmentRow[]>()
+  for (const item of walStatusArchives.value) {
+    const sid = item.streamId || 0
+    if (!grouped.has(sid)) grouped.set(sid, [])
+    grouped.get(sid)!.push({ ...item })
+  }
+  const result: WalStatusGroup[] = []
+  for (const [streamId, list] of grouped.entries()) {
+    list.sort((a, b) => {
+      const tlA = String(a.timelineId || '')
+      const tlB = String(b.timelineId || '')
+      if (tlA !== tlB) return tlA.localeCompare(tlB)
+      const segA = Number(a.segmentNo) || 0
+      const segB = Number(b.segmentNo) || 0
+      return segA - segB
+    })
+    let gapCount = 0
+    const timelineSet = new Set<string>()
+    let prevSegment: number | null = null
+    let prevTimeline: string | null = null
+    for (const segment of list) {
+      const timeline = String(segment.timelineId || '')
+      if (timeline) timelineSet.add(timeline)
+      const segNo = Number(segment.segmentNo)
+      if (timeline && prevTimeline !== null && timeline !== prevTimeline) {
+        segment.timelineSwitch = true
+        prevSegment = null
+      } else if (Number.isFinite(segNo) && prevSegment !== null && segNo - prevSegment > 1) {
+        segment.gapBefore = true
+        gapCount += 1
+      }
+      if (Number.isFinite(segNo)) prevSegment = segNo
+      if (timeline) prevTimeline = timeline
+    }
+    const first = list[0]
+    const last = list[list.length - 1]
+    const timeRange = first || last
+      ? `${first?.firstEventTime || '-'} → ${last?.lastEventTime || '-'}`
+      : '-'
+    let lsnRange = ''
+    const startLsn = first?.startLsn
+    const endLsn = last?.endLsn
+    if (startLsn || endLsn) {
+      lsnRange = `${startLsn || '-'} → ${endLsn || '-'}`
+    }
+    result.push({
+      streamId,
+      instanceName: first?.instanceName || '',
+      segments: list,
+      gapCount,
+      timelineCount: timelineSet.size,
+      timeRange,
+      lsnRange
+    })
+  }
+  result.sort((a, b) => a.streamId - b.streamId)
+  return result
+})
+
 const resetRunnerHostQuery = () => {
   runnerHostQuery.page = 1
   runnerHostQuery.pageSize = 10
@@ -10158,7 +10935,9 @@ watch(activeTab, async (tab) => {
       loadLogArchives(),
       loadLogArchiveEvents(),
       loadRestorePlans(),
-      loadRestoreJobs()
+      loadRestoreJobs(),
+      loadBarmanCatalogRecords(),
+      loadWalStatusArchives()
     ])
   }
   if (tab === 'permissions') {
@@ -11069,6 +11848,84 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
   font-weight: 700;
   color: #1f2937;
+}
+
+.restore-job-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.restore-job-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.restore-job-timeline {
+  padding-top: 6px;
+}
+
+.restore-step-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.restore-step-name {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.pitr-catalog-meta,
+.pitr-wal-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.45;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.pitr-wal-stream-card {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.pitr-wal-stream-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.pitr-wal-stream-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.pitr-wal-stream-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.pitr-wal-stream-empty {
+  padding: 24px 0;
 }
 
 @media (max-width: 900px) {

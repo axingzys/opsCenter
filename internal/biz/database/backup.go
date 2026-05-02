@@ -828,6 +828,22 @@ func (uc *UseCase) toBackupRecordVO(item *DatabaseBackupRecord, taskName, instan
 		Message:               buildBackupRecordMessage(item),
 		CreatedAt:             item.CreatedAt.Format("2006-01-02 15:04:05"),
 		UpdatedAt:             item.UpdatedAt.Format("2006-01-02 15:04:05"),
+
+		ServerUUID:             item.ServerUUID,
+		ServerID:               item.ServerID,
+		GTIDMode:               item.GTIDMode,
+		BinlogFormat:           item.BinlogFormat,
+		BackupBinlogFile:       item.BackupBinlogFile,
+		BackupBinlogPos:        item.BackupBinlogPos,
+		BackupGTIDSet:          item.BackupGTIDSet,
+		PGSystemIdentifier:     item.PGSystemIdentifier,
+		TimelineID:             item.TimelineID,
+		WALSegmentSize:         item.WALSegmentSize,
+		StartLSN:               item.StartLSN,
+		EndLSN:                 item.EndLSN,
+		WALStart:               item.WALStart,
+		WALEnd:                 item.WALEnd,
+		BackupManifestChecksum: item.BackupManifestChecksum,
 	}
 }
 

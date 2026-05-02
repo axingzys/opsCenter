@@ -208,7 +208,9 @@ type DatabaseBackupRecordListRequest struct {
 	InstanceID         uint   `form:"instanceId"`
 	Status             string `form:"status"`
 	TriggerType        string `form:"triggerType"`
+	BackupMethod       string `form:"backupMethod"`
 	BackupEngine       string `form:"backupEngine"`
+	BackupScope        string `form:"backupScope"`
 	DateFrom           string `form:"dateFrom"`
 	DateTo             string `form:"dateTo"`
 	RestrictToAllowed  bool   `form:"-" json:"-"`
@@ -639,6 +641,22 @@ type DatabaseBackupRecordVO struct {
 	Message               string `json:"message"`
 	CreatedAt             string `json:"createdAt"`
 	UpdatedAt             string `json:"updatedAt"`
+
+	ServerUUID             string `json:"serverUuid,omitempty"`
+	ServerID               string `json:"serverId,omitempty"`
+	GTIDMode               string `json:"gtidMode,omitempty"`
+	BinlogFormat           string `json:"binlogFormat,omitempty"`
+	BackupBinlogFile       string `json:"backupBinlogFile,omitempty"`
+	BackupBinlogPos        int64  `json:"backupBinlogPos,omitempty"`
+	BackupGTIDSet          string `json:"backupGtidSet,omitempty"`
+	PGSystemIdentifier     string `json:"pgSystemIdentifier,omitempty"`
+	TimelineID             string `json:"timelineId,omitempty"`
+	WALSegmentSize         int64  `json:"walSegmentSize,omitempty"`
+	StartLSN               string `json:"startLsn,omitempty"`
+	EndLSN                 string `json:"endLsn,omitempty"`
+	WALStart               string `json:"walStart,omitempty"`
+	WALEnd                 string `json:"walEnd,omitempty"`
+	BackupManifestChecksum string `json:"backupManifestChecksum,omitempty"`
 }
 
 type DatabaseBackupRunVO struct {
@@ -1864,7 +1882,9 @@ func normalizeBackupRecordListRequest(req *DatabaseBackupRecordListRequest) {
 	}
 	req.Status = strings.TrimSpace(req.Status)
 	req.TriggerType = strings.TrimSpace(req.TriggerType)
+	req.BackupMethod = strings.TrimSpace(req.BackupMethod)
 	req.BackupEngine = strings.TrimSpace(req.BackupEngine)
+	req.BackupScope = strings.TrimSpace(req.BackupScope)
 	req.DateFrom = strings.TrimSpace(req.DateFrom)
 	req.DateTo = strings.TrimSpace(req.DateTo)
 }

@@ -261,6 +261,21 @@ export interface DatabaseBackupRecordResult {
   message: string
   createdAt: string
   updatedAt: string
+  serverUuid?: string
+  serverId?: string
+  gtidMode?: string
+  binlogFormat?: string
+  backupBinlogFile?: string
+  backupBinlogPos?: number
+  backupGtidSet?: string
+  pgSystemIdentifier?: string
+  timelineId?: string
+  walSegmentSize?: number
+  startLsn?: string
+  endLsn?: string
+  walStart?: string
+  walEnd?: string
+  backupManifestChecksum?: string
 }
 
 export interface DatabaseExternalBackupRecordPayload {
@@ -1039,7 +1054,9 @@ export const listDatabaseBackupRecords = (params?: {
   instanceId?: number
   status?: string
   triggerType?: string
+  backupMethod?: string
   backupEngine?: string
+  backupScope?: string
   dateFrom?: string
   dateTo?: string
 }) => request.get('/api/v1/databases/backup-records', { params })

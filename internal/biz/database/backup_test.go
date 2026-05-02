@@ -111,3 +111,49 @@ func TestRestoreCapabilityTextAndPITRStatus(t *testing.T) {
 		t.Fatalf("PITRStatusText(logical) = %q", got)
 	}
 }
+
+func TestToBackupRecordVOMapsPhysicalChainFields(t *testing.T) {
+	uc := &UseCase{}
+	record := &DatabaseBackupRecord{
+		BackupMethod:           DatabaseBackupMethodPhysical,
+		BackupLevel:            DatabaseBackupLevelFull,
+		BackupEngine:           "barman",
+		ServerUUID:             "uuid-1",
+		ServerID:               "1",
+		GTIDMode:               "ON",
+		BinlogFormat:           "ROW",
+		BackupBinlogFile:       "mysql-bin.000123",
+		BackupBinlogPos:        4567,
+		BackupGTIDSet:          "uuid-1:1-100",
+		PGSystemIdentifier:     "7400000000000000000",
+		TimelineID:             "00000001",
+		WALSegmentSize:         16 * 1024 * 1024,
+		StartLSN:               "0/3000028",
+		EndLSN:                 "0/5000000",
+		WALStart:               "000000010000000000000003",
+		WALEnd:                 "000000010000000000000005",
+		BackupManifestChecksum: "sha256:abcdef",
+	}
+	vo := uc.toBackupRecordVO(record, "task", "instance")
+	if vo == nil {
+		t.Fatalf("toBackupRecordVO returned nil")
+	}
+	if vo.ServerUUID != "uuid-1" || vo.BackupBinlogFile != "mysql-bin.000123" || vo.BackupBinlogPos != 4567 {
+		t.Fatalf("MySQL physical fields not mapped: %+v", vo)
+	}
+	if vo.PGSystemIdentifier != "7400000000000000000" || vo.TimelineID != "00000001" {
+		t.Fatalf("PostgreSQL identifier/timeline not mapped: %+v", vo)
+	}
+	if vo.StartLSN != "0/3000028" || vo.EndLSN != "0/5000000" {
+		t.Fatalf("PostgreSQL LSN range not mapped: %+v", vo)
+	}
+	if vo.WALStart != "000000010000000000000003" || vo.WALEnd != "000000010000000000000005" {
+		t.Fatalf("PostgreSQL WAL range not mapped: %+v", vo)
+	}
+	if vo.WALSegmentSize != 16*1024*1024 {
+		t.Fatalf("WALSegmentSize not mapped: got %d", vo.WALSegmentSize)
+	}
+	if vo.BackupManifestChecksum != "sha256:abcdef" {
+		t.Fatalf("BackupManifestChecksum not mapped: %q", vo.BackupManifestChecksum)
+	}
+}

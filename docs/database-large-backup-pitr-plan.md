@@ -4709,6 +4709,35 @@ P3.10 不再重新设计 pg_basebackup 恢复逻辑，只负责用真实 Postgre
 5. 前端外部备份登记已提供 WAL-G external 和 pgBackRest legacy external 选项，并补充外部备份 ID、外部 Server/Profile/Stanza、工具名字段。
 6. 前端新建 PostgreSQL 物理备份任务仍只推荐 Barman 和 pg_basebackup；pgBackRest 不出现在新建深接入策略入口。
 
+##### P3.A1/P3.A2：PITR 可观测性补齐已落地
+
+落地记录（2026-05-02）：
+
+1. 恢复任务详情已补充步骤时间线：
+   - 前端恢复任务列表新增“详情”入口。
+   - 详情弹窗读取 `database_restore_jobs.step_json`，按 `name/status/occurredAt` 展示恢复步骤、开始/完成时间和步骤耗时。
+   - 同一个步骤的 `running` 与后续终态事件会合并展示，方便定位恢复卡在哪一步。
+   - 未识别的步骤名称保留原始 `name`，避免后端新增步骤后前端丢失信息。
+2. 恢复任务详情已补充校验 SQL 和断言结果：
+   - 前端读取 `validation_json`，展示 SQL、执行状态、期望值、实际值、断言状态和输出预览。
+   - 支持展示 `expectedRows`、`expectedContains`、`expectedScalar` 对应的实际结果和失败原因。
+   - Proof 仍作为完整证据保留，详情弹窗只做排障和快速核验视图。
+3. PITR 子页签已新增 Barman Catalog 视图：
+   - 复用 `/api/v1/databases/backup-records`，按 PostgreSQL 物理备份、cluster 级范围和备份引擎过滤。
+   - 展示 backup ID、实例、引擎、状态、PostgreSQL system identifier、timeline、LSN 范围、WAL 范围、manifest checksum、可恢复窗口和同步状态。
+   - 后端 `DatabaseBackupRecordVO` 已补充 MySQL binlog/GTID 字段和 PostgreSQL timeline/LSN/WAL/system identifier 字段，避免前端只能看通用备份字段。
+   - 备份记录列表接口已支持 `backupMethod` 和 `backupScope` 查询参数，用于稳定过滤 PostgreSQL cluster 级物理备份 catalog。
+4. PITR 子页签已新增 WAL 状态视图：
+   - 复用 `/api/v1/databases/log-archives`，固定按 `archiveType=wal` 查询。
+   - 前端归档流下拉只展示 WAL stream，避免混入 MySQL/MariaDB binlog stream。
+   - WAL 记录按 stream 分组，展示 timeline、segment 序号、LSN 范围、事件时间范围、文件大小和状态。
+   - 同一 timeline 内 segment 序号不连续会标记“缺口”；timeline 切换会单独标记，便于恢复计划失败前先从 UI 发现链路风险。
+5. 当前边界：
+   - A1/A2 是可观测性和 catalog 展示增强，不改变 PITR 恢复计划的链路校验算法。
+   - WAL 状态页只使用已登记的 finalized WAL/archive metadata，不把 rollup 事件当作 PITR 输入。
+   - WAL-G / pgBackRest 仍只做 external metadata 纳管，自动隔离恢复执行仍不开放。
+   - 真实 PostgreSQL+Barman / pg_basebackup 端到端演练脚本和 runbook 仍归入 P3.10。
+
 ##### P3.10：P3 联调、回归和恢复演练
 
 目标：把 P3 做成可证明恢复的闭环。

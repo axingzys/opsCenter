@@ -162,8 +162,14 @@ func (r *backupRecordRepo) List(ctx context.Context, req *dbbiz.DatabaseBackupRe
 		if triggerType := strings.TrimSpace(req.TriggerType); triggerType != "" {
 			query = query.Where("trigger_type = ?", triggerType)
 		}
+		if backupMethod := strings.TrimSpace(req.BackupMethod); backupMethod != "" {
+			query = query.Where("backup_method = ?", backupMethod)
+		}
 		if backupEngine := strings.TrimSpace(req.BackupEngine); backupEngine != "" {
 			query = query.Where("backup_engine = ?", backupEngine)
+		}
+		if backupScope := strings.TrimSpace(req.BackupScope); backupScope != "" {
+			query = query.Where("backup_scope = ?", backupScope)
 		}
 		if dateFrom := strings.TrimSpace(req.DateFrom); dateFrom != "" {
 			query = query.Where("created_at >= ?", dateFrom)
