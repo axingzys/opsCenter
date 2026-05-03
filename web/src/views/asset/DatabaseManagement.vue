@@ -2204,13 +2204,15 @@
                       <div class="muted-text">{{ row.lastMessage || row.lastError || '-' }}</div>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="420" align="center" fixed="right">
+                  <el-table-column label="操作" width="520" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="warning" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'full'" @click="handleRunBackupPolicy(row, 'full')">跑Full</el-button>
                       <el-button link type="success" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'incremental'" @click="handleRunBackupPolicy(row, 'incremental')">跑增量</el-button>
                       <el-button link type="primary" :loading="validatingBackupPolicyId === row.id" @click="handleValidateBackupPolicyChain(row)">校验链</el-button>
                       <el-button link type="warning" :disabled="!row.syntheticEnabled" :loading="previewingSyntheticPolicyId === row.id" @click="openSyntheticFullPreview(row)">合成预览</el-button>
                       <el-button link type="danger" :disabled="!row.syntheticEnabled" :loading="runningSyntheticPolicyId === row.id" @click="handleRunSyntheticFull(row)">合成Full</el-button>
+                      <el-button link type="warning" :disabled="!row.syntheticEnabled" :loading="previewingPurgePolicyId === row.id" @click="openBackupPolicyPurgePreview(row)">清理预览</el-button>
+                      <el-button link type="danger" :disabled="!row.syntheticEnabled" :loading="runningPurgePolicyId === row.id" @click="handleRunBackupPolicyPurge(row)">清理旧链</el-button>
                       <el-button link type="primary" @click="openBackupPolicyDialog(row)">编辑</el-button>
                       <el-button link type="danger" @click="handleDeleteBackupPolicy(row)">删除</el-button>
                     </template>
@@ -4410,6 +4412,104 @@
         </el-button>
       </template>
     </el-dialog>
+    <el-dialog
+      v-model="purgePreviewVisible"
+      title="Synthetic Full 旧链清理预览"
+      width="1080px"
+    >
+      <template v-if="purgePreview">
+        <el-alert
+          :title="purgePreview.blockingReasons?.length ? '旧链暂不可清理' : '旧链清理门禁通过'"
+          :type="purgePreview.blockingReasons?.length ? 'error' : (purgePreview.warnings?.length ? 'warning' : 'success')"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
+        <el-descriptions :column="3" border size="small" class="backup-summary-descriptions">
+          <el-descriptions-item label="策略">{{ purgePreviewPolicy?.name || `#${purgePreview.policyId}` }}</el-descriptions-item>
+          <el-descriptions-item label="Synthetic Full">#{{ purgePreview.syntheticRecordId || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="恢复证明">{{ purgePreview.proofStatusText || purgePreview.proofStatus || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Binlog 链">{{ purgePreview.binlogCoverageText || purgePreview.binlogCoverageStatus || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="保护天数">{{ purgePreview.retentionDays }}</el-descriptions-item>
+          <el-descriptions-item label="无 Proof 禁删">{{ purgePreview.neverDeleteWithoutProof ? '开启' : '关闭' }}</el-descriptions-item>
+          <el-descriptions-item label="可清理">{{ purgePreview.eligibleRecordIds?.length || 0 }} 条</el-descriptions-item>
+          <el-descriptions-item label="阻断">{{ purgePreview.blockedRecordIds?.length || 0 }} 条</el-descriptions-item>
+          <el-descriptions-item label="检查时间">{{ purgePreview.checkedAt || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <div v-if="purgePreview.blockingReasons?.length" class="backup-preview-section">
+          <div class="section-title">阻断原因</div>
+          <el-alert
+            v-for="item in purgePreview.blockingReasons"
+            :key="item"
+            :title="item"
+            type="error"
+            show-icon
+            :closable="false"
+            class="backup-inline-alert"
+          />
+        </div>
+        <div v-if="purgePreview.warnings?.length" class="backup-preview-section">
+          <div class="section-title">风险提示</div>
+          <el-alert
+            v-for="item in purgePreview.warnings"
+            :key="item"
+            :title="item"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="backup-inline-alert"
+          />
+        </div>
+        <div class="backup-preview-section">
+          <div class="section-title">清理计划</div>
+          <el-table :data="purgePreview.storageDeletePlan || []" stripe class="modern-table backup-preview-table" empty-text="暂无可清理记录">
+            <el-table-column label="记录" width="90">
+              <template #default="{ row }">#{{ row.recordId }}</template>
+            </el-table-column>
+            <el-table-column label="级别" width="110">
+              <template #default="{ row }">{{ row.backupLevel || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="文件" min-width="240" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.fileName || row.storageUri || row.filePath || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="大小" width="110">
+              <template #default="{ row }">{{ row.fileSizeText || formatBytes(row.fileSize) }}</template>
+            </el-table-column>
+            <el-table-column label="Checksum" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.checksumSha256 || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="清理窗口" width="170">
+              <template #default="{ row }">{{ row.purgeEligibleAt || '-' }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
+        <div v-if="purgePreview.blockedRecords?.length" class="backup-preview-section">
+          <div class="section-title">受保护记录</div>
+          <el-table :data="purgePreview.blockedRecords || []" stripe class="modern-table backup-preview-table">
+            <el-table-column label="记录" width="90">
+              <template #default="{ row }">#{{ row.recordId }}</template>
+            </el-table-column>
+            <el-table-column label="文件" min-width="240" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.fileName || row.storageUri || row.filePath || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="原因" min-width="320" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.blockingReason || '-' }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </template>
+      <template #footer>
+        <el-button @click="purgePreviewVisible = false">关闭</el-button>
+        <el-button
+          type="danger"
+          :disabled="!!purgePreview?.blockingReasons?.length || !(purgePreview?.eligibleRecordIds?.length) || !purgePreviewPolicy"
+          :loading="runningPurgePolicyId === purgePreviewPolicy?.id"
+          @click="purgePreviewPolicy && handleRunBackupPolicyPurge(purgePreviewPolicy)"
+        >
+          标记清理旧链
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="externalBackupDialogVisible"
@@ -6116,6 +6216,7 @@ import {
   executeDatabaseWriteQuery,
   explainDatabaseWriteQuery,
   generateDatabaseInspectionReport,
+  previewDatabaseBackupPolicyPurge,
   previewDatabaseBackupPolicySyntheticFull,
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
@@ -6165,6 +6266,7 @@ import {
   registerExternalDatabaseLogArchive,
   resumeDatabaseLogArchiveStream,
   resumeDatabaseReplicaApply,
+  runDatabaseBackupPolicyPurge,
   runDatabaseBackupPolicySyntheticFull,
   runDatabaseBackupPolicyFull,
   runDatabaseBackupPolicyIncremental,
@@ -6190,6 +6292,8 @@ import {
   validateDatabaseDDLQuery,
   verifyDatabaseBackupRecord,
   type DatabaseBackupPolicyChainValidationResult,
+  type DatabaseBackupPolicyPurgePreviewResult,
+  type DatabaseBackupPolicyPurgeRunResult,
   type DatabaseBackupRecordResult,
   type DatabaseBackupPolicyPayload,
   type DatabaseBackupPolicyResult,
@@ -6451,9 +6555,14 @@ const runningBackupPolicyLevel = ref('')
 const validatingBackupPolicyId = ref(0)
 const previewingSyntheticPolicyId = ref(0)
 const runningSyntheticPolicyId = ref(0)
+const previewingPurgePolicyId = ref(0)
+const runningPurgePolicyId = ref(0)
 const syntheticPreviewVisible = ref(false)
 const syntheticPreviewPolicy = ref<DatabaseBackupPolicyResult>()
 const syntheticPreview = ref<DatabaseSyntheticFullPreviewResult>()
+const purgePreviewVisible = ref(false)
+const purgePreviewPolicy = ref<DatabaseBackupPolicyResult>()
+const purgePreview = ref<DatabaseBackupPolicyPurgePreviewResult>()
 const backupPolicies = ref<DatabaseBackupPolicyResult[]>([])
 const backupPolicyTotal = ref(0)
 const backupPolicyFormRef = ref<FormInstance>()
@@ -6963,7 +7072,7 @@ const backupPolicyForm = reactive<DatabaseBackupPolicyPayload & { id?: number }>
   fullSchedule: '0 2 1 * *',
   incrementalSchedule: '0 3 * * *',
   syntheticEnabled: false,
-  syntheticRuleJson: '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true\n}',
+  syntheticRuleJson: '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true,\n  "neverDeleteWithoutProof": true,\n  "markSupersededAfterProof": true,\n  "supersededKeepDaysAfterProof": 7\n}',
   restoreDrillRequired: true,
   retentionJson: '{\n  "fullKeepMonths": 6,\n  "incrementalKeepDays": 45,\n  "binlogKeepDays": 45,\n  "neverDeleteWithoutProof": true\n}',
   enabled: true
@@ -8999,7 +9108,7 @@ const resetBackupPolicyForm = () => {
   backupPolicyForm.fullSchedule = '0 2 1 * *'
   backupPolicyForm.incrementalSchedule = '0 3 * * *'
   backupPolicyForm.syntheticEnabled = false
-  backupPolicyForm.syntheticRuleJson = '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true\n}'
+  backupPolicyForm.syntheticRuleJson = '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true,\n  "neverDeleteWithoutProof": true,\n  "markSupersededAfterProof": true,\n  "supersededKeepDaysAfterProof": 7\n}'
   backupPolicyForm.restoreDrillRequired = true
   backupPolicyForm.retentionJson = '{\n  "fullKeepMonths": 6,\n  "incrementalKeepDays": 45,\n  "binlogKeepDays": 45,\n  "neverDeleteWithoutProof": true\n}'
   backupPolicyForm.enabled = true
@@ -11976,6 +12085,55 @@ const handleRunSyntheticFull = async (row: DatabaseBackupPolicyResult) => {
     }, 3000)
   } finally {
     runningSyntheticPolicyId.value = 0
+  }
+}
+
+const openBackupPolicyPurgePreview = async (row: DatabaseBackupPolicyResult) => {
+  purgePreviewPolicy.value = row
+  purgePreview.value = undefined
+  previewingPurgePolicyId.value = row.id
+  try {
+    const res = await previewDatabaseBackupPolicyPurge(row.id) as DatabaseBackupPolicyPurgePreviewResult
+    purgePreview.value = res
+    purgePreviewVisible.value = true
+    if (res.blockingReasons?.length) {
+      ElMessage.warning(res.blockingReasons[0] || '旧链暂不可清理')
+    }
+    await Promise.all([loadBackupPolicies(), loadBackupRecords()])
+  } finally {
+    previewingPurgePolicyId.value = 0
+  }
+}
+
+const handleRunBackupPolicyPurge = async (row: DatabaseBackupPolicyResult) => {
+  if (!purgePreview.value || purgePreview.value.policyId !== row.id) {
+    await openBackupPolicyPurgePreview(row)
+  }
+  if (purgePreview.value?.blockingReasons?.length) {
+    ElMessage.error(purgePreview.value.blockingReasons[0] || '旧链暂不可清理')
+    return
+  }
+  if (!purgePreview.value?.eligibleRecordIds?.length) {
+    ElMessage.warning('没有到达清理窗口的旧链记录')
+    return
+  }
+  await ElMessageBox.confirm(
+    `确定将策略「${row.name}」的 ${purgePreview.value.eligibleRecordIds.length} 条旧链记录标记为 expired/purged 吗？本操作不会在 backend 中硬删除 runner 或对象存储 artifact，但会改变备份记录状态。`,
+    '清理旧链确认',
+    {
+      type: 'warning',
+      confirmButtonText: '标记清理',
+      cancelButtonText: '取消'
+    }
+  )
+  runningPurgePolicyId.value = row.id
+  try {
+    const res = await runDatabaseBackupPolicyPurge(row.id, { reason: 'manual synthetic purge from backup policy page' }) as DatabaseBackupPolicyPurgeRunResult
+    ElMessage.success(res.message || `已标记清理 ${res.purgedRecordIds?.length || 0} 条旧链记录`)
+    purgePreviewVisible.value = false
+    await Promise.all([loadBackupPolicies(), loadBackupRecords()])
+  } finally {
+    runningPurgePolicyId.value = 0
   }
 }
 

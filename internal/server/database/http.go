@@ -304,6 +304,8 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/backup-policies/:id/synthetic-full/preview", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.PreviewBackupPolicySyntheticFull)
 		databases.POST("/backup-policies/:id/synthetic-full/run", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupPolicySyntheticFull)
 		databases.GET("/backup-policies/:id/synthetic-full/jobs", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupPolicySyntheticJobs)
+		databases.POST("/backup-policies/:id/purge-preview", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.PreviewBackupPolicyPurge)
+		databases.POST("/backup-policies/:id/purge", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupPolicyPurge)
 		databases.POST("/backup-policies/:id/run-full", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupPolicyFull)
 		databases.POST("/backup-policies/:id/run-incremental", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupPolicyIncremental)
 		databases.GET("/backup-records", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupRecords)

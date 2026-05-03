@@ -97,8 +97,11 @@ type backupPolicyChainValidation struct {
 }
 
 type syntheticRuleConfig struct {
-	MergeOldestIncrementals int  `json:"mergeOldestIncrementals"`
-	RequireRestoreProof     bool `json:"requireRestoreProof"`
+	MergeOldestIncrementals      int  `json:"mergeOldestIncrementals"`
+	RequireRestoreProof          bool `json:"requireRestoreProof"`
+	SupersededKeepDaysAfterProof int  `json:"supersededKeepDaysAfterProof"`
+	NeverDeleteWithoutProof      bool `json:"neverDeleteWithoutProof"`
+	MarkSupersededAfterProof     bool `json:"markSupersededAfterProof"`
 }
 
 type syntheticFullArtifactInput struct {
@@ -212,6 +215,11 @@ func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, op
 		sourceIDs = append(sourceIDs, item.ID)
 	}
 	sourceIDsJSON, _ := json.Marshal(sourceIDs)
+	rule := parseSyntheticRule(policy)
+	restoreTestStatus := ""
+	if rule.RequireRestoreProof || policy.RestoreDrillRequired || rule.NeverDeleteWithoutProof {
+		restoreTestStatus = DatabaseBackupStatusPending
+	}
 	record := &DatabaseBackupRecord{
 		PolicyID:                 policy.ID,
 		InstanceID:               policy.InstanceID,
@@ -242,6 +250,7 @@ func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, op
 		RecoverableUntil:         parseTimePtr(firstNonEmpty(preview.SelectedRecords[len(preview.SelectedRecords)-1].RecoverableUntil, started.Format("2006-01-02 15:04:05"))),
 		PrepareStatus:            "synthetic_pending",
 		SyntheticSourceRecordIDs: string(sourceIDsJSON),
+		RestoreTestStatus:        restoreTestStatus,
 		ErrorMessage:             "MySQL/MariaDB 合成全量任务已进入 Runner 队列",
 	}
 	if err := uc.backupRecordRepo.Create(ctx, record); err != nil {
@@ -730,7 +739,12 @@ func (p *DatabaseSyntheticFullPreviewVO) finalizeSyntheticPreviewStatus() {
 }
 
 func parseSyntheticRule(policy *DatabaseBackupPolicyConfig) syntheticRuleConfig {
-	rule := syntheticRuleConfig{MergeOldestIncrementals: 4}
+	rule := syntheticRuleConfig{
+		MergeOldestIncrementals:      4,
+		SupersededKeepDaysAfterProof: 7,
+		NeverDeleteWithoutProof:      true,
+		MarkSupersededAfterProof:     true,
+	}
 	if policy == nil {
 		return rule
 	}
@@ -739,6 +753,9 @@ func parseSyntheticRule(policy *DatabaseBackupPolicyConfig) syntheticRuleConfig 
 	}
 	if rule.MergeOldestIncrementals <= 0 {
 		rule.MergeOldestIncrementals = 4
+	}
+	if rule.SupersededKeepDaysAfterProof < 0 {
+		rule.SupersededKeepDaysAfterProof = 7
 	}
 	return rule
 }

@@ -2149,9 +2149,9 @@ validation-results.json
 | --- | --- | --- |
 | P2.8 备份策略模型 | 已落地 | 新增策略表、链状态表、策略 API、前端“备份策略”页签、调度器接入 |
 | P2.9 Runner 化 MySQL/MariaDB 物理备份 | 已落地 | 策略可手动/定时下发 full 或 incremental 到 SSH Runner，后端自动选择增量父记录 |
-| P2.10 自动增量链选择和链路校验 | 部分随 P2.8/P2.9 落地 | 第一版已校验父记录状态、策略归属、备份引擎、来源实例、checksum、checkpoint 和 Runner 可读 URI；更完整的链路巡检仍在 P2.10 |
-| P2.11 Synthetic Full | 待落地 | 当前只登记 synthetic 规则，不执行合成全量 |
-| P2.12 Purge 门禁 | 待落地 | 当前只预留 superseded/protected 字段，不自动清理旧链 |
+| P2.10 自动增量链选择和链路校验 | 已落地 | 增量自动选择上一条成功物理备份作为父记录；链路校验覆盖父链、策略归属、备份引擎、来源实例、checksum、checkpoint、Runner 可读 URI、链状态持久化和前端校验入口 |
+| P2.11 Synthetic Full | 已落地 | 支持合成预览、SSH Runner 白名单执行、全量+增量 prepare/merge、生成 synthetic full 记录、更新链状态和前端合成入口 |
+| P2.12 Purge 门禁 | 已落地 | 支持 proof/binlog/artifact/依赖/purge 窗口清理预览；proof 通过后旧链标记 superseded；执行清理仅标记 expired/purged 并保留 URI/checksum 审计 |
 
 目标是把“单个物理备份任务”升级为“可长期运行的备份策略编排”，让 OpsHub 可以自动回答并执行：
 
@@ -2730,6 +2730,66 @@ P2.11 已落地实现边界：
 
 目标：确保合成全量可恢复后，再把旧链标记为可清理。
 
+P2.12 已落地实现边界：
+
+1. synthetic full 创建/完成时，如果策略启用了 `requireRestoreProof`、`restoreDrillRequired` 或 `neverDeleteWithoutProof`，新 synthetic full 记录会进入 `restore_test_status=pending`，前端显示为待演练。
+2. 恢复证明复用 P2.7 已实现的隔离恢复 Runner：用户基于 synthetic full 生成恢复计划并执行恢复任务，恢复任务 `verified` 后会把 synthetic full 备份记录更新为 `restore_test_status=success`。
+3. 新增策略级清理预览接口：
+
+```text
+POST /api/v1/databases/backup-policies/:id/purge-preview
+```
+
+4. 新增策略级清理执行接口：
+
+```text
+POST /api/v1/databases/backup-policies/:id/purge
+```
+
+5. 清理预览会先找到当前策略最新成功的 `backup_origin=synthetic_full` 记录，再解析其 `synthetic_source_record_ids` 作为候选旧链。
+6. 如果 synthetic full 已通过恢复证明，预览会对来源旧链做状态调和：
+   - 设置 `superseded_by_record_id=<synthetic full record id>`；
+   - 首次设置 `purge_eligible_at=now + supersededKeepDaysAfterProof`；
+   - 不改变未通过 proof 的旧链。
+7. 清理预览门禁包括：
+   - synthetic full 必须是 `success`；
+   - synthetic full artifact 不能是 `missing/checksum_failed`；
+   - synthetic full 必须有 checksum；
+   - `neverDeleteWithoutProof=true` 时 synthetic full 必须 `restore_test_status=success`；
+   - 策略必须绑定 binlog 归档流；
+   - binlog catalog 必须能从 synthetic full 的 `backup_binlog_file` 起点证明文件链连续；
+   - 若有后续成功增量仍以待清理旧链记录为 `parent_record_id`，阻止清理；
+   - 单条旧链记录必须已到达 `purge_eligible_at`，且不在 `protected_until` 保护期内。
+8. `purge-preview` 返回：
+   - `eligibleRecordIds`；
+   - `blockedRecordIds`；
+   - `requiredProofRecordId`；
+   - `proofStatus`；
+   - `binlogCoverageStatus`；
+   - `storageDeletePlan`；
+   - `blockedRecords`；
+   - `blockingReasons`、`warnings`、`messages`。
+9. `storageDeletePlan` 明确展示：
+   - `recordId`；
+   - `backupLevel`；
+   - `backupOrigin`；
+   - `fileName`；
+   - `fileSize/fileSizeText`；
+   - `storageUri`；
+   - `filePath`；
+   - `checksumSha256`；
+   - `purgeEligibleAt`。
+10. `purge` 执行是第一版安全清理：不在 backend 容器中硬删除 Runner 文件或对象存储对象，只把可清理旧链记录标记为：
+    - `status=expired`；
+    - `verify_status=expired`；
+    - 保留 `storage_uri/file_path/checksum_sha256` 作为审计证据；
+    - `verify_message/error_message` 记录 synthetic proof 和清理边界。
+11. 前端备份策略页新增：
+    - `清理预览`；
+    - `清理旧链`；
+    - 清理预览弹窗展示 proof、binlog 链、保护天数、可清理数、阻断数、清理计划和受保护记录。
+12. 本阶段不做 artifact 物理删除。真正删除 Runner 本地文件、对象存储对象、S3 Object Lock/retention 过期后的 delete marker 管理，后续必须放到 Runner/对象存储保留策略中做，不能由普通 backend HTTP 请求直接执行。
+
 清理状态建议：
 
 ```text
@@ -2767,13 +2827,22 @@ purge_blocked
 4. 如果后续 incremental 仍依赖旧 parent，不允许清理。
 5. 清理动作必须审计，并记录删除的 artifact URI、checksum 和 record ID。
 
-新增 API 建议：
+API 规划与当前落地：
 
 ```text
 POST /api/v1/databases/backup-policies/:id/synthetic-full/:jobId/run-restore-proof
 POST /api/v1/databases/backup-policies/:id/purge-preview
 POST /api/v1/databases/backup-policies/:id/purge
 ```
+
+当前 P2.12 已落地后两个清理 API；`run-restore-proof` 不新增独立入口，恢复证明复用现有恢复计划和隔离恢复 Runner：
+
+```text
+POST /api/v1/databases/restore-plans/:id/run
+GET  /api/v1/databases/restore-jobs/:id/proof
+```
+
+后续如果要把“为某个 synthetic full 自动创建恢复计划并执行 proof”做成一键按钮，再补 `run-restore-proof` 编排接口。
 
 purge preview 必须返回：
 

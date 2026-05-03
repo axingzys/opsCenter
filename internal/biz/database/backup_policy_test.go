@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -154,6 +155,143 @@ func TestBuildSyntheticFullPreviewSelectsOldestIncrementals(t *testing.T) {
 	}
 	if got := preview.SelectedIncrementalRecordIDs; len(got) != 2 || got[0] != 2 || got[1] != 3 {
 		t.Fatalf("unexpected selected incrementals: %v", got)
+	}
+}
+
+func TestBuildSyntheticPurgePreviewRequiresProof(t *testing.T) {
+	now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.Local)
+	base := testPolicyBackupRecord(1, DatabaseBackupLevelFull, 0, 1, "", "1000")
+	inc := testPolicyBackupRecord(2, DatabaseBackupLevelIncremental, 1, 1, "1000", "2000")
+	synthetic := testPolicyBackupRecord(9, DatabaseBackupLevelFull, 2, 9, "", "2000")
+	synthetic.BackupOrigin = DatabaseBackupOriginSyntheticFull
+	synthetic.SyntheticSourceRecordIDs = `[1,2]`
+	synthetic.BackupBinlogFile = "binlog.000001"
+	synthetic.BackupBinlogPos = 4
+	synthetic.RestoreTestStatus = DatabaseBackupStatusPending
+
+	preview := buildSyntheticPurgePreview(&syntheticPurgeInput{
+		Policy: &DatabaseBackupPolicyConfig{
+			Model:          gorm.Model{ID: 7},
+			InstanceID:     10,
+			BinlogStreamID: 3,
+		},
+		Synthetic:     synthetic,
+		SourceRecords: []*DatabaseBackupRecord{base, inc},
+		AllRecords:    []*DatabaseBackupRecord{base, inc, synthetic},
+		LogArchives: []*DatabaseLogArchive{{
+			Model:    gorm.Model{ID: 20},
+			FileName: "binlog.000001",
+			Status:   DatabaseLogArchiveStatusArchived,
+		}},
+		Rule: syntheticRuleConfig{
+			MergeOldestIncrementals:      1,
+			SupersededKeepDaysAfterProof: 0,
+			NeverDeleteWithoutProof:      true,
+			MarkSupersededAfterProof:     true,
+		},
+		Now: now,
+	})
+	if len(preview.EligibleRecordIDs) != 0 {
+		t.Fatalf("proof pending should not produce eligible records: %#v", preview.EligibleRecordIDs)
+	}
+	if len(preview.BlockingReasons) == 0 || !strings.Contains(strings.Join(preview.BlockingReasons, " "), "恢复演练") {
+		t.Fatalf("expected restore proof block, got %v", preview.BlockingReasons)
+	}
+}
+
+func TestBuildSyntheticPurgePreviewEligibleAfterProof(t *testing.T) {
+	now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.Local)
+	base := testPolicyBackupRecord(1, DatabaseBackupLevelFull, 0, 1, "", "1000")
+	inc := testPolicyBackupRecord(2, DatabaseBackupLevelIncremental, 1, 1, "1000", "2000")
+	eligibleAt := now.Add(-time.Minute)
+	for _, record := range []*DatabaseBackupRecord{base, inc} {
+		record.SupersededByRecordID = 9
+		record.PurgeEligibleAt = &eligibleAt
+	}
+	synthetic := testPolicyBackupRecord(9, DatabaseBackupLevelFull, 2, 9, "", "2000")
+	synthetic.BackupOrigin = DatabaseBackupOriginSyntheticFull
+	synthetic.SyntheticSourceRecordIDs = `[1,2]`
+	synthetic.BackupBinlogFile = "binlog.000001"
+	synthetic.BackupBinlogPos = 4
+	synthetic.RestoreTestStatus = DatabaseBackupStatusSuccess
+
+	preview := buildSyntheticPurgePreview(&syntheticPurgeInput{
+		Policy: &DatabaseBackupPolicyConfig{
+			Model:          gorm.Model{ID: 7},
+			InstanceID:     10,
+			BinlogStreamID: 3,
+		},
+		Synthetic:     synthetic,
+		SourceRecords: []*DatabaseBackupRecord{base, inc},
+		AllRecords:    []*DatabaseBackupRecord{base, inc, synthetic},
+		LogArchives: []*DatabaseLogArchive{{
+			Model:    gorm.Model{ID: 20},
+			FileName: "binlog.000001",
+			Status:   DatabaseLogArchiveStatusArchived,
+		}},
+		Rule: syntheticRuleConfig{
+			MergeOldestIncrementals:      1,
+			SupersededKeepDaysAfterProof: 0,
+			NeverDeleteWithoutProof:      true,
+			MarkSupersededAfterProof:     true,
+		},
+		Now: now,
+	})
+	if len(preview.BlockingReasons) != 0 {
+		t.Fatalf("expected no blocking reasons, got %v", preview.BlockingReasons)
+	}
+	if len(preview.EligibleRecordIDs) != 2 || preview.EligibleRecordIDs[0] != 1 || preview.EligibleRecordIDs[1] != 2 {
+		t.Fatalf("unexpected eligible records: %v", preview.EligibleRecordIDs)
+	}
+	if len(preview.StorageDeletePlan) != 2 || preview.StorageDeletePlan[0].StorageURI == "" || preview.StorageDeletePlan[0].ChecksumSHA256 == "" {
+		t.Fatalf("storage delete plan should keep uri and checksum: %#v", preview.StorageDeletePlan)
+	}
+}
+
+func TestBuildSyntheticPurgePreviewBlocksDependentIncremental(t *testing.T) {
+	now := time.Date(2026, 5, 3, 10, 0, 0, 0, time.Local)
+	base := testPolicyBackupRecord(1, DatabaseBackupLevelFull, 0, 1, "", "1000")
+	inc := testPolicyBackupRecord(2, DatabaseBackupLevelIncremental, 1, 1, "1000", "2000")
+	child := testPolicyBackupRecord(3, DatabaseBackupLevelIncremental, 2, 1, "2000", "3000")
+	eligibleAt := now.Add(-time.Minute)
+	for _, record := range []*DatabaseBackupRecord{base, inc} {
+		record.SupersededByRecordID = 9
+		record.PurgeEligibleAt = &eligibleAt
+	}
+	synthetic := testPolicyBackupRecord(9, DatabaseBackupLevelFull, 2, 9, "", "2000")
+	synthetic.BackupOrigin = DatabaseBackupOriginSyntheticFull
+	synthetic.SyntheticSourceRecordIDs = `[1,2]`
+	synthetic.BackupBinlogFile = "binlog.000001"
+	synthetic.BackupBinlogPos = 4
+	synthetic.RestoreTestStatus = DatabaseBackupStatusSuccess
+
+	preview := buildSyntheticPurgePreview(&syntheticPurgeInput{
+		Policy: &DatabaseBackupPolicyConfig{
+			Model:          gorm.Model{ID: 7},
+			InstanceID:     10,
+			BinlogStreamID: 3,
+		},
+		Synthetic:     synthetic,
+		SourceRecords: []*DatabaseBackupRecord{base, inc},
+		AllRecords:    []*DatabaseBackupRecord{base, inc, child, synthetic},
+		LogArchives: []*DatabaseLogArchive{{
+			Model:    gorm.Model{ID: 20},
+			FileName: "binlog.000001",
+			Status:   DatabaseLogArchiveStatusArchived,
+		}},
+		Rule: syntheticRuleConfig{
+			MergeOldestIncrementals:      1,
+			SupersededKeepDaysAfterProof: 0,
+			NeverDeleteWithoutProof:      true,
+			MarkSupersededAfterProof:     true,
+		},
+		Now: now,
+	})
+	if len(preview.EligibleRecordIDs) != 0 {
+		t.Fatalf("dependent incremental should block all cleanup: %v", preview.EligibleRecordIDs)
+	}
+	if len(preview.BlockingReasons) == 0 || !strings.Contains(strings.Join(preview.BlockingReasons, " "), "parent") {
+		t.Fatalf("expected dependency block, got %v", preview.BlockingReasons)
 	}
 }
 

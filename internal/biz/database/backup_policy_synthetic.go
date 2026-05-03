@@ -228,6 +228,10 @@ func (uc *UseCase) applyMySQLSyntheticFullResult(ctx context.Context, policy *Da
 		record.ArtifactCacheURI = trimText(fmt.Sprintf("runner://runner-host-%d%s", result.RunnerHostID, result.WorkDir), 1000)
 		record.PrepareStatus = "synthetic_ready"
 		record.ManifestJSON = buildMySQLPolicySyntheticFullManifest(record, policy, selectedRecords, result)
+		rule := parseSyntheticRule(policy)
+		if strings.TrimSpace(record.RestoreTestStatus) == "" && (rule.RequireRestoreProof || policy.RestoreDrillRequired || rule.NeverDeleteWithoutProof) {
+			record.RestoreTestStatus = DatabaseBackupStatusPending
+		}
 		started := startTimeFromRecord(record, now, durationMs)
 		uc.finishBackupRecordSuccess(ctx, record, started, now, durationMs, result.FileSize, result.ChecksumSHA256, "MySQL/MariaDB 合成全量执行完成")
 		policy.LastSyntheticAt = &now

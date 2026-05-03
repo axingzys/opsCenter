@@ -332,6 +332,57 @@ export interface DatabaseSyntheticFullJobsResult {
   total: number
 }
 
+export interface DatabaseBackupPolicyPurgeRecordResult {
+  recordId: number
+  backupLevel: string
+  backupOrigin: string
+  fileName: string
+  fileSize: number
+  fileSizeText: string
+  storageUri: string
+  filePath: string
+  checksumSha256: string
+  status: string
+  statusText: string
+  artifactState: string
+  supersededByRecordId: number
+  purgeEligibleAt: string
+  protectedUntil: string
+  restoreTestStatus: string
+  restoreTestStatusText: string
+  blockingReason?: string
+}
+
+export interface DatabaseBackupPolicyPurgePreviewResult {
+  policyId: number
+  syntheticRecordId: number
+  requiredProofRecordId: number
+  proofStatus: string
+  proofStatusText: string
+  binlogCoverageStatus: string
+  binlogCoverageText: string
+  retentionDays: number
+  neverDeleteWithoutProof: boolean
+  eligibleRecordIds: number[]
+  blockedRecordIds: number[]
+  storageDeletePlan: DatabaseBackupPolicyPurgeRecordResult[]
+  blockedRecords: DatabaseBackupPolicyPurgeRecordResult[]
+  blockingReasons: string[]
+  warnings: string[]
+  messages: string[]
+  checkedAt: string
+}
+
+export interface DatabaseBackupPolicyPurgeRunResult {
+  policyId: number
+  syntheticRecordId: number
+  purgedRecordIds: number[]
+  skippedRecordIds: number[]
+  storageDeletePlan: DatabaseBackupPolicyPurgeRecordResult[]
+  message: string
+  executedAt: string
+}
+
 export interface DatabaseBackupPolicyResult {
   id: number
   instanceId: number
@@ -1473,6 +1524,12 @@ export const listDatabaseBackupPolicySyntheticJobs = (id: number, params?: {
   page?: number
   pageSize?: number
 }) => request.get(`/api/v1/databases/backup-policies/${id}/synthetic-full/jobs`, { params })
+
+export const previewDatabaseBackupPolicyPurge = (id: number) =>
+  request.post(`/api/v1/databases/backup-policies/${id}/purge-preview`)
+
+export const runDatabaseBackupPolicyPurge = (id: number, data?: { reason?: string }) =>
+  request.post(`/api/v1/databases/backup-policies/${id}/purge`, data || {})
 
 export const runDatabaseBackupPolicyFull = (id: number, data?: { reason?: string }) =>
   request.post(`/api/v1/databases/backup-policies/${id}/run-full`, data || {})
