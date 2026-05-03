@@ -37,6 +37,13 @@ type ReplicaIncidentGuideRepo interface {
 	List(ctx context.Context, req *DatabaseReplicaIncidentGuideListRequest) ([]*DatabaseReplicaIncidentGuide, int64, error)
 }
 
+type ReplicaActionRepo interface {
+	Create(ctx context.Context, item *DatabaseReplicaAction) error
+	Update(ctx context.Context, item *DatabaseReplicaAction) error
+	GetByID(ctx context.Context, id uint) (*DatabaseReplicaAction, error)
+	List(ctx context.Context, req *DatabaseReplicaActionListRequest) ([]*DatabaseReplicaAction, int64, error)
+}
+
 type DatabasePermissionRepo interface {
 	HasAnyRules(ctx context.Context) (bool, error)
 	IsAdmin(ctx context.Context, userID uint) (bool, error)

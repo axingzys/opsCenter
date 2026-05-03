@@ -97,7 +97,10 @@ func writeDatabaseError(c *gin.Context, prefix string, err error) {
 		strings.Contains(message, "已禁用"),
 		strings.Contains(message, "未确认"),
 		strings.Contains(message, "未开启"),
-		strings.Contains(message, "范围"):
+		strings.Contains(message, "范围"),
+		strings.Contains(message, "必须"),
+		strings.Contains(message, "缺少"),
+		strings.Contains(message, "只能"):
 		statusCode = http.StatusBadRequest
 	}
 	response.ErrorCode(c, statusCode, prefix+message)
@@ -264,6 +267,9 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseReplicaIncidentGuideListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseReplicaActionListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
 	}

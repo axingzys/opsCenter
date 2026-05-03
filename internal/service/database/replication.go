@@ -169,6 +169,93 @@ func (s *Service) GetReplicaIncidentGuide(c *gin.Context) {
 	response.Success(c, result)
 }
 
+func (s *Service) ListReplicaActions(c *gin.Context) {
+	var req dbbiz.DatabaseReplicaActionListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionTopology)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListReplicaActions(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+func (s *Service) PauseReplicaApply(c *gin.Context) {
+	s.executeReplicaApplyAction(c, true)
+}
+
+func (s *Service) ResumeReplicaApply(c *gin.Context) {
+	s.executeReplicaApplyAction(c, false)
+}
+
+func (s *Service) executeReplicaApplyAction(c *gin.Context, pause bool) {
+	replicaID, ok := parseUintParam(c, "id", "副本关系ID")
+	if !ok {
+		return
+	}
+	target, err := s.useCase.GetInstanceReplica(c.Request.Context(), replicaID)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if target == nil || target.ReplicaInstanceID == 0 {
+		response.ErrorCode(c, http.StatusBadRequest, "副本关系缺少目标实例")
+		return
+	}
+	if !s.ensureInstancePermission(c, target.ReplicaInstanceID, dbbiz.DatabasePermissionTopology) {
+		return
+	}
+	if target.PrimaryInstanceID > 0 && !s.ensureInstancePermission(c, target.PrimaryInstanceID, dbbiz.DatabasePermissionTopology) {
+		return
+	}
+	var req dbbiz.DatabaseReplicaActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	operator := dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	}
+	var result *dbbiz.DatabaseReplicaActionVO
+	if pause {
+		result, err = s.useCase.PauseReplicaApply(c.Request.Context(), replicaID, &req, operator)
+	} else {
+		result, err = s.useCase.ResumeReplicaApply(c.Request.Context(), replicaID, &req, operator)
+	}
+	if err != nil {
+		prefix := "执行失败: "
+		if pause {
+			prefix = "暂停 apply 失败: "
+		} else {
+			prefix = "恢复 apply 失败: "
+		}
+		writeDatabaseError(c, prefix, err)
+		return
+	}
+	message := "apply 控制已执行"
+	if pause {
+		message = "已暂停 apply/replay"
+	} else {
+		message = "已恢复 apply/replay"
+	}
+	response.SuccessWithMessage(c, message, result)
+}
+
 func (s *Service) GetInstanceReplicationStatus(c *gin.Context) {
 	instanceID, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {

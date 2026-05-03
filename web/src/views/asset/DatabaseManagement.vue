@@ -1223,8 +1223,8 @@
       <el-tab-pane label="副本治理" name="replication">
         <div class="backup-panel">
           <el-alert
-            title="P4.1 仅做副本关系发现和只读状态展示。这里不会执行 pause、resume、promote、failover 或切换动作。"
-            type="info"
+            title="P4.4 支持对已确认 replica/standby 执行固定白名单 pause/resume apply 命令；不支持 promote、failover 或任意 SQL。执行前会自动复查角色并写入审计。"
+            type="warning"
             show-icon
             :closable="false"
           />
@@ -1312,7 +1312,7 @@
               <el-table-column label="最近检查" width="170">
                 <template #default="{ row }">{{ row.lastCheckedAt || '-' }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="170" fixed="right">
+              <el-table-column label="操作" width="230" fixed="right">
                 <template #default="{ row }">
                   <el-button v-if="row.preferredReplicaInstanceId" link type="primary" :loading="replicationCheckingId === row.preferredReplicaInstanceId" @click="handleCheckReplication(row.preferredReplicaInstanceId)">采集</el-button>
                   <el-button v-if="uiPermissions.replicaIncidentGuide" link type="warning" @click="handleOpenReplicaIncidentGuide(row)">生成事故指引</el-button>
@@ -1489,6 +1489,11 @@
                   <el-tag size="small" :type="replicationHealthTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
                 </template>
               </el-table-column>
+              <el-table-column label="Apply状态" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="replicaApplyStateTag(row.applyState)">{{ row.applyStateText || row.applyState || '-' }}</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="配置延迟" width="110" align="right">
                 <template #default="{ row }">{{ replicationDelayText(row.configuredDelaySeconds) }}</template>
               </el-table-column>
@@ -1505,6 +1510,8 @@
                 <template #default="{ row }">
                   <el-button link type="primary" :loading="replicationCheckingId === row.replicaInstanceId" @click="handleCheckReplication(row.replicaInstanceId)">采集</el-button>
                   <el-button link type="info" @click="handleViewReplicationStatus(row.replicaInstanceId)">详情</el-button>
+                  <el-button v-if="uiPermissions.replicaPauseApply && !row.applyPaused" link type="danger" @click="handleOpenReplicaAction(row, 'pause')">暂停</el-button>
+                  <el-button v-if="uiPermissions.replicaResumeApply && row.applyPaused" link type="success" @click="handleOpenReplicaAction(row, 'resume')">恢复</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -1517,6 +1524,76 @@
                 layout="total, sizes, prev, pager, next"
                 @size-change="loadReplicationReplicas"
                 @current-change="loadReplicationReplicas"
+              />
+            </div>
+          </div>
+
+          <div class="backup-card">
+            <div class="section-title">
+              <span>Apply 操作记录</span>
+              <el-tag size="small" type="info">{{ replicaActionTotal }}</el-tag>
+            </div>
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <el-select v-model="replicaActionQuery.instanceId" placeholder="实例" clearable filterable class="audit-search-input" @change="loadReplicaActions">
+                  <el-option
+                    v-for="item in replicationInstances"
+                    :key="item.id"
+                    :label="`${item.name} (${item.dbType})`"
+                    :value="item.id"
+                  />
+                </el-select>
+                <el-select v-model="replicaActionQuery.action" placeholder="动作" clearable class="audit-select" @change="loadReplicaActions">
+                  <el-option label="暂停 apply" value="pause_apply" />
+                  <el-option label="恢复 apply" value="resume_apply" />
+                </el-select>
+                <el-select v-model="replicaActionQuery.status" placeholder="状态" clearable class="audit-select" @change="loadReplicaActions">
+                  <el-option label="成功" value="success" />
+                  <el-option label="失败" value="failed" />
+                  <el-option label="待执行" value="pending" />
+                </el-select>
+              </div>
+              <div class="backup-toolbar-group">
+                <el-button type="primary" plain :loading="replicaActionLoading" @click="loadReplicaActions">刷新记录</el-button>
+              </div>
+            </div>
+            <el-table :data="replicaActions" v-loading="replicaActionLoading" stripe class="modern-table">
+              <el-table-column label="动作" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="replicaActionTag(row.action)">{{ row.actionText || row.action }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="副本" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.replicaInstanceName || `#${row.replicaInstanceId}` }}</span>
+                    <span class="muted-text">{{ row.replicaEndpoint || '-' }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="事故编号" width="150" prop="incidentNo" show-overflow-tooltip />
+              <el-table-column label="命令" min-width="180" prop="commandTemplate" show-overflow-tooltip />
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="auditStatusTag(row.status)">{{ row.statusText || row.status }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="原因" min-width="220" prop="reason" show-overflow-tooltip />
+              <el-table-column label="错误" min-width="220" prop="errorMessage" show-overflow-tooltip />
+              <el-table-column label="操作人" width="120" prop="operatorName" show-overflow-tooltip />
+              <el-table-column label="时间" width="170">
+                <template #default="{ row }">{{ row.createdAt || '-' }}</template>
+              </el-table-column>
+            </el-table>
+            <div class="pagination-wrapper">
+              <el-pagination
+                v-model:current-page="replicaActionQuery.page"
+                v-model:page-size="replicaActionQuery.pageSize"
+                :total="replicaActionTotal"
+                :page-sizes="[5, 10, 20]"
+                layout="total, sizes, prev, pager, next"
+                @size-change="loadReplicaActions"
+                @current-change="loadReplicaActions"
               />
             </div>
           </div>
@@ -5537,6 +5614,72 @@
     </el-dialog>
 
     <el-dialog
+      v-model="replicaActionDialogVisible"
+      :title="replicaActionMode === 'pause' ? '暂停副本 Apply' : '恢复副本 Apply'"
+      width="760px"
+      @close="resetReplicaActionForm"
+    >
+      <el-alert
+        title="该操作会在目标副本上执行固定白名单命令。提交前系统会自动采集副本状态，只有确认是 replica/standby 时才会继续。"
+        type="error"
+        show-icon
+        :closable="false"
+        class="mb-3"
+      />
+      <el-descriptions :column="2" border class="backup-detail-descriptions">
+        <el-descriptions-item label="主库">{{ replicaActionTarget?.primaryInstanceName || replicaActionTarget?.primaryEndpoint || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="副本">{{ replicaActionTarget?.replicaInstanceName || replicaActionTarget?.replicaEndpoint || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="角色">{{ replicaActionTarget?.replicaRoleText || replicaActionTarget?.replicaRole || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="Apply状态">{{ replicaActionTarget?.applyStateText || replicaActionTarget?.applyState || '-' }}</el-descriptions-item>
+      </el-descriptions>
+      <el-form ref="replicaActionFormRef" :model="replicaActionForm" :rules="replicaActionRules" label-width="120px" class="mt-3">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="事故编号" prop="incidentNo">
+              <el-input v-model="replicaActionForm.incidentNo" maxlength="120" placeholder="例如 INC-20260503-001" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="关联指引ID">
+              <el-input-number v-model="replicaActionForm.incidentGuideId" :min="0" controls-position="right" class="w-full" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="执行原因" prop="reason">
+          <el-input
+            v-model="replicaActionForm.reason"
+            type="textarea"
+            :rows="3"
+            maxlength="1000"
+            show-word-limit
+            placeholder="必须填写暂停或恢复原因"
+          />
+        </el-form-item>
+        <el-form-item label="影响确认" prop="confirmImpact">
+          <el-input
+            v-model="replicaActionForm.confirmImpact"
+            type="textarea"
+            :rows="3"
+            maxlength="1000"
+            show-word-limit
+            placeholder="说明确认的目标、副本角色、影响范围和回滚/恢复安排"
+          />
+        </el-form-item>
+        <el-form-item label="二次确认" prop="confirmed">
+          <el-checkbox v-model="replicaActionForm.confirmed">
+            我确认目标是副本/standby，理解暂停或恢复 apply/replay 对误删拦截窗口和复制状态的影响
+          </el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="replicaActionDialogVisible = false">取消</el-button>
+        <el-button :type="replicaActionMode === 'pause' ? 'danger' : 'success'" :loading="replicaActionSubmitting" @click="submitReplicaAction">
+          {{ replicaActionMode === 'pause' ? '确认暂停' : '确认恢复' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="permissionDialogVisible"
       :title="permissionForm.id ? '编辑实例权限' : '添加实例权限'"
       width="720px"
@@ -5664,10 +5807,13 @@ import {
   listDatabaseReplicationChecks,
   listDatabaseReplicaProtections,
   listDatabaseReplicaIncidentGuides,
+  listDatabaseReplicaActions,
   pauseDatabaseLogArchiveStream,
+  pauseDatabaseReplicaApply,
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
   resumeDatabaseLogArchiveStream,
+  resumeDatabaseReplicaApply,
   runDatabaseBackupTask,
   runDatabaseLogArchiveCatchUp,
   runDatabaseLogArchiveOnce,
@@ -5707,6 +5853,8 @@ import {
   type DatabaseInspectionReportResult,
   type DatabaseInstancePayload,
   type DatabaseInstanceReplicaResult,
+  type DatabaseReplicaActionPayload,
+  type DatabaseReplicaActionResult,
   type DatabaseQueryPayload,
   type DatabaseReplicationCheckResult,
   type DatabaseReplicaProtectionResult,
@@ -5920,6 +6068,14 @@ const replicaIncidentGuideDetailVisible = ref(false)
 const replicaIncidentGuideDetailTitle = ref('')
 const replicaIncidentGuideDetailMarkdown = ref('')
 const replicaIncidentGuideFormRef = ref<FormInstance>()
+const replicaActionLoading = ref(false)
+const replicaActionSubmitting = ref(false)
+const replicaActions = ref<DatabaseReplicaActionResult[]>([])
+const replicaActionTotal = ref(0)
+const replicaActionDialogVisible = ref(false)
+const replicaActionMode = ref<'pause' | 'resume'>('pause')
+const replicaActionTarget = ref<DatabaseInstanceReplicaResult>()
+const replicaActionFormRef = ref<FormInstance>()
 const backupTaskLoading = ref(false)
 const backupTaskSubmitting = ref(false)
 const backupTaskDialogVisible = ref(false)
@@ -6091,6 +6247,8 @@ const auditActions = [
   { label: '副本状态查看', value: 'replica_status_view' },
   { label: '副本状态采集', value: 'replica_check_run' },
   { label: '副本事故指引', value: 'replica_incident_guide' },
+  { label: '暂停副本 Apply', value: 'replica_pause_apply' },
+  { label: '恢复副本 Apply', value: 'replica_resume_apply' },
   { label: '实例权限保存', value: 'instance_permission_upsert' },
   { label: '实例权限删除', value: 'instance_permission_delete' },
   { label: '数据字典导出', value: 'metadata_export' },
@@ -6259,6 +6417,15 @@ const replicaIncidentGuideQuery = reactive({
   canIntercept: ''
 })
 
+const replicaActionQuery = reactive({
+  page: 1,
+  pageSize: 5,
+  instanceId: undefined as number | undefined,
+  replicaId: undefined as number | undefined,
+  action: '',
+  status: ''
+})
+
 const replicaIncidentGuideForm = reactive<DatabaseReplicaIncidentGuidePayload>({
   instanceId: 0,
   incidentTime: '',
@@ -6267,6 +6434,15 @@ const replicaIncidentGuideForm = reactive<DatabaseReplicaIncidentGuidePayload>({
   incidentReason: '',
   expectedRecoveryMethod: 'export_backfill',
   confirmNoAutoPause: false
+})
+
+const replicaActionForm = reactive<DatabaseReplicaActionPayload>({
+  incidentGuideId: undefined,
+  incidentNo: '',
+  reason: '',
+  confirmImpact: '',
+  confirmed: false,
+  maxCheckAgeSeconds: 60
 })
 
 const replicaIncidentGuideRules: FormRules = {
@@ -6280,6 +6456,21 @@ const replicaIncidentGuideRules: FormRules = {
       validator: (_rule, value, callback) => {
         if (value === true) callback()
         else callback(new Error('必须确认本阶段不自动暂停 apply/replay'))
+      },
+      trigger: 'change'
+    }
+  ]
+}
+
+const replicaActionRules: FormRules = {
+  incidentNo: [{ required: true, message: '请填写事故编号', trigger: 'blur' }],
+  reason: [{ required: true, message: '请填写执行原因', trigger: 'blur' }],
+  confirmImpact: [{ required: true, message: '请填写影响范围确认', trigger: 'blur' }],
+  confirmed: [
+    {
+      validator: (_rule, value, callback) => {
+        if (value === true) callback()
+        else callback(new Error('必须完成二次确认'))
       },
       trigger: 'change'
     }
@@ -7551,6 +7742,9 @@ const pruneSelectedInstanceRefs = () => {
   if (replicaIncidentGuideQuery.instanceId && !replicationInstances.value.some(item => item.id === replicaIncidentGuideQuery.instanceId)) {
     replicaIncidentGuideQuery.instanceId = undefined
   }
+  if (replicaActionQuery.instanceId && !replicationInstances.value.some(item => item.id === replicaActionQuery.instanceId)) {
+    replicaActionQuery.instanceId = undefined
+  }
   if (backupTaskQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskQuery.instanceId)) {
     backupTaskQuery.instanceId = undefined
   }
@@ -7945,8 +8139,21 @@ const loadReplicaIncidentGuides = async () => {
   }
 }
 
+const loadReplicaActions = async () => {
+  replicaActionLoading.value = true
+  try {
+    const res: any = await listDatabaseReplicaActions(replicaActionQuery)
+    replicaActions.value = res.list || []
+    replicaActionTotal.value = res.total || 0
+    if (res.page) replicaActionQuery.page = res.page
+    if (res.pageSize) replicaActionQuery.pageSize = res.pageSize
+  } finally {
+    replicaActionLoading.value = false
+  }
+}
+
 const refreshReplicationState = async () => {
-  await Promise.all([loadReplicationProtections(), loadReplicationReplicas(), loadReplicationChecks(), loadReplicaIncidentGuides()])
+  await Promise.all([loadReplicationProtections(), loadReplicationReplicas(), loadReplicationChecks(), loadReplicaIncidentGuides(), loadReplicaActions()])
 }
 
 const handleCheckReplication = async (instanceId?: number) => {
@@ -8055,6 +8262,47 @@ const handleViewReplicaIncidentGuide = async (row: DatabaseReplicaIncidentGuideR
     replicaIncidentGuideDetailVisible.value = true
   } finally {
     replicaIncidentGuideLoading.value = false
+  }
+}
+
+const resetReplicaActionForm = () => {
+  replicaActionForm.incidentGuideId = undefined
+  replicaActionForm.incidentNo = ''
+  replicaActionForm.reason = ''
+  replicaActionForm.confirmImpact = ''
+  replicaActionForm.confirmed = false
+  replicaActionForm.maxCheckAgeSeconds = 60
+  replicaActionFormRef.value?.clearValidate()
+}
+
+const handleOpenReplicaAction = (row: DatabaseInstanceReplicaResult, mode: 'pause' | 'resume') => {
+  resetReplicaActionForm()
+  replicaActionMode.value = mode
+  replicaActionTarget.value = row
+  replicaActionForm.incidentNo = `INC-${formatDateTimeInput().replace(/[-:\s]/g, '')}`
+  replicaActionForm.reason = mode === 'pause' ? '误操作应急，暂停副本 apply/replay 以保留恢复窗口' : '误操作处理完成，恢复副本 apply/replay'
+  replicaActionForm.confirmImpact = `目标副本：${row.replicaInstanceName || row.replicaEndpoint || row.replicaInstanceId}；当前角色：${row.replicaRoleText || row.replicaRole || '未知'}；当前 apply 状态：${row.applyStateText || row.applyState || '未知'}`
+  replicaActionDialogVisible.value = true
+}
+
+const submitReplicaAction = async () => {
+  await replicaActionFormRef.value?.validate()
+  const target = replicaActionTarget.value
+  if (!target?.id || !target.replicaInstanceId) return
+  replicaActionSubmitting.value = true
+  try {
+    await checkDatabaseReplication(target.replicaInstanceId)
+    if (replicaActionMode.value === 'pause') {
+      await pauseDatabaseReplicaApply(target.id, replicaActionForm)
+      ElMessage.success('已暂停副本 apply/replay')
+    } else {
+      await resumeDatabaseReplicaApply(target.id, replicaActionForm)
+      ElMessage.success('已恢复副本 apply/replay')
+    }
+    replicaActionDialogVisible.value = false
+    await refreshReplicationState()
+  } finally {
+    replicaActionSubmitting.value = false
   }
 }
 
@@ -11264,6 +11512,28 @@ const replicationRoleTag = (role?: string) => {
     case 'standby':
       return 'primary'
     case 'primary':
+      return 'success'
+    default:
+      return 'info'
+  }
+}
+
+const replicaApplyStateTag = (state?: string) => {
+  switch (state) {
+    case 'running':
+      return 'success'
+    case 'paused':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const replicaActionTag = (action?: string) => {
+  switch (action) {
+    case 'pause_apply':
+      return 'danger'
+    case 'resume_apply':
       return 'success'
     default:
       return 'info'

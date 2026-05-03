@@ -5494,6 +5494,34 @@ database:replica:resume-apply
 6. 恢复 apply 也必须审计。
 7. P4.4 上线前必须有真实 MySQL/MariaDB 和 PostgreSQL standby 演练。
 
+P4.4 第一版落地边界：
+
+1. 新增 `database_replica_actions` 表，专门记录 pause/resume apply 的执行记录、事故编号、原因、影响确认、前后检查、白名单命令、stdout/stderr 摘要、执行状态和操作人。
+2. 新增菜单权限：
+   - `database:replica:pause-apply`
+   - `database:replica:resume-apply`
+3. API：
+   - `GET /api/v1/databases/replica-actions`
+   - `POST /api/v1/databases/replicas/:id/pause-apply`
+   - `POST /api/v1/databases/replicas/:id/resume-apply`
+4. 第一版执行器不开放任意 SQL，也不做 promote/failover。后端复用数据库连接对目标副本执行固定 SQL 白名单；后续如需要更强隔离，可把同一 `allowed_command` 迁移到 Runner 主机执行。
+5. 执行前后都会自动运行一次 `CheckInstanceReplication`：
+   - 执行前确认目标当前检测角色是 MySQL/MariaDB `replica` 或 PostgreSQL `standby`。
+   - 如果检测结果是 `primary`、`unknown` 或采集失败，动作失败并记录。
+   - 执行后重新采集并把 `after_check_id` 和状态摘要写入记录。
+6. MySQL/MariaDB 优先执行 `STOP/START REPLICA SQL_THREAD`，失败时回退到旧版 `STOP/START SLAVE SQL_THREAD`，最终实际命令写入记录。
+7. PostgreSQL 执行 `SELECT pg_wal_replay_pause()` / `SELECT pg_wal_replay_resume()`；状态采集增加 `pg_is_wal_replay_paused()`，前端能显示 `Apply状态=已暂停`。
+8. 每次执行都会写入统一查询审计：
+   - `replica_pause_apply`
+   - `replica_resume_apply`
+   - `SQLType=REPLICA_APPLY_CONTROL`
+   - `risk_level=high`
+9. 前端“副本治理”新增：
+   - 副本关系表的 `Apply状态` 列。
+   - 暂停 / 恢复按钮，仅在拥有对应菜单权限时显示。
+   - 强制填写事故编号、执行原因、影响确认和二次确认的弹窗。
+   - `Apply 操作记录` 表格，展示动作、目标副本、命令、状态、原因、错误和操作人。
+
 ## 迁移策略
 
 ### 现有任务

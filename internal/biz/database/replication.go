@@ -284,6 +284,12 @@ FROM pg_stat_replication`)
 	}
 
 	raw := map[string]any{"role": "standby"}
+	replayPaused := false
+	if err := db.QueryRowContext(ctx, "SELECT pg_is_wal_replay_paused()").Scan(&replayPaused); err != nil {
+		raw["pg_is_wal_replay_paused_error"] = err.Error()
+	} else {
+		raw["pg_is_wal_replay_paused"] = replayPaused
+	}
 	walReceiver, _, receiverErr := querySingleRowMap(ctx, db, postgreSQLWALReceiverStatusQuery())
 	if receiverErr != nil {
 		raw["pg_stat_wal_receiver_error"] = receiverErr.Error()
@@ -316,7 +322,7 @@ FROM pg_stat_replication`)
 	}
 	sourceHost, sourcePort, applicationName := parsePostgreSQLConnInfo(firstNonEmpty(walReceiver["conninfo"], firstNonEmptyQueryValue(ctx, db, "SHOW primary_conninfo")))
 	sourceInstanceID := uc.matchRegisteredInstance(ctx, sourceHost, sourcePort, item.ID)
-	riskFlags := postgresStandbyRiskFlags(walReceiver["status"], sourceInstanceID, receiverErr)
+	riskFlags := postgresStandbyRiskFlags(walReceiver["status"], sourceInstanceID, receiverErr, replayPaused)
 
 	check.RoleDetected = DatabaseReplicationRoleStandby
 	check.SourceInstanceID = sourceInstanceID
@@ -429,6 +435,7 @@ func (uc *UseCase) toInstanceReplicaVO(ctx context.Context, item *DatabaseInstan
 	}
 	primaryName, primaryEndpoint := uc.instanceNameEndpoint(ctx, item.PrimaryInstanceID)
 	replicaName, replicaEndpoint := uc.instanceNameEndpoint(ctx, item.ReplicaInstanceID)
+	applyState := uc.latestReplicaApplyState(ctx, item.ReplicaInstanceID)
 	return &DatabaseInstanceReplicaVO{
 		ID:                     item.ID,
 		PrimaryInstanceID:      item.PrimaryInstanceID,
@@ -451,12 +458,42 @@ func (uc *UseCase) toInstanceReplicaVO(ctx context.Context, item *DatabaseInstan
 		DiscoverySourceText:    ReplicaDiscoverySourceText(item.DiscoverySource),
 		Status:                 item.Status,
 		StatusText:             ReplicaHealthText(item.Status),
+		ApplyState:             applyState,
+		ApplyStateText:         ReplicaApplyStateText(applyState),
+		ApplyPaused:            applyState == DatabaseReplicaApplyStatePaused,
 		LastCheckID:            item.LastCheckID,
 		LastCheckedAt:          formatTime(item.LastCheckedAt),
 		LastError:              item.LastError,
 		CreatedAt:              formatTime(&item.CreatedAt),
 		UpdatedAt:              formatTime(&item.UpdatedAt),
 	}
+}
+
+func (uc *UseCase) latestReplicaApplyState(ctx context.Context, replicaInstanceID uint) string {
+	if uc == nil || uc.replicationCheckRepo == nil || replicaInstanceID == 0 {
+		return DatabaseReplicaApplyStateUnknown
+	}
+	check, err := uc.replicationCheckRepo.LatestByInstanceID(ctx, replicaInstanceID)
+	if err != nil || check == nil {
+		return DatabaseReplicaApplyStateUnknown
+	}
+	switch check.RoleDetected {
+	case DatabaseReplicationRoleReplica:
+		status := strings.TrimSpace(check.ReplicaSQLRunning)
+		if strings.EqualFold(status, "No") || strings.EqualFold(status, "Stopped") {
+			return DatabaseReplicaApplyStatePaused
+		}
+		if strings.EqualFold(status, "Yes") || strings.EqualFold(status, "Running") {
+			return DatabaseReplicaApplyStateRunning
+		}
+	case DatabaseReplicationRoleStandby:
+		raw := decodeReplicaRawMap(check.RawStatusJSON)
+		if toBool(raw["pg_is_wal_replay_paused"]) {
+			return DatabaseReplicaApplyStatePaused
+		}
+		return DatabaseReplicaApplyStateRunning
+	}
+	return DatabaseReplicaApplyStateUnknown
 }
 
 func (uc *UseCase) toReplicationCheckVOList(ctx context.Context, list []*DatabaseReplicationCheck) []*DatabaseReplicationCheckVO {
@@ -614,10 +651,13 @@ func mysqlReplicaRiskFlags(ioRunning, sqlRunning string, secondsBehind, configur
 	return flags
 }
 
-func postgresStandbyRiskFlags(receiverStatus string, sourceInstanceID uint, receiverErr error) []string {
+func postgresStandbyRiskFlags(receiverStatus string, sourceInstanceID uint, receiverErr error, replayPaused bool) []string {
 	flags := make([]string, 0, 3)
 	if receiverErr != nil {
 		flags = append(flags, "WAL receiver 状态读取失败")
+	}
+	if replayPaused {
+		flags = append(flags, "WAL replay 已暂停")
 	}
 	if status := strings.TrimSpace(receiverStatus); status != "" && !strings.EqualFold(status, "streaming") {
 		flags = append(flags, "WAL receiver 非 streaming")
@@ -804,6 +844,11 @@ func toString(value any) string {
 	switch typed := value.(type) {
 	case string:
 		return typed
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
 	case fmt.Stringer:
 		return typed.String()
 	case nil:
@@ -811,6 +856,23 @@ func toString(value any) string {
 	default:
 		return fmt.Sprintf("%v", typed)
 	}
+}
+
+func toBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1", "yes", "on":
+			return true
+		}
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	}
+	return false
 }
 
 func ReplicaRoleText(role string) string {
@@ -834,6 +896,41 @@ func ReplicationRoleText(role string) string {
 		return "从库"
 	case DatabaseReplicationRoleStandby:
 		return "Standby"
+	default:
+		return "未知"
+	}
+}
+
+func ReplicaApplyStateText(state string) string {
+	switch strings.TrimSpace(state) {
+	case DatabaseReplicaApplyStateRunning:
+		return "运行中"
+	case DatabaseReplicaApplyStatePaused:
+		return "已暂停"
+	default:
+		return "未知"
+	}
+}
+
+func ReplicaApplyActionText(action string) string {
+	switch strings.TrimSpace(action) {
+	case DatabaseReplicaApplyActionPause:
+		return "暂停 apply"
+	case DatabaseReplicaApplyActionResume:
+		return "恢复 apply"
+	default:
+		return "未知"
+	}
+}
+
+func DatabaseActionStatusText(status string) string {
+	switch strings.TrimSpace(status) {
+	case DatabaseQueryStatusPending:
+		return "待执行"
+	case DatabaseQueryStatusSuccess:
+		return "成功"
+	case DatabaseQueryStatusFailed:
+		return "失败"
 	default:
 		return "未知"
 	}

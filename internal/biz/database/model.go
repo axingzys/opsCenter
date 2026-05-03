@@ -62,6 +62,8 @@ const (
 	DatabaseAuditActionReplicaStatusView  = "replica_status_view"
 	DatabaseAuditActionReplicaCheckRun    = "replica_check_run"
 	DatabaseAuditActionReplicaIncident    = "replica_incident_guide"
+	DatabaseAuditActionReplicaPauseApply  = "replica_pause_apply"
+	DatabaseAuditActionReplicaResumeApply = "replica_resume_apply"
 
 	DatabaseBackupTypeLogical         = "logical"
 	DatabaseBackupTypeLogicalCustom   = "logical_custom"
@@ -188,6 +190,8 @@ const (
 	DatabaseRunnerAllowedCommandBarmanRestore        = "barman_restore"
 	DatabaseRunnerAllowedCommandPgBaseBackup         = "pg_basebackup"
 	DatabaseRunnerAllowedCommandPgBaseBackupRestore  = "pg_basebackup_restore"
+	DatabaseRunnerAllowedCommandReplicaPauseApply    = "replica_pause_apply"
+	DatabaseRunnerAllowedCommandReplicaResumeApply   = "replica_resume_apply"
 
 	DatabaseBarmanServerStatusPending  = "pending"
 	DatabaseBarmanServerStatusHealthy  = "healthy"
@@ -267,6 +271,13 @@ const (
 	DatabaseReplicaDiscoveryPrimaryStat   = "primary_stat"
 	DatabaseReplicaDiscoveryManual        = "manual"
 	DatabaseReplicaDiscoveryInferred      = "inferred"
+
+	DatabaseReplicaApplyStateRunning = "running"
+	DatabaseReplicaApplyStatePaused  = "paused"
+	DatabaseReplicaApplyStateUnknown = "unknown"
+
+	DatabaseReplicaApplyActionPause  = "pause_apply"
+	DatabaseReplicaApplyActionResume = "resume_apply"
 
 	DatabasePermissionView           uint = 1 << 0
 	DatabasePermissionQuery          uint = 1 << 1
@@ -400,6 +411,43 @@ type DatabaseReplicaIncidentGuide struct {
 
 func (DatabaseReplicaIncidentGuide) TableName() string {
 	return "database_replica_incident_guides"
+}
+
+// DatabaseReplicaAction 保存一次副本 apply/replay 暂停或恢复执行记录。
+type DatabaseReplicaAction struct {
+	gorm.Model
+	ReplicaID         uint       `gorm:"column:replica_id;not null;index;comment:副本关系ID" json:"replicaId"`
+	PrimaryInstanceID uint       `gorm:"column:primary_instance_id;index;comment:主库实例ID" json:"primaryInstanceId"`
+	ReplicaInstanceID uint       `gorm:"column:replica_instance_id;not null;index;comment:副本实例ID" json:"replicaInstanceId"`
+	IncidentGuideID   uint       `gorm:"column:incident_guide_id;index;comment:关联事故指引ID" json:"incidentGuideId"`
+	IncidentNo        string     `gorm:"column:incident_no;type:varchar(120);index;comment:事故编号" json:"incidentNo"`
+	Action            string     `gorm:"type:varchar(30);not null;index;comment:pause_apply/resume_apply" json:"action"`
+	Engine            string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
+	AllowedCommand    string     `gorm:"column:allowed_command;type:varchar(80);not null;comment:白名单命令编码" json:"allowedCommand"`
+	CommandTemplate   string     `gorm:"column:command_template;type:varchar(500);not null;comment:固定SQL模板" json:"commandTemplate"`
+	Reason            string     `gorm:"type:text;comment:暂停或恢复原因" json:"reason"`
+	ConfirmImpact     string     `gorm:"column:confirm_impact;type:text;comment:确认影响范围" json:"confirmImpact"`
+	Confirmed         bool       `gorm:"default:false;comment:是否二次确认" json:"confirmed"`
+	BeforeCheckID     uint       `gorm:"column:before_check_id;index;comment:执行前最近检查ID" json:"beforeCheckId"`
+	AfterCheckID      uint       `gorm:"column:after_check_id;index;comment:执行后检查ID" json:"afterCheckId"`
+	BeforeStatusJSON  string     `gorm:"column:before_status_json;type:longtext;comment:执行前状态摘要" json:"beforeStatusJson"`
+	AfterStatusJSON   string     `gorm:"column:after_status_json;type:longtext;comment:执行后状态摘要" json:"afterStatusJson"`
+	Stdout            string     `gorm:"type:text;comment:执行输出摘要" json:"stdout"`
+	Stderr            string     `gorm:"type:text;comment:执行错误摘要" json:"stderr"`
+	ExitCode          int        `gorm:"column:exit_code;type:int;default:0;comment:执行退出码" json:"exitCode"`
+	Status            string     `gorm:"type:varchar(30);index;default:'pending';comment:pending/success/failed" json:"status"`
+	ErrorMessage      string     `gorm:"column:error_message;type:varchar(1000);comment:错误信息" json:"errorMessage"`
+	OperatorID        uint       `gorm:"column:operator_id;index;comment:操作人" json:"operatorId"`
+	OperatorName      string     `gorm:"column:operator_name;type:varchar(100);comment:操作人名称" json:"operatorName"`
+	ClientIP          string     `gorm:"column:client_ip;type:varchar(64);comment:客户端IP" json:"clientIp"`
+	StartedAt         *time.Time `gorm:"column:started_at;index;comment:开始时间" json:"startedAt,omitempty"`
+	FinishedAt        *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
+	DurationMs        int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	RequestJSON       string     `gorm:"column:request_json;type:text;comment:请求摘要JSON" json:"requestJson"`
+}
+
+func (DatabaseReplicaAction) TableName() string {
+	return "database_replica_actions"
 }
 
 // DatabaseInstancePermission 角色到数据库实例的对象级权限。

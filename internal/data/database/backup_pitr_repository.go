@@ -691,6 +691,8 @@ func reqPage(req any) int {
 		return item.Page
 	case *dbbiz.DatabaseReplicaIncidentGuideListRequest:
 		return item.Page
+	case *dbbiz.DatabaseReplicaActionListRequest:
+		return item.Page
 	default:
 		return 1
 	}
@@ -721,6 +723,8 @@ func reqPageSize(req any) int {
 	case *dbbiz.DatabaseReplicationCheckListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseReplicaIncidentGuideListRequest:
+		return item.PageSize
+	case *dbbiz.DatabaseReplicaActionListRequest:
 		return item.PageSize
 	default:
 		return 10

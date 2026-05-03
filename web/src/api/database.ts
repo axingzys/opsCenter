@@ -763,6 +763,9 @@ export interface DatabaseInstanceReplicaResult {
   discoverySourceText: string
   status: string
   statusText: string
+  applyState: string
+  applyStateText: string
+  applyPaused: boolean
   lastCheckId: number
   lastCheckedAt: string
   lastError: string
@@ -884,6 +887,55 @@ export interface DatabaseReplicaIncidentGuideResult {
   operatorId: number
   operatorName: string
   clientIp: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseReplicaActionPayload {
+  incidentGuideId?: number
+  incidentNo: string
+  reason: string
+  confirmImpact: string
+  confirmed: boolean
+  maxCheckAgeSeconds?: number
+}
+
+export interface DatabaseReplicaActionResult {
+  id: number
+  replicaId: number
+  primaryInstanceId: number
+  primaryInstanceName: string
+  primaryEndpoint: string
+  replicaInstanceId: number
+  replicaInstanceName: string
+  replicaEndpoint: string
+  incidentGuideId: number
+  incidentNo: string
+  action: string
+  actionText: string
+  engine: string
+  engineText: string
+  allowedCommand: string
+  commandTemplate: string
+  reason: string
+  confirmImpact: string
+  confirmed: boolean
+  beforeCheckId: number
+  afterCheckId: number
+  beforeStatusJson: string
+  afterStatusJson: string
+  stdout: string
+  stderr: string
+  exitCode: number
+  status: string
+  statusText: string
+  errorMessage: string
+  operatorId: number
+  operatorName: string
+  clientIp: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
   createdAt: string
   updatedAt: string
 }
@@ -1460,6 +1512,21 @@ export const listDatabaseReplicaIncidentGuides = (params?: {
 
 export const getDatabaseReplicaIncidentGuide = (id: number) =>
   request.get(`/api/v1/databases/replica-incident-guides/${id}`)
+
+export const listDatabaseReplicaActions = (params?: {
+  page?: number
+  pageSize?: number
+  replicaId?: number
+  instanceId?: number
+  action?: string
+  status?: string
+}) => request.get('/api/v1/databases/replica-actions', { params })
+
+export const pauseDatabaseReplicaApply = (id: number, data: DatabaseReplicaActionPayload) =>
+  request.post(`/api/v1/databases/replicas/${id}/pause-apply`, data)
+
+export const resumeDatabaseReplicaApply = (id: number, data: DatabaseReplicaActionPayload) =>
+  request.post(`/api/v1/databases/replicas/${id}/resume-apply`, data)
 
 export const createDatabaseInstance = (data: DatabaseInstancePayload) =>
   request.post('/api/v1/databases/instances', data)

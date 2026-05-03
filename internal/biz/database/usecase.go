@@ -67,6 +67,7 @@ type UseCase struct {
 	instanceReplicaRepo    InstanceReplicaRepo
 	replicationCheckRepo   ReplicationCheckRepo
 	replicaIncidentRepo    ReplicaIncidentGuideRepo
+	replicaActionRepo      ReplicaActionRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
 	writePolicyResolver    func(ctx context.Context) (*DatabaseWritePolicy, error)
@@ -154,6 +155,7 @@ func (uc *UseCase) SetReplicaGovernanceRepos(
 	instanceReplicaRepo InstanceReplicaRepo,
 	replicationCheckRepo ReplicationCheckRepo,
 	replicaIncidentRepo ReplicaIncidentGuideRepo,
+	replicaActionRepo ReplicaActionRepo,
 ) {
 	if uc == nil {
 		return
@@ -161,6 +163,7 @@ func (uc *UseCase) SetReplicaGovernanceRepos(
 	uc.instanceReplicaRepo = instanceReplicaRepo
 	uc.replicationCheckRepo = replicationCheckRepo
 	uc.replicaIncidentRepo = replicaIncidentRepo
+	uc.replicaActionRepo = replicaActionRepo
 }
 
 type DatabaseInstanceRequest struct {
@@ -316,6 +319,26 @@ type DatabaseReplicaIncidentGuideListRequest struct {
 	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
+type DatabaseReplicaActionRequest struct {
+	IncidentGuideID    uint   `json:"incidentGuideId"`
+	IncidentNo         string `json:"incidentNo" binding:"omitempty,max=120"`
+	Reason             string `json:"reason" binding:"required,max=1000"`
+	ConfirmImpact      string `json:"confirmImpact" binding:"required,max=1000"`
+	Confirmed          bool   `json:"confirmed"`
+	MaxCheckAgeSeconds int    `json:"maxCheckAgeSeconds" binding:"omitempty,min=1,max=600"`
+}
+
+type DatabaseReplicaActionListRequest struct {
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	ReplicaID          uint   `form:"replicaId"`
+	InstanceID         uint   `form:"instanceId"`
+	Action             string `form:"action"`
+	Status             string `form:"status"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
+}
+
 type DatabaseInstancePermissionRequest struct {
 	RoleID      uint `json:"roleId" binding:"required"`
 	InstanceID  uint `json:"instanceId" binding:"required"`
@@ -462,6 +485,9 @@ type DatabaseInstanceReplicaVO struct {
 	DiscoverySourceText    string `json:"discoverySourceText"`
 	Status                 string `json:"status"`
 	StatusText             string `json:"statusText"`
+	ApplyState             string `json:"applyState"`
+	ApplyStateText         string `json:"applyStateText"`
+	ApplyPaused            bool   `json:"applyPaused"`
 	LastCheckID            uint   `json:"lastCheckId"`
 	LastCheckedAt          string `json:"lastCheckedAt"`
 	LastError              string `json:"lastError"`
@@ -575,6 +601,46 @@ type DatabaseReplicaIncidentGuideVO struct {
 	ClientIP                   string `json:"clientIp"`
 	CreatedAt                  string `json:"createdAt"`
 	UpdatedAt                  string `json:"updatedAt"`
+}
+
+type DatabaseReplicaActionVO struct {
+	ID                  uint   `json:"id"`
+	ReplicaID           uint   `json:"replicaId"`
+	PrimaryInstanceID   uint   `json:"primaryInstanceId"`
+	PrimaryInstanceName string `json:"primaryInstanceName"`
+	PrimaryEndpoint     string `json:"primaryEndpoint"`
+	ReplicaInstanceID   uint   `json:"replicaInstanceId"`
+	ReplicaInstanceName string `json:"replicaInstanceName"`
+	ReplicaEndpoint     string `json:"replicaEndpoint"`
+	IncidentGuideID     uint   `json:"incidentGuideId"`
+	IncidentNo          string `json:"incidentNo"`
+	Action              string `json:"action"`
+	ActionText          string `json:"actionText"`
+	Engine              string `json:"engine"`
+	EngineText          string `json:"engineText"`
+	AllowedCommand      string `json:"allowedCommand"`
+	CommandTemplate     string `json:"commandTemplate"`
+	Reason              string `json:"reason"`
+	ConfirmImpact       string `json:"confirmImpact"`
+	Confirmed           bool   `json:"confirmed"`
+	BeforeCheckID       uint   `json:"beforeCheckId"`
+	AfterCheckID        uint   `json:"afterCheckId"`
+	BeforeStatusJSON    string `json:"beforeStatusJson"`
+	AfterStatusJSON     string `json:"afterStatusJson"`
+	Stdout              string `json:"stdout"`
+	Stderr              string `json:"stderr"`
+	ExitCode            int    `json:"exitCode"`
+	Status              string `json:"status"`
+	StatusText          string `json:"statusText"`
+	ErrorMessage        string `json:"errorMessage"`
+	OperatorID          uint   `json:"operatorId"`
+	OperatorName        string `json:"operatorName"`
+	ClientIP            string `json:"clientIp"`
+	StartedAt           string `json:"startedAt"`
+	FinishedAt          string `json:"finishedAt"`
+	DurationMs          int64  `json:"durationMs"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 type SupportedTypeVO struct {
@@ -2364,6 +2430,10 @@ func QueryAuditActionText(action string) string {
 		return "副本状态采集"
 	case DatabaseAuditActionReplicaIncident:
 		return "副本事故指引"
+	case DatabaseAuditActionReplicaPauseApply:
+		return "暂停副本 Apply"
+	case DatabaseAuditActionReplicaResumeApply:
+		return "恢复副本 Apply"
 	default:
 		return strings.TrimSpace(action)
 	}
@@ -2415,6 +2485,10 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionReplicaCheckRun
 	case DatabaseAuditActionReplicaIncident:
 		return DatabaseAuditActionReplicaIncident
+	case DatabaseAuditActionReplicaPauseApply:
+		return DatabaseAuditActionReplicaPauseApply
+	case DatabaseAuditActionReplicaResumeApply:
+		return DatabaseAuditActionReplicaResumeApply
 	default:
 		return strings.ToLower(strings.TrimSpace(action))
 	}

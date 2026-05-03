@@ -53,6 +53,8 @@ const (
 	permDatabaseReplicaView     = "database:replica:view"
 	permDatabaseReplicaCheck    = "database:replica:check"
 	permDatabaseReplicaIncident = "database:replica:incident-guide"
+	permDatabaseReplicaPause    = "database:replica:pause-apply"
+	permDatabaseReplicaResume   = "database:replica:resume-apply"
 )
 
 var databaseUIPermissionCodes = map[string]string{
@@ -81,6 +83,8 @@ var databaseUIPermissionCodes = map[string]string{
 	"replicaView":                permDatabaseReplicaView,
 	"replicaCheck":               permDatabaseReplicaCheck,
 	"replicaIncidentGuide":       permDatabaseReplicaIncident,
+	"replicaPauseApply":          permDatabaseReplicaPause,
+	"replicaResumeApply":         permDatabaseReplicaResume,
 	"instancePermissionView":     permDatabaseInstanceView,
 	"instancePermissionManage":   permDatabaseInstanceUpdate,
 	"instanceObjectPermissionUI": permDatabaseInstanceUpdate,
@@ -121,6 +125,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	instanceReplicaRepo := dbdata.NewInstanceReplicaRepo(db)
 	replicationCheckRepo := dbdata.NewReplicationCheckRepo(db)
 	replicaIncidentGuideRepo := dbdata.NewReplicaIncidentGuideRepo(db)
+	replicaActionRepo := dbdata.NewReplicaActionRepo(db)
 	credentialRepo := assetdata.NewCredentialRepo(db)
 	configRepo := systemdata.NewConfigRepo(db)
 	loginAttemptRepo := systemdata.NewLoginAttemptRepo(db)
@@ -196,7 +201,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		runnerJobRepo,
 		barmanServerRepo,
 	)
-	useCase.SetReplicaGovernanceRepos(instanceReplicaRepo, replicationCheckRepo, replicaIncidentGuideRepo)
+	useCase.SetReplicaGovernanceRepos(instanceReplicaRepo, replicationCheckRepo, replicaIncidentGuideRepo, replicaActionRepo)
 
 	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
 		Interval:        time.Minute,
@@ -336,7 +341,10 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/replica-incident-guides", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaIncident), s.service.CreateReplicaIncidentGuide)
 		databases.GET("/replica-incident-guides", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicaIncidentGuides)
 		databases.GET("/replica-incident-guides/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.GetReplicaIncidentGuide)
+		databases.GET("/replica-actions", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicaActions)
 		databases.GET("/replicas", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicas)
+		databases.POST("/replicas/:id/pause-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaPause), s.service.PauseReplicaApply)
+		databases.POST("/replicas/:id/resume-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaResume), s.service.ResumeReplicaApply)
 		databases.GET("/replication-checks", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicationChecks)
 
 		instances := databases.Group("/instances")

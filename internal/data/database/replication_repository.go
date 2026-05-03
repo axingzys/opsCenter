@@ -249,3 +249,64 @@ func (r *replicaIncidentGuideRepo) List(ctx context.Context, req *dbbiz.Database
 	}
 	return items, total, nil
 }
+
+type replicaActionRepo struct {
+	db *gorm.DB
+}
+
+func NewReplicaActionRepo(db *gorm.DB) dbbiz.ReplicaActionRepo {
+	return &replicaActionRepo{db: db}
+}
+
+func (r *replicaActionRepo) Create(ctx context.Context, item *dbbiz.DatabaseReplicaAction) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *replicaActionRepo) Update(ctx context.Context, item *dbbiz.DatabaseReplicaAction) error {
+	return r.db.WithContext(ctx).Save(item).Error
+}
+
+func (r *replicaActionRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseReplicaAction, error) {
+	var item dbbiz.DatabaseReplicaAction
+	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *replicaActionRepo) List(ctx context.Context, req *dbbiz.DatabaseReplicaActionListRequest) ([]*dbbiz.DatabaseReplicaAction, int64, error) {
+	var (
+		items []*dbbiz.DatabaseReplicaAction
+		total int64
+	)
+	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseReplicaAction{})
+	if req != nil {
+		if req.RestrictToAllowed {
+			if len(req.AllowedInstanceIDs) == 0 {
+				query = query.Where("1 = 0")
+			} else {
+				query = query.Where("primary_instance_id IN ? OR replica_instance_id IN ?", req.AllowedInstanceIDs, req.AllowedInstanceIDs)
+			}
+		}
+		if req.ReplicaID > 0 {
+			query = query.Where("replica_id = ?", req.ReplicaID)
+		}
+		if req.InstanceID > 0 {
+			query = query.Where("primary_instance_id = ? OR replica_instance_id = ?", req.InstanceID, req.InstanceID)
+		}
+		if action := strings.TrimSpace(req.Action); action != "" {
+			query = query.Where("action = ?", action)
+		}
+		if status := strings.TrimSpace(req.Status); status != "" {
+			query = query.Where("status = ?", status)
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := normalizeRepoPage(reqPage(req), reqPageSize(req))
+	if err := query.Order("created_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}

@@ -218,6 +218,7 @@ func autoMigrate(db *gorm.DB) error {
 		&databasemodel.DatabaseInstanceReplica{},
 		&databasemodel.DatabaseReplicationCheck{},
 		&databasemodel.DatabaseReplicaIncidentGuide{},
+		&databasemodel.DatabaseReplicaAction{},
 		&databasemodel.DatabaseSchema{},
 		&databasemodel.DatabaseTable{},
 		&databasemodel.DatabaseColumn{},
@@ -553,6 +554,8 @@ func ensureDatabaseManagementMenu(db *gorm.DB) error {
 		{Name: "查看副本治理", Code: "database:replica:view", Type: 3, ParentID: menu.ID, Sort: 131, Visible: 0, Status: 1},
 		{Name: "采集副本状态", Code: "database:replica:check", Type: 3, ParentID: menu.ID, Sort: 132, Visible: 0, Status: 1},
 		{Name: "生成副本事故指引", Code: "database:replica:incident-guide", Type: 3, ParentID: menu.ID, Sort: 133, Visible: 0, Status: 1},
+		{Name: "暂停副本 Apply", Code: "database:replica:pause-apply", Type: 3, ParentID: menu.ID, Sort: 134, Visible: 0, Status: 1},
+		{Name: "恢复副本 Apply", Code: "database:replica:resume-apply", Type: 3, ParentID: menu.ID, Sort: 135, Visible: 0, Status: 1},
 	}
 	for _, item := range buttons {
 		var button rbacmodel.SysMenu
