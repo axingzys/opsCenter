@@ -259,6 +259,79 @@ export interface DatabaseBackupChainStateResult {
   lastError: string
 }
 
+export interface DatabaseBackupChainRecordResult {
+  id: number
+  chainId: string
+  baseRecordId: number
+  parentRecordId: number
+  backupLevel: string
+  backupLevelText: string
+  backupOrigin: string
+  checkpointFromLsn: string
+  checkpointToLsn: string
+  checkpointLastLsn: string
+  fileName: string
+  fileSize: number
+  checksumSha256: string
+  artifactState: string
+  storageUri: string
+  recoverableFrom: string
+  recoverableUntil: string
+  status: string
+  statusText: string
+  startedAt: string
+  finishedAt: string
+  serverUuid: string
+  backupBinlogFile: string
+  backupBinlogPos: number
+  backupGtidSet: string
+  syntheticSourceRecordIds: string
+  supersededByRecordId: number
+}
+
+export interface DatabaseBackupPolicyChainValidationResult {
+  policyId: number
+  status: string
+  statusText: string
+  backupChainStatus: string
+  backupChainStatusText: string
+  selectedRecordIds: number[]
+  baseRecord?: DatabaseBackupChainRecordResult
+  latestRecord?: DatabaseBackupChainRecordResult
+  records: DatabaseBackupChainRecordResult[]
+  blockingReasons: string[]
+  warnings: string[]
+  messages: string[]
+  checkedAt: string
+  chain?: DatabaseBackupChainStateResult
+}
+
+export interface DatabaseSyntheticFullPreviewResult {
+  policyId: number
+  status: string
+  statusText: string
+  selectedBaseRecordId: number
+  selectedIncrementalRecordIds: number[]
+  selectedRecordIds: number[]
+  selectedRecords: DatabaseBackupChainRecordResult[]
+  newSyntheticFullAfterRecordId: number
+  estimatedInputSize: number
+  estimatedInputSizeText: string
+  estimatedWorkdirSize: number
+  estimatedWorkdirSizeText: string
+  mergeIncrementalCount: number
+  requiresRestoreProof: boolean
+  blockingReasons: string[]
+  warnings: string[]
+  messages: string[]
+  checkedAt: string
+}
+
+export interface DatabaseSyntheticFullJobsResult {
+  items: DatabaseRunnerJobResult[]
+  total: number
+}
+
 export interface DatabaseBackupPolicyResult {
   id: number
   instanceId: number
@@ -1386,6 +1459,20 @@ export const deleteDatabaseBackupPolicy = (id: number) =>
 
 export const getDatabaseBackupPolicyChain = (id: number) =>
   request.get(`/api/v1/databases/backup-policies/${id}/chain`)
+
+export const validateDatabaseBackupPolicyChain = (id: number) =>
+  request.post(`/api/v1/databases/backup-policies/${id}/validate-chain`)
+
+export const previewDatabaseBackupPolicySyntheticFull = (id: number) =>
+  request.post(`/api/v1/databases/backup-policies/${id}/synthetic-full/preview`)
+
+export const runDatabaseBackupPolicySyntheticFull = (id: number, data?: { reason?: string }) =>
+  request.post(`/api/v1/databases/backup-policies/${id}/synthetic-full/run`, data || {})
+
+export const listDatabaseBackupPolicySyntheticJobs = (id: number, params?: {
+  page?: number
+  pageSize?: number
+}) => request.get(`/api/v1/databases/backup-policies/${id}/synthetic-full/jobs`, { params })
 
 export const runDatabaseBackupPolicyFull = (id: number, data?: { reason?: string }) =>
   request.post(`/api/v1/databases/backup-policies/${id}/run-full`, data || {})

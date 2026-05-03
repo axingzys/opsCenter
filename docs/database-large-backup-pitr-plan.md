@@ -2414,7 +2414,7 @@ P2.8/P2.9 已落地实现边界：
    - 手动触发 full / incremental；
    - 查看最近运行状态。
 9. 当前暂不自动上传策略物理备份 artifact 到对象存储。第一版登记 `runner://runner-host-<id>/<path>`，要求恢复 Runner 或后续同步机制可读该路径。
-10. 当前不执行 synthetic full，不清理 superseded 链，不自动要求恢复演练后 purge；这些继续由 P2.11/P2.12 落地。
+10. P2.8/P2.9 阶段不执行 synthetic full，不清理 superseded 链，不自动要求恢复演练后 purge；P2.11 已补 synthetic full 第一版，P2.12 继续处理恢复证明后的 superseded/purge 门禁。
 
 #### P2.10：自动增量链选择和链路校验
 
@@ -2486,6 +2486,55 @@ GET  /api/v1/databases/backup-policies/:id/chain
 5. LSN 不连续时，链路标记 broken。
 6. 同一实例不会同时跑两个物理备份。
 7. full 到期日不会重复执行 full 和 incremental。
+
+P2.10 已落地实现边界：
+
+1. 新增链路校验 API：
+   - `POST /api/v1/databases/backup-policies/:id/validate-chain`
+   - `GET /api/v1/databases/backup-policies/:id/chain` 仍返回当前链状态。
+2. 后端新增链路校验模型输出：
+   - `status / statusText`
+   - `backupChainStatus / backupChainStatusText`
+   - `baseRecord`
+   - `latestRecord`
+   - `records`
+   - `selectedRecordIds`
+   - `blockingReasons`
+   - `warnings`
+   - `messages`
+   - `checkedAt`
+   - `chain`
+3. 增量备份触发前不再盲信 `database_backup_chain_states.latest_record_id`：
+   - 先读取同一策略下成功的物理备份记录；
+   - 以当前 `current_base_record_id` 为优先基线；
+   - 如果链状态缺失但存在成功 full，则选择最近成功 full 作为校验基线；
+   - 从 base 开始按 `parent_record_id` 追溯连续子链；
+   - 校验通过后，自动选择链上最新记录作为本次 incremental parent。
+4. 链路阻断条件：
+   - 缺少 base；
+   - 链状态中的 latest 不能从 base 连续追溯；
+   - 父子 `parent_record_id/base_record_id` 不连续；
+   - `checkpoint_from_lsn` 与父记录 `checkpoint_to_lsn` 不一致；
+   - artifact 状态为 `missing/checksum_failed`；
+   - 缺少 checksum；
+   - 缺少 checkpoint `to_lsn`；
+   - artifact URI 不能被当前 Runner 读取；
+   - 同一链内存在明确的 `server_uuid` 不一致。
+5. 链路提示但不阻断的场景：
+   - 策略未绑定 binlog 归档流；
+   - 同一父记录存在多个子增量时，按时间选择最早子链并提示风险。
+6. 校验结果会同步写回 `database_backup_chain_states`：
+   - 通过时：`status=healthy`，`last_validation_status=complete`，更新 base/latest/incremental count；
+   - 失败时：`status=broken`，`last_validation_status` 写入具体断链类型，`last_error` 保存阻断摘要。
+7. 前端备份策略页新增“校验链”操作：
+   - 成功显示通过消息；
+   - 有 warning 显示第一条风险；
+   - 有 blocking reason 显示失败原因；
+   - 操作后刷新策略链状态。
+8. 单测已覆盖：
+   - full + incremental + incremental 完整链；
+   - LSN 不连续导致 `broken_chain`；
+   - 旧的 incremental parent 校验继续保留。
 
 #### P2.11：Synthetic Full / 合成全量
 
@@ -2597,6 +2646,85 @@ preview 返回内容：
 4. 合成过程中任一 artifact 缺失或 checksum 错误都会失败。
 5. 合成后可以用 synthetic full + 后续 incremental + binlog 创建 PITR 恢复计划。
 6. synthetic full 未恢复演练前，旧链不能自动删除。
+
+P2.11 已落地实现边界：
+
+1. 新增 API：
+   - `POST /api/v1/databases/backup-policies/:id/synthetic-full/preview`
+   - `POST /api/v1/databases/backup-policies/:id/synthetic-full/run`
+   - `GET /api/v1/databases/backup-policies/:id/synthetic-full/jobs`
+2. `preview` 会先复用 P2.10 链路校验，再按策略 `synthetic_rule_json` 选择待合成窗口。
+3. 第一版规则字段：
+   - `mergeOldestIncrementals`：从当前 base 后选择最早 N 条增量合并，默认 `4`；
+   - `requireRestoreProof`：提示合成后需要恢复证明；真正清理门禁仍在 P2.12。
+4. `preview` 返回：
+   - `selectedBaseRecordId`
+   - `selectedIncrementalRecordIds`
+   - `selectedRecordIds`
+   - `selectedRecords`
+   - `newSyntheticFullAfterRecordId`
+   - `estimatedInputSize`
+   - `estimatedWorkdirSize`
+   - `requiresRestoreProof`
+   - `blockingReasons`
+   - `warnings`
+5. `run` 阻断条件：
+   - 策略未启用；
+   - 未开启 `synthetic_enabled`；
+   - P2.10 备份链校验失败；
+   - 可合并增量数量小于 `mergeOldestIncrementals`；
+   - 同一策略或同一实例已有备份任务运行。
+6. Runner job：
+   - 新增 `job_type=mysql_synthetic_full`；
+   - 新增 `allowed_command=mysql_synthetic_full`；
+   - 使用同一 Runner 互斥机制；
+   - 只通过 SSH Runner 下发内置白名单脚本；
+   - 不需要数据库在线连接，不读取数据库密码，只读取 Runner 可访问的物理备份 artifact。
+7. Runner 脚本步骤：
+   - 检查 `xtrabackup/mariadb-backup` 工具存在；
+   - 校验所有输入 artifact 文件存在；
+   - 对每个输入 artifact 做 SHA256 校验；
+   - 解包 base；
+   - 解包每条 incremental；
+   - 检查每个目录的 `xtrabackup_checkpoints`；
+   - `--prepare --apply-log-only` 准备 base；
+   - 依次 `--prepare --apply-log-only --incremental-dir` 应用增量；
+   - 最后执行一次 `--prepare --target-dir=<base>`；
+   - 打包新的 synthetic full artifact；
+   - 输出 artifact size、SHA256、checkpoint、binlog info 和 Runner URI。
+8. synthetic full 记录：
+   - `backup_method=physical`
+   - `backup_level=full`
+   - `backup_origin=synthetic_full`
+   - `base_record_id=self`
+   - `parent_record_id=<最后一条被合并的 incremental>`
+   - `synthetic_source_record_ids=[base, inc...]`
+   - `prepare_status=synthetic_ready`
+   - `verify_status=pending`
+   - `artifact_state=remote`
+9. synthetic full 成功后：
+   - 写入新的 backup record；
+   - 更新 `database_backup_chain_states.current_base_record_id` 到 synthetic full；
+   - `latest_record_id` 指向 synthetic full；
+   - `latest_synthetic_record_id` 指向 synthetic full；
+   - `incremental_count` 重置为 `0`；
+   - 策略 `last_synthetic_at` 更新；
+   - 旧 full/incremental 不自动删除、不自动 supersede。
+10. synthetic full 失败后：
+   - 当前 synthetic record 标记 failed；
+   - Runner job 标记 failed；
+   - 不覆盖旧链；
+   - 不修改旧 artifact；
+   - 不执行自动清理。
+11. 前端备份策略页新增：
+   - “合成预览”；
+   - “合成Full”；
+   - 预览弹窗展示 selected records、LSN、artifact、大小、可恢复时间、阻断原因和 warning。
+12. 单测已覆盖：
+   - preview 选择最早 N 条 incremental；
+   - synthetic 脚本包含 artifact checksum 校验；
+   - synthetic 脚本包含 prepare/apply incremental/输出 checkpoint；
+   - synthetic 脚本不携带数据库密码参数。
 
 #### P2.12：Synthetic Full 后的恢复演练和清理
 

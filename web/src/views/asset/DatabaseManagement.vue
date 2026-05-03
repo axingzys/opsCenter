@@ -2204,10 +2204,13 @@
                       <div class="muted-text">{{ row.lastMessage || row.lastError || '-' }}</div>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="260" align="center" fixed="right">
+                  <el-table-column label="操作" width="420" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="warning" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'full'" @click="handleRunBackupPolicy(row, 'full')">跑Full</el-button>
                       <el-button link type="success" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'incremental'" @click="handleRunBackupPolicy(row, 'incremental')">跑增量</el-button>
+                      <el-button link type="primary" :loading="validatingBackupPolicyId === row.id" @click="handleValidateBackupPolicyChain(row)">校验链</el-button>
+                      <el-button link type="warning" :disabled="!row.syntheticEnabled" :loading="previewingSyntheticPolicyId === row.id" @click="openSyntheticFullPreview(row)">合成预览</el-button>
+                      <el-button link type="danger" :disabled="!row.syntheticEnabled" :loading="runningSyntheticPolicyId === row.id" @click="handleRunSyntheticFull(row)">合成Full</el-button>
                       <el-button link type="primary" @click="openBackupPolicyDialog(row)">编辑</el-button>
                       <el-button link type="danger" @click="handleDeleteBackupPolicy(row)">删除</el-button>
                     </template>
@@ -2418,6 +2421,7 @@
                     <el-select v-model="runnerJobQuery.jobType" placeholder="任务类型" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="Runner 探测" value="runner_probe" />
                       <el-option label="物理备份" value="physical_backup" />
+                      <el-option label="MySQL 合成全量" value="mysql_synthetic_full" />
                       <el-option label="binlog 归档" value="binlog_archive" />
                       <el-option label="物理恢复" value="physical_restore" />
                       <el-option label="Barman 检查" value="barman_check" />
@@ -4191,7 +4195,7 @@
       @close="resetBackupPolicyForm"
     >
       <el-alert
-        title="P2.8/P2.9 策略会由后端自动选择上一条成功 full/incremental 作为增量基线，并通过 Runner 执行 XtraBackup 或 mariadb-backup；synthetic full 合并仍在后续阶段。"
+        title="策略会由后端校验 full/incremental 物理备份链，增量自动选择上一条成功记录作为基线；synthetic full 可把基础全量与最早一段增量合成为新的全量基线。"
         type="warning"
         show-icon
         :closable="false"
@@ -4320,6 +4324,90 @@
       <template #footer>
         <el-button @click="backupPolicyDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="backupPolicySubmitting" @click="submitBackupPolicyForm">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="syntheticPreviewVisible"
+      title="合成全量预览"
+      width="980px"
+    >
+      <template v-if="syntheticPreview">
+        <el-alert
+          :title="syntheticPreview.statusText || syntheticPreview.status"
+          :type="syntheticPreview.blockingReasons?.length ? 'error' : (syntheticPreview.warnings?.length ? 'warning' : 'success')"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
+        <el-descriptions :column="3" border size="small" class="backup-summary-descriptions">
+          <el-descriptions-item label="策略">{{ syntheticPreviewPolicy?.name || `#${syntheticPreview.policyId}` }}</el-descriptions-item>
+          <el-descriptions-item label="基础记录">#{{ syntheticPreview.selectedBaseRecordId || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="合成截止">#{{ syntheticPreview.newSyntheticFullAfterRecordId || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="合并增量">{{ syntheticPreview.selectedIncrementalRecordIds?.length || 0 }} / {{ syntheticPreview.mergeIncrementalCount }}</el-descriptions-item>
+          <el-descriptions-item label="输入估算">{{ syntheticPreview.estimatedInputSizeText || formatBytes(syntheticPreview.estimatedInputSize) }}</el-descriptions-item>
+          <el-descriptions-item label="工作目录估算">{{ syntheticPreview.estimatedWorkdirSizeText || formatBytes(syntheticPreview.estimatedWorkdirSize) }}</el-descriptions-item>
+          <el-descriptions-item label="恢复证明">{{ syntheticPreview.requiresRestoreProof ? '要求' : '不强制' }}</el-descriptions-item>
+          <el-descriptions-item label="检查时间">{{ syntheticPreview.checkedAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="状态">{{ syntheticPreview.statusText || syntheticPreview.status }}</el-descriptions-item>
+        </el-descriptions>
+        <div v-if="syntheticPreview.blockingReasons?.length" class="backup-preview-section">
+          <div class="section-title">阻断原因</div>
+          <el-alert
+            v-for="item in syntheticPreview.blockingReasons"
+            :key="item"
+            :title="item"
+            type="error"
+            show-icon
+            :closable="false"
+            class="backup-inline-alert"
+          />
+        </div>
+        <div v-if="syntheticPreview.warnings?.length" class="backup-preview-section">
+          <div class="section-title">风险提示</div>
+          <el-alert
+            v-for="item in syntheticPreview.warnings"
+            :key="item"
+            :title="item"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="backup-inline-alert"
+          />
+        </div>
+        <el-table :data="syntheticPreview.selectedRecords || []" stripe class="modern-table backup-preview-table">
+          <el-table-column label="记录" width="90">
+            <template #default="{ row }">#{{ row.id }}</template>
+          </el-table-column>
+          <el-table-column label="级别" width="120">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.backupLevel === 'full' ? 'primary' : 'success'">{{ row.backupLevelText || row.backupLevel }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="LSN" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.checkpointFromLsn || '-' }} -> {{ row.checkpointToLsn || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="文件" min-width="260" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.fileName || row.storageUri || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="大小" width="110">
+            <template #default="{ row }">{{ formatBytes(row.fileSize) }}</template>
+          </el-table-column>
+          <el-table-column label="可恢复到" width="170">
+            <template #default="{ row }">{{ row.recoverableUntil || row.finishedAt || '-' }}</template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <template #footer>
+        <el-button @click="syntheticPreviewVisible = false">关闭</el-button>
+        <el-button
+          type="danger"
+          :disabled="!!syntheticPreview?.blockingReasons?.length || !syntheticPreviewPolicy"
+          :loading="runningSyntheticPolicyId === syntheticPreviewPolicy?.id"
+          @click="syntheticPreviewPolicy && handleRunSyntheticFull(syntheticPreviewPolicy)"
+        >
+          确认合成Full
+        </el-button>
       </template>
     </el-dialog>
 
@@ -6028,6 +6116,7 @@ import {
   executeDatabaseWriteQuery,
   explainDatabaseWriteQuery,
   generateDatabaseInspectionReport,
+  previewDatabaseBackupPolicySyntheticFull,
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
@@ -6076,6 +6165,7 @@ import {
   registerExternalDatabaseLogArchive,
   resumeDatabaseLogArchiveStream,
   resumeDatabaseReplicaApply,
+  runDatabaseBackupPolicySyntheticFull,
   runDatabaseBackupPolicyFull,
   runDatabaseBackupPolicyIncremental,
   runDatabaseBackupTask,
@@ -6096,14 +6186,17 @@ import {
   updateDatabaseInstance,
   updateDatabaseRunnerHost,
   upsertDatabaseInstancePermission,
+  validateDatabaseBackupPolicyChain,
   validateDatabaseDDLQuery,
   verifyDatabaseBackupRecord,
+  type DatabaseBackupPolicyChainValidationResult,
   type DatabaseBackupRecordResult,
   type DatabaseBackupPolicyPayload,
   type DatabaseBackupPolicyResult,
   type DatabaseBackupRunResult,
   type DatabaseBackupTaskPayload,
   type DatabaseBackupTaskResult,
+  type DatabaseSyntheticFullPreviewResult,
   type DatabaseBarmanServerPayload,
   type DatabaseBarmanServerResult,
   type DatabaseCapacityCollectResult,
@@ -6355,6 +6448,12 @@ const backupPolicySubmitting = ref(false)
 const backupPolicyDialogVisible = ref(false)
 const runningBackupPolicyId = ref(0)
 const runningBackupPolicyLevel = ref('')
+const validatingBackupPolicyId = ref(0)
+const previewingSyntheticPolicyId = ref(0)
+const runningSyntheticPolicyId = ref(0)
+const syntheticPreviewVisible = ref(false)
+const syntheticPreviewPolicy = ref<DatabaseBackupPolicyResult>()
+const syntheticPreview = ref<DatabaseSyntheticFullPreviewResult>()
 const backupPolicies = ref<DatabaseBackupPolicyResult[]>([])
 const backupPolicyTotal = ref(0)
 const backupPolicyFormRef = ref<FormInstance>()
@@ -11824,6 +11923,62 @@ const handleRunBackupPolicy = async (row: DatabaseBackupPolicyResult, level: 'fu
   }
 }
 
+const handleValidateBackupPolicyChain = async (row: DatabaseBackupPolicyResult) => {
+  validatingBackupPolicyId.value = row.id
+  try {
+    const res = await validateDatabaseBackupPolicyChain(row.id) as DatabaseBackupPolicyChainValidationResult
+    if (res.blockingReasons?.length) {
+      ElMessage.error(res.blockingReasons[0] || '备份链校验失败')
+    } else if (res.warnings?.length) {
+      ElMessage.warning(res.warnings[0] || '备份链校验有风险')
+    } else {
+      ElMessage.success(res.messages?.[0] || '备份链校验通过')
+    }
+    await loadBackupPolicies()
+  } finally {
+    validatingBackupPolicyId.value = 0
+  }
+}
+
+const openSyntheticFullPreview = async (row: DatabaseBackupPolicyResult) => {
+  syntheticPreviewPolicy.value = row
+  syntheticPreview.value = undefined
+  previewingSyntheticPolicyId.value = row.id
+  try {
+    const res = await previewDatabaseBackupPolicySyntheticFull(row.id) as DatabaseSyntheticFullPreviewResult
+    syntheticPreview.value = res
+    syntheticPreviewVisible.value = true
+  } finally {
+    previewingSyntheticPolicyId.value = 0
+  }
+}
+
+const handleRunSyntheticFull = async (row: DatabaseBackupPolicyResult) => {
+  await ElMessageBox.confirm(
+    `确定手动触发策略「${row.name}」的合成全量吗？Runner 会读取当前备份链 artifact，完成 prepare/merge 后生成新的 synthetic full 基线。`,
+    '触发合成全量',
+    {
+      type: 'warning',
+      confirmButtonText: '触发',
+      cancelButtonText: '取消'
+    }
+  )
+  runningSyntheticPolicyId.value = row.id
+  try {
+    const res: any = await runDatabaseBackupPolicySyntheticFull(row.id, { reason: 'manual synthetic full from backup policy page' })
+    ElMessage.success(res?.message || '合成全量已下发 Runner')
+    syntheticPreviewVisible.value = false
+    await Promise.all([loadBackupPolicies(), loadBackupRecords(), loadRunnerJobs()])
+    window.setTimeout(() => {
+      loadBackupPolicies()
+      loadBackupRecords()
+      loadRunnerJobs()
+    }, 3000)
+  } finally {
+    runningSyntheticPolicyId.value = 0
+  }
+}
+
 const handleRunBackupTask = async (row: DatabaseBackupTaskResult) => {
   await ElMessageBox.confirm(
     `确定手动触发备份任务「${row.name}」吗？系统会创建一条队列记录并在后台执行逻辑全量备份，所有动作会写入统一审计。`,
@@ -13417,6 +13572,22 @@ onBeforeUnmount(() => {
 
 .backup-dialog-alert {
   margin-bottom: 16px;
+}
+
+.backup-summary-descriptions,
+.backup-preview-table {
+  margin-bottom: 14px;
+}
+
+.backup-preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.backup-inline-alert {
+  margin: 0;
 }
 
 .restore-assertions {

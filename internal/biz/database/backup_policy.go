@@ -201,20 +201,20 @@ func (uc *UseCase) runBackupPolicy(ctx context.Context, id uint, backupLevel str
 	if level != DatabaseBackupLevelFull && level != DatabaseBackupLevelIncremental {
 		return nil, fmt.Errorf("备份策略第一版仅支持全量和增量")
 	}
-	var state *DatabaseBackupChainState
 	var parent *DatabaseBackupRecord
 	if level == DatabaseBackupLevelIncremental {
-		state, err = uc.loadBackupChainState(ctx, policy.ID)
+		validation, err := uc.validateBackupPolicyChainInternal(ctx, policy, host, true)
 		if err != nil {
-			return nil, fmt.Errorf("增量备份需要先完成一次全量备份")
+			return nil, err
 		}
-		if state == nil || state.LatestRecordID == 0 || state.CurrentBaseRecordID == 0 {
-			return nil, fmt.Errorf("增量备份需要先完成一次全量备份")
+		if validation == nil || validation.Status != DatabaseBackupChainStatusComplete || validation.LatestRecord == nil || validation.BaseRecord == nil {
+			reasons := []string{"增量备份链路校验未通过"}
+			if validation != nil && len(validation.BlockingReasons) > 0 {
+				reasons = validation.BlockingReasons
+			}
+			return nil, fmt.Errorf("%s", strings.Join(reasons, "；"))
 		}
-		parent, err = uc.backupRecordRepo.GetByID(ctx, state.LatestRecordID)
-		if err != nil || parent == nil {
-			return nil, fmt.Errorf("增量备份父记录不存在")
-		}
+		parent = validation.LatestRecord
 		if err := validatePolicyIncrementalParent(policy, host, parent); err != nil {
 			return nil, err
 		}
@@ -231,8 +231,11 @@ func (uc *UseCase) runBackupPolicy(ctx context.Context, id uint, backupLevel str
 	baseRecordID := uint(0)
 	parentRecordID := uint(0)
 	if level == DatabaseBackupLevelIncremental {
-		chainID = state.ChainID
-		baseRecordID = state.CurrentBaseRecordID
+		chainID = parent.ChainID
+		baseRecordID = parent.BaseRecordID
+		if baseRecordID == 0 {
+			baseRecordID = parent.ID
+		}
 		parentRecordID = parent.ID
 	}
 	record := &DatabaseBackupRecord{
@@ -845,7 +848,11 @@ func (uc *UseCase) updateBackupChainStateAfterSuccess(ctx context.Context, polic
 		state.ChainID = record.ChainID
 		state.CurrentBaseRecordID = record.ID
 		state.LatestRecordID = record.ID
-		state.LatestFullRecordID = record.ID
+		if record.BackupOrigin == DatabaseBackupOriginSyntheticFull {
+			state.LatestSyntheticRecordID = record.ID
+		} else {
+			state.LatestFullRecordID = record.ID
+		}
 		state.IncrementalCount = 0
 		if record.StartedAt != nil {
 			state.ChainStartedAt = record.StartedAt

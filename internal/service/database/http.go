@@ -881,6 +881,99 @@ func (s *Service) GetBackupPolicyChain(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) ValidateBackupPolicyChain(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "校验失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.ValidateBackupPolicyChain(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "校验失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) PreviewBackupPolicySyntheticFull(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "预览失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.PreviewBackupPolicySyntheticFull(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "预览失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) RunBackupPolicySyntheticFull(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseBackupPolicyRunRequest
+	_ = c.ShouldBindJSON(&req)
+	instanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "触发失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	operator := dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	}
+	item, err := s.useCase.RunBackupPolicySyntheticFull(c.Request.Context(), id, operator)
+	if err != nil {
+		writeDatabaseError(c, "触发失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListBackupPolicySyntheticJobs(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	var req dbbiz.DatabaseRunnerJobListRequest
+	_ = c.ShouldBindQuery(&req)
+	item, err := s.useCase.ListBackupPolicySyntheticJobs(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) RunBackupPolicyFull(c *gin.Context) {
 	s.runBackupPolicy(c, true)
 }

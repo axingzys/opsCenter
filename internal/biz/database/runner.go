@@ -663,6 +663,8 @@ func RunnerJobTypeText(value string) string {
 		return "pg_basebackup"
 	case DatabaseRunnerJobTypePgBaseBackupRestore:
 		return "pg_basebackup 恢复"
+	case DatabaseRunnerJobTypeMySQLSyntheticFull:
+		return "MySQL/MariaDB 合成全量"
 	default:
 		return "Runner 探测"
 	}
