@@ -108,6 +108,67 @@ func (s *Service) ListReplicaProtections(c *gin.Context) {
 	})
 }
 
+func (s *Service) CreateReplicaIncidentGuide(c *gin.Context) {
+	var req dbbiz.DatabaseReplicaIncidentGuideRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionTopology) {
+		return
+	}
+	result, err := s.useCase.CreateReplicaIncidentGuide(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "生成失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "事故指引已生成", result)
+}
+
+func (s *Service) ListReplicaIncidentGuides(c *gin.Context) {
+	var req dbbiz.DatabaseReplicaIncidentGuideListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionTopology)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListReplicaIncidentGuides(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+func (s *Service) GetReplicaIncidentGuide(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "事故指引ID")
+	if !ok {
+		return
+	}
+	result, err := s.useCase.GetReplicaIncidentGuide(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, result.InstanceID, dbbiz.DatabasePermissionTopology) {
+		return
+	}
+	response.Success(c, result)
+}
+
 func (s *Service) GetInstanceReplicationStatus(c *gin.Context) {
 	instanceID, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {

@@ -846,6 +846,48 @@ export interface DatabaseReplicaProtectionResult {
   walBacklogWarningBytes: number
 }
 
+export interface DatabaseReplicaIncidentGuidePayload {
+  instanceId: number
+  incidentTime?: string
+  incidentType: string
+  affectedSummary: string
+  incidentReason: string
+  expectedRecoveryMethod?: string
+  confirmNoAutoPause: boolean
+}
+
+export interface DatabaseReplicaIncidentGuideResult {
+  id: number
+  instanceId: number
+  instanceName: string
+  instanceEndpoint: string
+  engine: string
+  engineText: string
+  incidentTime: string
+  incidentType: string
+  incidentTypeText: string
+  affectedSummary: string
+  incidentReason: string
+  expectedRecoveryMethod: string
+  expectedRecoveryMethodText: string
+  preferredReplicaId: number
+  preferredReplicaInstanceId: number
+  preferredReplicaName: string
+  preferredReplicaEndpoint: string
+  preferredCheckId: number
+  canIntercept: boolean
+  remainingDelaySeconds: number
+  guideMarkdown: string
+  guideJson: string
+  status: string
+  statusText: string
+  operatorId: number
+  operatorName: string
+  clientIp: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface DatabaseBackupRunResult {
   taskId: number
   taskName: string
@@ -1403,6 +1445,21 @@ export const listDatabaseReplicaProtections = (params?: {
   relayLogBacklogWarningBytes?: number
   walBacklogWarningBytes?: number
 }) => request.get('/api/v1/databases/replica-protections', { params })
+
+export const createDatabaseReplicaIncidentGuide = (data: DatabaseReplicaIncidentGuidePayload) =>
+  request.post('/api/v1/databases/replica-incident-guides', data)
+
+export const listDatabaseReplicaIncidentGuides = (params?: {
+  page?: number
+  pageSize?: number
+  instanceId?: number
+  incidentType?: string
+  status?: string
+  canIntercept?: string
+}) => request.get('/api/v1/databases/replica-incident-guides', { params })
+
+export const getDatabaseReplicaIncidentGuide = (id: number) =>
+  request.get(`/api/v1/databases/replica-incident-guides/${id}`)
 
 export const createDatabaseInstance = (data: DatabaseInstancePayload) =>
   request.post('/api/v1/databases/instances', data)

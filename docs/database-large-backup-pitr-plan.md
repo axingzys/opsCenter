@@ -5406,6 +5406,40 @@ P4.2 已落地内容：
 4. 指引能关联最近一次 replication check。
 5. 不执行任何 pause/resume 命令。
 
+P4.3 已落地内容：
+
+1. 新增只读事故指引模型 `database_replica_incident_guides`：
+   - 保存事故实例、事故时间、事故类型、影响摘要、事故原因和期望恢复方式。
+   - 绑定推荐延迟副本、推荐副本实例、最近一次 `database_replication_checks`。
+   - 记录生成时的 `remaining_delay_seconds` 和 `can_intercept` 判断。
+   - 保存可复制 Markdown 指引 `guide_markdown` 和结构化摘要 `guide_json`。
+2. 新增 API：
+   - `POST /api/v1/databases/replica-incident-guides`
+   - `GET /api/v1/databases/replica-incident-guides`
+   - `GET /api/v1/databases/replica-incident-guides/{id}`
+3. 新增菜单权限：
+   - `database:replica:incident-guide`
+   - 仅控制“生成事故指引”；列表和详情复用 `database:replica:view`。
+   - 实例对象范围仍复用拓扑权限位，避免越权查看副本关系。
+4. 指引生成逻辑：
+   - 复用 P4.2 误操作保护窗口选择推荐延迟副本。
+   - 如果没有延迟副本、没有最近检查、remaining delay 不足或副本严重异常，则明确提示转 PITR 兜底。
+   - 如果仍可能截停，则提示立刻人工确认并在副本侧暂停 apply/replay。
+5. 指引内容包含：
+   - 事故信息。
+   - 当前保护状态、风险等级、推荐延迟副本、最近检查、配置延迟、remaining delay、apply/replay 时间。
+   - “OpsHub P4.3 不自动执行 pause/resume”的安全边界。
+   - MySQL/MariaDB 和 PostgreSQL 暂停 apply/replay 命令模板。
+   - 延迟副本导出回填流程和 PITR 兜底流程。
+6. 前端“副本治理”页签新增：
+   - 保护窗口表格中的“生成事故指引”入口。
+   - 事故指引生成弹窗，强制填写事故原因和“不自动暂停 apply/replay”确认。
+   - 事故指引列表、筛选和 Markdown 详情查看。
+7. 审计：
+   - 新增审计动作 `replica_incident_guide`。
+   - 每次生成指引写入查询审计，记录推荐副本、关联检查和截停判断。
+8. P4.3 仍然只读；没有实现 pause、resume、promote、failover、switchover，也没有通过 Runner 执行任何数据库命令。
+
 #### P4.4：暂停 apply 执行，单独评审
 
 目标：在 P4.1-P4.3 稳定后，再允许 OpsHub 通过 Runner 执行 pause/resume apply。这个阶段风险最高，必须独立评审、独立权限、独立验收，不和只读监控混在一起做。

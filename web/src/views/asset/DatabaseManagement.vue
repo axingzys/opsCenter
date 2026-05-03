@@ -202,7 +202,7 @@
                 <el-option v-for="role in roleOptions" :key="role.id" :label="role.name" :value="role.id" />
               </el-select>
               <el-select v-model="permissionQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadInstancePermissions">
-                <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+                <el-option v-for="item in instanceOptions" :key="item.id" :label="item.name" :value="item.id" />
               </el-select>
             </div>
             <el-button v-if="canManageInstancePermissions" type="primary" @click="openPermissionDialog()">
@@ -1315,7 +1315,7 @@
               <el-table-column label="操作" width="170" fixed="right">
                 <template #default="{ row }">
                   <el-button v-if="row.preferredReplicaInstanceId" link type="primary" :loading="replicationCheckingId === row.preferredReplicaInstanceId" @click="handleCheckReplication(row.preferredReplicaInstanceId)">采集</el-button>
-                  <el-button link type="warning" @click="handleReplicaIncidentGuideEntry">生成事故指引</el-button>
+                  <el-button v-if="uiPermissions.replicaIncidentGuide" link type="warning" @click="handleOpenReplicaIncidentGuide(row)">生成事故指引</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -1328,6 +1328,92 @@
                 layout="total, sizes, prev, pager, next"
                 @size-change="loadReplicationProtections"
                 @current-change="loadReplicationProtections"
+              />
+            </div>
+          </div>
+
+          <div class="backup-card">
+            <div class="section-title">
+              <span>事故指引</span>
+              <el-tag size="small" type="info">{{ replicaIncidentGuideTotal }}</el-tag>
+            </div>
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <el-select v-model="replicaIncidentGuideQuery.instanceId" placeholder="事故实例" clearable filterable class="audit-search-input" @change="loadReplicaIncidentGuides">
+                  <el-option
+                    v-for="item in replicationInstances"
+                    :key="item.id"
+                    :label="`${item.name} (${item.dbType})`"
+                    :value="item.id"
+                  />
+                </el-select>
+                <el-select v-model="replicaIncidentGuideQuery.incidentType" placeholder="事故类型" clearable class="audit-select" @change="loadReplicaIncidentGuides">
+                  <el-option label="误删" value="delete" />
+                  <el-option label="误更新" value="update" />
+                  <el-option label="错误发布" value="release" />
+                  <el-option label="其他" value="other" />
+                </el-select>
+                <el-select v-model="replicaIncidentGuideQuery.canIntercept" placeholder="截停机会" clearable class="audit-select" @change="loadReplicaIncidentGuides">
+                  <el-option label="可能可截停" value="true" />
+                  <el-option label="不可截停/未知" value="false" />
+                </el-select>
+              </div>
+              <div class="backup-toolbar-group">
+                <el-button type="primary" plain :loading="replicaIncidentGuideLoading" @click="loadReplicaIncidentGuides">刷新指引</el-button>
+              </div>
+            </div>
+            <el-table :data="replicaIncidentGuides" v-loading="replicaIncidentGuideLoading" stripe class="modern-table">
+              <el-table-column label="事故实例" min-width="180" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.instanceName || `#${row.instanceId}` }}</span>
+                    <span class="muted-text">{{ row.instanceEndpoint || row.engineText || '-' }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="事故类型" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" type="warning" effect="plain">{{ row.incidentTypeText || row.incidentType }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="事故时间" width="170">
+                <template #default="{ row }">{{ row.incidentTime || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="推荐延迟副本" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.preferredReplicaName || (row.preferredReplicaInstanceId ? `#${row.preferredReplicaInstanceId}` : '无') }}</span>
+                    <span class="muted-text">{{ row.preferredReplicaEndpoint || '-' }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="截停机会" width="130">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.canIntercept ? 'success' : 'danger'">{{ row.canIntercept ? '可能可截停' : '不可截停/未知' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="剩余窗口" width="110" align="right">
+                <template #default="{ row }">{{ replicationDelayText(row.remainingDelaySeconds) }}</template>
+              </el-table-column>
+              <el-table-column label="影响摘要" min-width="220" show-overflow-tooltip prop="affectedSummary" />
+              <el-table-column label="生成时间" width="170">
+                <template #default="{ row }">{{ row.createdAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="110" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="primary" @click="handleViewReplicaIncidentGuide(row)">查看指引</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div class="pagination-wrapper">
+              <el-pagination
+                v-model:current-page="replicaIncidentGuideQuery.page"
+                v-model:page-size="replicaIncidentGuideQuery.pageSize"
+                :total="replicaIncidentGuideTotal"
+                :page-sizes="[5, 10, 20]"
+                layout="total, sizes, prev, pager, next"
+                @size-change="loadReplicaIncidentGuides"
+                @current-change="loadReplicaIncidentGuides"
               />
             </div>
           </div>
@@ -3236,7 +3322,7 @@
               </template>
             </el-input>
             <el-select v-model="auditQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadQueryAudits">
-              <el-option v-for="item in instances" :key="item.id" :label="item.name" :value="item.id" />
+              <el-option v-for="item in instanceOptions" :key="item.id" :label="item.name" :value="item.id" />
             </el-select>
             <el-select v-model="auditQuery.status" placeholder="状态" clearable class="audit-select" @change="loadQueryAudits">
               <el-option label="成功" value="success" />
@@ -5346,6 +5432,111 @@
     </el-dialog>
 
     <el-dialog
+      v-model="replicaIncidentGuideDialogVisible"
+      title="生成误操作事故指引"
+      width="820px"
+      @close="resetReplicaIncidentGuideForm"
+    >
+      <el-alert
+        title="P4.3 只生成处置指引和审计，不会自动暂停 apply/replay，也不会执行任何数据库命令。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="mb-3"
+      />
+      <el-form ref="replicaIncidentGuideFormRef" :model="replicaIncidentGuideForm" :rules="replicaIncidentGuideRules" label-width="120px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="事故实例" prop="instanceId">
+              <el-select v-model="replicaIncidentGuideForm.instanceId" placeholder="请选择实例" filterable class="w-full">
+                <el-option
+                  v-for="item in replicationInstances"
+                  :key="item.id"
+                  :label="`${item.name} (${item.dbType})`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="事故时间" prop="incidentTime">
+              <el-date-picker
+                v-model="replicaIncidentGuideForm.incidentTime"
+                type="datetime"
+                value-format="YYYY-MM-DD HH:mm:ss"
+                placeholder="选择事故时间"
+                class="w-full"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="事故类型" prop="incidentType">
+              <el-select v-model="replicaIncidentGuideForm.incidentType" placeholder="请选择类型" class="w-full">
+                <el-option label="误删" value="delete" />
+                <el-option label="误更新" value="update" />
+                <el-option label="错误发布" value="release" />
+                <el-option label="其他" value="other" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="期望恢复" prop="expectedRecoveryMethod">
+              <el-select v-model="replicaIncidentGuideForm.expectedRecoveryMethod" placeholder="请选择方式" class="w-full">
+                <el-option label="导出回填" value="export_backfill" />
+                <el-option label="整库回滚" value="full_rollback" />
+                <el-option label="暂不确定" value="unknown" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="影响摘要" prop="affectedSummary">
+          <el-input
+            v-model="replicaIncidentGuideForm.affectedSummary"
+            type="textarea"
+            :rows="4"
+            maxlength="4000"
+            show-word-limit
+            placeholder="填写影响库、表、SQL 摘要或业务对象"
+          />
+        </el-form-item>
+        <el-form-item label="事故原因" prop="incidentReason">
+          <el-input
+            v-model="replicaIncidentGuideForm.incidentReason"
+            type="textarea"
+            :rows="4"
+            maxlength="4000"
+            show-word-limit
+            placeholder="必须填写事故原因，便于审计和后续复盘"
+          />
+        </el-form-item>
+        <el-form-item label="安全确认" prop="confirmNoAutoPause">
+          <el-checkbox v-model="replicaIncidentGuideForm.confirmNoAutoPause">
+            我确认本阶段只生成指引，不自动暂停 apply/replay，后续命令需人工确认目标是 replica/standby 后执行
+          </el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="replicaIncidentGuideDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="replicaIncidentGuideSubmitting" @click="submitReplicaIncidentGuide">生成指引</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="replicaIncidentGuideDetailVisible" :title="replicaIncidentGuideDetailTitle" width="920px">
+      <el-input
+        v-model="replicaIncidentGuideDetailMarkdown"
+        type="textarea"
+        :rows="26"
+        readonly
+        class="mono-textarea"
+      />
+      <template #footer>
+        <el-button @click="replicaIncidentGuideDetailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="permissionDialogVisible"
       :title="permissionForm.id ? '编辑实例权限' : '添加实例权限'"
       width="720px"
@@ -5360,7 +5551,7 @@
         <el-form-item label="实例" prop="instanceId">
           <el-select v-model="permissionForm.instanceId" placeholder="请选择数据库实例" filterable style="width: 100%;">
             <el-option
-              v-for="item in instances"
+              v-for="item in instanceOptions"
               :key="item.id"
               :label="`${item.name}（${item.dbTypeText || item.dbType} / ${item.endpoint || `${item.host}:${item.port}`}）`"
               :value="item.id"
@@ -5413,6 +5604,7 @@ import {
   cleanupDatabaseRestoreJob,
   createDatabaseBarmanServer,
   createDatabaseLogArchiveStream,
+  createDatabaseReplicaIncidentGuide,
   createDatabaseRestorePlan,
   createDatabaseRunnerHost,
   createDatabaseStorageProfile,
@@ -5436,6 +5628,7 @@ import {
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
   getDatabaseReplicationStatus,
+  getDatabaseReplicaIncidentGuide,
   getDatabaseRestoreJobProof,
   getDatabaseTopology,
   getDatabaseUIPermissions,
@@ -5470,6 +5663,7 @@ import {
   listDatabaseReplicas,
   listDatabaseReplicationChecks,
   listDatabaseReplicaProtections,
+  listDatabaseReplicaIncidentGuides,
   pauseDatabaseLogArchiveStream,
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
@@ -5516,6 +5710,8 @@ import {
   type DatabaseQueryPayload,
   type DatabaseReplicationCheckResult,
   type DatabaseReplicaProtectionResult,
+  type DatabaseReplicaIncidentGuidePayload,
+  type DatabaseReplicaIncidentGuideResult,
   type DatabaseReplicationStatusResult,
   type DatabaseRestoreDryRunPayload,
   type DatabaseRestoreJobResult,
@@ -5551,6 +5747,7 @@ const testingId = ref(0)
 const syncingId = ref(0)
 const dialogVisible = ref(false)
 const instances = ref<any[]>([])
+const instanceOptions = ref<any[]>([])
 const supportedTypes = ref<DatabaseSupportedType[]>([])
 const credentials = ref<any[]>([])
 const roleOptions = ref<any[]>([])
@@ -5714,6 +5911,15 @@ const replicationStatusDetail = ref<DatabaseReplicationStatusResult>()
 const replicationRawDialogVisible = ref(false)
 const replicationRawDialogTitle = ref('')
 const replicationRawDialogContent = ref('')
+const replicaIncidentGuideLoading = ref(false)
+const replicaIncidentGuideSubmitting = ref(false)
+const replicaIncidentGuides = ref<DatabaseReplicaIncidentGuideResult[]>([])
+const replicaIncidentGuideTotal = ref(0)
+const replicaIncidentGuideDialogVisible = ref(false)
+const replicaIncidentGuideDetailVisible = ref(false)
+const replicaIncidentGuideDetailTitle = ref('')
+const replicaIncidentGuideDetailMarkdown = ref('')
+const replicaIncidentGuideFormRef = ref<FormInstance>()
 const backupTaskLoading = ref(false)
 const backupTaskSubmitting = ref(false)
 const backupTaskDialogVisible = ref(false)
@@ -5884,6 +6090,7 @@ const auditActions = [
   { label: '巡检报告生成', value: 'inspection_generate' },
   { label: '副本状态查看', value: 'replica_status_view' },
   { label: '副本状态采集', value: 'replica_check_run' },
+  { label: '副本事故指引', value: 'replica_incident_guide' },
   { label: '实例权限保存', value: 'instance_permission_upsert' },
   { label: '实例权限删除', value: 'instance_permission_delete' },
   { label: '数据字典导出', value: 'metadata_export' },
@@ -6042,6 +6249,42 @@ const replicationCheckQuery = reactive({
   roleDetected: '',
   healthStatus: ''
 })
+
+const replicaIncidentGuideQuery = reactive({
+  page: 1,
+  pageSize: 5,
+  instanceId: undefined as number | undefined,
+  incidentType: '',
+  status: '',
+  canIntercept: ''
+})
+
+const replicaIncidentGuideForm = reactive<DatabaseReplicaIncidentGuidePayload>({
+  instanceId: 0,
+  incidentTime: '',
+  incidentType: 'delete',
+  affectedSummary: '',
+  incidentReason: '',
+  expectedRecoveryMethod: 'export_backfill',
+  confirmNoAutoPause: false
+})
+
+const replicaIncidentGuideRules: FormRules = {
+  instanceId: [{ required: true, message: '请选择事故实例', trigger: 'change' }],
+  incidentType: [{ required: true, message: '请选择事故类型', trigger: 'change' }],
+  incidentTime: [{ required: true, message: '请选择事故时间', trigger: 'change' }],
+  affectedSummary: [{ required: true, message: '请填写影响范围或 SQL 摘要', trigger: 'blur' }],
+  incidentReason: [{ required: true, message: '请填写事故原因', trigger: 'blur' }],
+  confirmNoAutoPause: [
+    {
+      validator: (_rule, value, callback) => {
+        if (value === true) callback()
+        else callback(new Error('必须确认本阶段不自动暂停 apply/replay'))
+      },
+      trigger: 'change'
+    }
+  ]
+}
 
 const runnerHostQuery = reactive({
   page: 1,
@@ -6490,19 +6733,19 @@ const restoreRules: FormRules = {
 }
 
 const currentMetadataInstance = computed(() =>
-  instances.value.find(item => item.id === metadataInstanceId.value)
+  instanceOptions.value.find(item => item.id === metadataInstanceId.value)
 )
 
 const metadataInstances = computed(() =>
-  instances.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.VIEW, 'metadataEnabled'))
+  instanceOptions.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.VIEW, 'metadataEnabled'))
 )
 
 const currentQueryInstance = computed(() =>
-  instances.value.find(item => item.id === queryInstanceId.value)
+  instanceOptions.value.find(item => item.id === queryInstanceId.value)
 )
 
 const queryInstances = computed(() =>
-  instances.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.QUERY, 'queryEnabled'))
+  instanceOptions.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.QUERY, 'queryEnabled'))
 )
 
 const isRedisMetadataInstance = computed(() =>
@@ -6565,11 +6808,11 @@ const queryEditorPlaceholder = computed(() =>
 )
 
 const currentDiagnosisInstance = computed(() =>
-  instances.value.find(item => item.id === diagnosisInstanceId.value)
+  instanceOptions.value.find(item => item.id === diagnosisInstanceId.value)
 )
 
 const diagnosisInstances = computed(() =>
-  instances.value.filter(item => hasDatabasePermission(item, DATABASE_PERMISSION.DIAGNOSIS))
+  instanceOptions.value.filter(item => hasDatabasePermission(item, DATABASE_PERMISSION.DIAGNOSIS))
 )
 
 const isRedisDiagnosisInstance = computed(() =>
@@ -6577,7 +6820,7 @@ const isRedisDiagnosisInstance = computed(() =>
 )
 
 const currentTopologyInstance = computed(() =>
-  instances.value.find(item => item.id === topologyInstanceId.value)
+  instanceOptions.value.find(item => item.id === topologyInstanceId.value)
 )
 
 const capacityTrendPoints = computed(() =>
@@ -6589,27 +6832,27 @@ let diagnosisRequestSeq = 0
 let capacityTrendRequestSeq = 0
 
 const topologyInstances = computed(() =>
-  instances.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.TOPOLOGY, 'topologyEnabled'))
+  instanceOptions.value.filter(item => canUseDatabaseFeature(item, DATABASE_PERMISSION.TOPOLOGY, 'topologyEnabled'))
 )
 
 const replicationInstances = computed(() =>
-  instances.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.TOPOLOGY))
+  instanceOptions.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.TOPOLOGY))
 )
 
 const supportedBackupInstances = computed(() =>
-  instances.value.filter(item => ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
+  instanceOptions.value.filter(item => ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
 const pitrBackupInstances = computed(() =>
-  instances.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
+  instanceOptions.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
 const postgresqlBackupInstances = computed(() =>
-  instances.value.filter(item => item.dbType === 'postgresql' && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
+  instanceOptions.value.filter(item => item.dbType === 'postgresql' && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
 const restorePlanSourceInstance = computed(() =>
-  instances.value.find(item => item.id === restorePlanForm.sourceInstanceId)
+  instanceOptions.value.find(item => item.id === restorePlanForm.sourceInstanceId)
 )
 
 const restorePlanSourceDbType = computed(() =>
@@ -6617,7 +6860,7 @@ const restorePlanSourceDbType = computed(() =>
 )
 
 const restoreRunSourceInstance = computed(() =>
-  instances.value.find(item => item.id === restorePlanRunSource.value?.sourceInstanceId)
+  instanceOptions.value.find(item => item.id === restorePlanRunSource.value?.sourceInstanceId)
 )
 
 const restoreRunSourceDbType = computed(() =>
@@ -6704,7 +6947,7 @@ const postgresqlRestoreRunAlertTitle = computed(() => {
 })
 
 const selectedBackupTaskInstance = computed(() =>
-  instances.value.find(item => item.id === backupTaskForm.instanceId)
+  instanceOptions.value.find(item => item.id === backupTaskForm.instanceId)
 )
 
 const selectedBackupTaskDbType = computed(() =>
@@ -6840,7 +7083,7 @@ const normalizeBackupTaskFormBackupType = () => {
 }
 
 const restoreTargetInstances = computed(() =>
-  instances.value.filter(item =>
+  instanceOptions.value.filter(item =>
     ['mysql', 'mariadb', 'postgresql', 'redis'].includes(item.dbType) &&
     hasDatabasePermission(item, DATABASE_PERMISSION.RESTORE) &&
     item.status === 'enabled' &&
@@ -6911,7 +7154,7 @@ const sshCredentialOptions = computed(() =>
 
 const restoreTargetOptions = computed(() => {
   const sourceType = restoreSourceRecord.value
-    ? instances.value.find(item => item.id === restoreSourceRecord.value?.instanceId)?.dbType
+    ? instanceOptions.value.find(item => item.id === restoreSourceRecord.value?.instanceId)?.dbType
     : ''
   return restoreTargetInstances.value.filter(item =>
     item.id !== restoreSourceRecord.value?.instanceId && isRestoreCompatibleType(sourceType, item.dbType)
@@ -6920,7 +7163,7 @@ const restoreTargetOptions = computed(() => {
 
 const restoreSourceDbType = computed(() =>
   restoreSourceRecord.value
-    ? instances.value.find(item => item.id === restoreSourceRecord.value?.instanceId)?.dbType || ''
+    ? instanceOptions.value.find(item => item.id === restoreSourceRecord.value?.instanceId)?.dbType || ''
     : ''
 )
 
@@ -7261,92 +7504,128 @@ const loadInstances = async () => {
     total.value = res.total || 0
     if (res.page) query.page = res.page
     if (res.pageSize) query.pageSize = res.pageSize
-    if (metadataInstanceId.value && !metadataInstances.value.some(item => item.id === metadataInstanceId.value)) {
-      metadataInstanceId.value = undefined
-      resetMetadataSelection()
-    }
-    if (queryInstanceId.value && !queryInstances.value.some(item => item.id === queryInstanceId.value)) {
-      queryInstanceId.value = undefined
-      querySchemaName.value = ''
-      querySchemas.value = []
-      queryUnlimitedRows.value = false
-      clearQueryConsoleState()
-    }
-    if (queryUnlimitedRows.value && !canUseQueryUnlimitedRows.value) {
-      queryUnlimitedRows.value = false
-    }
-    if (diagnosisInstanceId.value && !diagnosisInstances.value.some(item => item.id === diagnosisInstanceId.value)) {
-      diagnosisInstanceId.value = undefined
-      diagnosisMetrics.value = undefined
-      diagnosisSessions.value = []
-      diagnosisSlowQueries.value = []
-      diagnosisSlowMessage.value = ''
-      capacityTrend.value = undefined
-    }
-    if (topologyInstanceId.value && !topologyInstances.value.some(item => item.id === topologyInstanceId.value)) {
-      topologyInstanceId.value = undefined
-      topologyResult.value = undefined
-    }
-    if (replicationReplicaQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationReplicaQuery.instanceId)) {
-      replicationReplicaQuery.instanceId = undefined
-    }
-    if (replicationProtectionQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationProtectionQuery.instanceId)) {
-      replicationProtectionQuery.instanceId = undefined
-    }
-    if (replicationCheckQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationCheckQuery.instanceId)) {
-      replicationCheckQuery.instanceId = undefined
-    }
-    if (backupTaskQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskQuery.instanceId)) {
-      backupTaskQuery.instanceId = undefined
-    }
-    if (backupRecordQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupRecordQuery.instanceId)) {
-      backupRecordQuery.instanceId = undefined
-    }
-    if (logArchiveStreamQuery.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveStreamQuery.instanceId)) {
-      logArchiveStreamQuery.instanceId = undefined
-    }
-    if (logArchiveQuery.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveQuery.instanceId)) {
-      logArchiveQuery.instanceId = undefined
-    }
-    if (barmanServerQuery.sourceInstanceId && !postgresqlBackupInstances.value.some(item => item.id === barmanServerQuery.sourceInstanceId)) {
-      barmanServerQuery.sourceInstanceId = undefined
-    }
-    if (restorePlanQuery.sourceInstanceId && !instances.value.some(item => item.id === restorePlanQuery.sourceInstanceId)) {
-      restorePlanQuery.sourceInstanceId = undefined
-    }
-    if (restorePlanQuery.targetInstanceId && !instances.value.some(item => item.id === restorePlanQuery.targetInstanceId)) {
-      restorePlanQuery.targetInstanceId = undefined
-    }
-    if (restoreJobQuery.sourceInstanceId && !instances.value.some(item => item.id === restoreJobQuery.sourceInstanceId)) {
-      restoreJobQuery.sourceInstanceId = undefined
-    }
-    if (restoreJobQuery.targetInstanceId && !instances.value.some(item => item.id === restoreJobQuery.targetInstanceId)) {
-      restoreJobQuery.targetInstanceId = undefined
-    }
-    if (inspectionQuery.instanceId && !diagnosisInstances.value.some(item => item.id === inspectionQuery.instanceId)) {
-      inspectionQuery.instanceId = undefined
-    }
-    if (backupTaskForm.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskForm.instanceId)) {
-      backupTaskForm.instanceId = 0
-    }
-    if (externalBackupForm.instanceId && !pitrBackupInstances.value.some(item => item.id === externalBackupForm.instanceId)) {
-      externalBackupForm.instanceId = 0
-    }
-    if (logArchiveStreamForm.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveStreamForm.instanceId)) {
-      logArchiveStreamForm.instanceId = 0
-    }
-    if (barmanServerForm.sourceInstanceId && !postgresqlBackupInstances.value.some(item => item.id === barmanServerForm.sourceInstanceId)) {
-      barmanServerForm.sourceInstanceId = 0
-    }
-    if (restorePlanForm.sourceInstanceId && !pitrBackupInstances.value.some(item => item.id === restorePlanForm.sourceInstanceId)) {
-      restorePlanForm.sourceInstanceId = 0
-    }
-    if (inspectionForm.instanceId && !diagnosisInstances.value.some(item => item.id === inspectionForm.instanceId)) {
-      inspectionForm.instanceId = undefined
-    }
   } finally {
     loading.value = false
   }
+}
+
+const pruneSelectedInstanceRefs = () => {
+  const hasInstanceOption = (id?: number) =>
+    !!id && instanceOptions.value.some(item => item.id === id)
+
+  if (metadataInstanceId.value && !metadataInstances.value.some(item => item.id === metadataInstanceId.value)) {
+    metadataInstanceId.value = undefined
+    resetMetadataSelection()
+  }
+  if (queryInstanceId.value && !queryInstances.value.some(item => item.id === queryInstanceId.value)) {
+    queryInstanceId.value = undefined
+    querySchemaName.value = ''
+    querySchemas.value = []
+    queryUnlimitedRows.value = false
+    clearQueryConsoleState()
+  }
+  if (queryUnlimitedRows.value && !canUseQueryUnlimitedRows.value) {
+    queryUnlimitedRows.value = false
+  }
+  if (diagnosisInstanceId.value && !diagnosisInstances.value.some(item => item.id === diagnosisInstanceId.value)) {
+    diagnosisInstanceId.value = undefined
+    diagnosisMetrics.value = undefined
+    diagnosisSessions.value = []
+    diagnosisSlowQueries.value = []
+    diagnosisSlowMessage.value = ''
+    capacityTrend.value = undefined
+  }
+  if (topologyInstanceId.value && !topologyInstances.value.some(item => item.id === topologyInstanceId.value)) {
+    topologyInstanceId.value = undefined
+    topologyResult.value = undefined
+  }
+  if (replicationReplicaQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationReplicaQuery.instanceId)) {
+    replicationReplicaQuery.instanceId = undefined
+  }
+  if (replicationProtectionQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationProtectionQuery.instanceId)) {
+    replicationProtectionQuery.instanceId = undefined
+  }
+  if (replicationCheckQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationCheckQuery.instanceId)) {
+    replicationCheckQuery.instanceId = undefined
+  }
+  if (replicaIncidentGuideQuery.instanceId && !replicationInstances.value.some(item => item.id === replicaIncidentGuideQuery.instanceId)) {
+    replicaIncidentGuideQuery.instanceId = undefined
+  }
+  if (backupTaskQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskQuery.instanceId)) {
+    backupTaskQuery.instanceId = undefined
+  }
+  if (backupRecordQuery.instanceId && !supportedBackupInstances.value.some(item => item.id === backupRecordQuery.instanceId)) {
+    backupRecordQuery.instanceId = undefined
+  }
+  if (logArchiveStreamQuery.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveStreamQuery.instanceId)) {
+    logArchiveStreamQuery.instanceId = undefined
+  }
+  if (logArchiveQuery.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveQuery.instanceId)) {
+    logArchiveQuery.instanceId = undefined
+  }
+  if (barmanServerQuery.sourceInstanceId && !postgresqlBackupInstances.value.some(item => item.id === barmanServerQuery.sourceInstanceId)) {
+    barmanServerQuery.sourceInstanceId = undefined
+  }
+  if (restorePlanQuery.sourceInstanceId && !hasInstanceOption(restorePlanQuery.sourceInstanceId)) {
+    restorePlanQuery.sourceInstanceId = undefined
+  }
+  if (restorePlanQuery.targetInstanceId && !hasInstanceOption(restorePlanQuery.targetInstanceId)) {
+    restorePlanQuery.targetInstanceId = undefined
+  }
+  if (restoreJobQuery.sourceInstanceId && !hasInstanceOption(restoreJobQuery.sourceInstanceId)) {
+    restoreJobQuery.sourceInstanceId = undefined
+  }
+  if (restoreJobQuery.targetInstanceId && !hasInstanceOption(restoreJobQuery.targetInstanceId)) {
+    restoreJobQuery.targetInstanceId = undefined
+  }
+  if (inspectionQuery.instanceId && !diagnosisInstances.value.some(item => item.id === inspectionQuery.instanceId)) {
+    inspectionQuery.instanceId = undefined
+  }
+  if (backupTaskForm.instanceId && !supportedBackupInstances.value.some(item => item.id === backupTaskForm.instanceId)) {
+    backupTaskForm.instanceId = 0
+  }
+  if (externalBackupForm.instanceId && !pitrBackupInstances.value.some(item => item.id === externalBackupForm.instanceId)) {
+    externalBackupForm.instanceId = 0
+  }
+  if (logArchiveStreamForm.instanceId && !pitrBackupInstances.value.some(item => item.id === logArchiveStreamForm.instanceId)) {
+    logArchiveStreamForm.instanceId = 0
+  }
+  if (barmanServerForm.sourceInstanceId && !postgresqlBackupInstances.value.some(item => item.id === barmanServerForm.sourceInstanceId)) {
+    barmanServerForm.sourceInstanceId = 0
+  }
+  if (restorePlanForm.sourceInstanceId && !pitrBackupInstances.value.some(item => item.id === restorePlanForm.sourceInstanceId)) {
+    restorePlanForm.sourceInstanceId = 0
+  }
+  if (inspectionForm.instanceId && !diagnosisInstances.value.some(item => item.id === inspectionForm.instanceId)) {
+    inspectionForm.instanceId = undefined
+  }
+}
+
+const loadInstanceOptions = async () => {
+  const pageSize = 100
+  const options: any[] = []
+  let page = 1
+  let totalCount = 0
+
+  while (page <= 100) {
+    const res: any = await listDatabaseInstances({ page, pageSize })
+    const list = Array.isArray(res?.list) ? res.list : []
+    options.push(...list)
+    totalCount = Number(res?.total || options.length)
+    if (list.length === 0 || options.length >= totalCount) {
+      break
+    }
+    page += 1
+  }
+
+  const seen = new Set<number>()
+  instanceOptions.value = options.filter(item => {
+    const id = Number(item?.id || 0)
+    if (!id || seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
+  pruneSelectedInstanceRefs()
 }
 
 const ensureMetadataInstance = async () => {
@@ -7653,8 +7932,21 @@ const loadReplicationChecks = async () => {
   }
 }
 
+const loadReplicaIncidentGuides = async () => {
+  replicaIncidentGuideLoading.value = true
+  try {
+    const res: any = await listDatabaseReplicaIncidentGuides(replicaIncidentGuideQuery)
+    replicaIncidentGuides.value = res.list || []
+    replicaIncidentGuideTotal.value = res.total || 0
+    if (res.page) replicaIncidentGuideQuery.page = res.page
+    if (res.pageSize) replicaIncidentGuideQuery.pageSize = res.pageSize
+  } finally {
+    replicaIncidentGuideLoading.value = false
+  }
+}
+
 const refreshReplicationState = async () => {
-  await Promise.all([loadReplicationProtections(), loadReplicationReplicas(), loadReplicationChecks()])
+  await Promise.all([loadReplicationProtections(), loadReplicationReplicas(), loadReplicationChecks(), loadReplicaIncidentGuides()])
 }
 
 const handleCheckReplication = async (instanceId?: number) => {
@@ -7719,8 +8011,51 @@ const handleViewReplicationRaw = (row: DatabaseReplicationCheckResult) => {
   replicationRawDialogVisible.value = true
 }
 
-const handleReplicaIncidentGuideEntry = () => {
-  ElMessage.info('事故指引将在 P4.3 启用；当前页面只做保护窗口监控和风险提示')
+const resetReplicaIncidentGuideForm = () => {
+  replicaIncidentGuideForm.instanceId = 0
+  replicaIncidentGuideForm.incidentTime = ''
+  replicaIncidentGuideForm.incidentType = 'delete'
+  replicaIncidentGuideForm.affectedSummary = ''
+  replicaIncidentGuideForm.incidentReason = ''
+  replicaIncidentGuideForm.expectedRecoveryMethod = 'export_backfill'
+  replicaIncidentGuideForm.confirmNoAutoPause = false
+  replicaIncidentGuideFormRef.value?.clearValidate()
+}
+
+const handleOpenReplicaIncidentGuide = (row?: DatabaseReplicaProtectionResult) => {
+  resetReplicaIncidentGuideForm()
+  replicaIncidentGuideForm.instanceId = row?.primaryInstanceId || replicationProtectionQuery.instanceId || 0
+  replicaIncidentGuideForm.incidentTime = formatDateTimeInput()
+  replicaIncidentGuideForm.affectedSummary = row?.primaryInstanceName ? `实例 ${row.primaryInstanceName} 发生误操作，影响范围待补充` : ''
+  replicaIncidentGuideDialogVisible.value = true
+}
+
+const submitReplicaIncidentGuide = async () => {
+  await replicaIncidentGuideFormRef.value?.validate()
+  replicaIncidentGuideSubmitting.value = true
+  try {
+    const result = await createDatabaseReplicaIncidentGuide(replicaIncidentGuideForm) as DatabaseReplicaIncidentGuideResult
+    ElMessage.success('事故指引已生成')
+    replicaIncidentGuideDialogVisible.value = false
+    replicaIncidentGuideDetailTitle.value = `事故指引 #${result.id} - ${result.instanceName || result.instanceId}`
+    replicaIncidentGuideDetailMarkdown.value = result.guideMarkdown || ''
+    replicaIncidentGuideDetailVisible.value = true
+    await loadReplicaIncidentGuides()
+  } finally {
+    replicaIncidentGuideSubmitting.value = false
+  }
+}
+
+const handleViewReplicaIncidentGuide = async (row: DatabaseReplicaIncidentGuideResult) => {
+  replicaIncidentGuideLoading.value = true
+  try {
+    const result = await getDatabaseReplicaIncidentGuide(row.id) as DatabaseReplicaIncidentGuideResult
+    replicaIncidentGuideDetailTitle.value = `事故指引 #${result.id} - ${result.instanceName || result.instanceId}`
+    replicaIncidentGuideDetailMarkdown.value = result.guideMarkdown || ''
+    replicaIncidentGuideDetailVisible.value = true
+  } finally {
+    replicaIncidentGuideLoading.value = false
+  }
 }
 
 const loadBackupTasks = async () => {
@@ -7948,7 +8283,7 @@ const formatDateTimeInput = (date = new Date()) => {
 }
 
 const archiveTypeForInstance = (instanceId?: number) => {
-  const dbType = instances.value.find(item => item.id === instanceId)?.dbType || ''
+  const dbType = instanceOptions.value.find(item => item.id === instanceId)?.dbType || ''
   if (dbType === 'postgresql') return 'wal'
   if (['mysql', 'mariadb'].includes(dbType)) return 'binlog'
   return ''
@@ -8597,7 +8932,7 @@ const submitRestorePlan = async () => {
 }
 
 const defaultRestoreImageForPlan = (row?: DatabaseRestorePlanResult) => {
-  const source = instances.value.find(item => item.id === row?.sourceInstanceId)
+  const source = instanceOptions.value.find(item => item.id === row?.sourceInstanceId)
   const version = String(source?.version || '')
   if (source?.dbType === 'postgresql') {
     const match = version.match(/(\d+)/)
@@ -9281,7 +9616,7 @@ const buildRunnerAgentConfig = (row: DatabaseRunnerHostResult, auth: string) => 
   const assignedStreams = logArchiveStreams.value.filter(item => item.runnerHostId === row.id)
   const credentials = assignedStreams.map(stream => {
     const sourceID = stream.sourceInstanceId || stream.instanceId
-    const instance = instances.value.find(item => item.id === sourceID)
+    const instance = instanceOptions.value.find(item => item.id === sourceID)
     return {
       streamId: stream.id,
       instanceId: sourceID,
@@ -9468,7 +9803,7 @@ const submitPermissionForm = async () => {
     })
     ElMessage.success('实例权限已保存')
     permissionDialogVisible.value = false
-    await Promise.all([loadInstancePermissions(), loadInstances()])
+    await Promise.all([loadInstancePermissions(), loadInstances(), loadInstanceOptions()])
   } finally {
     permissionSubmitting.value = false
   }
@@ -9486,7 +9821,7 @@ const handleDeletePermission = async (row: any) => {
   })
   await deleteDatabaseInstancePermission(row.id)
   ElMessage.success('实例权限已删除')
-  await Promise.all([loadInstancePermissions(), loadInstances()])
+  await Promise.all([loadInstancePermissions(), loadInstances(), loadInstanceOptions()])
 }
 
 const resetQuery = () => {
@@ -9573,7 +9908,7 @@ const submitForm = async () => {
       ElMessage.success('创建成功')
     }
     dialogVisible.value = false
-    await loadInstances()
+    await Promise.all([loadInstances(), loadInstanceOptions()])
   } finally {
     submitting.value = false
   }
@@ -9591,7 +9926,7 @@ const handleDelete = async (row: any) => {
   })
   await deleteDatabaseInstance(row.id)
   ElMessage.success('删除成功')
-  await loadInstances()
+  await Promise.all([loadInstances(), loadInstanceOptions()])
 }
 
 const toggleInstanceStatus = async (row: any) => {
@@ -9606,7 +9941,7 @@ const toggleInstanceStatus = async (row: any) => {
     await enableDatabaseInstance(row.id)
     ElMessage.success('已启用')
   }
-  await loadInstances()
+  await Promise.all([loadInstances(), loadInstanceOptions()])
 }
 
 const handleTest = async (row: any) => {
@@ -9618,7 +9953,7 @@ const handleTest = async (row: any) => {
   try {
     const res: any = await testDatabaseInstance(row.id)
     ElMessage.success(`${res.message || '连接测试成功'}${res.version ? `，版本：${res.version}` : ''}`)
-    await loadInstances()
+    await Promise.all([loadInstances(), loadInstanceOptions()])
   } finally {
     testingId.value = 0
   }
@@ -9630,7 +9965,7 @@ const handleSync = async (row?: any) => {
     ElMessage.warning('请先选择数据库实例')
     return
   }
-  const instance = row || instances.value.find(item => item.id === id)
+  const instance = row || instanceOptions.value.find(item => item.id === id)
   if (!canUseDatabaseFeature(instance, DATABASE_PERMISSION.MANAGE, 'metadataEnabled')) {
     ElMessage.warning('无元数据同步权限或该数据库类型暂未接入')
     return
@@ -9647,7 +9982,7 @@ const handleSync = async (row?: any) => {
         `${res.message || '同步成功'}：${res.schemasCount || 0} 个库，${res.tablesCount || 0} 张表，${res.columnsCount || 0} 个字段`
       )
     }
-    await loadInstances()
+    await Promise.all([loadInstances(), loadInstanceOptions()])
     if (metadataInstanceId.value === id || !metadataInstanceId.value) {
       metadataInstanceId.value = id
       await loadSchemas()
@@ -10790,7 +11125,7 @@ const submitRestoreDryRun = async () => {
     return
   }
   normalizeRestoreFormStrategy()
-  const target = instances.value.find(item => item.id === restoreForm.targetInstanceId)
+  const target = instanceOptions.value.find(item => item.id === restoreForm.targetInstanceId)
   const strategyText = availableRestoreStrategyOptions.value.find(item => item.value === restoreForm.restoreStrategy)?.label || restoreForm.restoreStrategy
   await ElMessageBox.confirm(
     `确定把备份「${restoreSourceRecord.value.fileName}」恢复演练到「${target?.name || restoreForm.targetInstanceId}」吗？目标处理：${strategyText}。`,
@@ -11559,7 +11894,7 @@ onMounted(async () => {
   window.addEventListener('resize', resizeCapacityChart)
   document.addEventListener('click', handleDocumentClick)
   await Promise.all([loadSupportedTypes(), loadCredentials(), loadRoles(), loadUIPermissions(), loadDatabaseWriteConfig()])
-  await loadInstances()
+  await Promise.all([loadInstances(), loadInstanceOptions()])
 })
 
 onBeforeUnmount(() => {

@@ -61,6 +61,7 @@ const (
 	DatabaseAuditActionPermissionDelete   = "instance_permission_delete"
 	DatabaseAuditActionReplicaStatusView  = "replica_status_view"
 	DatabaseAuditActionReplicaCheckRun    = "replica_check_run"
+	DatabaseAuditActionReplicaIncident    = "replica_incident_guide"
 
 	DatabaseBackupTypeLogical         = "logical"
 	DatabaseBackupTypeLogicalCustom   = "logical_custom"
@@ -373,6 +374,32 @@ type DatabaseReplicationCheck struct {
 
 func (DatabaseReplicationCheck) TableName() string {
 	return "database_replication_checks"
+}
+
+// DatabaseReplicaIncidentGuide 保存误删、误更新等事故的只读处置指引。
+type DatabaseReplicaIncidentGuide struct {
+	gorm.Model
+	InstanceID                 uint       `gorm:"column:instance_id;not null;index;comment:事故实例ID" json:"instanceId"`
+	IncidentTime               *time.Time `gorm:"column:incident_time;index;comment:事故发生时间" json:"incidentTime,omitempty"`
+	IncidentType               string     `gorm:"column:incident_type;type:varchar(30);not null;index;comment:delete/update/release/other" json:"incidentType"`
+	AffectedSummary            string     `gorm:"column:affected_summary;type:text;comment:影响库表、SQL摘要或业务对象" json:"affectedSummary"`
+	IncidentReason             string     `gorm:"column:incident_reason;type:text;comment:事故原因" json:"incidentReason"`
+	ExpectedRecoveryMethod     string     `gorm:"column:expected_recovery_method;type:varchar(30);comment:export_backfill/full_rollback/unknown" json:"expectedRecoveryMethod"`
+	PreferredReplicaID         uint       `gorm:"column:preferred_replica_id;index;comment:推荐副本关系ID" json:"preferredReplicaId"`
+	PreferredReplicaInstanceID uint       `gorm:"column:preferred_replica_instance_id;index;comment:推荐延迟副本实例ID" json:"preferredReplicaInstanceId"`
+	PreferredCheckID           uint       `gorm:"column:preferred_check_id;index;comment:推荐副本最近一次检查ID" json:"preferredCheckId"`
+	CanIntercept               bool       `gorm:"column:can_intercept;index;default:false;comment:当前是否仍可能截停" json:"canIntercept"`
+	RemainingDelaySeconds      int        `gorm:"column:remaining_delay_seconds;type:int;default:-1;comment:生成指引时剩余保护窗口" json:"remainingDelaySeconds"`
+	GuideMarkdown              string     `gorm:"column:guide_markdown;type:longtext;comment:可复制Markdown处置指引" json:"guideMarkdown"`
+	GuideJSON                  string     `gorm:"column:guide_json;type:longtext;comment:结构化指引摘要JSON" json:"guideJson"`
+	Status                     string     `gorm:"column:status;type:varchar(30);index;default:'generated';comment:generated/archived" json:"status"`
+	OperatorID                 uint       `gorm:"column:operator_id;index;comment:生成人" json:"operatorId"`
+	OperatorName               string     `gorm:"column:operator_name;type:varchar(100);comment:生成人名称" json:"operatorName"`
+	ClientIP                   string     `gorm:"column:client_ip;type:varchar(64);comment:客户端IP" json:"clientIp"`
+}
+
+func (DatabaseReplicaIncidentGuide) TableName() string {
+	return "database_replica_incident_guides"
 }
 
 // DatabaseInstancePermission 角色到数据库实例的对象级权限。

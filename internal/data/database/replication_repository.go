@@ -193,3 +193,59 @@ func (r *replicationCheckRepo) List(ctx context.Context, req *dbbiz.DatabaseRepl
 	}
 	return items, total, nil
 }
+
+type replicaIncidentGuideRepo struct {
+	db *gorm.DB
+}
+
+func NewReplicaIncidentGuideRepo(db *gorm.DB) dbbiz.ReplicaIncidentGuideRepo {
+	return &replicaIncidentGuideRepo{db: db}
+}
+
+func (r *replicaIncidentGuideRepo) Create(ctx context.Context, item *dbbiz.DatabaseReplicaIncidentGuide) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *replicaIncidentGuideRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseReplicaIncidentGuide, error) {
+	var item dbbiz.DatabaseReplicaIncidentGuide
+	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *replicaIncidentGuideRepo) List(ctx context.Context, req *dbbiz.DatabaseReplicaIncidentGuideListRequest) ([]*dbbiz.DatabaseReplicaIncidentGuide, int64, error) {
+	var (
+		items []*dbbiz.DatabaseReplicaIncidentGuide
+		total int64
+	)
+	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseReplicaIncidentGuide{})
+	if req != nil {
+		query = applyAllowedInstanceFilter(query, "instance_id", req.RestrictToAllowed, req.AllowedInstanceIDs)
+		if req.InstanceID > 0 {
+			query = query.Where("instance_id = ?", req.InstanceID)
+		}
+		if typ := strings.TrimSpace(req.IncidentType); typ != "" {
+			query = query.Where("incident_type = ?", typ)
+		}
+		if status := strings.TrimSpace(req.Status); status != "" {
+			query = query.Where("status = ?", status)
+		}
+		if value := strings.TrimSpace(req.CanIntercept); value != "" {
+			switch strings.ToLower(value) {
+			case "true", "1", "yes":
+				query = query.Where("can_intercept = ?", true)
+			case "false", "0", "no":
+				query = query.Where("can_intercept = ?", false)
+			}
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := normalizeRepoPage(reqPage(req), reqPageSize(req))
+	if err := query.Order("created_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}

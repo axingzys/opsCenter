@@ -66,6 +66,7 @@ type UseCase struct {
 	barmanServerRepo       BarmanServerRepo
 	instanceReplicaRepo    InstanceReplicaRepo
 	replicationCheckRepo   ReplicationCheckRepo
+	replicaIncidentRepo    ReplicaIncidentGuideRepo
 	credentialIDExists     func(ctx context.Context, id uint) error
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
 	writePolicyResolver    func(ctx context.Context) (*DatabaseWritePolicy, error)
@@ -152,12 +153,14 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 func (uc *UseCase) SetReplicaGovernanceRepos(
 	instanceReplicaRepo InstanceReplicaRepo,
 	replicationCheckRepo ReplicationCheckRepo,
+	replicaIncidentRepo ReplicaIncidentGuideRepo,
 ) {
 	if uc == nil {
 		return
 	}
 	uc.instanceReplicaRepo = instanceReplicaRepo
 	uc.replicationCheckRepo = replicationCheckRepo
+	uc.replicaIncidentRepo = replicaIncidentRepo
 }
 
 type DatabaseInstanceRequest struct {
@@ -290,6 +293,27 @@ type DatabaseReplicaProtectionListRequest struct {
 	WALBacklogWarningBytes       int64  `form:"walBacklogWarningBytes"`
 	RestrictToAllowed            bool   `form:"-" json:"-"`
 	AllowedInstanceIDs           []uint `form:"-" json:"-"`
+}
+
+type DatabaseReplicaIncidentGuideRequest struct {
+	InstanceID             uint   `json:"instanceId" binding:"required"`
+	IncidentTime           string `json:"incidentTime" binding:"omitempty,max=40"`
+	IncidentType           string `json:"incidentType" binding:"required,max=30"`
+	AffectedSummary        string `json:"affectedSummary" binding:"required,max=4000"`
+	IncidentReason         string `json:"incidentReason" binding:"required,max=4000"`
+	ExpectedRecoveryMethod string `json:"expectedRecoveryMethod" binding:"omitempty,max=30"`
+	ConfirmNoAutoPause     bool   `json:"confirmNoAutoPause"`
+}
+
+type DatabaseReplicaIncidentGuideListRequest struct {
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	InstanceID         uint   `form:"instanceId"`
+	IncidentType       string `form:"incidentType"`
+	Status             string `form:"status"`
+	CanIntercept       string `form:"canIntercept"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
 type DatabaseInstancePermissionRequest struct {
@@ -519,6 +543,38 @@ type DatabaseReplicaProtectionVO struct {
 	RemainingDelayWarningSeconds int      `json:"remainingDelayWarningSeconds"`
 	RelayLogBacklogWarningBytes  int64    `json:"relayLogBacklogWarningBytes"`
 	WALBacklogWarningBytes       int64    `json:"walBacklogWarningBytes"`
+}
+
+type DatabaseReplicaIncidentGuideVO struct {
+	ID                         uint   `json:"id"`
+	InstanceID                 uint   `json:"instanceId"`
+	InstanceName               string `json:"instanceName"`
+	InstanceEndpoint           string `json:"instanceEndpoint"`
+	Engine                     string `json:"engine"`
+	EngineText                 string `json:"engineText"`
+	IncidentTime               string `json:"incidentTime"`
+	IncidentType               string `json:"incidentType"`
+	IncidentTypeText           string `json:"incidentTypeText"`
+	AffectedSummary            string `json:"affectedSummary"`
+	IncidentReason             string `json:"incidentReason"`
+	ExpectedRecoveryMethod     string `json:"expectedRecoveryMethod"`
+	ExpectedRecoveryMethodText string `json:"expectedRecoveryMethodText"`
+	PreferredReplicaID         uint   `json:"preferredReplicaId"`
+	PreferredReplicaInstanceID uint   `json:"preferredReplicaInstanceId"`
+	PreferredReplicaName       string `json:"preferredReplicaName"`
+	PreferredReplicaEndpoint   string `json:"preferredReplicaEndpoint"`
+	PreferredCheckID           uint   `json:"preferredCheckId"`
+	CanIntercept               bool   `json:"canIntercept"`
+	RemainingDelaySeconds      int    `json:"remainingDelaySeconds"`
+	GuideMarkdown              string `json:"guideMarkdown"`
+	GuideJSON                  string `json:"guideJson"`
+	Status                     string `json:"status"`
+	StatusText                 string `json:"statusText"`
+	OperatorID                 uint   `json:"operatorId"`
+	OperatorName               string `json:"operatorName"`
+	ClientIP                   string `json:"clientIp"`
+	CreatedAt                  string `json:"createdAt"`
+	UpdatedAt                  string `json:"updatedAt"`
 }
 
 type SupportedTypeVO struct {
@@ -2306,6 +2362,8 @@ func QueryAuditActionText(action string) string {
 		return "副本状态查看"
 	case DatabaseAuditActionReplicaCheckRun:
 		return "副本状态采集"
+	case DatabaseAuditActionReplicaIncident:
+		return "副本事故指引"
 	default:
 		return strings.TrimSpace(action)
 	}
@@ -2355,6 +2413,8 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionReplicaStatusView
 	case DatabaseAuditActionReplicaCheckRun:
 		return DatabaseAuditActionReplicaCheckRun
+	case DatabaseAuditActionReplicaIncident:
+		return DatabaseAuditActionReplicaIncident
 	default:
 		return strings.ToLower(strings.TrimSpace(action))
 	}
