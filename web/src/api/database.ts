@@ -922,6 +922,75 @@ export interface DatabaseRunnerJobResult {
   updatedAt: string
 }
 
+export interface DatabaseRunnerToolInfo {
+  name: string
+  path: string
+  version: string
+  installed: boolean
+}
+
+export interface DatabaseRunnerToolCapabilitySummary {
+  available: string[]
+  missing: string[]
+  warnings: string[]
+}
+
+export interface DatabaseRunnerToolCompatibilitySummary {
+  os: string
+  arch: string
+  supported: string[]
+  warnings: string[]
+}
+
+export interface DatabaseRunnerToolProfileResult {
+  id: number
+  runnerHostId: number
+  runnerName: string
+  osFamily: string
+  osVersion: string
+  osPrettyName: string
+  arch: string
+  packageManager: string
+  isRoot: boolean
+  hasSudo: boolean
+  hasSystemd: boolean
+  hasDocker: boolean
+  networkAccess: string
+  tools: Record<string, DatabaseRunnerToolInfo>
+  capability: DatabaseRunnerToolCapabilitySummary
+  compatibility: DatabaseRunnerToolCompatibilitySummary
+  lastProbeAt: string
+  lastStatus: string
+  lastError: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseRunnerToolInstallScriptPayload {
+  profiles: string[]
+  targetDbVersions?: Record<string, string>
+  installMode?: string
+  dryRun?: boolean
+}
+
+export interface DatabaseRunnerToolInstallScriptResult {
+  runnerHostId: number
+  runnerHostName: string
+  osFamily: string
+  osVersion: string
+  osPrettyName: string
+  arch: string
+  packageManager: string
+  profiles: string[]
+  targetDbVersions?: Record<string, string>
+  installMode: string
+  dryRun: boolean
+  warnings: string[]
+  unsupported: string[]
+  script: string
+  generatedAt: string
+}
+
 export interface DatabaseBarmanServerPayload {
   sourceInstanceId: number
   runnerHostId: number
@@ -1684,6 +1753,15 @@ export const updateDatabaseRunnerHost = (id: number, data: DatabaseRunnerHostPay
 
 export const testDatabaseRunnerHost = (id: number) =>
   request.post(`/api/v1/databases/runner-hosts/${id}/test`)
+
+export const getDatabaseRunnerToolProfile = (id: number) =>
+  request.get(`/api/v1/databases/runner-hosts/${id}/tool-profile`)
+
+export const probeDatabaseRunnerTools = (id: number) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/tool-probe`)
+
+export const generateDatabaseRunnerToolInstallScript = (id: number, data: DatabaseRunnerToolInstallScriptPayload) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/tool-install-script`, data)
 
 export const listDatabaseRunnerJobs = (params?: {
   page?: number

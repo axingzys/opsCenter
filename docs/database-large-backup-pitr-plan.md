@@ -3287,6 +3287,601 @@ retention:
 8. 用 synthetic full 创建并运行隔离恢复演练。
 9. 恢复 proof 成功后，才允许旧链进入清理窗口。
 
+### P2.14-P2.19：Runner 工具部署、巡检和 Agent 生命周期
+
+当前 MySQL/PostgreSQL 物理备份、日志归档和隔离恢复都依赖 Runner 主机上的本地工具。OpsHub 已能登记 Runner、通过 SSH Runner 执行受控任务、通过 Runner Agent 承载长期 binlog 归档，但还没有把 Runner 工具安装和升级产品化。现阶段如果 Runner 缺少 `xtrabackup/mysqlbinlog/pg_basebackup/barman/docker`，仍需要运维人员手动安装。
+
+本阶段目标是把这件事做成类似现有 `Agent管理` 的生命周期能力：页面选择 Runner，后端创建任务，SSH/Agent 执行受控脚本，前端展示阶段进度、日志、错误和最终验收结果。
+
+#### 总体原则
+
+1. OpsHub backend 继续只做编排、权限、审计、状态和短生命周期 SSH 调度，不在 backend 容器内安装数据库工具或运行长期数据库备份进程。
+2. Runner 工具安装必须以 Runner Job 记录，保留阶段、进度、stdout/stderr 摘要、远端日志路径、操作人和失败原因。
+3. 不能只检查 `command -v`，必须校验工具版本和目标数据库版本兼容。
+4. 安装前必须先探测 OS、架构、包管理器、root/sudo 能力、网络能力、Docker/systemd 能力和已有工具。
+5. 安装后必须执行 smoke test，证明工具能连接目标数据库并执行真实最小动作。
+6. 自动安装必须支持 dry-run 和生成脚本，生产环境可以选择人工审核后再执行。
+7. CentOS 7.9 等老系统只做 best-effort；如依赖冲突，优先走容器化工具 Runner。
+8. 数据库密码、对象存储密钥和 Runner Agent 的 `runnerAuth` 明文不通过公开接口下发；后端只保存 hash 或凭据引用。
+
+#### 复用 Agent 管理模式
+
+现有 `Agent管理` 已有部署任务模式：
+
+1. 前端选择主机。
+2. 后端创建部署任务。
+3. Linux 通过 SSH 执行安装命令。
+4. Windows 后续通过 WinRM 执行安装命令。
+5. 任务展示阶段、进度、错误和最终状态。
+6. Agent 注册或心跳后进入运行态。
+
+Runner 工具部署建议复用同一体验：
+
+```text
+数据库管理
+  -> PITR 链路与恢复计划
+     -> Runner主机
+        -> 工具巡检
+        -> 安装/升级工具
+        -> 生成安装脚本
+        -> 安装/升级 Runner Agent
+```
+
+#### Runner 工具画像
+
+建议新增表：
+
+```text
+database_runner_tool_profiles
+```
+
+核心字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `runner_host_id` | Runner 主机 |
+| `os_family` | `ubuntu / debian / rocky / alma / rhel / centos / unknown` |
+| `os_version` | 例如 `7.9 / 8.10 / 9.4 / 22.04 / 24.04 / 12` |
+| `os_pretty_name` | `/etc/os-release` 可读名称 |
+| `arch` | `x86_64 / amd64 / arm64 / aarch64` |
+| `package_manager` | `apt / yum / dnf / unknown` |
+| `is_root` | SSH 用户是否为 root |
+| `has_sudo` | SSH 用户是否可无交互 sudo |
+| `has_systemd` | 是否可管理 systemd service |
+| `has_docker` | 是否可运行 Docker |
+| `network_access` | `online / offline / restricted / unknown` |
+| `tool_manifest_json` | 工具路径和版本 |
+| `capability_json` | Runner 当前具备的能力 |
+| `compatibility_json` | 与已绑定数据库实例的兼容结论 |
+| `last_probe_at` | 最近巡检时间 |
+| `last_probe_status` | `success / warning / failed` |
+| `last_error` | 最近错误 |
+
+`tool_manifest_json` 示例：
+
+```json
+{
+  "mysql": {
+    "mysql": {"path": "/usr/bin/mysql", "version": "8.0.45"},
+    "mysqlbinlog": {"path": "/usr/local/bin/mysqlbinlog", "version": "8.0.45"},
+    "xtrabackup": {"path": "/usr/bin/xtrabackup", "version": "8.0.35"},
+    "mariadbBackup": {"path": "", "version": ""}
+  },
+  "postgresql": {
+    "psql": {"path": "/usr/bin/psql", "version": "17.7"},
+    "pgBasebackup": {"path": "/usr/bin/pg_basebackup", "version": "17.7"},
+    "pgCombinebackup": {"path": "/usr/local/bin/pg_combinebackup", "version": "17.7"},
+    "pgVerifybackup": {"path": "/usr/local/bin/pg_verifybackup", "version": "17.7"},
+    "barman": {"path": "/usr/bin/barman", "version": "3.12.1"}
+  },
+  "common": {
+    "docker": {"path": "/usr/bin/docker", "version": "28.x"},
+    "tar": {"path": "/usr/bin/tar", "version": ""},
+    "sha256sum": {"path": "/usr/bin/sha256sum", "version": ""},
+    "zstd": {"path": "/usr/bin/zstd", "version": ""}
+  }
+}
+```
+
+#### 工具 Profile
+
+用户不应该直接面对包名，而是选择用途 Profile。
+
+| Profile | 用途 | 必需工具 |
+| --- | --- | --- |
+| `mysql_57_physical` | MySQL 5.7 物理备份 | `xtrabackup 2.4`、`mysqlbinlog`、`mysql` |
+| `mysql_80_physical` | MySQL 8.0 物理备份 | `percona-xtrabackup-80`、MySQL/Percona `mysqlbinlog 8.0`、`mysql` |
+| `mysql_84_physical` | MySQL 8.4 物理备份 | `percona-xtrabackup 8.4`、`mysqlbinlog 8.4`、`mysql` |
+| `mariadb_physical` | MariaDB 物理备份 | `mariadb-backup`、`mariadb-binlog`、`mariadb` |
+| `mysql_binlog_archiver` | MySQL/MariaDB binlog 长期归档 | 匹配数据库版本的 `mysqlbinlog` 或 `mariadb-binlog`、`opshub-agent` |
+| `postgres_barman` | PostgreSQL Barman 备份恢复 | `barman`、`barman-cli`、`psql`、`pg_basebackup`、`pg_receivewal` |
+| `postgres_native_pg_basebackup` | PostgreSQL 原生 base backup | `pg_basebackup`、`pg_verifybackup`、`pg_combinebackup`、`psql` |
+| `restore_runner` | 隔离恢复 Runner | `docker`、`tar`、`sha256sum`、数据库客户端 |
+
+后端用 Profile 做策略门禁：
+
+```text
+数据库实例版本 + Runner tool profile + backup_engine = 是否允许创建/运行策略
+```
+
+#### MySQL / MariaDB 兼容矩阵
+
+| 数据库 | 推荐工具 | 说明 |
+| --- | --- | --- |
+| MySQL 5.7 | Percona XtraBackup 2.4 | 老版本专用 |
+| MySQL 8.0.x | Percona XtraBackup 8.0 | 例如 `8.0.44` 必须用 8.0 系列 |
+| MySQL 8.4.x | Percona XtraBackup 8.4 | 不能拿来备 MySQL 8.0 |
+| MySQL 9.x | 暂不默认自动安装 | 等明确工具支持后再开放 |
+| Percona Server 8.0 | Percona XtraBackup 8.0 | 与主版本匹配 |
+| Percona Server 8.4 | Percona XtraBackup 8.4 | 与主版本匹配 |
+| MariaDB 10.x/11.x | `mariadb-backup` | 不默认使用 XtraBackup |
+
+必须做真实兼容校验：
+
+```bash
+xtrabackup --version
+mysql --version
+mysqlbinlog --version
+mysql -h <host> -P <port> -u <user> -p*** -e "SELECT VERSION()"
+```
+
+允许 smoke test 时执行：
+
+```bash
+xtrabackup \
+  --defaults-extra-file=<temp-client.cnf> \
+  --backup \
+  --target-dir=<runner-workdir>/tool-smoke/xtrabackup-<timestamp>
+```
+
+`mysqlbinlog` 也必须做远程拉取验证：
+
+```bash
+mysqlbinlog \
+  --read-from-remote-server \
+  --raw \
+  --host=<host> \
+  --port=<port> \
+  --user=<user> \
+  --result-file=<tmpdir>/ \
+  <binlog-file>
+```
+
+禁止把 MariaDB `mariadb-binlog` 简单包装成 MySQL 8.0 的 `mysqlbinlog`。对 MySQL 8.0 推荐使用 MySQL/Percona 8.0 系列 `mysqlbinlog`。
+
+#### PostgreSQL 兼容矩阵
+
+Barman Profile：
+
+| 工具 | 用途 |
+| --- | --- |
+| `barman` | Barman server 管理、备份、恢复 |
+| `barman-cli` | PostgreSQL 主库侧 WAL archive，视部署模式需要 |
+| `psql` | 连接、校验、恢复后 SQL 断言 |
+| `pg_basebackup` | base backup 或 Barman 相关底层能力 |
+| `pg_receivewal` | WAL streaming，降低 RPO |
+| `rsync` | 部分 Barman 部署模式需要 |
+
+pg_basebackup Profile：
+
+| 工具 | 用途 |
+| --- | --- |
+| `pg_basebackup` | 原生 base backup |
+| `pg_verifybackup` | 校验 base backup manifest |
+| `pg_combinebackup` | PostgreSQL 17+ 原生 incremental 合成 synthetic full |
+| `psql` | 恢复后校验 SQL |
+| `docker` | 隔离 PostgreSQL 实例 |
+
+规则：
+
+1. PostgreSQL 物理备份是 cluster 级，不承诺单库/单表物理备份。
+2. 客户端工具大版本建议与 PostgreSQL server 大版本一致。
+3. 使用原生 incremental 时必须存在 `pg_combinebackup`。
+4. 恢复计划必须校验 `system_identifier`、`timeline`、`LSN` 和 WAL 连续性。
+
+#### OS 支持矩阵
+
+| OS | 自动安装支持 | 建议 |
+| --- | --- | --- |
+| Ubuntu 20.04 | 支持 | 可作为 Runner |
+| Ubuntu 22.04 | 优先支持 | 推荐生产 Runner |
+| Ubuntu 24.04 | 优先支持 | 推荐生产 Runner |
+| Ubuntu 25.04 | 支持但谨慎 | 第三方仓库可能没有对应发行版，需要 fallback |
+| Debian 11 | 支持 | 可作为 Runner |
+| Debian 12 | 优先支持 | 推荐生产 Runner |
+| Rocky Linux 8 | 优先支持 | 推荐生产 Runner |
+| Rocky Linux 9 | 优先支持 | 推荐生产 Runner |
+| AlmaLinux 8/9 | 支持 | 与 Rocky 类似 |
+| RHEL 8/9 | 支持 | 需要用户具备订阅或仓库权限 |
+| CentOS 7.9 | best-effort | 不推荐长期承载新工具 |
+| 无公网主机 | 离线包 | 需要 P2.17 |
+| 依赖冲突老系统 | 容器化工具 Runner | 需要 P2.18 |
+
+CentOS 7.9 特别说明：
+
+1. 系统生命周期、OpenSSL、glibc、Python 和 repo 依赖都容易卡住新工具。
+2. MySQL 5.7 + XtraBackup 2.4 可作为兼容场景。
+3. MySQL 8.0 + XtraBackup 8.0 只能 best-effort。
+4. PostgreSQL 16/17 工具、Barman 新版本可能依赖冲突，不作为默认推荐。
+5. 如果生产仍有 CentOS 7.9，优先使用容器化工具 Runner 或更换 Runner OS。
+
+默认推荐：
+
+```text
+生产 Runner OS:
+  Ubuntu 22.04 / Ubuntu 24.04 / Debian 12 / Rocky Linux 9
+
+MySQL 8.0:
+  Percona XtraBackup 8.0 + MySQL/Percona mysqlbinlog 8.0
+
+MySQL 8.4:
+  Percona XtraBackup 8.4 + mysqlbinlog 8.4
+
+MariaDB:
+  mariadb-backup + mariadb-binlog
+
+PostgreSQL:
+  Barman + PostgreSQL 官方 client
+```
+
+#### 安装模式
+
+1. 自动安装：
+   - 用户选择 Runner、Profile、目标数据库版本。
+   - 后端通过 SSH 执行受控安装脚本。
+   - 安装完成后自动巡检和 smoke test。
+
+2. 生成脚本：
+   - 类似 Agent bootstrap。
+   - OpsHub 生成 `install-runner-tools.sh`。
+   - 用户复制到 Runner 上人工执行。
+   - 执行完成后回到 OpsHub 点击重新巡检。
+
+3. 离线包：
+   - 适合无公网 Runner。
+   - 包内包含 `install.sh`、`packages/`、`checksums.txt`、`profile.json`。
+
+4. 容器化工具 Runner：
+   - Runner 只要求 Docker 可用。
+   - 使用工具镜像运行 `xtrabackup/mysqlbinlog/pg_basebackup`。
+   - 需要显式配置 datadir mount、workdir mount、网络模式和用户权限。
+
+#### 受控脚本边界
+
+自动安装脚本必须满足：
+
+1. 不允许用户输入任意 shell。
+2. 后端按 OS/Profile 生成固定模板。
+3. 包仓库 URL、包名、版本必须来自白名单或配置。
+4. 所有下载包必须支持 checksum 校验。
+5. 支持 `--dry-run`。
+6. 支持 `--verify-only`。
+7. 输出结构化标记：
+
+```text
+OPSHUB_RUNNER_TOOL_STEP=detect_os|success|...
+OPSHUB_RUNNER_TOOL_STEP=install_repo|success|...
+OPSHUB_RUNNER_TOOL_STEP=install_packages|success|...
+OPSHUB_RUNNER_TOOL_STEP=verify_tools|success|...
+OPSHUB_RUNNER_TOOL_RESULT=<base64-json>
+```
+
+8. 完整远端日志写入：
+
+```text
+<runner_workdir>/tool-install/job-<id>/install.log
+<runner_workdir>/tool-install/job-<id>/manifest.json
+```
+
+#### 安装后验收
+
+通用验收：
+
+1. `tar`、`sha256sum` 可用。
+2. Runner workdir 可写。
+3. 可创建、读取、删除临时文件。
+4. 隔离恢复场景下 Docker 可用。
+5. Runner Agent 场景下 systemd 或等价 supervisor 可用。
+
+MySQL 验收：
+
+1. `mysql` 可连接目标实例。
+2. `SELECT VERSION()` 能识别数据库版本。
+3. `xtrabackup --version` 与目标 MySQL 主版本匹配。
+4. `mysqlbinlog --version` 与目标 MySQL/MariaDB 系列匹配。
+5. 允许时执行小型 `xtrabackup --backup` smoke test。
+6. `mysqlbinlog --read-from-remote-server --raw` 能拉取一个 binlog 文件。
+7. Runner 能读取生产 datadir 或从库 datadir；Docker 场景要校验 volume mount。
+
+PostgreSQL 验收：
+
+1. `psql` 可连接目标实例。
+2. `pg_basebackup --version` 可用。
+3. `pg_verifybackup --version` 可用。
+4. 使用原生 incremental 时 `pg_combinebackup --version` 必须可用。
+5. Barman Profile 要求 `barman --version` 可用。
+6. Barman server 必须能列出目标 server 或通过配置检查。
+
+#### 权限和审计
+
+建议新增权限：
+
+```text
+database:runner-tool:view
+database:runner-tool:probe
+database:runner-tool:install
+database:runner-tool:upgrade
+database:runner-tool:generate-script
+database:runner-agent:install
+database:runner-agent:upgrade
+database:runner-agent:restart
+```
+
+审计必须记录：
+
+1. Runner 主机。
+2. 操作人。
+3. Profile。
+4. OS 探测结果。
+5. 安装模式。
+6. 工具版本前后变化。
+7. smoke test 结果。
+8. 失败原因摘要。
+
+#### P2.14：Runner 工具巡检
+
+目标：先知道 Runner 当前能不能承担数据库备份恢复任务。
+
+实现内容：
+
+1. 新增 API：
+
+```text
+POST /api/v1/databases/runner-hosts/:id/tool-probe
+GET  /api/v1/databases/runner-hosts/:id/tool-profile
+```
+
+2. Runner Job：
+
+```text
+job_type=runner_tool_probe
+allowed_command=tool_probe
+```
+
+3. 探测脚本收集：
+   - `/etc/os-release`
+   - `uname -m`
+   - `id -u`
+   - `sudo -n true`
+   - `command -v apt/yum/dnf`
+   - `command -v docker`
+   - 数据库工具路径和版本
+4. 写入 `database_runner_tool_profiles`。
+5. 前端 Runner 主机页展示 OS、包管理器、工具清单、兼容性、最近巡检时间和风险提示。
+
+验收：
+
+1. Ubuntu/Debian/Rocky/CentOS 能正确识别 OS family。
+2. 能识别 `xtrabackup/mysqlbinlog/pg_basebackup/barman/docker`。
+3. MySQL 8.0 + XtraBackup 8.4 标记为不兼容。
+4. MySQL 8.0 + XtraBackup 8.0 标记为兼容。
+5. Runner 缺工具时工具画像和安装脚本能给出明确风险提示；策略创建/运行前阻塞留到 P2.16+ 与自动安装、运行前校验一起做。
+
+#### P2.15：Runner 工具安装脚本生成
+
+目标：提供可审核、可复制执行的安装脚本。
+
+实现内容：
+
+1. 新增 API：
+
+```text
+POST /api/v1/databases/runner-hosts/:id/tool-install-script
+```
+
+2. 请求参数：
+
+```json
+{
+  "profiles": ["mysql_80_physical", "mysql_binlog_archiver", "postgres_barman"],
+  "targetDbVersions": {
+    "mysql": "8.0.44",
+    "postgresql": "17"
+  },
+  "installMode": "online",
+  "dryRun": false
+}
+```
+
+3. 根据 OS 生成脚本：
+   - Ubuntu/Debian：`apt`
+   - Rocky/Alma/RHEL：`dnf`
+   - CentOS 7.9：`yum`
+4. 脚本包含 repo 配置、包安装、工具版本验证、smoke test 提示和 rollback 提示。
+5. 前端展示脚本内容、风险提示和复制按钮。
+
+验收：
+
+1. Ubuntu 22.04 能生成 MySQL 8.0 工具安装脚本。
+2. Rocky 9 能生成 MySQL 8.0 工具安装脚本。
+3. Debian 12 能生成 PostgreSQL/Barman 工具安装脚本。
+4. CentOS 7.9 显示 best-effort 风险提示。
+5. 不支持的 OS 不生成危险脚本，只给出人工处理建议。
+
+#### P2.16：SSH 一键安装 Runner 工具
+
+目标：在页面里点“安装/升级工具”，由 OpsHub 通过 SSH Runner 自动执行。
+
+实现内容：
+
+1. 新增 API：
+
+```text
+POST /api/v1/databases/runner-hosts/:id/tool-install
+```
+
+2. Runner Job：
+
+```text
+job_type=runner_tool_install
+allowed_command=runner_tool_install
+```
+
+3. 阶段：
+   - `detect_os`
+   - `precheck`
+   - `install_repo`
+   - `install_packages`
+   - `verify_tools`
+   - `compatibility_check`
+   - `smoke_test`
+   - `write_manifest`
+4. 安装成功后自动刷新 `database_runner_tool_profiles`。
+5. 前端任务弹窗显示阶段进度和错误摘要。
+
+安全边界：
+
+1. 必须有 `database:runner-tool:install` 权限。
+2. 必须二次确认。
+3. 必须显示将要安装的包和仓库。
+4. 不能开放任意命令输入。
+5. CentOS 7.9 如果风险过高，默认阻止并建议容器化工具 Runner。
+
+验收：
+
+1. Ubuntu/Rocky/Debian 至少各有一条自动安装路径通过。
+2. 安装后 Runner 探测成功。
+3. 工具版本写入 tool profile。
+4. 安装失败时保留远端日志和失败阶段。
+5. 重复执行幂等，不破坏已存在可用工具。
+
+#### P2.17：Runner 工具离线包
+
+目标：支持无公网 Runner。
+
+离线包结构：
+
+```text
+opshub-runner-tools-offline/
+  install.sh
+  profile.json
+  checksums.txt
+  packages/
+    ...
+  README.md
+```
+
+实现内容：
+
+1. 后端支持登记离线包元数据。
+2. 前端支持下载或上传离线包。
+3. Runner 通过 SSH 上传离线包到 workdir。
+4. 远端执行 `install.sh --offline`。
+5. 安装后执行巡检。
+
+验收：
+
+1. 无公网 Ubuntu/Rocky Runner 可通过离线包安装。
+2. checksum 错误时阻断。
+3. OS 不匹配时阻断。
+4. 离线包安装过程完整审计。
+
+#### P2.18：容器化工具 Runner
+
+目标：解决 CentOS 7.9、老 Debian、依赖冲突主机无法原生安装工具的问题。
+
+工具镜像建议：
+
+```text
+opshub-runner-tools:mysql80
+opshub-runner-tools:mysql84
+opshub-runner-tools:mariadb
+opshub-runner-tools:postgres17
+```
+
+运行方式示例：
+
+```bash
+docker run --rm \
+  --network host \
+  -v /var/lib/mysql:/var/lib/mysql:ro \
+  -v /var/lib/opshub-pitr-e2e/runner:/runner \
+  opshub-runner-tools:mysql80 \
+  xtrabackup --backup --target-dir=/runner/...
+```
+
+配置要求：
+
+1. Runner 主机必须有 Docker。
+2. MySQL 物理备份必须挂载 datadir。
+3. workdir 必须挂载为读写。
+4. 容器必须使用明确镜像标签，不允许 `latest`。
+5. 镜像 digest 可选校验。
+6. 生产 datadir 默认只读挂载；恢复场景另行确认。
+
+后端改造：
+
+1. Runner tool profile 支持 `execution_mode=host/container`。
+2. 备份策略可选择 `host_tools` 或 `container_tools`。
+3. Runner 脚本根据执行模式包装命令。
+4. readiness gate 校验 mount 和 Docker 权限。
+
+验收：
+
+1. CentOS 7.9 Runner 可通过容器化工具完成 MySQL 8.0 xtrabackup。
+2. 容器缺 datadir mount 时阻断。
+3. 容器工具版本不匹配时阻断。
+4. 产物仍落在 Runner workdir，并登记 `runner://` URI。
+
+#### P2.19：Runner Agent 自动部署和升级
+
+目标：把 P2.6 binlog archiver 所需的 `opshub-agent` 从手工部署升级为页面托管。
+
+实现内容：
+
+1. Runner 主机页新增：
+   - 安装 Runner Agent
+   - 升级 Runner Agent
+   - 重启 Runner Agent
+   - 查看最近 Agent 日志
+   - 生成 databaseArchiver 配置片段
+2. 复用现有 Agent bundle：
+   - `opshub-agent-linux-amd64`
+   - `opshub-agent-linux-arm64`
+3. 生成 systemd service：
+
+```text
+/opt/opshub-agent/opshub-agent --config /opt/opshub-agent/config.json
+```
+
+4. 自动写入或合并 `databaseArchiver` 配置模板。
+5. 后端只保存 `runnerAuthSha256`，不保存 runnerAuth 明文。
+6. 数据库密码默认不从 backend 下发；第一版生成占位配置，由用户在 Runner 本机填写。后续如接入 secret profile 下发，必须走加密通道和审计。
+7. Agent 安装后自动调用 Runner Agent 心跳接口。
+
+验收：
+
+1. 页面一键安装 `opshub-agent` 到 Runner。
+2. systemd service 启动成功。
+3. Runner Agent 心跳成功。
+4. 启动归档流后 Agent 能获取 lease。
+5. binlog 归档成功登记 `database_log_archives`。
+6. Agent 升级不丢失本地配置。
+7. Agent 重启后能继续接管归档流。
+
+#### P2.14-P2.19 总体验收
+
+1. 新 Runner 首次接入后，先运行工具巡检，能看到 OS、包管理器和工具缺口。
+2. Ubuntu 22.04/24.04 Runner 可自动安装 MySQL 8.0 工具链。
+3. Rocky 9 Runner 可自动安装 MySQL 8.0 工具链。
+4. Debian 12 Runner 可自动安装 PostgreSQL/Barman 工具链。
+5. CentOS 7.9 Runner 显示 best-effort 风险，并可选择容器化工具 Runner。
+6. MySQL 8.0 实例绑定 XtraBackup 8.4 时创建或运行策略被阻断。
+7. MySQL 8.0 实例绑定 XtraBackup 8.0 时 smoke test 通过。
+8. PostgreSQL 使用 pg_basebackup incremental 时缺少 `pg_combinebackup` 会被阻断。
+9. Runner Agent 可从页面安装、升级、重启并接管 binlog 归档流。
+10. 安装、升级、巡检、失败和 smoke test 都有 Runner Job 与审计记录。
+
 ## 文档定位
 
 本文是 OpsHub 数据库管理模块在“大库备份、日志归档、延迟副本、PITR 恢复演练”方向的长期改造基准。后续分期实施、表结构扩展、接口设计、前端页面、Runner 执行边界、权限和验收标准均以本文为准。

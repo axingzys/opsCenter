@@ -122,6 +122,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	storageProfileRepo := dbdata.NewStorageProfileRepo(db)
 	secretProfileRepo := dbdata.NewSecretProfileRepo(db)
 	runnerHostRepo := dbdata.NewRunnerHostRepo(db)
+	runnerToolProfileRepo := dbdata.NewRunnerToolProfileRepo(db)
 	runnerJobRepo := dbdata.NewRunnerJobRepo(db)
 	barmanServerRepo := dbdata.NewBarmanServerRepo(db)
 	instanceReplicaRepo := dbdata.NewInstanceReplicaRepo(db)
@@ -205,6 +206,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		backupPolicyConfigRepo,
 		backupChainStateRepo,
 	)
+	useCase.SetRunnerToolProfileRepo(runnerToolProfileRepo)
 	useCase.SetReplicaGovernanceRepos(instanceReplicaRepo, replicationCheckRepo, replicaIncidentGuideRepo, replicaActionRepo)
 
 	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
@@ -342,6 +344,9 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/runner-hosts", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateRunnerHost)
 		databases.PUT("/runner-hosts/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateRunnerHost)
 		databases.POST("/runner-hosts/:id/test", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.TestRunnerHost)
+		databases.GET("/runner-hosts/:id/tool-profile", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.GetRunnerToolProfile)
+		databases.POST("/runner-hosts/:id/tool-probe", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.ProbeRunnerTools)
+		databases.POST("/runner-hosts/:id/tool-install-script", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.GenerateRunnerToolInstallScript)
 		databases.GET("/runner-jobs", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListRunnerJobs)
 		databases.GET("/barman-servers", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBarmanServers)
 		databases.POST("/barman-servers", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateBarmanServer)

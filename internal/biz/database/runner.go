@@ -641,6 +641,10 @@ func RunnerHostStatusText(value string) string {
 
 func RunnerJobTypeText(value string) string {
 	switch strings.TrimSpace(value) {
+	case DatabaseRunnerJobTypeProbe:
+		return "Runner 连通性探测"
+	case DatabaseRunnerJobTypeToolProbe:
+		return "Runner 工具巡检"
 	case DatabaseRunnerJobTypePhysicalBackup:
 		return "MySQL/MariaDB 物理备份"
 	case DatabaseRunnerJobTypeBinlogArchive:

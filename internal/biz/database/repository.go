@@ -207,6 +207,11 @@ type RunnerHostRepo interface {
 	List(ctx context.Context, req *DatabaseRunnerHostListRequest) ([]*DatabaseRunnerHost, int64, error)
 }
 
+type RunnerToolProfileRepo interface {
+	UpsertByRunnerHostID(ctx context.Context, item *DatabaseRunnerToolProfile) error
+	GetByRunnerHostID(ctx context.Context, runnerHostID uint) (*DatabaseRunnerToolProfile, error)
+}
+
 type RunnerJobRepo interface {
 	Create(ctx context.Context, item *DatabaseRunnerJob) error
 	Update(ctx context.Context, item *DatabaseRunnerJob) error

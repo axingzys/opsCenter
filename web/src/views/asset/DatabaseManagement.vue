@@ -2393,12 +2393,15 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="220" align="center" fixed="right">
+                  <el-table-column label="操作" width="340" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="primary" @click="openRunnerHostDialog(row)">编辑</el-button>
                       <el-button link type="primary" @click="openRunnerAgentConfigDialog(row)">配置</el-button>
                       <el-button link type="info" @click="openLogArchiveEventsForRunner(row)">事件</el-button>
                       <el-button link type="success" :loading="runnerHostTestingId === row.id" @click="handleTestRunnerHost(row)">测试</el-button>
+                      <el-button link type="warning" :loading="runnerToolProbingId === row.id" @click="handleProbeRunnerTools(row)">巡检</el-button>
+                      <el-button link type="info" @click="openRunnerToolProfileDialog(row)">画像</el-button>
+                      <el-button link type="primary" @click="openRunnerToolInstallScriptDialog(row)">脚本</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -5672,6 +5675,150 @@
     </el-dialog>
 
     <el-dialog
+      v-model="runnerToolProfileDialogVisible"
+      title="Runner 工具画像"
+      width="980px"
+    >
+      <el-alert
+        title="工具画像来自最近一次 SSH 巡检；这里只展示可见能力和版本，不保存任何密钥。安装脚本需要基于画像生成，不会自动执行。"
+        type="info"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-skeleton v-if="runnerToolProfileLoading" :rows="6" animated />
+      <template v-else-if="runnerToolProfile">
+        <el-descriptions :column="3" border class="backup-detail-descriptions">
+          <el-descriptions-item label="Runner">{{ runnerToolProfile.runnerName || `#${runnerToolProfile.runnerHostId}` }}</el-descriptions-item>
+          <el-descriptions-item label="OS">{{ runnerToolProfile.osPrettyName || `${runnerToolProfile.osFamily || '-'} ${runnerToolProfile.osVersion || ''}` }}</el-descriptions-item>
+          <el-descriptions-item label="架构">{{ runnerToolProfile.arch || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="包管理器">{{ runnerToolProfile.packageManager || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="权限">{{ runnerToolProfile.isRoot ? 'root' : (runnerToolProfile.hasSudo ? 'sudo 可用' : '需要安装权限') }}</el-descriptions-item>
+          <el-descriptions-item label="最近巡检">{{ runnerToolProfile.lastProbeAt || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <div class="runner-tool-section">
+          <div class="runner-config-title">
+            <span>能力摘要</span>
+          </div>
+          <div class="runner-tool-tags">
+            <el-tag v-for="item in runnerToolProfile.capability?.available || []" :key="`ok-${item}`" type="success" size="small">{{ item }}</el-tag>
+            <el-tag v-for="item in runnerToolProfile.capability?.missing || []" :key="`miss-${item}`" type="info" size="small">{{ item }} 缺失</el-tag>
+          </div>
+          <el-alert
+            v-for="item in runnerToolWarnings"
+            :key="item"
+            :title="item"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="backup-dialog-alert compact-alert"
+          />
+        </div>
+        <el-table :data="runnerToolRows" stripe class="modern-table">
+          <el-table-column prop="name" label="工具" width="170" />
+          <el-table-column label="状态" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.installed ? 'success' : 'info'">{{ row.installed ? '已安装' : '缺失' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="path" label="路径" min-width="220" show-overflow-tooltip />
+          <el-table-column prop="version" label="版本" min-width="260" show-overflow-tooltip />
+        </el-table>
+      </template>
+      <el-empty v-else description="暂无工具画像，请先点击 Runner 主机列表里的“巡检”" />
+      <template #footer>
+        <el-button @click="runnerToolProfileDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="runnerToolScriptDialogVisible"
+      title="生成 Runner 工具安装脚本"
+      width="1040px"
+    >
+      <el-alert
+        title="P2.15 只生成脚本，不会远程执行安装。执行前请按 Runner OS、数据库版本和企业源策略审阅脚本。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form label-width="130px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Runner">
+              <el-input :model-value="runnerToolScriptHost?.name || '-'" readonly />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="安装模式">
+              <el-select v-model="runnerToolScriptForm.installMode" style="width: 100%;">
+                <el-option label="在线仓库" value="online" />
+                <el-option label="离线清单" value="offline" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="Dry Run">
+              <el-switch v-model="runnerToolScriptForm.dryRun" active-text="是" inactive-text="否" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="工具 Profile">
+          <el-select v-model="runnerToolScriptForm.profiles" multiple filterable style="width: 100%;">
+            <el-option label="MySQL 8.0 物理备份（XtraBackup 8.0）" value="mysql_80_physical" />
+            <el-option label="MySQL 8.4 物理备份（XtraBackup 8.4）" value="mysql_84_physical" />
+            <el-option label="MySQL 5.7 遗留物理备份（XtraBackup 2.4）" value="mysql_57_physical" />
+            <el-option label="MySQL/MariaDB binlog 归档" value="mysql_binlog_archiver" />
+            <el-option label="MariaDB 物理备份" value="mariadb_physical" />
+            <el-option label="PostgreSQL Barman" value="postgres_barman" />
+            <el-option label="PostgreSQL pg_basebackup" value="postgres_native_pg_basebackup" />
+            <el-option label="隔离恢复容器 Runner" value="restore_runner" />
+          </el-select>
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="MySQL版本">
+              <el-input v-model="runnerToolScriptForm.mysqlVersion" placeholder="如 8.0.44 / 8.4，可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="PostgreSQL版本">
+              <el-input v-model="runnerToolScriptForm.postgresqlVersion" placeholder="如 16 / 17 / 18，可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <div class="runner-tool-script-actions">
+        <el-button type="primary" :loading="runnerToolScriptGenerating" @click="handleGenerateRunnerToolScript">生成脚本</el-button>
+        <el-button :disabled="!runnerToolScriptResult?.script" @click="copyText(runnerToolScriptResult?.script || '', '安装脚本')">复制脚本</el-button>
+      </div>
+      <template v-if="runnerToolScriptResult">
+        <el-alert
+          v-for="item in runnerToolScriptResult.warnings || []"
+          :key="`warn-${item}`"
+          :title="item"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert compact-alert"
+        />
+        <el-alert
+          v-if="runnerToolScriptResult.unsupported?.length"
+          :title="`未支持项：${runnerToolScriptResult.unsupported.join('、')}`"
+          type="error"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert compact-alert"
+        />
+        <el-input :model-value="runnerToolScriptResult.script" type="textarea" :rows="22" readonly class="runner-tool-script-textarea" />
+      </template>
+      <template #footer>
+        <el-button @click="runnerToolScriptDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="barmanServerDialogVisible"
       :title="barmanServerForm.id ? '编辑 Barman Server' : '新增 Barman Server'"
       width="920px"
@@ -6228,6 +6375,7 @@ import {
   executeDatabaseWriteQuery,
   explainDatabaseWriteQuery,
   generateDatabaseInspectionReport,
+  generateDatabaseRunnerToolInstallScript,
   previewDatabaseBackupPolicyPurge,
   previewDatabaseBackupPolicySyntheticFull,
   getDatabaseCapacityTrend,
@@ -6236,6 +6384,7 @@ import {
   getDatabaseReplicationStatus,
   getDatabaseReplicaIncidentGuide,
   getDatabaseRestoreJobProof,
+  getDatabaseRunnerToolProfile,
   getDatabaseTopology,
   getDatabaseUIPermissions,
   exportDatabaseQueryResult,
@@ -6274,6 +6423,7 @@ import {
   listDatabaseReplicaActions,
   pauseDatabaseLogArchiveStream,
   pauseDatabaseReplicaApply,
+  probeDatabaseRunnerTools,
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
   resumeDatabaseLogArchiveStream,
@@ -6348,6 +6498,9 @@ import {
   type DatabaseRunnerHostPayload,
   type DatabaseRunnerHostResult,
   type DatabaseRunnerJobResult,
+  type DatabaseRunnerToolInstallScriptPayload,
+  type DatabaseRunnerToolInstallScriptResult,
+  type DatabaseRunnerToolProfileResult,
   type DatabaseStorageProfilePayload,
   type DatabaseStorageProfilePostureCheckPayload,
   type DatabaseStorageProfileResult,
@@ -6683,6 +6836,14 @@ const runnerHostLoading = ref(false)
 const runnerHostSubmitting = ref(false)
 const runnerHostDialogVisible = ref(false)
 const runnerHostTestingId = ref(0)
+const runnerToolProbingId = ref(0)
+const runnerToolProfileLoading = ref(false)
+const runnerToolProfileDialogVisible = ref(false)
+const runnerToolProfile = ref<DatabaseRunnerToolProfileResult>()
+const runnerToolScriptDialogVisible = ref(false)
+const runnerToolScriptGenerating = ref(false)
+const runnerToolScriptHost = ref<DatabaseRunnerHostResult>()
+const runnerToolScriptResult = ref<DatabaseRunnerToolInstallScriptResult>()
 const runnerHostFormRef = ref<FormInstance>()
 const runnerHosts = ref<DatabaseRunnerHostResult[]>([])
 const runnerHostTotal = ref(0)
@@ -7257,6 +7418,14 @@ const runnerHostForm = reactive<DatabaseRunnerHostPayload & { id?: number }>({
   timeoutMinutes: 30,
   enabled: true,
   configJson: ''
+})
+
+const runnerToolScriptForm = reactive({
+  profiles: ['mysql_80_physical', 'mysql_binlog_archiver', 'postgres_barman', 'postgres_native_pg_basebackup', 'restore_runner'] as string[],
+  installMode: 'online',
+  dryRun: true,
+  mysqlVersion: '',
+  postgresqlVersion: ''
 })
 
 const barmanServerForm = reactive<DatabaseBarmanServerPayload & { id?: number }>({
@@ -7956,6 +8125,15 @@ const runnerHostOptions = computed(() =>
     label: `${item.name}（${item.runnerTypeText || item.runnerType}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`
   }))
 )
+
+const runnerToolRows = computed(() =>
+  Object.values(runnerToolProfile.value?.tools || {}).sort((a, b) => a.name.localeCompare(b.name))
+)
+
+const runnerToolWarnings = computed(() => [
+  ...(runnerToolProfile.value?.capability?.warnings || []),
+  ...(runnerToolProfile.value?.compatibility?.warnings || [])
+])
 
 const storagePostureChecks = computed(() => {
   const raw = currentStoragePostureDetail.value?.postureJson || ''
@@ -10388,6 +10566,69 @@ const handleTestRunnerHost = async (row: DatabaseRunnerHostResult) => {
     }, 2500)
   } finally {
     runnerHostTestingId.value = 0
+  }
+}
+
+const openRunnerToolProfileDialog = async (row: DatabaseRunnerHostResult) => {
+  runnerToolProfile.value = undefined
+  runnerToolProfileDialogVisible.value = true
+  runnerToolProfileLoading.value = true
+  try {
+    const res: any = await getDatabaseRunnerToolProfile(row.id)
+    runnerToolProfile.value = res || undefined
+  } finally {
+    runnerToolProfileLoading.value = false
+  }
+}
+
+const handleProbeRunnerTools = async (row: DatabaseRunnerHostResult) => {
+  runnerToolProbingId.value = row.id
+  try {
+    await probeDatabaseRunnerTools(row.id)
+    ElMessage.success('Runner 工具巡检任务已下发')
+    await loadRunnerJobs()
+    window.setTimeout(() => {
+      loadRunnerHosts()
+      loadRunnerJobs()
+    }, 3000)
+  } finally {
+    runnerToolProbingId.value = 0
+  }
+}
+
+const openRunnerToolInstallScriptDialog = async (row: DatabaseRunnerHostResult) => {
+  runnerToolScriptHost.value = row
+  runnerToolScriptResult.value = undefined
+  runnerToolScriptForm.profiles = ['mysql_80_physical', 'mysql_binlog_archiver', 'postgres_barman', 'postgres_native_pg_basebackup', 'restore_runner']
+  runnerToolScriptForm.installMode = 'online'
+  runnerToolScriptForm.dryRun = true
+  runnerToolScriptForm.mysqlVersion = ''
+  runnerToolScriptForm.postgresqlVersion = ''
+  runnerToolScriptDialogVisible.value = true
+}
+
+const handleGenerateRunnerToolScript = async () => {
+  if (!runnerToolScriptHost.value?.id) return
+  if (!runnerToolScriptForm.profiles.length) {
+    ElMessage.warning('请至少选择一个工具 Profile')
+    return
+  }
+  runnerToolScriptGenerating.value = true
+  try {
+    const targetDbVersions: Record<string, string> = {}
+    if (runnerToolScriptForm.mysqlVersion.trim()) targetDbVersions.mysql = runnerToolScriptForm.mysqlVersion.trim()
+    if (runnerToolScriptForm.postgresqlVersion.trim()) targetDbVersions.postgresql = runnerToolScriptForm.postgresqlVersion.trim()
+    const payload: DatabaseRunnerToolInstallScriptPayload = {
+      profiles: runnerToolScriptForm.profiles,
+      installMode: runnerToolScriptForm.installMode,
+      dryRun: runnerToolScriptForm.dryRun,
+      targetDbVersions
+    }
+    const res: any = await generateDatabaseRunnerToolInstallScript(runnerToolScriptHost.value.id, payload)
+    runnerToolScriptResult.value = res
+    ElMessage.success('安装脚本已生成')
+  } finally {
+    runnerToolScriptGenerating.value = false
   }
 }
 
@@ -13998,6 +14239,28 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
   font-weight: 700;
   color: #1f2937;
+}
+
+.runner-tool-section {
+  margin: 16px 0;
+}
+
+.runner-tool-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.runner-tool-script-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 14px;
+}
+
+.runner-tool-script-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .restore-job-detail {

@@ -1254,6 +1254,54 @@ func (s *Service) TestRunnerHost(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) GetRunnerToolProfile(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.GetRunnerToolProfile(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ProbeRunnerTools(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.ProbeRunnerTools(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "巡检失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) GenerateRunnerToolInstallScript(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRunnerToolInstallScriptRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.GenerateRunnerToolInstallScript(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "生成失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) ListRunnerJobs(c *gin.Context) {
 	var req dbbiz.DatabaseRunnerJobListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {

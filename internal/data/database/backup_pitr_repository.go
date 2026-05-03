@@ -486,6 +486,10 @@ type runnerHostRepo struct {
 	db *gorm.DB
 }
 
+type runnerToolProfileRepo struct {
+	db *gorm.DB
+}
+
 func NewRunnerHostRepo(db *gorm.DB) dbbiz.RunnerHostRepo {
 	return &runnerHostRepo{db: db}
 }
@@ -535,6 +539,49 @@ func (r *runnerHostRepo) List(ctx context.Context, req *dbbiz.DatabaseRunnerHost
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func NewRunnerToolProfileRepo(db *gorm.DB) dbbiz.RunnerToolProfileRepo {
+	return &runnerToolProfileRepo{db: db}
+}
+
+func (r *runnerToolProfileRepo) UpsertByRunnerHostID(ctx context.Context, item *dbbiz.DatabaseRunnerToolProfile) error {
+	if item == nil {
+		return nil
+	}
+	now := time.Now()
+	item.UpdatedAt = now
+	updates := map[string]any{
+		"os_family":          item.OSFamily,
+		"os_version":         item.OSVersion,
+		"os_pretty_name":     item.OSPrettyName,
+		"arch":               item.Arch,
+		"package_manager":    item.PackageManager,
+		"is_root":            item.IsRoot,
+		"has_sudo":           item.HasSudo,
+		"has_systemd":        item.HasSystemd,
+		"has_docker":         item.HasDocker,
+		"network_access":     item.NetworkAccess,
+		"tool_manifest_json": item.ToolManifestJSON,
+		"capability_json":    item.CapabilityJSON,
+		"compatibility_json": item.CompatibilityJSON,
+		"last_probe_at":      item.LastProbeAt,
+		"last_probe_status":  item.LastProbeStatus,
+		"last_error":         item.LastError,
+		"updated_at":         now,
+	}
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "runner_host_id"}},
+		DoUpdates: clause.Assignments(updates),
+	}).Create(item).Error
+}
+
+func (r *runnerToolProfileRepo) GetByRunnerHostID(ctx context.Context, runnerHostID uint) (*dbbiz.DatabaseRunnerToolProfile, error) {
+	var item dbbiz.DatabaseRunnerToolProfile
+	if err := r.db.WithContext(ctx).Where("runner_host_id = ?", runnerHostID).First(&item).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
 }
 
 func NewRunnerJobRepo(db *gorm.DB) dbbiz.RunnerJobRepo {

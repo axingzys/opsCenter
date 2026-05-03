@@ -181,6 +181,7 @@ const (
 	DatabaseRunnerHostStatusDisabled = "disabled"
 
 	DatabaseRunnerJobTypeProbe                       = "runner_probe"
+	DatabaseRunnerJobTypeToolProbe                   = "runner_tool_probe"
 	DatabaseRunnerJobTypePhysicalBackup              = "physical_backup"
 	DatabaseRunnerJobTypeBinlogArchive               = "binlog_archive"
 	DatabaseRunnerJobTypePhysicalRestore             = "physical_restore"
@@ -1096,6 +1097,32 @@ type DatabaseRunnerHost struct {
 
 func (DatabaseRunnerHost) TableName() string {
 	return "database_runner_hosts"
+}
+
+// DatabaseRunnerToolProfile Runner 主机上的数据库备份工具画像。
+type DatabaseRunnerToolProfile struct {
+	gorm.Model
+	RunnerHostID      uint       `gorm:"column:runner_host_id;uniqueIndex;comment:Runner主机ID" json:"runnerHostId"`
+	OSFamily          string     `gorm:"column:os_family;type:varchar(80);index;comment:OS家族" json:"osFamily"`
+	OSVersion         string     `gorm:"column:os_version;type:varchar(80);comment:OS版本" json:"osVersion"`
+	OSPrettyName      string     `gorm:"column:os_pretty_name;type:varchar(200);comment:OS显示名称" json:"osPrettyName"`
+	Arch              string     `gorm:"column:arch;type:varchar(80);comment:CPU架构" json:"arch"`
+	PackageManager    string     `gorm:"column:package_manager;type:varchar(40);comment:包管理器" json:"packageManager"`
+	IsRoot            bool       `gorm:"column:is_root;comment:是否root" json:"isRoot"`
+	HasSudo           bool       `gorm:"column:has_sudo;comment:是否可免密sudo" json:"hasSudo"`
+	HasSystemd        bool       `gorm:"column:has_systemd;comment:是否systemd环境" json:"hasSystemd"`
+	HasDocker         bool       `gorm:"column:has_docker;comment:是否有docker" json:"hasDocker"`
+	NetworkAccess     string     `gorm:"column:network_access;type:varchar(40);comment:网络访问能力" json:"networkAccess"`
+	ToolManifestJSON  string     `gorm:"column:tool_manifest_json;type:text;comment:工具清单JSON" json:"toolManifestJson"`
+	CapabilityJSON    string     `gorm:"column:capability_json;type:text;comment:能力摘要JSON" json:"capabilityJson"`
+	CompatibilityJSON string     `gorm:"column:compatibility_json;type:text;comment:兼容性摘要JSON" json:"compatibilityJson"`
+	LastProbeAt       *time.Time `gorm:"column:last_probe_at;comment:最近巡检时间" json:"lastProbeAt,omitempty"`
+	LastProbeStatus   string     `gorm:"column:last_probe_status;type:varchar(30);index;comment:最近巡检状态" json:"lastProbeStatus"`
+	LastError         string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误" json:"lastError"`
+}
+
+func (DatabaseRunnerToolProfile) TableName() string {
+	return "database_runner_tool_profiles"
 }
 
 // DatabaseRunnerJob Runner 长任务记录
