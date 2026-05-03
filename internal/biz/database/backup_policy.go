@@ -313,8 +313,11 @@ func (uc *UseCase) runBackupPolicy(ctx context.Context, id uint, backupLevel str
 	}
 	releaseOnError = false
 	go func() {
-		defer uc.releaseBackupPolicyRun(policy.ID, policy.InstanceID)
 		uc.executeMySQLPhysicalBackupPolicyJob(context.Background(), policy.ID, record.ID, job.ID, parentRecordID, audit, credential)
+		uc.releaseBackupPolicyRun(policy.ID, policy.InstanceID)
+		if level == DatabaseBackupLevelIncremental {
+			uc.maybeRunBackupPolicySyntheticAfterSuccess(context.Background(), policy.ID, record.ID, "auto_after_incremental")
+		}
 	}()
 	return &DatabaseBackupPolicyRunVO{
 		PolicyID:     policy.ID,

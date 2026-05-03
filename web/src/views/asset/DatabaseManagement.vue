@@ -2186,6 +2186,7 @@
                         </el-tag>
                         <span class="muted-text">base #{{ row.chain?.currentBaseRecordId || '-' }} / latest #{{ row.chain?.latestRecordId || '-' }}</span>
                         <span class="muted-text">增量 {{ row.chain?.incrementalCount || 0 }} 条</span>
+                        <span v-if="backupPolicySyntheticRuleText(row)" class="muted-text">{{ backupPolicySyntheticRuleText(row) }}</span>
                       </div>
                     </template>
                   </el-table-column>
@@ -4317,7 +4318,18 @@
           </el-col>
         </el-row>
         <el-form-item label="Synthetic规则">
-          <el-input v-model="backupPolicyForm.syntheticRuleJson" type="textarea" :rows="4" placeholder="后续 P2.11 使用；当前只登记规则，不自动合并" />
+          <el-input v-model="backupPolicyForm.syntheticRuleJson" type="textarea" :rows="6" placeholder="rolling_synthetic_full 自动合成规则 JSON" />
+          <div v-if="backupPolicyForm.syntheticEnabled" class="field-tip">
+            {{ backupPolicyFormSyntheticRuleTip }}
+          </div>
+          <el-alert
+            v-if="backupPolicyFormSyntheticRuleWarning"
+            :title="backupPolicyFormSyntheticRuleWarning"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="backup-dialog-alert compact-alert"
+          />
         </el-form-item>
         <el-form-item label="保留策略">
           <el-input v-model="backupPolicyForm.retentionJson" type="textarea" :rows="4" placeholder="JSON，仅保存非敏感保留规则" />
@@ -7058,6 +7070,8 @@ const backupTaskForm = reactive<DatabaseBackupTaskPayload & { id?: number }>({
 })
 const backupTaskFormInstanceDbType = ref('')
 
+const defaultBackupPolicySyntheticRuleJson = '{\n  "mode": "rolling_synthetic_full",\n  "autoRun": true,\n  "triggerAfterIncrementals": 5,\n  "mergeOldestIncrementals": 5,\n  "requireRestoreProof": true,\n  "neverDeleteWithoutProof": true,\n  "markSupersededAfterProof": true,\n  "supersededKeepDaysAfterProof": 7\n}'
+
 const backupPolicyForm = reactive<DatabaseBackupPolicyPayload & { id?: number }>({
   id: undefined,
   instanceId: 0,
@@ -7072,7 +7086,7 @@ const backupPolicyForm = reactive<DatabaseBackupPolicyPayload & { id?: number }>
   fullSchedule: '0 2 1 * *',
   incrementalSchedule: '0 3 * * *',
   syntheticEnabled: false,
-  syntheticRuleJson: '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true,\n  "neverDeleteWithoutProof": true,\n  "markSupersededAfterProof": true,\n  "supersededKeepDaysAfterProof": 7\n}',
+  syntheticRuleJson: defaultBackupPolicySyntheticRuleJson,
   restoreDrillRequired: true,
   retentionJson: '{\n  "fullKeepMonths": 6,\n  "incrementalKeepDays": 45,\n  "binlogKeepDays": 45,\n  "neverDeleteWithoutProof": true\n}',
   enabled: true
@@ -7704,6 +7718,76 @@ const backupPolicyBinlogStreamOptions = computed(() =>
       label: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveEngine || item.archiveMode || 'binlog'} / ${item.statusText || item.status || '-'}`
     }))
 )
+
+type SyntheticRuleSummary = {
+  valid: boolean
+  mode: string
+  autoRun: boolean
+  triggerAfterIncrementals: number
+  mergeOldestIncrementals: number
+  requireRestoreProof: boolean
+}
+
+const parseBackupPolicySyntheticRule = (raw?: string): SyntheticRuleSummary => {
+  const defaults: SyntheticRuleSummary = {
+    valid: true,
+    mode: 'rolling_synthetic_full',
+    autoRun: false,
+    triggerAfterIncrementals: 5,
+    mergeOldestIncrementals: 5,
+    requireRestoreProof: true
+  }
+  if (!raw || !raw.trim()) return defaults
+  try {
+    const parsed = JSON.parse(raw)
+    const trigger = Number(parsed.triggerAfterIncrementals || defaults.triggerAfterIncrementals)
+    const merge = Number(parsed.mergeOldestIncrementals || trigger || defaults.mergeOldestIncrementals)
+    return {
+      valid: true,
+      mode: String(parsed.mode || defaults.mode),
+      autoRun: parsed.autoRun === true,
+      triggerAfterIncrementals: Number.isFinite(trigger) && trigger > 0 ? trigger : defaults.triggerAfterIncrementals,
+      mergeOldestIncrementals: Number.isFinite(merge) && merge > 0 ? merge : defaults.mergeOldestIncrementals,
+      requireRestoreProof: parsed.requireRestoreProof !== false
+    }
+  } catch {
+    return {
+      ...defaults,
+      valid: false
+    }
+  }
+}
+
+const backupPolicySyntheticRuleText = (row: DatabaseBackupPolicyResult) => {
+  if (!row.syntheticEnabled) return ''
+  const rule = parseBackupPolicySyntheticRule(row.syntheticRuleJson)
+  if (!rule.valid) return 'Synthetic规则解析失败'
+  if (!rule.autoRun) return '自动合成：关闭'
+  const count = row.chain?.incrementalCount || 0
+  const remain = Math.max(rule.triggerAfterIncrementals - count, 0)
+  return remain > 0
+    ? `自动合成 ${count}/${rule.triggerAfterIncrementals} 条，还差 ${remain} 条`
+    : `自动合成已达阈值 ${count}/${rule.triggerAfterIncrementals} 条`
+}
+
+const backupPolicyFormSyntheticRuleSummary = computed(() => parseBackupPolicySyntheticRule(backupPolicyForm.syntheticRuleJson))
+
+const backupPolicyFormSyntheticRuleTip = computed(() => {
+  const rule = backupPolicyFormSyntheticRuleSummary.value
+  if (!rule.valid) return '规则 JSON 解析失败，后端会拒绝或按安全默认值处理。'
+  return `自动合成：${rule.autoRun ? '开启' : '关闭'}；触发增量数：${rule.triggerAfterIncrementals}；合并增量数：${rule.mergeOldestIncrementals}；恢复证明：${rule.requireRestoreProof ? '要求' : '不要求'}。`
+})
+
+const backupPolicyFormSyntheticRuleWarning = computed(() => {
+  const rule = backupPolicyFormSyntheticRuleSummary.value
+  if (!rule.valid) return 'Synthetic 规则不是有效 JSON。'
+  if (!rule.autoRun) return ''
+  if (!backupPolicyForm.binlogStreamId) return '自动 Synthetic Full 需要绑定 binlog 归档流；未绑定时后端会阻止自动执行。'
+  if (rule.mergeOldestIncrementals !== rule.triggerAfterIncrementals) {
+    return '第一版自动合成建议整段合并：mergeOldestIncrementals 必须等于 triggerAfterIncrementals，否则后端会阻止自动执行。'
+  }
+  return ''
+})
 
 const selectedBackupTaskDbType = computed(() =>
   selectedBackupTaskInstance.value?.dbType || backupTaskFormInstanceDbType.value
@@ -9108,7 +9192,7 @@ const resetBackupPolicyForm = () => {
   backupPolicyForm.fullSchedule = '0 2 1 * *'
   backupPolicyForm.incrementalSchedule = '0 3 * * *'
   backupPolicyForm.syntheticEnabled = false
-  backupPolicyForm.syntheticRuleJson = '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true,\n  "neverDeleteWithoutProof": true,\n  "markSupersededAfterProof": true,\n  "supersededKeepDaysAfterProof": 7\n}'
+  backupPolicyForm.syntheticRuleJson = defaultBackupPolicySyntheticRuleJson
   backupPolicyForm.restoreDrillRequired = true
   backupPolicyForm.retentionJson = '{\n  "fullKeepMonths": 6,\n  "incrementalKeepDays": 45,\n  "binlogKeepDays": 45,\n  "neverDeleteWithoutProof": true\n}'
   backupPolicyForm.enabled = true
@@ -13730,6 +13814,11 @@ onBeforeUnmount(() => {
 
 .backup-dialog-alert {
   margin-bottom: 16px;
+}
+
+.backup-dialog-alert.compact-alert {
+  margin-top: 8px;
+  margin-bottom: 0;
 }
 
 .backup-summary-descriptions,

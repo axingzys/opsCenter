@@ -97,11 +97,14 @@ type backupPolicyChainValidation struct {
 }
 
 type syntheticRuleConfig struct {
-	MergeOldestIncrementals      int  `json:"mergeOldestIncrementals"`
-	RequireRestoreProof          bool `json:"requireRestoreProof"`
-	SupersededKeepDaysAfterProof int  `json:"supersededKeepDaysAfterProof"`
-	NeverDeleteWithoutProof      bool `json:"neverDeleteWithoutProof"`
-	MarkSupersededAfterProof     bool `json:"markSupersededAfterProof"`
+	Mode                         string `json:"mode"`
+	AutoRun                      bool   `json:"autoRun"`
+	TriggerAfterIncrementals     int    `json:"triggerAfterIncrementals"`
+	MergeOldestIncrementals      int    `json:"mergeOldestIncrementals"`
+	RequireRestoreProof          bool   `json:"requireRestoreProof"`
+	SupersededKeepDaysAfterProof int    `json:"supersededKeepDaysAfterProof"`
+	NeverDeleteWithoutProof      bool   `json:"neverDeleteWithoutProof"`
+	MarkSupersededAfterProof     bool   `json:"markSupersededAfterProof"`
 }
 
 type syntheticFullArtifactInput struct {
@@ -153,6 +156,10 @@ func (uc *UseCase) PreviewBackupPolicySyntheticFull(ctx context.Context, id uint
 }
 
 func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, operator QueryOperator) (*DatabaseBackupPolicyRunVO, error) {
+	return uc.runBackupPolicySyntheticFull(ctx, id, operator, DatabaseBackupTriggerManual, "manual", 0)
+}
+
+func (uc *UseCase) runBackupPolicySyntheticFull(ctx context.Context, id uint, operator QueryOperator, triggerType string, triggerReason string, triggerRecordID uint) (*DatabaseBackupPolicyRunVO, error) {
 	if uc.backupPolicyConfigRepo == nil || uc.backupRecordRepo == nil || uc.runnerHostRepo == nil || uc.runnerJobRepo == nil {
 		return nil, fmt.Errorf("备份策略 Runner 仓库未配置")
 	}
@@ -220,10 +227,18 @@ func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, op
 	if rule.RequireRestoreProof || policy.RestoreDrillRequired || rule.NeverDeleteWithoutProof {
 		restoreTestStatus = DatabaseBackupStatusPending
 	}
+	normalizedTriggerType := normalizeBackupTriggerType(triggerType)
+	if strings.TrimSpace(triggerReason) == "" {
+		triggerReason = normalizedTriggerType
+	}
+	queuedMessage := "MySQL/MariaDB 合成全量任务已进入 Runner 队列"
+	if triggerReason == "auto_after_incremental" {
+		queuedMessage = "自动 Synthetic Full 已进入 Runner 队列"
+	}
 	record := &DatabaseBackupRecord{
 		PolicyID:                 policy.ID,
 		InstanceID:               policy.InstanceID,
-		TriggerType:              DatabaseBackupTriggerManual,
+		TriggerType:              normalizedTriggerType,
 		BackupType:               DatabaseBackupTypePhysical,
 		ChainID:                  trimText(chainID, 64),
 		ParentRecordID:           preview.NewSyntheticFullAfterRecordID,
@@ -251,7 +266,7 @@ func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, op
 		PrepareStatus:            "synthetic_pending",
 		SyntheticSourceRecordIDs: string(sourceIDsJSON),
 		RestoreTestStatus:        restoreTestStatus,
-		ErrorMessage:             "MySQL/MariaDB 合成全量任务已进入 Runner 队列",
+		ErrorMessage:             queuedMessage,
 	}
 	if err := uc.backupRecordRepo.Create(ctx, record); err != nil {
 		uc.finishBackupAudit(ctx, audit, DatabaseQueryStatusFailed, 0, "创建合成全量记录失败: "+err.Error())
@@ -264,7 +279,7 @@ func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, op
 	}
 	policy.LastRunAt = &started
 	policy.LastStatus = DatabaseBackupStatusQueued
-	policy.LastMessage = "MySQL/MariaDB 合成全量任务已进入 Runner 队列"
+	policy.LastMessage = queuedMessage
 	policy.Status = DatabaseBackupPolicyStatusActive
 	uc.applyBackupPolicyNextRunAt(policy, started)
 	if err := uc.backupPolicyConfigRepo.Update(ctx, policy); err != nil {
@@ -281,11 +296,11 @@ func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, op
 		SourceInstanceID: sourceInstance.ID,
 		Status:           DatabaseRunnerJobStatusQueued,
 		AllowedCommand:   DatabaseRunnerAllowedCommandMySQLSyntheticFull,
-		CommandSummary:   fmt.Sprintf("%s %s 合成全量", policy.BackupEngine, instance.Name),
+		CommandSummary:   syntheticFullCommandSummary(policy, instance, triggerReason),
 		WorkDir:          host.WorkDir,
 		OperatorID:       operator.ID,
 		OperatorName:     trimText(operator.Username, 120),
-		RequestJSON:      mysqlSyntheticFullRequestJSON(policy, record, host, instance, sourceInstance, operator, sourceIDs),
+		RequestJSON:      mysqlSyntheticFullRequestJSON(policy, record, host, instance, sourceInstance, operator, sourceIDs, triggerReason, triggerRecordID, rule),
 	}
 	if err := uc.runnerJobRepo.Create(ctx, job); err != nil {
 		record.Status = DatabaseBackupStatusFailed
@@ -317,7 +332,7 @@ func (uc *UseCase) RunBackupPolicySyntheticFull(ctx context.Context, id uint, op
 		Status:       DatabaseBackupStatusQueued,
 		StatusText:   BackupStatusText(DatabaseBackupStatusQueued),
 		FileName:     record.FileName,
-		Message:      fmt.Sprintf("MySQL/MariaDB 合成全量已进入 Runner 队列，Runner Job #%d", job.ID),
+		Message:      fmt.Sprintf("%s，Runner Job #%d", queuedMessage, job.ID),
 		TriggeredAt:  started.Format("2006-01-02 15:04:05"),
 	}, nil
 }
@@ -740,7 +755,11 @@ func (p *DatabaseSyntheticFullPreviewVO) finalizeSyntheticPreviewStatus() {
 
 func parseSyntheticRule(policy *DatabaseBackupPolicyConfig) syntheticRuleConfig {
 	rule := syntheticRuleConfig{
-		MergeOldestIncrementals:      4,
+		Mode:                         "rolling_synthetic_full",
+		AutoRun:                      false,
+		TriggerAfterIncrementals:     5,
+		MergeOldestIncrementals:      5,
+		RequireRestoreProof:          true,
 		SupersededKeepDaysAfterProof: 7,
 		NeverDeleteWithoutProof:      true,
 		MarkSupersededAfterProof:     true,
@@ -751,13 +770,34 @@ func parseSyntheticRule(policy *DatabaseBackupPolicyConfig) syntheticRuleConfig 
 	if strings.TrimSpace(policy.SyntheticRuleJSON) != "" {
 		_ = json.Unmarshal([]byte(policy.SyntheticRuleJSON), &rule)
 	}
+	if strings.TrimSpace(rule.Mode) == "" {
+		rule.Mode = "rolling_synthetic_full"
+	}
+	if rule.TriggerAfterIncrementals <= 0 {
+		rule.TriggerAfterIncrementals = 5
+	}
 	if rule.MergeOldestIncrementals <= 0 {
-		rule.MergeOldestIncrementals = 4
+		rule.MergeOldestIncrementals = rule.TriggerAfterIncrementals
 	}
 	if rule.SupersededKeepDaysAfterProof < 0 {
 		rule.SupersededKeepDaysAfterProof = 7
 	}
 	return rule
+}
+
+func syntheticFullCommandSummary(policy *DatabaseBackupPolicyConfig, instance *DatabaseInstance, triggerReason string) string {
+	engine := ""
+	if policy != nil {
+		engine = policy.BackupEngine
+	}
+	instanceName := ""
+	if instance != nil {
+		instanceName = instance.Name
+	}
+	if strings.TrimSpace(triggerReason) == "auto_after_incremental" {
+		return fmt.Sprintf("%s %s 自动合成全量", engine, instanceName)
+	}
+	return fmt.Sprintf("%s %s 合成全量", engine, instanceName)
 }
 
 func backupRecordSortTime(item *DatabaseBackupRecord) time.Time {

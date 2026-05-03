@@ -130,7 +130,7 @@ func TestBuildSyntheticFullPreviewSelectsOldestIncrementals(t *testing.T) {
 	policy := &DatabaseBackupPolicyConfig{
 		Model:             gorm.Model{ID: 7},
 		SyntheticEnabled:  true,
-		SyntheticRuleJSON: `{"mergeOldestIncrementals":2}`,
+		SyntheticRuleJSON: `{"mergeOldestIncrementals":2,"requireRestoreProof":false}`,
 		BinlogStreamID:    2,
 	}
 	validation := &backupPolicyChainValidation{
@@ -155,6 +155,93 @@ func TestBuildSyntheticFullPreviewSelectsOldestIncrementals(t *testing.T) {
 	}
 	if got := preview.SelectedIncrementalRecordIDs; len(got) != 2 || got[0] != 2 || got[1] != 3 {
 		t.Fatalf("unexpected selected incrementals: %v", got)
+	}
+}
+
+func TestParseSyntheticRuleDefaultsForRollingAutoPolicy(t *testing.T) {
+	rule := parseSyntheticRule(&DatabaseBackupPolicyConfig{})
+	if rule.Mode != "rolling_synthetic_full" {
+		t.Fatalf("unexpected default mode: %s", rule.Mode)
+	}
+	if rule.AutoRun {
+		t.Fatalf("auto run must be opt-in")
+	}
+	if rule.TriggerAfterIncrementals != 5 || rule.MergeOldestIncrementals != 5 {
+		t.Fatalf("unexpected default thresholds: trigger=%d merge=%d", rule.TriggerAfterIncrementals, rule.MergeOldestIncrementals)
+	}
+	if !rule.RequireRestoreProof || !rule.NeverDeleteWithoutProof || !rule.MarkSupersededAfterProof {
+		t.Fatalf("safe synthetic rule gates should default to true: %#v", rule)
+	}
+}
+
+func TestBuildSyntheticAutoDecisionRequiresExactRollingWindow(t *testing.T) {
+	policy := &DatabaseBackupPolicyConfig{
+		Model:             gorm.Model{ID: 7},
+		InstanceID:        10,
+		Enabled:           true,
+		Status:            DatabaseBackupPolicyStatusActive,
+		SyntheticEnabled:  true,
+		BinlogStreamID:    2,
+		SyntheticRuleJSON: `{"autoRun":true,"triggerAfterIncrementals":2,"mergeOldestIncrementals":2,"requireRestoreProof":true}`,
+	}
+	base := testPolicyBackupRecord(1, DatabaseBackupLevelFull, 0, 1, "", "1000")
+	inc1 := testPolicyBackupRecord(2, DatabaseBackupLevelIncremental, 1, 1, "1000", "2000")
+	inc2 := testPolicyBackupRecord(3, DatabaseBackupLevelIncremental, 2, 1, "2000", "3000")
+	validation := &backupPolicyChainValidation{
+		Policy:       policy,
+		Status:       DatabaseBackupChainStatusComplete,
+		BaseRecord:   base,
+		LatestRecord: inc2,
+		Records:      []*DatabaseBackupRecord{base, inc1, inc2},
+	}
+	rule := syntheticRuleConfig{
+		Mode:                     "rolling_synthetic_full",
+		AutoRun:                  true,
+		TriggerAfterIncrementals: 2,
+		MergeOldestIncrementals:  2,
+		RequireRestoreProof:      true,
+	}
+	preview := (&UseCase{}).buildSyntheticFullPreview(policy, validation)
+	decision := buildSyntheticAutoDecision(policy, rule, validation, preview, inc2)
+	if !decision.ShouldRun {
+		t.Fatalf("expected auto synthetic to run, got %#v", decision)
+	}
+
+	rule.MergeOldestIncrementals = 1
+	decision = buildSyntheticAutoDecision(policy, rule, validation, preview, inc2)
+	if decision.ShouldRun || !decision.Degraded || !strings.Contains(decision.Reason, "mergeOldestIncrementals") {
+		t.Fatalf("partial merge should be blocked and degraded, got %#v", decision)
+	}
+}
+
+func TestBuildSyntheticAutoDecisionBlocksWithoutBinlogAtThreshold(t *testing.T) {
+	policy := &DatabaseBackupPolicyConfig{
+		Model:             gorm.Model{ID: 7},
+		InstanceID:        10,
+		Enabled:           true,
+		Status:            DatabaseBackupPolicyStatusActive,
+		SyntheticEnabled:  true,
+		SyntheticRuleJSON: `{"autoRun":true,"triggerAfterIncrementals":1,"mergeOldestIncrementals":1,"requireRestoreProof":true}`,
+	}
+	base := testPolicyBackupRecord(1, DatabaseBackupLevelFull, 0, 1, "", "1000")
+	inc := testPolicyBackupRecord(2, DatabaseBackupLevelIncremental, 1, 1, "1000", "2000")
+	validation := &backupPolicyChainValidation{
+		Policy:       policy,
+		Status:       DatabaseBackupChainStatusComplete,
+		BaseRecord:   base,
+		LatestRecord: inc,
+		Records:      []*DatabaseBackupRecord{base, inc},
+	}
+	rule := syntheticRuleConfig{
+		Mode:                     "rolling_synthetic_full",
+		AutoRun:                  true,
+		TriggerAfterIncrementals: 1,
+		MergeOldestIncrementals:  1,
+	}
+	preview := (&UseCase{}).buildSyntheticFullPreview(policy, validation)
+	decision := buildSyntheticAutoDecision(policy, rule, validation, preview, inc)
+	if decision.ShouldRun || !decision.Degraded || !strings.Contains(decision.Reason, "binlog") {
+		t.Fatalf("missing binlog stream should block auto synthetic, got %#v", decision)
 	}
 }
 

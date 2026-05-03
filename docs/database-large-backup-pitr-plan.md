@@ -2141,7 +2141,7 @@ validation-results.json
 4. 不做长期运行恢复 Worker 池；本期由后端下发 SSH Runner 任务并记录审计。
 5. 不承诺 PostgreSQL 隔离恢复；PostgreSQL 仍放在后续 Barman/WAL-G/pg_basebackup 专项。
 
-### P2.8-P2.12：MySQL/MariaDB 自动增量链和 Synthetic Full 策略
+### P2.8-P2.13：MySQL/MariaDB 自动增量链和 Synthetic Full 策略
 
 本章节是 P2.7 之后的 MySQL/MariaDB 物理备份深化规划。当前落地状态：
 
@@ -2152,6 +2152,7 @@ validation-results.json
 | P2.10 自动增量链选择和链路校验 | 已落地 | 增量自动选择上一条成功物理备份作为父记录；链路校验覆盖父链、策略归属、备份引擎、来源实例、checksum、checkpoint、Runner 可读 URI、链状态持久化和前端校验入口 |
 | P2.11 Synthetic Full | 已落地 | 支持合成预览、SSH Runner 白名单执行、全量+增量 prepare/merge、生成 synthetic full 记录、更新链状态和前端合成入口 |
 | P2.12 Purge 门禁 | 已落地 | 支持 proof/binlog/artifact/依赖/purge 窗口清理预览；proof 通过后旧链标记 superseded；执行清理仅标记 expired/purged 并保留 URI/checksum 审计 |
+| P2.13 自动 Synthetic Full 调度 | 已落地 | 每次 incremental 成功后按规则检查链长，满阈值自动触发 synthetic full，把当前 base + N 条 incremental 合成为新全量基线 |
 
 目标是把“单个物理备份任务”升级为“可长期运行的备份策略编排”，让 OpsHub 可以自动回答并执行：
 
@@ -2871,6 +2872,294 @@ purge preview 必须返回：
 4. binlog 断链时 purge preview 阻止删除。
 5. purge 删除前必须展示 record、storage URI、大小和 checksum。
 6. purge 后 records 不直接硬删除，先标记 `expired/purged` 并保留审计。
+
+#### P2.13：自动 Synthetic Full 调度
+
+目标：把 P2.11 的手动 synthetic full 升级为长期自动调度能力，让 MySQL/MariaDB 物理增量链不会无限增长。典型生产策略是“先全量一次，之后每天增量；当前 base 后累计 N 条增量后，自动把 base + N 条增量合成为新的 synthetic full，第二天继续以新 synthetic full 为父记录跑增量”。
+
+推荐链路：
+
+```text
+native_full_0
+  -> inc_1
+  -> inc_2
+  -> inc_3
+  -> inc_4
+  -> inc_5
+      => synthetic_full_5
+
+synthetic_full_5
+  -> inc_6
+  -> inc_7
+  -> inc_8
+  -> inc_9
+  -> inc_10
+      => synthetic_full_10
+```
+
+推荐策略 JSON：
+
+```json
+{
+  "mode": "rolling_synthetic_full",
+  "autoRun": true,
+  "triggerAfterIncrementals": 5,
+  "mergeOldestIncrementals": 5,
+  "requireRestoreProof": true,
+  "neverDeleteWithoutProof": true,
+  "markSupersededAfterProof": true,
+  "supersededKeepDaysAfterProof": 7
+}
+```
+
+字段语义：
+
+| 字段 | 说明 |
+| --- | --- |
+| `mode` | `rolling_synthetic_full` 表示滚动合成全量 |
+| `autoRun` | 是否允许调度器自动触发 synthetic full |
+| `triggerAfterIncrementals` | 当前 base 后成功增量数达到该值时触发自动合成 |
+| `mergeOldestIncrementals` | 本次合成纳入的最早增量数；推荐与 `triggerAfterIncrementals` 一致 |
+| `requireRestoreProof` | synthetic full 成功后必须恢复演练 |
+| `neverDeleteWithoutProof` | 没有 proof 成功时绝不清理旧链 |
+| `markSupersededAfterProof` | proof 成功后自动把来源旧链标记为 superseded |
+| `supersededKeepDaysAfterProof` | proof 成功后旧链继续保留的天数 |
+
+为什么推荐 `triggerAfterIncrementals=5` 且 `mergeOldestIncrementals=5`：
+
+1. 链路最清晰：每次合成都把当前 base 后的一整段增量合并掉。
+2. 合成后 `database_backup_chain_states.current_base_record_id` 可以直接切换到新的 synthetic full。
+3. 第二天的 incremental 自动以 synthetic full 为 parent。
+4. 旧 base + 5 条 incremental 在 proof 成功后可以整体进入 superseded/purge 门禁。
+5. 不需要做复杂的 incremental rebase / reparent。
+
+不推荐第一版做 `triggerAfterIncrementals=5`、`mergeOldestIncrementals=3`：
+
+1. 只合并前 3 条时，剩下 inc_4/inc_5 仍依赖旧 parent。
+2. 要让 inc_4/inc_5 接到新的 synthetic full 后面，需要重写父链或重新生成增量。
+3. 这属于 incremental rebase/reparent，风险高于滚动整段合成。
+4. P2.12 purge 门禁会因为“后续增量仍依赖旧 parent”阻止清理旧链。
+
+自动触发时机：
+
+1. 调度器跑完 full 成功后：
+   - 重置 chain state；
+   - 不立即触发 synthetic full。
+2. 调度器跑完 incremental 成功后：
+   - 更新 chain state；
+   - 检查 `synthetic_enabled=true`；
+   - 解析 `synthetic_rule_json`；
+   - 如果 `autoRun=true` 且 `incremental_count >= triggerAfterIncrementals`，进入自动 synthetic full 检查。
+3. 手动跑 incremental 成功后：
+   - 同样允许检查自动 synthetic full；
+   - 但需记录触发来源为 `auto_after_incremental`。
+4. synthetic full 成功后：
+   - 更新当前 base 为 synthetic full；
+   - `incremental_count=0`；
+   - `restore_test_status=pending`；
+   - 不自动清理旧链。
+
+自动调度门禁：
+
+1. 策略必须启用。
+2. `synthetic_enabled=true`。
+3. `synthetic_rule_json.autoRun=true`。
+4. 当前没有同一策略、同一实例的 full/incremental/synthetic 正在运行。
+5. 当前备份链校验必须通过。
+6. 当前 base 后成功 incremental 数必须大于等于 `triggerAfterIncrementals`。
+7. `mergeOldestIncrementals` 必须大于 0，且不能大于当前可合成增量数。
+8. 推荐第一版要求 `mergeOldestIncrementals == triggerAfterIncrementals`；如果不相等，前端提示高风险，后端可直接拒绝自动执行。
+9. 策略必须绑定 binlog 归档流；未绑定时可以允许 synthetic full 手动预览，但不允许自动执行。
+10. Runner 主机必须在线或最近探测成功，且具备 `xtrabackup/mariadb-backup` 能力。
+11. 旧 synthetic full 如果仍有运行中的 proof 或 purge，不阻止新一轮增量，但不允许清理旧链。
+
+后端改造：
+
+1. 扩展 `syntheticRuleConfig`：
+
+```go
+type syntheticRuleConfig struct {
+    Mode                         string `json:"mode"`
+    AutoRun                      bool   `json:"autoRun"`
+    TriggerAfterIncrementals     int    `json:"triggerAfterIncrementals"`
+    MergeOldestIncrementals      int    `json:"mergeOldestIncrementals"`
+    RequireRestoreProof          bool   `json:"requireRestoreProof"`
+    NeverDeleteWithoutProof      bool   `json:"neverDeleteWithoutProof"`
+    MarkSupersededAfterProof     bool   `json:"markSupersededAfterProof"`
+    SupersededKeepDaysAfterProof int    `json:"supersededKeepDaysAfterProof"`
+}
+```
+
+2. `parseSyntheticRule` 默认值：
+
+```text
+mode=rolling_synthetic_full
+autoRun=false
+triggerAfterIncrementals=5
+mergeOldestIncrementals=5
+requireRestoreProof=true
+neverDeleteWithoutProof=true
+markSupersededAfterProof=true
+supersededKeepDaysAfterProof=7
+```
+
+3. 新增内部方法：
+
+```go
+func (uc *UseCase) maybeRunBackupPolicySyntheticAfterSuccess(ctx context.Context, policyID uint, triggerRecordID uint, triggerType string)
+```
+
+职责：
+   - 加载策略；
+   - 加载 Runner；
+   - 校验规则；
+   - 校验链状态；
+   - 调用 synthetic full preview；
+   - 满足门禁时调用 synthetic full run 的内部实现；
+   - 记录触发来源。
+
+4. 拆分 `RunBackupPolicySyntheticFull`：
+   - HTTP 手动入口继续保留；
+   - 内部新增 `runBackupPolicySyntheticFull(ctx, id, operator, triggerType)`，支持手动和自动复用。
+
+5. 自动 synthetic 的 `DatabaseBackupRecord`：
+
+```text
+trigger_type=schedule 或 auto_synthetic
+backup_origin=synthetic_full
+backup_level=full
+restore_test_status=pending
+synthetic_source_record_ids=[base, inc_1..inc_N]
+```
+
+如不新增枚举，也可以先用 `trigger_type=schedule`，在 `manifest_json/request_json` 里记录：
+
+```json
+{
+  "triggerReason": "auto_after_incremental",
+  "triggerRecordId": 123,
+  "triggerAfterIncrementals": 5,
+  "mergeOldestIncrementals": 5
+}
+```
+
+6. 调度器接入点：
+   - `executeScheduledPolicy` full/incremental 成功后；
+   - 手动 full/incremental 成功后；
+   - 只在 incremental 成功后触发 synthetic full 检查。
+
+7. 互斥与防重复：
+   - 复用现有 `acquireBackupPolicyRun(policy.ID, policy.InstanceID)`；
+   - 增加“最近 synthetic full 是否已经覆盖当前 latest record”的检查；
+   - 若存在 queued/running 的 `mysql_synthetic_full` Runner job，跳过；
+   - 若 `last_synthetic_at` 晚于最新 incremental finished_at，跳过。
+
+8. 策略状态：
+   - 自动 synthetic 下发成功：`last_status=queued/running`，`last_message=自动 Synthetic Full 已下发`；
+   - synthetic 成功：`last_synthetic_at` 更新，chain state 重置；
+   - synthetic 失败：策略 `status=degraded`，旧链保持 active；
+   - proof 未完成：策略不失败，但前端展示 “Synthetic Full 待恢复演练”。
+
+前端改造：
+
+1. 备份策略弹窗的 Synthetic 规则默认值改为：
+
+```json
+{
+  "mode": "rolling_synthetic_full",
+  "autoRun": true,
+  "triggerAfterIncrementals": 5,
+  "mergeOldestIncrementals": 5,
+  "requireRestoreProof": true,
+  "neverDeleteWithoutProof": true,
+  "markSupersededAfterProof": true,
+  "supersededKeepDaysAfterProof": 7
+}
+```
+
+2. 在 `Synthetic Full` 开关旁展示：
+   - 自动合成：开/关；
+   - 触发增量数；
+   - 合并增量数；
+   - 是否要求 proof。
+3. 如果 `mergeOldestIncrementals != triggerAfterIncrementals`，显示风险提示：
+   - “第一版自动合成建议整段合并，否则旧链清理可能被后续增量依赖阻断。”
+4. 备份策略表增加提示：
+   - 当前 base；
+   - 当前增量数；
+   - 自动合成阈值；
+   - 距离下次 synthetic 还差几条增量。
+5. Runner 任务表支持筛选 `mysql_synthetic_full`，展示触发来源 `auto_after_incremental`。
+
+恢复证明与清理关系：
+
+1. 自动 synthetic full 成功后，新的 synthetic full 可以作为后续增量 parent。
+2. 即使 proof 未完成，后续增量仍可以继续接在 synthetic full 后面，以避免链继续增长。
+3. proof 未成功前，旧链不能进入 purge。
+4. proof 成功后，P2.12 会把旧链标记为 superseded，并设置 `purge_eligible_at`。
+5. purge preview 仍必须检查 binlog 链、artifact 状态、checksum 和后续依赖。
+
+这种设计的取舍：
+
+1. 优点：备份链短、恢复快、长期维护成本低。
+2. 风险：如果 synthetic full 自动生成后长期不做 proof，系统会积累多条待证明 synthetic full 和旧链。
+3. 控制方式：前端风险提示、策略 degraded 标记、定期 restore drill 和 purge preview。
+
+验收标准：
+
+1. 创建策略：月度 full、每日 incremental、`autoRun=true`、`triggerAfterIncrementals=5`、`mergeOldestIncrementals=5`。
+2. 手动跑一次 full 成功，chain state 指向 full，`incremental_count=0`。
+3. 连续跑 5 次 incremental，每次自动选择上一条成功记录作为 parent。
+4. 第 5 次 incremental 成功后，系统自动下发 `mysql_synthetic_full` Runner job。
+5. synthetic full 成功后：
+   - 新 record 为 `backup_origin=synthetic_full`；
+   - `base_record_id=self`；
+   - `synthetic_source_record_ids` 包含 full + 5 条 incremental；
+   - chain state `current_base_record_id` 指向 synthetic full；
+   - `incremental_count=0`；
+   - `restore_test_status=pending`。
+6. 第 6 天 incremental 自动以 synthetic full 为 parent。
+7. synthetic full 失败时：
+   - 旧链仍保持 current；
+   - 第 6 天 incremental 仍可按旧链继续，或策略 degraded 后等待人工处理；
+   - 不清理任何旧 artifact。
+8. synthetic full proof 成功后，旧 full + 5 条 incremental 可以通过 purge preview。
+9. synthetic full proof 未成功时，purge preview 阻止清理。
+10. 未绑定 binlog 归档流时，自动 synthetic 不触发或直接进入 warning/blocked。
+
+`opshub-mysql` 推荐配置：
+
+```text
+backup_engine: xtrabackup_8_0
+full_schedule: 0 2 1 * *
+incremental_schedule: 0 3 * * *
+binlog_archive: streaming 或 polling 连续归档流
+synthetic_enabled: true
+restore_drill_required: true
+```
+
+```json
+{
+  "mode": "rolling_synthetic_full",
+  "autoRun": true,
+  "triggerAfterIncrementals": 5,
+  "mergeOldestIncrementals": 5,
+  "requireRestoreProof": true,
+  "neverDeleteWithoutProof": true,
+  "markSupersededAfterProof": true,
+  "supersededKeepDaysAfterProof": 7
+}
+```
+
+生产使用流程：
+
+1. 绑定并启动 binlog 归档流。
+2. 保存备份策略。
+3. 手动执行一次 full。
+4. 确认第一天 incremental 成功。
+5. 到第 5 条 incremental 成功后，观察自动 synthetic full Runner job。
+6. synthetic full 成功后生成恢复计划并执行 proof。
+7. proof 成功后通过清理预览确认旧链可清理。
 
 #### 前端改造
 

@@ -430,7 +430,7 @@ func normalizeBackupTriggerType(triggerType string) string {
 }
 
 func isBackupTaskRunningError(err error) bool {
-	return err != nil && (strings.Contains(err.Error(), "备份任务正在执行中") || strings.Contains(err.Error(), "数据库实例已有备份任务正在执行中"))
+	return err != nil && (strings.Contains(err.Error(), "备份任务正在执行中") || strings.Contains(err.Error(), "备份策略正在执行中") || strings.Contains(err.Error(), "数据库实例已有备份任务正在执行中"))
 }
 
 func backupEngineForSpec(task *DatabaseBackupTask, spec *backupCommandSpec) string {

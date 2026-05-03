@@ -271,7 +271,7 @@ func buildMySQLPolicySyntheticFullManifest(record *DatabaseBackupRecord, policy 
 	return string(data)
 }
 
-func mysqlSyntheticFullRequestJSON(policy *DatabaseBackupPolicyConfig, record *DatabaseBackupRecord, host *DatabaseRunnerHost, instance *DatabaseInstance, sourceInstance *DatabaseInstance, operator QueryOperator, sourceRecordIDs []uint) string {
+func mysqlSyntheticFullRequestJSON(policy *DatabaseBackupPolicyConfig, record *DatabaseBackupRecord, host *DatabaseRunnerHost, instance *DatabaseInstance, sourceInstance *DatabaseInstance, operator QueryOperator, sourceRecordIDs []uint, triggerReason string, triggerRecordID uint, rule syntheticRuleConfig) string {
 	sourceInstanceID := instance.ID
 	if sourceInstance != nil {
 		sourceInstanceID = sourceInstance.ID
@@ -288,9 +288,22 @@ func mysqlSyntheticFullRequestJSON(policy *DatabaseBackupPolicyConfig, record *D
 		"backupScope":      "instance",
 		"backupLevel":      DatabaseBackupLevelFull,
 		"backupOrigin":     DatabaseBackupOriginSyntheticFull,
-		"sourceRecordIds":  sourceRecordIDs,
-		"operatorId":       operator.ID,
-		"operatorName":     operator.Username,
+		"triggerType":      record.TriggerType,
+		"triggerReason":    strings.TrimSpace(triggerReason),
+		"triggerRecordId":  triggerRecordID,
+		"syntheticRule": map[string]any{
+			"mode":                         rule.Mode,
+			"autoRun":                      rule.AutoRun,
+			"triggerAfterIncrementals":     rule.TriggerAfterIncrementals,
+			"mergeOldestIncrementals":      rule.MergeOldestIncrementals,
+			"requireRestoreProof":          rule.RequireRestoreProof,
+			"neverDeleteWithoutProof":      rule.NeverDeleteWithoutProof,
+			"markSupersededAfterProof":     rule.MarkSupersededAfterProof,
+			"supersededKeepDaysAfterProof": rule.SupersededKeepDaysAfterProof,
+		},
+		"sourceRecordIds": sourceRecordIDs,
+		"operatorId":      operator.ID,
+		"operatorName":    operator.Username,
 	}
 	data, _ := json.Marshal(payload)
 	return trimText(string(data), maxRunnerJSONLength)
