@@ -72,6 +72,11 @@ func (uc *UseCase) runMySQLSyntheticFullCommand(ctx context.Context, policy *Dat
 func buildMySQLSyntheticFullScript(policy *DatabaseBackupPolicyConfig, record *DatabaseBackupRecord, host *DatabaseRunnerHost, inputs []syntheticFullArtifactInput) string {
 	workRoot := firstNonEmpty(host.StorageMountPath, host.WorkDir, defaultRunnerWorkDir)
 	toolName := mysqlPhysicalBackupToolName(policy.BackupEngine, policy.Engine)
+	containerOpts := backupPolicyContainerToolOptions(policy, host)
+	toolExecutionMode := DatabaseToolExecutionModeHost
+	if containerOpts.Enabled {
+		toolExecutionMode = DatabaseToolExecutionModeContainer
+	}
 	lines := []string{
 		"set -eu",
 		"WORK_ROOT=" + shellSingleQuote(workRoot),
@@ -79,6 +84,7 @@ func buildMySQLSyntheticFullScript(policy *DatabaseBackupPolicyConfig, record *D
 		fmt.Sprintf("BACKUP_RECORD_ID=%d", record.ID),
 		fmt.Sprintf("RUNNER_HOST_ID=%d", host.ID),
 		"TOOL_NAME=" + shellSingleQuote(toolName),
+		"TOOL_EXECUTION_MODE=" + shellSingleQuote(toolExecutionMode),
 		"FILE_NAME=" + shellSingleQuote(record.FileName),
 		"WORK_DIR=\"$WORK_ROOT/mysql-physical/policy-$POLICY_ID/synthetic-$BACKUP_RECORD_ID\"",
 		"BASE_DIR=\"$WORK_DIR/base\"",
@@ -90,19 +96,30 @@ func buildMySQLSyntheticFullScript(policy *DatabaseBackupPolicyConfig, record *D
 		`step() { printf 'OPSHUB_RESTORE_STEP=%s|%s|%s\n' "$1" "$2" "$(date '+%Y-%m-%d %H:%M:%S')"; printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> "$LOG_FILE"; }`,
 		`fail_step() { step "$1" "failed"; echo "$2" >> "$LOG_FILE"; exit 1; }`,
 		`TOOL_PATH="$(command -v "$TOOL_NAME" || true)"`,
-		`if [ -z "$TOOL_PATH" ]; then fail_step "tool_check" "$TOOL_NAME not found"; fi`,
 		`printf 'OPSHUB_WORK_DIR=%s\n' "$WORK_DIR"`,
 		`printf 'OPSHUB_FILE_PATH=%s\n' "$ARTIFACT"`,
 		`printf 'OPSHUB_FILE_NAME=%s\n' "$FILE_NAME"`,
 		`printf 'OPSHUB_LOG_PATH=%s\n' "$LOG_FILE"`,
 		`printf 'OPSHUB_TOOL_NAME=%s\n' "$TOOL_NAME"`,
-		`printf 'OPSHUB_TOOL_VERSION=%s\n' "$("$TOOL_PATH" --version 2>/dev/null | head -n 1)"`,
 		`rm -rf "$BASE_DIR" "$INC_ROOT" "$ARTIFACT"`,
 		`mkdir -p "$BASE_DIR" "$INC_ROOT"`,
+		`if [ "$TOOL_EXECUTION_MODE" = "container_tools" ]; then`,
+	}
+	appendContainerToolShellPrelude(&lines, containerOpts, false)
+	lines = append(lines,
+		`  CONTAINER_BASE_ARGS="--rm --network $CONTAINER_NETWORK_MODE -v $WORK_DIR:/work"`,
+		`  TOOL_VERSION="$($DOCKER_BIN run $CONTAINER_BASE_ARGS "$CONTAINER_TOOL_IMAGE" sh -lc "$TOOL_NAME --version 2>/dev/null | head -n 1" 2>/dev/null || true)"`,
+		`  run_tool_prepare() { cmd="$1"; $DOCKER_BIN run $CONTAINER_BASE_ARGS "$CONTAINER_TOOL_IMAGE" sh -lc "$cmd"; }`,
+		`else`,
+		`  if [ -z "$TOOL_PATH" ]; then fail_step "tool_check" "$TOOL_NAME not found"; fi`,
+		`  TOOL_VERSION="$("$TOOL_PATH" --version 2>/dev/null | head -n 1)"`,
+		`  run_tool_prepare() { sh -lc "$1"; }`,
+		`fi`,
+		`printf 'OPSHUB_TOOL_VERSION=%s\n' "$TOOL_VERSION"`,
 		`verify_artifact() { path="$1"; expected="$2"; record_id="$3"; if [ ! -f "$path" ]; then fail_step "verify_artifact" "artifact not found for record $record_id"; fi; actual="$(sha256sum "$path" | awk '{print $1}')"; if [ "$actual" != "$expected" ]; then fail_step "verify_artifact" "checksum mismatch for record $record_id"; fi; }`,
 		`checkpoint_value() { awk -F= -v key="$1" '{gsub(/^[ \t]+|[ \t]+$/,"",$1); if ($1==key) {gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}}' "$BASE_DIR/xtrabackup_checkpoints" 2>/dev/null || true; }`,
 		`step "verify_artifact" "running"`,
-	}
+	)
 	for _, input := range inputs {
 		lines = append(lines,
 			"verify_artifact "+shellSingleQuote(input.Path)+" "+shellSingleQuote(input.ChecksumSHA256)+" "+shellSingleQuote(strconv.FormatUint(uint64(input.RecordID), 10)),
@@ -115,7 +132,7 @@ func buildMySQLSyntheticFullScript(policy *DatabaseBackupPolicyConfig, record *D
 		`if [ ! -f "$BASE_DIR/xtrabackup_checkpoints" ]; then fail_step "unpack_base" "base xtrabackup_checkpoints not found"; fi`,
 		`step "unpack_base" "success"`,
 		`step "prepare_base" "running"`,
-		`"$TOOL_PATH" --prepare --apply-log-only --target-dir="$BASE_DIR" >> "$LOG_FILE" 2>&1 || fail_step "prepare_base" "prepare base failed"`,
+		`if [ "$TOOL_EXECUTION_MODE" = "container_tools" ]; then run_tool_prepare "$TOOL_NAME --prepare --apply-log-only --target-dir=/work/base" >> "$LOG_FILE" 2>&1 || fail_step "prepare_base" "prepare base failed"; else "$TOOL_PATH" --prepare --apply-log-only --target-dir="$BASE_DIR" >> "$LOG_FILE" 2>&1 || fail_step "prepare_base" "prepare base failed"; fi`,
 		`step "prepare_base" "success"`,
 	)
 	for _, input := range inputs[1:] {
@@ -125,13 +142,13 @@ func buildMySQLSyntheticFullScript(policy *DatabaseBackupPolicyConfig, record *D
 			`mkdir -p "$INC_DIR"`,
 			"tar -xzf "+shellSingleQuote(input.Path)+` -C "$INC_DIR" >> "$LOG_FILE" 2>&1 || fail_step "apply_incremental_`+strconv.FormatUint(uint64(input.RecordID), 10)+`" "unpack incremental failed"`,
 			`if [ ! -f "$INC_DIR/xtrabackup_checkpoints" ]; then fail_step "apply_incremental_`+strconv.FormatUint(uint64(input.RecordID), 10)+`" "incremental checkpoints not found"; fi`,
-			`"$TOOL_PATH" --prepare --apply-log-only --target-dir="$BASE_DIR" --incremental-dir="$INC_DIR" >> "$LOG_FILE" 2>&1 || fail_step "apply_incremental_`+strconv.FormatUint(uint64(input.RecordID), 10)+`" "apply incremental failed"`,
+			`if [ "$TOOL_EXECUTION_MODE" = "container_tools" ]; then run_tool_prepare "$TOOL_NAME --prepare --apply-log-only --target-dir=/work/base --incremental-dir=/work/incrementals/inc-`+strconv.FormatUint(uint64(input.RecordID), 10)+`" >> "$LOG_FILE" 2>&1 || fail_step "apply_incremental_`+strconv.FormatUint(uint64(input.RecordID), 10)+`" "apply incremental failed"; else "$TOOL_PATH" --prepare --apply-log-only --target-dir="$BASE_DIR" --incremental-dir="$INC_DIR" >> "$LOG_FILE" 2>&1 || fail_step "apply_incremental_`+strconv.FormatUint(uint64(input.RecordID), 10)+`" "apply incremental failed"; fi`,
 			fmt.Sprintf(`step "apply_incremental_%d" "success"`, input.RecordID),
 		)
 	}
 	lines = append(lines,
 		`step "final_prepare" "running"`,
-		`"$TOOL_PATH" --prepare --target-dir="$BASE_DIR" >> "$LOG_FILE" 2>&1 || fail_step "final_prepare" "final prepare failed"`,
+		`if [ "$TOOL_EXECUTION_MODE" = "container_tools" ]; then run_tool_prepare "$TOOL_NAME --prepare --target-dir=/work/base" >> "$LOG_FILE" 2>&1 || fail_step "final_prepare" "final prepare failed"; else "$TOOL_PATH" --prepare --target-dir="$BASE_DIR" >> "$LOG_FILE" 2>&1 || fail_step "final_prepare" "final prepare failed"; fi`,
 		`step "final_prepare" "success"`,
 		`step "package_backup" "running"`,
 		`tar -czf "$ARTIFACT" -C "$BASE_DIR" . >> "$LOG_FILE" 2>&1 || fail_step "package_backup" "package synthetic full failed"`,

@@ -183,6 +183,9 @@ const (
 	DatabaseRunnerJobTypeProbe                       = "runner_probe"
 	DatabaseRunnerJobTypeToolProbe                   = "runner_tool_probe"
 	DatabaseRunnerJobTypeToolInstall                 = "runner_tool_install"
+	DatabaseRunnerJobTypeAgentInstall                = "runner_agent_install"
+	DatabaseRunnerJobTypeAgentUpgrade                = "runner_agent_upgrade"
+	DatabaseRunnerJobTypeAgentRestart                = "runner_agent_restart"
 	DatabaseRunnerJobTypePhysicalBackup              = "physical_backup"
 	DatabaseRunnerJobTypeBinlogArchive               = "binlog_archive"
 	DatabaseRunnerJobTypePhysicalRestore             = "physical_restore"
@@ -203,6 +206,9 @@ const (
 	DatabaseRunnerAllowedCommandProbe                = "runner_probe"
 	DatabaseRunnerAllowedCommandToolProbe            = "tool_probe"
 	DatabaseRunnerAllowedCommandToolInstall          = "runner_tool_install"
+	DatabaseRunnerAllowedCommandAgentInstall         = "runner_agent_install"
+	DatabaseRunnerAllowedCommandAgentUpgrade         = "runner_agent_upgrade"
+	DatabaseRunnerAllowedCommandAgentRestart         = "runner_agent_restart"
 	DatabaseRunnerAllowedCommandBinlogArchiveOnce    = "mysqlbinlog_archive_once"
 	DatabaseRunnerAllowedCommandBinlogArchiveCatchUp = "mysqlbinlog_archive_catch_up"
 	DatabaseRunnerAllowedCommandPhysicalRestore      = "mysql_physical_restore"
@@ -781,6 +787,13 @@ type DatabaseBackupPolicyConfig struct {
 	Name                 string     `gorm:"type:varchar(120);not null;comment:策略名称" json:"name"`
 	Engine               string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
 	BackupEngine         string     `gorm:"column:backup_engine;type:varchar(60);comment:物理备份引擎" json:"backupEngine"`
+	ToolExecutionMode    string     `gorm:"column:tool_execution_mode;type:varchar(30);default:'host_tools';comment:工具执行模式 host_tools/container_tools" json:"toolExecutionMode"`
+	ToolImage            string     `gorm:"column:tool_image;type:varchar(255);comment:容器化工具镜像" json:"toolImage"`
+	ToolImageDigest      string     `gorm:"column:tool_image_digest;type:varchar(255);comment:容器化工具镜像摘要" json:"toolImageDigest"`
+	ContainerDatadirPath string     `gorm:"column:container_datadir_path;type:varchar(500);comment:Runner宿主机datadir挂载路径" json:"containerDatadirPath"`
+	ContainerWorkdirPath string     `gorm:"column:container_workdir_path;type:varchar(500);comment:容器化工具工作目录挂载路径" json:"containerWorkdirPath"`
+	ContainerNetworkMode string     `gorm:"column:container_network_mode;type:varchar(60);default:'host';comment:容器网络模式" json:"containerNetworkMode"`
+	ContainerDatadirRO   bool       `gorm:"column:container_datadir_ro;default:true;comment:datadir只读挂载" json:"containerDatadirRo"`
 	RunnerHostID         uint       `gorm:"column:runner_host_id;not null;index;comment:Runner主机ID" json:"runnerHostId"`
 	StorageProfileID     uint       `gorm:"column:storage_profile_id;index;comment:存储配置ID" json:"storageProfileId"`
 	SecretProfileID      uint       `gorm:"column:secret_profile_id;index;comment:密钥配置ID" json:"secretProfileId"`

@@ -62,6 +62,13 @@ type DatabaseRunnerToolInstallScriptRequest struct {
 	Profiles         []string          `json:"profiles"`
 	TargetDBVersions map[string]string `json:"targetDbVersions"`
 	InstallMode      string            `json:"installMode"`
+	ExecutionMode    string            `json:"executionMode"`
+	ToolImage        string            `json:"toolImage"`
+	ToolImageDigest  string            `json:"toolImageDigest"`
+	DatadirMount     string            `json:"datadirMount"`
+	WorkdirMount     string            `json:"workdirMount"`
+	NetworkMode      string            `json:"networkMode"`
+	ReadOnlyDatadir  bool              `json:"readOnlyDatadir"`
 	DryRun           bool              `json:"dryRun"`
 }
 
@@ -76,6 +83,13 @@ type DatabaseRunnerToolInstallScriptVO struct {
 	Profiles         []string          `json:"profiles"`
 	TargetDBVersions map[string]string `json:"targetDbVersions"`
 	InstallMode      string            `json:"installMode"`
+	ExecutionMode    string            `json:"executionMode"`
+	ToolImage        string            `json:"toolImage"`
+	ToolImageDigest  string            `json:"toolImageDigest"`
+	DatadirMount     string            `json:"datadirMount"`
+	WorkdirMount     string            `json:"workdirMount"`
+	NetworkMode      string            `json:"networkMode"`
+	ReadOnlyDatadir  bool              `json:"readOnlyDatadir"`
 	DryRun           bool              `json:"dryRun"`
 	Warnings         []string          `json:"warnings"`
 	Unsupported      []string          `json:"unsupported"`
@@ -491,6 +505,7 @@ func buildRunnerToolInstallScript(host *DatabaseRunnerHost, profile *DatabaseRun
 	if mode == "" {
 		mode = "online"
 	}
+	executionMode := normalizeToolExecutionMode(req.ExecutionMode)
 	warnings := make([]string, 0, 8)
 	unsupported := make([]string, 0, 4)
 	lines := []string{
@@ -521,14 +536,18 @@ func buildRunnerToolInstallScript(host *DatabaseRunnerHost, profile *DatabaseRun
 			"",
 		)
 	}
-	switch strings.ToLower(strings.TrimSpace(profile.PackageManager)) {
-	case "apt":
-		appendAptRunnerToolScript(&lines, profiles, &warnings, &unsupported, mode)
-	case "dnf", "yum":
-		appendYumRunnerToolScript(&lines, profiles, &warnings, &unsupported, strings.ToLower(strings.TrimSpace(profile.PackageManager)), profile.OSFamily, profile.OSVersion, mode)
-	default:
-		unsupported = append(unsupported, "当前包管理器未识别，仅支持 apt/dnf/yum 脚本生成")
-		lines = append(lines, `echo "Unsupported package manager; please install tools manually."`)
+	if executionMode == DatabaseToolExecutionModeContainer {
+		appendContainerRunnerToolScript(&lines, profiles, req, &warnings, &unsupported)
+	} else {
+		switch strings.ToLower(strings.TrimSpace(profile.PackageManager)) {
+		case "apt":
+			appendAptRunnerToolScript(&lines, profiles, &warnings, &unsupported, mode)
+		case "dnf", "yum":
+			appendYumRunnerToolScript(&lines, profiles, &warnings, &unsupported, strings.ToLower(strings.TrimSpace(profile.PackageManager)), profile.OSFamily, profile.OSVersion, mode)
+		default:
+			unsupported = append(unsupported, "当前包管理器未识别，仅支持 apt/dnf/yum 脚本生成")
+			lines = append(lines, `echo "Unsupported package manager; please install tools manually."`)
+		}
 	}
 	lines = append(lines,
 		"",
@@ -555,6 +574,13 @@ func buildRunnerToolInstallScript(host *DatabaseRunnerHost, profile *DatabaseRun
 		Profiles:         profiles,
 		TargetDBVersions: req.TargetDBVersions,
 		InstallMode:      mode,
+		ExecutionMode:    executionMode,
+		ToolImage:        strings.TrimSpace(req.ToolImage),
+		ToolImageDigest:  strings.TrimSpace(req.ToolImageDigest),
+		DatadirMount:     strings.TrimSpace(req.DatadirMount),
+		WorkdirMount:     strings.TrimSpace(req.WorkdirMount),
+		NetworkMode:      normalizeContainerNetworkMode(req.NetworkMode),
+		ReadOnlyDatadir:  req.ReadOnlyDatadir,
 		DryRun:           req.DryRun,
 		Warnings:         uniqueSorted(warnings),
 		Unsupported:      uniqueSorted(unsupported),
@@ -637,6 +663,43 @@ func appendYumRunnerToolScript(lines *[]string, profiles []string, warnings, uns
 			*unsupported = append(*unsupported, profile)
 		}
 	}
+}
+
+func appendContainerRunnerToolScript(lines *[]string, profiles []string, req *DatabaseRunnerToolInstallScriptRequest, warnings, unsupported *[]string) {
+	image := strings.TrimSpace(req.ToolImage)
+	if err := validateContainerToolImage(image); err != nil {
+		*unsupported = append(*unsupported, err.Error())
+	}
+	if image == "" {
+		image = "opshub-runner-tools:mysql80"
+		*warnings = append(*warnings, "未指定容器镜像，脚本示例使用 opshub-runner-tools:mysql80；生产环境必须固定版本 tag 或 digest")
+	}
+	datadirMount := strings.TrimSpace(req.DatadirMount)
+	if hasAnyProfile(profiles, "mysql_57_physical", "mysql_80_physical", "mysql_84_physical", "mariadb_physical") && datadirMount == "" {
+		*warnings = append(*warnings, "MySQL/MariaDB 物理备份容器需要把数据库 datadir 只读挂载到容器；未配置时执行任务会阻断")
+	}
+	networkMode := normalizeContainerNetworkMode(req.NetworkMode)
+	readOnly := "ro"
+	if !req.ReadOnlyDatadir {
+		readOnly = "rw"
+		*warnings = append(*warnings, "datadir 非只读挂载风险较高，仅在明确需要且已隔离 Runner 时使用")
+	}
+	*warnings = append(*warnings, "容器化工具模式不会在宿主机安装 xtrabackup/mariadb-backup/pg_basebackup，只校验 Docker、镜像、挂载和容器内工具版本")
+	*lines = append(*lines,
+		"echo '--- OpsHub containerized runner tools ---'",
+		"CONTAINER_TOOL_IMAGE="+shellSingleQuote(image),
+		"CONTAINER_TOOL_DIGEST="+shellSingleQuote(strings.TrimSpace(req.ToolImageDigest)),
+		"CONTAINER_DATADIR="+shellSingleQuote(datadirMount),
+		"CONTAINER_NETWORK_MODE="+shellSingleQuote(networkMode),
+		"CONTAINER_DATADIR_MODE="+shellSingleQuote(readOnly),
+		`command -v docker >/dev/null 2>&1 || { echo "docker not found"; exit 1; }`,
+		`docker image inspect "$CONTAINER_TOOL_IMAGE" >/dev/null 2>&1 || docker pull "$CONTAINER_TOOL_IMAGE"`,
+		`if [ -n "$CONTAINER_TOOL_DIGEST" ]; then docker inspect --format='{{index .RepoDigests 0}}' "$CONTAINER_TOOL_IMAGE" | grep -q "$CONTAINER_TOOL_DIGEST"; fi`,
+		`if [ -n "$CONTAINER_DATADIR" ]; then [ -d "$CONTAINER_DATADIR" ] || { echo "datadir mount not found: $CONTAINER_DATADIR"; exit 1; }; fi`,
+		`RUN_ARGS="--rm --network $CONTAINER_NETWORK_MODE"`,
+		`if [ -n "$CONTAINER_DATADIR" ]; then RUN_ARGS="$RUN_ARGS -v $CONTAINER_DATADIR:/var/lib/mysql:$CONTAINER_DATADIR_MODE"; fi`,
+		`docker run $RUN_ARGS "$CONTAINER_TOOL_IMAGE" sh -lc 'for bin in xtrabackup mariadb-backup mariabackup mysqlbinlog mariadb-binlog mysql mariadb psql pg_basebackup pg_receivewal pg_combinebackup pg_verifybackup barman docker tar sha256sum zstd gzip rsync; do command -v "$bin" >/dev/null 2>&1 && { printf "%s: " "$bin"; "$bin" --version 2>&1 | head -n 1 || true; }; done'`,
+	)
 }
 
 func normalizeRunnerToolProfiles(values []string) []string {

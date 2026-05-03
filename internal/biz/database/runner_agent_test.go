@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,43 @@ func TestRunnerAgentAuthMatchesHashOnly(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(config), "token") || strings.Contains(strings.ToLower(config), "secret") {
 		t.Fatalf("test config should use non-sensitive key naming: %s", config)
+	}
+}
+
+func TestBuildRunnerAgentConfigJSONUsesLocalSecretPlaceholders(t *testing.T) {
+	host := &DatabaseRunnerHost{
+		Host:             "192.168.1.30",
+		Port:             22,
+		WorkDir:          "/var/lib/opshub/database-runner",
+		StorageMountPath: "/backup/opshub",
+	}
+	req := &DatabaseRunnerAgentLifecycleRequest{
+		ServerURL:               "http://192.168.1.12:9876/",
+		ServiceName:             "opshub-agent-runner-12",
+		ListenAddr:              "0.0.0.0:19100",
+		IntervalSeconds:         60,
+		DatabaseArchiverEnabled: true,
+	}
+	config := buildRunnerAgentConfigJSON(host, req, "plain-runner-auth")
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(config), &payload); err != nil {
+		t.Fatalf("config is not json: %v\n%s", err, config)
+	}
+	archiver, _ := payload["databaseArchiver"].(map[string]any)
+	if archiver["runnerId"] != "ssh:192.168.1.30:22" {
+		t.Fatalf("unexpected runnerId: %#v", archiver["runnerId"])
+	}
+	if archiver["baseUrl"] != "http://192.168.1.12:9876" || archiver["runnerAuth"] != "plain-runner-auth" || archiver["storageRoot"] != "/backup/opshub" {
+		t.Fatalf("unexpected archiver config: %#v", archiver)
+	}
+	storage, _ := archiver["storage"].(map[string]any)
+	if storage["secretKey"] != "<local_secret>" {
+		t.Fatalf("object storage secret should stay local placeholder: %#v", storage["secretKey"])
+	}
+	credentials, _ := archiver["credentials"].([]any)
+	firstCredential, _ := credentials[0].(map[string]any)
+	if firstCredential["password"] != "<local_secret>" {
+		t.Fatalf("database password should stay local placeholder: %#v", firstCredential["password"])
 	}
 }
 

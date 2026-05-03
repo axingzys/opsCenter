@@ -2168,9 +2168,10 @@
                   </el-table-column>
                   <el-table-column label="工具 / binlog" min-width="210" show-overflow-tooltip>
                     <template #default="{ row }">
-                      {{ row.backupEngine || '-' }}
-                      <span class="muted-text"> / {{ row.binlogStreamId ? `binlog流 #${row.binlogStreamId}` : '未绑定binlog流' }}</span>
-                    </template>
+	                      {{ row.backupEngine || '-' }}
+	                      <span class="muted-text"> / {{ row.binlogStreamId ? `binlog流 #${row.binlogStreamId}` : '未绑定binlog流' }}</span>
+	                      <div class="muted-text">{{ row.toolExecutionMode === 'container_tools' ? `容器工具：${row.toolImage || '-'}` : '宿主机工具' }}</div>
+	                    </template>
                   </el-table-column>
                   <el-table-column label="计划" min-width="230" show-overflow-tooltip>
                     <template #default="{ row }">
@@ -2427,9 +2428,12 @@
                     </el-select>
                     <el-select v-model="runnerJobQuery.jobType" placeholder="任务类型" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="Runner 探测" value="runner_probe" />
-                      <el-option label="Runner 工具巡检" value="runner_tool_probe" />
-                      <el-option label="Runner 工具安装" value="runner_tool_install" />
-                      <el-option label="物理备份" value="physical_backup" />
+	                      <el-option label="Runner 工具巡检" value="runner_tool_probe" />
+	                      <el-option label="Runner 工具安装" value="runner_tool_install" />
+	                      <el-option label="Runner Agent 安装" value="runner_agent_install" />
+	                      <el-option label="Runner Agent 升级" value="runner_agent_upgrade" />
+	                      <el-option label="Runner Agent 重启" value="runner_agent_restart" />
+	                      <el-option label="物理备份" value="physical_backup" />
                       <el-option label="MySQL 合成全量" value="mysql_synthetic_full" />
                       <el-option label="binlog 归档" value="binlog_archive" />
                       <el-option label="物理恢复" value="physical_restore" />
@@ -4126,8 +4130,58 @@
               </el-select>
             </el-form-item>
           </el-col>
-        </el-row>
-        <el-row :gutter="16">
+	        </el-row>
+	        <el-row :gutter="16">
+	          <el-col :span="8">
+	            <el-form-item label="工具执行">
+	              <el-select v-model="backupPolicyForm.toolExecutionMode" style="width: 100%;">
+	                <el-option label="宿主机工具" value="host_tools" />
+	                <el-option label="容器化工具" value="container_tools" />
+	              </el-select>
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="8">
+	            <el-form-item label="工具镜像">
+	              <el-input v-model="backupPolicyForm.toolImage" :disabled="backupPolicyForm.toolExecutionMode !== 'container_tools'" placeholder="如 opshub-runner-tools:mysql80" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="8">
+	            <el-form-item label="镜像 Digest">
+	              <el-input v-model="backupPolicyForm.toolImageDigest" :disabled="backupPolicyForm.toolExecutionMode !== 'container_tools'" placeholder="可选 sha256:..." />
+	            </el-form-item>
+	          </el-col>
+	        </el-row>
+	        <el-row v-if="backupPolicyForm.toolExecutionMode === 'container_tools'" :gutter="16">
+	          <el-col :span="8">
+	            <el-form-item label="datadir挂载">
+	              <el-input v-model="backupPolicyForm.containerDatadirPath" placeholder="/var/lib/mysql 或只读挂载点" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="8">
+	            <el-form-item label="工作目录挂载">
+	              <el-input v-model="backupPolicyForm.containerWorkdirPath" placeholder="可选，默认 Runner 工作目录/仓库挂载" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="4">
+	            <el-form-item label="网络">
+	              <el-input v-model="backupPolicyForm.containerNetworkMode" placeholder="host" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="4">
+	            <el-form-item label="datadir只读">
+	              <el-switch v-model="backupPolicyForm.containerDatadirRo" active-text="是" inactive-text="否" />
+	            </el-form-item>
+	          </el-col>
+	        </el-row>
+	        <el-alert
+	          v-if="backupPolicyForm.toolExecutionMode === 'container_tools'"
+	          title="容器化模式会在 Runner 上用 Docker 运行固定镜像；MySQL/MariaDB 物理备份必须能把生产 datadir 只读挂载给容器。"
+	          type="warning"
+	          show-icon
+	          :closable="false"
+	          class="backup-dialog-alert compact-alert"
+	        />
+	        <el-row :gutter="16">
           <el-col v-if="isPhysicalBackupTaskForm" :span="12">
             <el-form-item label="备份引擎">
               <el-select v-model="backupTaskForm.backupEngine" style="width: 100%;">
@@ -5766,13 +5820,41 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="6">
-            <el-form-item label="Dry Run">
-              <el-switch v-model="runnerToolScriptForm.dryRun" active-text="是" inactive-text="否" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="工具 Profile">
+	          <el-col :span="6">
+	            <el-form-item label="Dry Run">
+	              <el-switch v-model="runnerToolScriptForm.dryRun" active-text="是" inactive-text="否" />
+	            </el-form-item>
+	          </el-col>
+	        </el-row>
+	        <el-row :gutter="16">
+	          <el-col :span="6">
+	            <el-form-item label="执行模式">
+	              <el-select v-model="runnerToolScriptForm.executionMode" style="width: 100%;">
+	                <el-option label="宿主机安装" value="host_tools" />
+	                <el-option label="容器化工具" value="container_tools" />
+	              </el-select>
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="工具镜像">
+	              <el-input v-model="runnerToolScriptForm.toolImage" :disabled="runnerToolScriptForm.executionMode !== 'container_tools'" placeholder="opshub-runner-tools:mysql80" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="datadir挂载">
+	              <el-input v-model="runnerToolScriptForm.datadirMount" :disabled="runnerToolScriptForm.executionMode !== 'container_tools'" placeholder="/var/lib/mysql" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="网络/只读">
+	              <div class="inline-control-row">
+	                <el-input v-model="runnerToolScriptForm.networkMode" :disabled="runnerToolScriptForm.executionMode !== 'container_tools'" placeholder="host" />
+	                <el-switch v-model="runnerToolScriptForm.readOnlyDatadir" :disabled="runnerToolScriptForm.executionMode !== 'container_tools'" active-text="RO" inactive-text="RW" />
+	              </div>
+	            </el-form-item>
+	          </el-col>
+	        </el-row>
+	        <el-form-item label="工具 Profile">
           <el-select v-model="runnerToolScriptForm.profiles" multiple filterable style="width: 100%;">
             <el-option label="MySQL 8.0 物理备份（XtraBackup 8.0）" value="mysql_80_physical" />
             <el-option label="MySQL 8.4 物理备份（XtraBackup 8.4）" value="mysql_84_physical" />
@@ -6119,13 +6201,78 @@
         :closable="false"
         class="backup-dialog-alert"
       />
-      <el-descriptions :column="2" border class="backup-detail-descriptions">
-        <el-descriptions-item label="Runner">{{ runnerAgentConfigHost?.name || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="Runner ID">{{ runnerAgentConfigHost ? runnerAgentIDForHost(runnerAgentConfigHost) : '-' }}</el-descriptions-item>
-      </el-descriptions>
-      <div class="runner-config-section">
-        <div class="runner-config-title">
-          <span>Runner 主机 configJson</span>
+	      <el-descriptions :column="2" border class="backup-detail-descriptions">
+	        <el-descriptions-item label="Runner">{{ runnerAgentConfigHost?.name || '-' }}</el-descriptions-item>
+	        <el-descriptions-item label="Runner ID">{{ runnerAgentConfigHost ? runnerAgentIDForHost(runnerAgentConfigHost) : '-' }}</el-descriptions-item>
+	      </el-descriptions>
+	      <el-form label-width="120px" class="runner-config-section">
+	        <el-row :gutter="16">
+	          <el-col :span="12">
+	            <el-form-item label="OpsHub地址">
+	              <el-input v-model="runnerAgentLifecycleForm.serverUrl" placeholder="Runner 可访问的 OpsHub 地址，如 http://192.168.1.12:8080" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="安装目录">
+	              <el-input v-model="runnerAgentLifecycleForm.installPath" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="服务名">
+	              <el-input v-model="runnerAgentLifecycleForm.serviceName" />
+	            </el-form-item>
+	          </el-col>
+	        </el-row>
+	        <el-row :gutter="16">
+	          <el-col :span="6">
+	            <el-form-item label="监听地址">
+	              <el-input v-model="runnerAgentLifecycleForm.listenAddr" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="上报间隔">
+	              <el-input-number v-model="runnerAgentLifecycleForm.intervalSeconds" :min="5" :max="3600" controls-position="right" style="width: 100%;" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="归档器">
+	              <el-switch v-model="runnerAgentLifecycleForm.databaseArchiverEnabled" active-text="启用" inactive-text="关闭" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="Dry Run">
+	              <el-switch v-model="runnerAgentLifecycleForm.dryRun" active-text="是" inactive-text="否" />
+	            </el-form-item>
+	          </el-col>
+	        </el-row>
+	        <el-row :gutter="16">
+	          <el-col :span="12">
+	            <el-form-item label="操作原因">
+	              <el-input v-model="runnerAgentLifecycleForm.reason" placeholder="安装/升级/重启时必填" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="重置认证">
+	              <el-switch v-model="runnerAgentLifecycleForm.regenerateAuth" active-text="是" inactive-text="否" />
+	            </el-form-item>
+	          </el-col>
+	          <el-col :span="6">
+	            <el-form-item label="执行确认">
+	              <el-checkbox v-model="runnerAgentLifecycleForm.confirm">确认执行</el-checkbox>
+	            </el-form-item>
+	          </el-col>
+	        </el-row>
+	      </el-form>
+	      <div class="runner-tool-script-actions">
+	        <el-button type="primary" :loading="runnerAgentLifecycleLoading" @click="handleGenerateRunnerAgentConfig">生成配置</el-button>
+	        <el-button type="success" plain :loading="runnerAgentLifecycleLoading" @click="handleRunnerAgentLifecycle('install')">安装 Agent</el-button>
+	        <el-button type="warning" plain :loading="runnerAgentLifecycleLoading" @click="handleRunnerAgentLifecycle('upgrade')">升级 Agent</el-button>
+	        <el-button type="info" plain :loading="runnerAgentLifecycleLoading" @click="handleRunnerAgentLifecycle('restart')">重启 Agent</el-button>
+	        <el-button :loading="runnerAgentLogsLoading" @click="handleFetchRunnerAgentLogs">查看日志</el-button>
+	      </div>
+	      <div class="runner-config-section">
+	        <div class="runner-config-title">
+	          <span>Runner 主机 configJson</span>
           <el-button size="small" @click="copyText(JSON.stringify({ runnerAuthSha256: runnerAgentAuthSha256 }, null, 2), 'runnerAuthSha256')">复制</el-button>
         </div>
         <el-input
@@ -6139,9 +6286,16 @@
         <div class="runner-config-title">
           <span>Agent 本地配置片段</span>
           <el-button size="small" @click="copyText(runnerAgentConfigJson, 'Agent 配置')">复制</el-button>
-        </div>
-        <el-input v-model="runnerAgentConfigJson" type="textarea" :rows="16" readonly />
-      </div>
+	        </div>
+	        <el-input v-model="runnerAgentConfigJson" type="textarea" :rows="16" readonly />
+	      </div>
+	      <div v-if="runnerAgentLogs" class="runner-config-section">
+	        <div class="runner-config-title">
+	          <span>最近 Agent 日志</span>
+	          <el-button size="small" @click="copyText(`${runnerAgentLogs.stdout || ''}\n${runnerAgentLogs.stderr || ''}`, 'Agent 日志')">复制</el-button>
+	        </div>
+	        <el-input :model-value="`${runnerAgentLogs.stdout || ''}\n${runnerAgentLogs.stderr || ''}`" type="textarea" :rows="10" readonly />
+	      </div>
       <template #footer>
         <el-button @click="runnerAgentConfigDialogVisible = false">关闭</el-button>
       </template>
@@ -6550,9 +6704,12 @@ import {
   executeDatabaseQuery,
   executeDatabaseWriteQuery,
   explainDatabaseWriteQuery,
-  generateDatabaseInspectionReport,
-  generateDatabaseRunnerToolInstallScript,
-  installDatabaseRunnerTools,
+	  generateDatabaseInspectionReport,
+	  generateDatabaseRunnerAgentConfigSnippet,
+	  generateDatabaseRunnerToolInstallScript,
+	  getDatabaseRunnerAgentLogs,
+	  installDatabaseRunnerTools,
+	  installDatabaseRunnerAgent,
   previewDatabaseBackupPolicyPurge,
   previewDatabaseBackupPolicySyntheticFull,
   getDatabaseCapacityTrend,
@@ -6605,7 +6762,8 @@ import {
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
   resumeDatabaseLogArchiveStream,
-  resumeDatabaseReplicaApply,
+	  resumeDatabaseReplicaApply,
+	  restartDatabaseRunnerAgent,
   runDatabaseBackupPolicyPurge,
   runDatabaseBackupPolicySyntheticFull,
   runDatabaseBackupPolicyFull,
@@ -6626,7 +6784,8 @@ import {
   updateDatabaseBackupTask,
   updateDatabaseBarmanServer,
   updateDatabaseInstance,
-  updateDatabaseRunnerHost,
+	  updateDatabaseRunnerHost,
+	  upgradeDatabaseRunnerAgent,
   uploadDatabaseRunnerToolOfflinePackage,
   upsertDatabaseInstancePermission,
   validateDatabaseBackupPolicyChain,
@@ -6675,8 +6834,11 @@ import {
   type DatabaseRunLogArchiveCatchUpPayload,
   type DatabaseRunLogArchiveOncePayload,
   type DatabaseRunnerHostPayload,
-  type DatabaseRunnerHostResult,
-  type DatabaseRunnerJobResult,
+	  type DatabaseRunnerHostResult,
+	  type DatabaseRunnerAgentConfigSnippetResult,
+	  type DatabaseRunnerAgentLifecyclePayload,
+	  type DatabaseRunnerAgentLogsResult,
+	  type DatabaseRunnerJobResult,
   type DatabaseRunnerToolInstallPayload,
   type DatabaseRunnerToolInstallScriptPayload,
   type DatabaseRunnerToolInstallScriptResult,
@@ -7038,9 +7200,23 @@ const runnerHosts = ref<DatabaseRunnerHostResult[]>([])
 const runnerHostTotal = ref(0)
 const runnerAgentConfigDialogVisible = ref(false)
 const runnerAgentConfigHost = ref<DatabaseRunnerHostResult>()
-const runnerAgentPlainAuth = ref('')
 const runnerAgentAuthSha256 = ref('')
 const runnerAgentConfigJson = ref('')
+const runnerAgentLifecycleLoading = ref(false)
+const runnerAgentLogsLoading = ref(false)
+const runnerAgentLogs = ref<DatabaseRunnerAgentLogsResult>()
+const runnerAgentLifecycleForm = reactive<DatabaseRunnerAgentLifecyclePayload>({
+  serverUrl: '',
+  installPath: '/opt/opshub-agent',
+  serviceName: '',
+  listenAddr: '0.0.0.0:19100',
+  intervalSeconds: 60,
+  databaseArchiverEnabled: true,
+  dryRun: false,
+  regenerateAuth: false,
+  confirm: false,
+  reason: ''
+})
 const runnerJobLoading = ref(false)
 const runnerJobs = ref<DatabaseRunnerJobResult[]>([])
 const runnerJobTotal = ref(0)
@@ -7429,6 +7605,13 @@ const backupPolicyForm = reactive<DatabaseBackupPolicyPayload & { id?: number }>
   sourceRole: 'primary',
   name: '',
   backupEngine: 'xtrabackup_8_0',
+  toolExecutionMode: 'host_tools',
+  toolImage: '',
+  toolImageDigest: '',
+  containerDatadirPath: '',
+  containerWorkdirPath: '',
+  containerNetworkMode: 'host',
+  containerDatadirRo: true,
   runnerHostId: 0,
   storageProfileId: undefined,
   secretProfileId: undefined,
@@ -7612,6 +7795,13 @@ const runnerHostForm = reactive<DatabaseRunnerHostPayload & { id?: number }>({
 const runnerToolScriptForm = reactive({
   profiles: ['mysql_80_physical', 'mysql_binlog_archiver', 'postgres_barman', 'postgres_native_pg_basebackup', 'restore_runner'] as string[],
   installMode: 'online',
+  executionMode: 'host_tools',
+  toolImage: '',
+  toolImageDigest: '',
+  datadirMount: '',
+  workdirMount: '',
+  networkMode: 'host',
+  readOnlyDatadir: true,
   dryRun: true,
   mysqlVersion: '',
   postgresqlVersion: '',
@@ -9577,6 +9767,13 @@ const resetBackupPolicyForm = () => {
   backupPolicyForm.sourceRole = 'primary'
   backupPolicyForm.name = ''
   backupPolicyForm.backupEngine = defaultPhysicalBackupPolicyEngine()
+  backupPolicyForm.toolExecutionMode = 'host_tools'
+  backupPolicyForm.toolImage = ''
+  backupPolicyForm.toolImageDigest = ''
+  backupPolicyForm.containerDatadirPath = ''
+  backupPolicyForm.containerWorkdirPath = ''
+  backupPolicyForm.containerNetworkMode = 'host'
+  backupPolicyForm.containerDatadirRo = true
   backupPolicyForm.runnerHostId = runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id || runnerHosts.value.find(item => item.enabled)?.id || 0
   backupPolicyForm.storageProfileId = undefined
   backupPolicyForm.secretProfileId = undefined
@@ -9885,6 +10082,13 @@ const openBackupPolicyDialog = async (row?: DatabaseBackupPolicyResult) => {
     backupPolicyForm.sourceRole = row.sourceRole || 'primary'
     backupPolicyForm.name = row.name || ''
     backupPolicyForm.backupEngine = row.backupEngine || defaultPhysicalBackupPolicyEngine()
+    backupPolicyForm.toolExecutionMode = row.toolExecutionMode || 'host_tools'
+    backupPolicyForm.toolImage = row.toolImage || ''
+    backupPolicyForm.toolImageDigest = row.toolImageDigest || ''
+    backupPolicyForm.containerDatadirPath = row.containerDatadirPath || ''
+    backupPolicyForm.containerWorkdirPath = row.containerWorkdirPath || ''
+    backupPolicyForm.containerNetworkMode = row.containerNetworkMode || 'host'
+    backupPolicyForm.containerDatadirRo = row.containerDatadirRo !== false
     backupPolicyForm.runnerHostId = row.runnerHostId || 0
     backupPolicyForm.storageProfileId = row.storageProfileId || undefined
     backupPolicyForm.secretProfileId = row.secretProfileId || undefined
@@ -9913,6 +10117,13 @@ const submitBackupPolicyForm = async () => {
       sourceRole: backupPolicyForm.sourceRole || 'primary',
       name: backupPolicyForm.name.trim(),
       backupEngine: backupPolicyForm.backupEngine || defaultPhysicalBackupPolicyEngine(),
+      toolExecutionMode: backupPolicyForm.toolExecutionMode || 'host_tools',
+      toolImage: backupPolicyForm.toolImage?.trim() || '',
+      toolImageDigest: backupPolicyForm.toolImageDigest?.trim() || '',
+      containerDatadirPath: backupPolicyForm.containerDatadirPath?.trim() || '',
+      containerWorkdirPath: backupPolicyForm.containerWorkdirPath?.trim() || '',
+      containerNetworkMode: backupPolicyForm.containerNetworkMode?.trim() || 'host',
+      containerDatadirRo: backupPolicyForm.containerDatadirRo !== false,
       runnerHostId: backupPolicyForm.runnerHostId,
       storageProfileId: backupPolicyForm.storageProfileId || undefined,
       secretProfileId: backupPolicyForm.secretProfileId || undefined,
@@ -10815,6 +11026,13 @@ const openRunnerToolInstallScriptDialog = async (row: DatabaseRunnerHostResult) 
   runnerToolScriptResult.value = undefined
   runnerToolScriptForm.profiles = ['mysql_80_physical', 'mysql_binlog_archiver', 'postgres_barman', 'postgres_native_pg_basebackup', 'restore_runner']
   runnerToolScriptForm.installMode = 'online'
+  runnerToolScriptForm.executionMode = 'host_tools'
+  runnerToolScriptForm.toolImage = ''
+  runnerToolScriptForm.toolImageDigest = ''
+  runnerToolScriptForm.datadirMount = ''
+  runnerToolScriptForm.workdirMount = ''
+  runnerToolScriptForm.networkMode = 'host'
+  runnerToolScriptForm.readOnlyDatadir = true
   runnerToolScriptForm.dryRun = true
   runnerToolScriptForm.mysqlVersion = ''
   runnerToolScriptForm.postgresqlVersion = ''
@@ -10837,10 +11055,17 @@ const handleGenerateRunnerToolScript = async () => {
     const targetDbVersions: Record<string, string> = {}
     if (runnerToolScriptForm.mysqlVersion.trim()) targetDbVersions.mysql = runnerToolScriptForm.mysqlVersion.trim()
     if (runnerToolScriptForm.postgresqlVersion.trim()) targetDbVersions.postgresql = runnerToolScriptForm.postgresqlVersion.trim()
-    const payload: DatabaseRunnerToolInstallScriptPayload = {
-      profiles: runnerToolScriptForm.profiles,
-      installMode: runnerToolScriptForm.installMode,
-      dryRun: runnerToolScriptForm.dryRun,
+	    const payload: DatabaseRunnerToolInstallScriptPayload = {
+	      profiles: runnerToolScriptForm.profiles,
+	      installMode: runnerToolScriptForm.installMode,
+	      executionMode: runnerToolScriptForm.executionMode,
+	      toolImage: runnerToolScriptForm.toolImage.trim(),
+	      toolImageDigest: runnerToolScriptForm.toolImageDigest.trim(),
+	      datadirMount: runnerToolScriptForm.datadirMount.trim(),
+	      workdirMount: runnerToolScriptForm.workdirMount.trim(),
+	      networkMode: runnerToolScriptForm.networkMode.trim() || 'host',
+	      readOnlyDatadir: runnerToolScriptForm.readOnlyDatadir,
+	      dryRun: runnerToolScriptForm.dryRun,
       targetDbVersions
     }
     const res: any = await generateDatabaseRunnerToolInstallScript(runnerToolScriptHost.value.id, payload)
@@ -10857,10 +11082,14 @@ const handleInstallRunnerTools = async () => {
     ElMessage.warning('请至少选择一个工具 Profile')
     return
   }
-  if (runnerToolScriptForm.installMode === 'offline' && !runnerToolScriptForm.offlinePackageId) {
-    ElMessage.warning('离线安装需要选择离线包')
-    return
-  }
+	  if (runnerToolScriptForm.executionMode !== 'container_tools' && runnerToolScriptForm.installMode === 'offline' && !runnerToolScriptForm.offlinePackageId) {
+	    ElMessage.warning('离线安装需要选择离线包')
+	    return
+	  }
+	  if (runnerToolScriptForm.executionMode === 'container_tools' && !runnerToolScriptForm.toolImage.trim()) {
+	    ElMessage.warning('容器化工具模式需要填写工具镜像')
+	    return
+	  }
   if (!runnerToolScriptForm.reason.trim()) {
     ElMessage.warning('请填写安装原因')
     return
@@ -10879,10 +11108,17 @@ const handleInstallRunnerTools = async () => {
     const targetDbVersions: Record<string, string> = {}
     if (runnerToolScriptForm.mysqlVersion.trim()) targetDbVersions.mysql = runnerToolScriptForm.mysqlVersion.trim()
     if (runnerToolScriptForm.postgresqlVersion.trim()) targetDbVersions.postgresql = runnerToolScriptForm.postgresqlVersion.trim()
-    const payload: DatabaseRunnerToolInstallPayload = {
-      profiles: runnerToolScriptForm.profiles,
-      installMode: runnerToolScriptForm.installMode,
-      dryRun: runnerToolScriptForm.dryRun,
+	    const payload: DatabaseRunnerToolInstallPayload = {
+	      profiles: runnerToolScriptForm.profiles,
+	      installMode: runnerToolScriptForm.installMode,
+	      executionMode: runnerToolScriptForm.executionMode,
+	      toolImage: runnerToolScriptForm.toolImage.trim(),
+	      toolImageDigest: runnerToolScriptForm.toolImageDigest.trim(),
+	      datadirMount: runnerToolScriptForm.datadirMount.trim(),
+	      workdirMount: runnerToolScriptForm.workdirMount.trim(),
+	      networkMode: runnerToolScriptForm.networkMode.trim() || 'host',
+	      readOnlyDatadir: runnerToolScriptForm.readOnlyDatadir,
+	      dryRun: runnerToolScriptForm.dryRun,
       targetDbVersions,
       confirmInstall: runnerToolScriptForm.confirmInstall,
       confirmPackages: runnerToolScriptForm.confirmPackages,
@@ -11106,151 +11342,95 @@ const handleDeleteBarmanServer = async (row: DatabaseBarmanServerResult) => {
 
 const runnerAgentIDForHost = (row: DatabaseRunnerHostResult) => `runner-host-${row.id}`
 
-const generateRunnerAgentAuth = () => {
-  const bytes = new Uint8Array(32)
-  window.crypto.getRandomValues(bytes)
-  return Array.from(bytes).map(value => value.toString(16).padStart(2, '0')).join('')
-}
-
-const sha256Hex = async (value: string) => {
-  if (!window.crypto?.subtle) {
-    return sha256HexFallback(value)
-  }
-  const data = new TextEncoder().encode(value)
-  const digest = await window.crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(digest)).map(item => item.toString(16).padStart(2, '0')).join('')
-}
-
-const sha256HexFallback = (value: string) => {
-  const bytes = new TextEncoder().encode(value)
-  const words: number[] = []
-  for (let i = 0; i < bytes.length; i += 1) {
-    words[i >> 2] = (words[i >> 2] || 0) | ((bytes[i] || 0) << (24 - (i % 4) * 8))
-  }
-  words[bytes.length >> 2] = (words[bytes.length >> 2] || 0) | (0x80 << (24 - (bytes.length % 4) * 8))
-  words[(((bytes.length + 8) >> 6) << 4) + 15] = bytes.length * 8
-  const constants: number[] = Array.from({ length: 64 }, (_, i) => {
-    let count = 0
-    for (let n = 2; ; n += 1) {
-      let prime = true
-      for (let d = 2; d * d <= n; d += 1) {
-        if (n % d === 0) {
-          prime = false
-          break
-        }
-      }
-      if (prime) {
-        if (count === i) return Math.floor((Math.cbrt(n) % 1) * 0x100000000) >>> 0
-        count += 1
-      }
-    }
-  })
-  const hash = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
-  const rightRotate = (x: number, n: number) => (x >>> n) | (x << (32 - n))
-  for (let i = 0; i < words.length; i += 16) {
-    const w = words.slice(i, i + 16)
-    for (let j = 16; j < 64; j += 1) {
-      const s0 = rightRotate(w[j - 15] || 0, 7) ^ rightRotate(w[j - 15] || 0, 18) ^ ((w[j - 15] || 0) >>> 3)
-      const s1 = rightRotate(w[j - 2] || 0, 17) ^ rightRotate(w[j - 2] || 0, 19) ^ ((w[j - 2] || 0) >>> 10)
-      w[j] = (((w[j - 16] || 0) + s0 + (w[j - 7] || 0) + s1) >>> 0)
-    }
-    let a = hash[0] || 0
-    let b = hash[1] || 0
-    let c = hash[2] || 0
-    let d = hash[3] || 0
-    let e = hash[4] || 0
-    let f = hash[5] || 0
-    let g = hash[6] || 0
-    let h = hash[7] || 0
-    for (let j = 0; j < 64; j += 1) {
-      const s1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25)
-      const ch = (e & f) ^ (~e & g)
-      const temp1 = (h + s1 + ch + (constants[j] || 0) + (w[j] || 0)) >>> 0
-      const s0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22)
-      const maj = (a & b) ^ (a & c) ^ (b & c)
-      const temp2 = (s0 + maj) >>> 0
-      h = g
-      g = f
-      f = e
-      e = (d + temp1) >>> 0
-      d = c
-      c = b
-      b = a
-      a = (temp1 + temp2) >>> 0
-    }
-    ;[a, b, c, d, e, f, g, h].forEach((item, index) => {
-      hash[index] = ((hash[index] || 0) + item) >>> 0
-    })
-  }
-  return hash.map(item => item.toString(16).padStart(8, '0')).join('')
-}
-
-const buildRunnerAgentConfig = (row: DatabaseRunnerHostResult, auth: string) => {
-  const assignedStreams = logArchiveStreams.value.filter(item => item.runnerHostId === row.id)
-  const credentials = assignedStreams.map(stream => {
-    const sourceID = stream.sourceInstanceId || stream.instanceId
-    const instance = instanceOptions.value.find(item => item.id === sourceID)
-    return {
-      streamId: stream.id,
-      instanceId: sourceID,
-      host: instance?.host || '',
-      port: instance?.port || 3306,
-      username: '<mysql_replication_user>',
-      password: '<local_secret>'
-    }
-  })
-  return JSON.stringify({
-    databaseArchiver: {
-      enabled: true,
-      baseUrl: window.location.origin,
-      runnerId: runnerAgentIDForHost(row),
-      runnerAuth: auth,
-      intervalSeconds: 30,
-      leaseTtlSeconds: 90,
-      maxFilesPerLoop: 5,
-      maxConcurrentStreams: 2,
-      failureBackoffSeconds: 30,
-      maxFailureBackoffSeconds: 300,
-      stopNeverEnabled: true,
-      spoolResumeEnabled: false,
-      uploadRetryEnabled: true,
-      uploadRetryBaseSeconds: 60,
-      uploadRetryMaxSeconds: 3600,
-      uploadRetryMaxAttempts: 0,
-      uploadBandwidthBytesPerSecond: 0,
-      streamingLogMaxBytes: 10485760,
-      streamingLogMaxFiles: 5,
-      includeCurrent: false,
-      workDir: row.workDir || '/var/lib/opshub-agent',
-      storageRoot: row.storageMountPath || '/var/lib/opshub-agent/database-archives',
-      storage: {
-        type: 'local',
-        endpoint: 'http://192.168.1.30:9000',
-        bucket: 'opshub-backup',
-        region: 'us-east-1',
-        pathPrefix: 'opshub/database-archives',
-        stagingPrefix: 'opshub/database-archives/.staging',
-        accessKey: '<minio_or_s3_access_key>',
-        secretKey: '<local_secret>',
-        useSsl: false,
-        usePathStyle: true,
-        insecureSkipVerify: false
-      },
-      mysqlBinlogPath: '',
-      credentials
-    }
-  }, null, 2)
-}
-
 const openRunnerAgentConfigDialog = async (row: DatabaseRunnerHostResult) => {
   if (!logArchiveStreams.value.length) {
     await loadLogArchiveStreams()
   }
   runnerAgentConfigHost.value = row
-  runnerAgentPlainAuth.value = generateRunnerAgentAuth()
-  runnerAgentAuthSha256.value = await sha256Hex(runnerAgentPlainAuth.value)
-  runnerAgentConfigJson.value = buildRunnerAgentConfig(row, runnerAgentPlainAuth.value)
+  runnerAgentAuthSha256.value = ''
+  runnerAgentConfigJson.value = ''
+  runnerAgentLogs.value = undefined
+  runnerAgentLifecycleForm.serverUrl = window.location.origin
+  runnerAgentLifecycleForm.installPath = '/opt/opshub-agent'
+  runnerAgentLifecycleForm.serviceName = `opshub-agent-runner-${row.id}`
+  runnerAgentLifecycleForm.listenAddr = '0.0.0.0:19100'
+  runnerAgentLifecycleForm.intervalSeconds = 60
+  runnerAgentLifecycleForm.databaseArchiverEnabled = true
+  runnerAgentLifecycleForm.dryRun = false
+  runnerAgentLifecycleForm.regenerateAuth = false
+  runnerAgentLifecycleForm.confirm = false
+  runnerAgentLifecycleForm.reason = ''
   runnerAgentConfigDialogVisible.value = true
+}
+
+const runnerAgentLifecyclePayload = (): DatabaseRunnerAgentLifecyclePayload => ({
+  serverUrl: (runnerAgentLifecycleForm.serverUrl || '').trim(),
+  installPath: (runnerAgentLifecycleForm.installPath || '').trim(),
+  serviceName: (runnerAgentLifecycleForm.serviceName || '').trim(),
+  listenAddr: (runnerAgentLifecycleForm.listenAddr || '').trim(),
+  intervalSeconds: Number(runnerAgentLifecycleForm.intervalSeconds || 60),
+  databaseArchiverEnabled: runnerAgentLifecycleForm.databaseArchiverEnabled === true,
+  dryRun: runnerAgentLifecycleForm.dryRun === true,
+  regenerateAuth: runnerAgentLifecycleForm.regenerateAuth === true,
+  confirm: runnerAgentLifecycleForm.confirm === true,
+  reason: (runnerAgentLifecycleForm.reason || '').trim()
+})
+
+const handleGenerateRunnerAgentConfig = async () => {
+  if (!runnerAgentConfigHost.value?.id) return
+  runnerAgentLifecycleLoading.value = true
+  try {
+    const res = await generateDatabaseRunnerAgentConfigSnippet(runnerAgentConfigHost.value.id, runnerAgentLifecyclePayload()) as DatabaseRunnerAgentConfigSnippetResult
+    runnerAgentAuthSha256.value = res.runnerAuthSha256 || ''
+    runnerAgentConfigJson.value = res.configJson || ''
+    ElMessage.success(res.message || 'Runner Agent 配置已生成')
+    await loadRunnerHosts()
+  } finally {
+    runnerAgentLifecycleLoading.value = false
+  }
+}
+
+const handleRunnerAgentLifecycle = async (action: 'install' | 'upgrade' | 'restart') => {
+  if (!runnerAgentConfigHost.value?.id) return
+  const actionText = action === 'install' ? '安装' : action === 'upgrade' ? '升级' : '重启'
+  const payload = runnerAgentLifecyclePayload()
+  if (!payload.reason) {
+    ElMessage.warning('请填写操作原因')
+    return
+  }
+  if (!payload.confirm) {
+    ElMessage.warning('请勾选执行确认')
+    return
+  }
+  await ElMessageBox.confirm(`确认${actionText} Runner「${runnerAgentConfigHost.value.name}」上的 OpsHub Agent？`, `Runner Agent ${actionText}`, {
+    type: 'warning',
+    confirmButtonText: '确认执行',
+    cancelButtonText: '取消'
+  })
+  runnerAgentLifecycleLoading.value = true
+  try {
+    if (action === 'install') {
+      await installDatabaseRunnerAgent(runnerAgentConfigHost.value.id, payload)
+    } else if (action === 'upgrade') {
+      await upgradeDatabaseRunnerAgent(runnerAgentConfigHost.value.id, payload)
+    } else {
+      await restartDatabaseRunnerAgent(runnerAgentConfigHost.value.id, payload)
+    }
+    ElMessage.success(`Runner Agent ${actionText}任务已下发`)
+    await Promise.all([loadRunnerHosts(), loadRunnerJobs()])
+  } finally {
+    runnerAgentLifecycleLoading.value = false
+  }
+}
+
+const handleFetchRunnerAgentLogs = async () => {
+  if (!runnerAgentConfigHost.value?.id) return
+  runnerAgentLogsLoading.value = true
+  try {
+    runnerAgentLogs.value = await getDatabaseRunnerAgentLogs(runnerAgentConfigHost.value.id, { lines: 300 }) as DatabaseRunnerAgentLogsResult
+  } finally {
+    runnerAgentLogsLoading.value = false
+  }
 }
 
 const copyText = async (value: string, label: string) => {
@@ -14672,6 +14852,18 @@ onBeforeUnmount(() => {
 
 .pitr-wal-stream-empty {
   padding: 24px 0;
+}
+
+.inline-control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.inline-control-row .el-input {
+  flex: 1;
+  min-width: 0;
 }
 
 @media (max-width: 900px) {

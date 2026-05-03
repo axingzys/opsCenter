@@ -393,6 +393,11 @@ func (uc *UseCase) runMySQLPhysicalBackupPolicyCommand(ctx context.Context, poli
 func buildMySQLPhysicalBackupPolicyScript(policy *DatabaseBackupPolicyConfig, record *DatabaseBackupRecord, parentArtifactPath string, instance *DatabaseInstance, host *DatabaseRunnerHost, credential *ConnectionCredential) string {
 	workRoot := firstNonEmpty(host.StorageMountPath, host.WorkDir, defaultRunnerWorkDir)
 	toolName := mysqlPhysicalBackupToolName(policy.BackupEngine, policy.Engine)
+	containerOpts := backupPolicyContainerToolOptions(policy, host)
+	toolExecutionMode := DatabaseToolExecutionModeHost
+	if containerOpts.Enabled {
+		toolExecutionMode = DatabaseToolExecutionModeContainer
+	}
 	lines := []string{
 		"set -eu",
 		"WORK_ROOT=" + shellSingleQuote(workRoot),
@@ -401,6 +406,7 @@ func buildMySQLPhysicalBackupPolicyScript(policy *DatabaseBackupPolicyConfig, re
 		fmt.Sprintf("RUNNER_HOST_ID=%d", host.ID),
 		"BACKUP_LEVEL=" + shellSingleQuote(record.BackupLevel),
 		"TOOL_NAME=" + shellSingleQuote(toolName),
+		"TOOL_EXECUTION_MODE=" + shellSingleQuote(toolExecutionMode),
 		"DB_HOST_VALUE=" + shellSingleQuote(instance.Host),
 		fmt.Sprintf("DB_PORT_VALUE=%d", instance.Port),
 		"DB_USER_VALUE=" + shellSingleQuote(credential.Username),
@@ -418,18 +424,29 @@ func buildMySQLPhysicalBackupPolicyScript(policy *DatabaseBackupPolicyConfig, re
 		`step() { printf 'OPSHUB_RESTORE_STEP=%s|%s|%s\n' "$1" "$2" "$(date '+%Y-%m-%d %H:%M:%S')"; printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> "$LOG_FILE"; }`,
 		`fail_step() { step "$1" "failed"; echo "$2" >> "$LOG_FILE"; exit 1; }`,
 		`TOOL_PATH="$(command -v "$TOOL_NAME" || true)"`,
-		`if [ -z "$TOOL_PATH" ]; then fail_step "tool_check" "$TOOL_NAME not found"; fi`,
 		`printf 'OPSHUB_WORK_DIR=%s\n' "$WORK_DIR"`,
 		`printf 'OPSHUB_FILE_PATH=%s\n' "$ARTIFACT"`,
 		`printf 'OPSHUB_FILE_NAME=%s\n' "$FILE_NAME"`,
 		`printf 'OPSHUB_LOG_PATH=%s\n' "$LOG_FILE"`,
 		`printf 'OPSHUB_TOOL_NAME=%s\n' "$TOOL_NAME"`,
-		`printf 'OPSHUB_TOOL_VERSION=%s\n' "$("$TOOL_PATH" --version 2>/dev/null | head -n 1)"`,
 		`rm -rf "$TARGET_DIR" "$PARENT_DIR" "$ARTIFACT"`,
 		`mkdir -p "$TARGET_DIR"`,
 		`{ printf '[client]\n'; printf 'user=%s\n' "$DB_USER_VALUE"; printf 'password=%s\n' "$DB_PASSWORD_VALUE"; printf 'host=%s\n' "$DB_HOST_VALUE"; printf 'port=%s\n' "$DB_PORT_VALUE"; } > "$MYSQL_CNF"`,
 		`chmod 600 "$MYSQL_CNF"`,
 		`trap 'rm -f "$MYSQL_CNF"' EXIT`,
+		`if [ "$TOOL_EXECUTION_MODE" = "container_tools" ]; then`,
+	}
+	appendContainerToolShellPrelude(&lines, containerOpts, true)
+	lines = append(lines,
+		`  CONTAINER_BASE_ARGS="--rm --network $CONTAINER_NETWORK_MODE -v $WORK_DIR:/work -v $CONTAINER_DATADIR:/var/lib/mysql:$CONTAINER_DATADIR_MODE"`,
+		`  TOOL_VERSION="$($DOCKER_BIN run $CONTAINER_BASE_ARGS "$CONTAINER_TOOL_IMAGE" sh -lc "$TOOL_NAME --version 2>/dev/null | head -n 1" 2>/dev/null || true)"`,
+		`  run_tool_backup() { cmd="$1"; $DOCKER_BIN run $CONTAINER_BASE_ARGS "$CONTAINER_TOOL_IMAGE" sh -lc "$cmd"; }`,
+		`else`,
+		`  if [ -z "$TOOL_PATH" ]; then fail_step "tool_check" "$TOOL_NAME not found"; fi`,
+		`  TOOL_VERSION="$("$TOOL_PATH" --version 2>/dev/null | head -n 1)"`,
+		`  run_tool_backup() { sh -lc "$1"; }`,
+		`fi`,
+		`printf 'OPSHUB_TOOL_VERSION=%s\n' "$TOOL_VERSION"`,
 		`step "physical_backup" "running"`,
 		`if [ "$BACKUP_LEVEL" = "incremental" ]; then`,
 		`  if [ -z "$PARENT_ARTIFACT" ] || [ ! -f "$PARENT_ARTIFACT" ]; then fail_step "prepare_parent" "parent artifact not found"; fi`,
@@ -438,9 +455,17 @@ func buildMySQLPhysicalBackupPolicyScript(policy *DatabaseBackupPolicyConfig, re
 		`  tar -xzf "$PARENT_ARTIFACT" -C "$PARENT_DIR" >> "$LOG_FILE" 2>&1 || fail_step "prepare_parent" "unpack parent artifact failed"`,
 		`  if [ ! -f "$PARENT_DIR/xtrabackup_checkpoints" ]; then fail_step "prepare_parent" "parent xtrabackup_checkpoints not found"; fi`,
 		`  step "prepare_parent" "success"`,
-		`  "$TOOL_PATH" --defaults-extra-file="$MYSQL_CNF" --backup --target-dir="$TARGET_DIR" --incremental-basedir="$PARENT_DIR" >> "$LOG_FILE" 2>&1 || fail_step "physical_backup" "incremental physical backup failed"`,
+		`  if [ "$TOOL_EXECUTION_MODE" = "container_tools" ]; then`,
+		`    run_tool_backup "$TOOL_NAME --defaults-extra-file=/work/mysql-client.cnf --backup --datadir=/var/lib/mysql --target-dir=/work/backup --incremental-basedir=/work/parent" >> "$LOG_FILE" 2>&1 || fail_step "physical_backup" "incremental physical backup failed"`,
+		`  else`,
+		`    "$TOOL_PATH" --defaults-extra-file="$MYSQL_CNF" --backup --target-dir="$TARGET_DIR" --incremental-basedir="$PARENT_DIR" >> "$LOG_FILE" 2>&1 || fail_step "physical_backup" "incremental physical backup failed"`,
+		`  fi`,
 		`else`,
-		`  "$TOOL_PATH" --defaults-extra-file="$MYSQL_CNF" --backup --target-dir="$TARGET_DIR" >> "$LOG_FILE" 2>&1 || fail_step "physical_backup" "full physical backup failed"`,
+		`  if [ "$TOOL_EXECUTION_MODE" = "container_tools" ]; then`,
+		`    run_tool_backup "$TOOL_NAME --defaults-extra-file=/work/mysql-client.cnf --backup --datadir=/var/lib/mysql --target-dir=/work/backup" >> "$LOG_FILE" 2>&1 || fail_step "physical_backup" "full physical backup failed"`,
+		`  else`,
+		`    "$TOOL_PATH" --defaults-extra-file="$MYSQL_CNF" --backup --target-dir="$TARGET_DIR" >> "$LOG_FILE" 2>&1 || fail_step "physical_backup" "full physical backup failed"`,
+		`  fi`,
 		`fi`,
 		`step "physical_backup" "success"`,
 		`step "package_backup" "running"`,
@@ -456,7 +481,7 @@ func buildMySQLPhysicalBackupPolicyScript(policy *DatabaseBackupPolicyConfig, re
 		`binlog_file=""; binlog_pos="0"; binlog_gtid=""; if [ -f "$binlog_info" ]; then binlog_file="$(awk 'NR==1 {print $1}' "$binlog_info")"; binlog_pos="$(awk 'NR==1 {print $2}' "$binlog_info")"; binlog_gtid="$(awk 'NR==1 {$1=""; $2=""; sub(/^[ \t]+/,""); print}' "$binlog_info")"; fi`,
 		`printf 'OPSHUB_FILE_SIZE=%s\n' "$size"`,
 		`printf 'OPSHUB_CHECKSUM_SHA256=%s\n' "$sha"`,
-		`printf 'OPSHUB_STORAGE_URI=runner://runner-host-` + strconv.Itoa(int(host.ID)) + `%s\n' "$ARTIFACT"`,
+		`printf 'OPSHUB_STORAGE_URI=runner://runner-host-`+strconv.Itoa(int(host.ID))+`%s\n' "$ARTIFACT"`,
 		`printf 'OPSHUB_CHECKPOINT_BACKUP_TYPE=%s\n' "$checkpoint_backup_type"`,
 		`printf 'OPSHUB_CHECKPOINT_FROM_LSN=%s\n' "$checkpoint_from_lsn"`,
 		`printf 'OPSHUB_CHECKPOINT_TO_LSN=%s\n' "$checkpoint_to_lsn"`,
@@ -466,7 +491,7 @@ func buildMySQLPhysicalBackupPolicyScript(policy *DatabaseBackupPolicyConfig, re
 		`printf 'OPSHUB_BACKUP_GTID_SET=%s\n' "$binlog_gtid"`,
 		`printf 'OPSHUB_PARENT_ARTIFACT_PATH=%s\n' "$PARENT_ARTIFACT"`,
 		`step "package_backup" "success"`,
-	}
+	)
 	return strings.Join(lines, "\n")
 }
 
@@ -690,6 +715,9 @@ func (uc *UseCase) validateBackupPolicyRequest(ctx context.Context, req *Databas
 	if err := validateBarmanRunnerHost(host); err != nil {
 		return err
 	}
+	if err := uc.validateBackupPolicyToolExecution(ctx, req, host); err != nil {
+		return err
+	}
 	if uc.credentialResolver == nil {
 		return fmt.Errorf("连接凭据解析器未配置")
 	}
@@ -748,6 +776,16 @@ func (uc *UseCase) applyBackupPolicyRequest(item *DatabaseBackupPolicyConfig, in
 	item.Name = trimText(strings.TrimSpace(req.Name), 120)
 	item.Engine = normalizeDBType(instance.DBType)
 	item.BackupEngine = engine
+	item.ToolExecutionMode = normalizeToolExecutionMode(req.ToolExecutionMode)
+	item.ToolImage = trimText(strings.TrimSpace(req.ToolImage), 255)
+	item.ToolImageDigest = trimText(strings.TrimSpace(req.ToolImageDigest), 255)
+	item.ContainerDatadirPath = trimText(strings.TrimSpace(req.ContainerDatadirPath), 500)
+	item.ContainerWorkdirPath = trimText(strings.TrimSpace(req.ContainerWorkdirPath), 500)
+	item.ContainerNetworkMode = trimText(normalizeContainerNetworkMode(req.ContainerNetworkMode), 60)
+	item.ContainerDatadirRO = true
+	if req.ContainerDatadirRO != nil {
+		item.ContainerDatadirRO = *req.ContainerDatadirRO
+	}
 	item.RunnerHostID = req.RunnerHostID
 	item.StorageProfileID = req.StorageProfileID
 	item.SecretProfileID = req.SecretProfileID
@@ -798,6 +836,44 @@ func validatePolicyIncrementalParent(policy *DatabaseBackupPolicyConfig, host *D
 	}
 	if _, err := resolveRunnerReadableArtifactPath(parent.StorageURI, parent.FilePath, host.ID); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (uc *UseCase) validateBackupPolicyToolExecution(ctx context.Context, req *DatabaseBackupPolicyRequest, host *DatabaseRunnerHost) error {
+	if req == nil {
+		return nil
+	}
+	mode := normalizeToolExecutionMode(req.ToolExecutionMode)
+	if mode == "host_tools" {
+		return nil
+	}
+	if host == nil {
+		return fmt.Errorf("Runner 主机不存在")
+	}
+	image := strings.TrimSpace(req.ToolImage)
+	if image == "" {
+		return fmt.Errorf("容器化工具模式必须填写工具镜像")
+	}
+	if err := validateContainerToolImage(image); err != nil {
+		return err
+	}
+	if err := validateContainerNetworkMode(req.ContainerNetworkMode); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.ContainerDatadirPath) == "" {
+		return fmt.Errorf("MySQL/MariaDB 容器化物理备份必须填写 Runner 宿主机 datadir 挂载路径")
+	}
+	if strings.TrimSpace(req.ContainerWorkdirPath) != "" && !strings.HasPrefix(strings.TrimSpace(req.ContainerWorkdirPath), "/") {
+		return fmt.Errorf("容器工作目录挂载路径必须是绝对路径")
+	}
+	if strings.TrimSpace(req.ContainerDatadirPath) != "" && !strings.HasPrefix(strings.TrimSpace(req.ContainerDatadirPath), "/") {
+		return fmt.Errorf("datadir 挂载路径必须是绝对路径")
+	}
+	if uc.runnerToolProfileRepo != nil {
+		if profile, err := uc.runnerToolProfileRepo.GetByRunnerHostID(ctx, host.ID); err == nil && profile != nil && !profile.HasDocker {
+			return fmt.Errorf("Runner 工具画像显示未安装 Docker，请先巡检/安装容器运行时后再选择容器化工具模式")
+		}
 	}
 	return nil
 }
@@ -1092,6 +1168,13 @@ func (uc *UseCase) toBackupPolicyVO(ctx context.Context, item *DatabaseBackupPol
 		Name:                 item.Name,
 		Engine:               item.Engine,
 		BackupEngine:         item.BackupEngine,
+		ToolExecutionMode:    normalizeToolExecutionMode(item.ToolExecutionMode),
+		ToolImage:            item.ToolImage,
+		ToolImageDigest:      item.ToolImageDigest,
+		ContainerDatadirPath: item.ContainerDatadirPath,
+		ContainerWorkdirPath: item.ContainerWorkdirPath,
+		ContainerNetworkMode: normalizeContainerNetworkMode(item.ContainerNetworkMode),
+		ContainerDatadirRO:   item.ContainerDatadirRO,
 		RunnerHostID:         item.RunnerHostID,
 		RunnerHostName:       runnerName,
 		StorageProfileID:     item.StorageProfileID,

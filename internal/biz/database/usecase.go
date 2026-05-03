@@ -450,6 +450,13 @@ type DatabaseBackupPolicyRequest struct {
 	SourceRole           string `json:"sourceRole" binding:"omitempty,max=40"`
 	Name                 string `json:"name" binding:"required,max=120"`
 	BackupEngine         string `json:"backupEngine" binding:"omitempty,max=60"`
+	ToolExecutionMode    string `json:"toolExecutionMode" binding:"omitempty,max=30"`
+	ToolImage            string `json:"toolImage" binding:"omitempty,max=255"`
+	ToolImageDigest      string `json:"toolImageDigest" binding:"omitempty,max=255"`
+	ContainerDatadirPath string `json:"containerDatadirPath" binding:"omitempty,max=500"`
+	ContainerWorkdirPath string `json:"containerWorkdirPath" binding:"omitempty,max=500"`
+	ContainerNetworkMode string `json:"containerNetworkMode" binding:"omitempty,max=60"`
+	ContainerDatadirRO   *bool  `json:"containerDatadirRo"`
 	RunnerHostID         uint   `json:"runnerHostId" binding:"required"`
 	StorageProfileID     uint   `json:"storageProfileId"`
 	SecretProfileID      uint   `json:"secretProfileId"`
@@ -937,6 +944,13 @@ type DatabaseBackupPolicyVO struct {
 	Name                 string                      `json:"name"`
 	Engine               string                      `json:"engine"`
 	BackupEngine         string                      `json:"backupEngine"`
+	ToolExecutionMode    string                      `json:"toolExecutionMode"`
+	ToolImage            string                      `json:"toolImage"`
+	ToolImageDigest      string                      `json:"toolImageDigest"`
+	ContainerDatadirPath string                      `json:"containerDatadirPath"`
+	ContainerWorkdirPath string                      `json:"containerWorkdirPath"`
+	ContainerNetworkMode string                      `json:"containerNetworkMode"`
+	ContainerDatadirRO   bool                        `json:"containerDatadirRo"`
 	RunnerHostID         uint                        `json:"runnerHostId"`
 	RunnerHostName       string                      `json:"runnerHostName"`
 	StorageProfileID     uint                        `json:"storageProfileId"`

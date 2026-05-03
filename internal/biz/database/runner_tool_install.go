@@ -30,6 +30,13 @@ type DatabaseRunnerToolInstallRequest struct {
 	Profiles         []string          `json:"profiles"`
 	TargetDBVersions map[string]string `json:"targetDbVersions"`
 	InstallMode      string            `json:"installMode"`
+	ExecutionMode    string            `json:"executionMode"`
+	ToolImage        string            `json:"toolImage"`
+	ToolImageDigest  string            `json:"toolImageDigest"`
+	DatadirMount     string            `json:"datadirMount"`
+	WorkdirMount     string            `json:"workdirMount"`
+	NetworkMode      string            `json:"networkMode"`
+	ReadOnlyDatadir  bool              `json:"readOnlyDatadir"`
 	DryRun           bool              `json:"dryRun"`
 	ConfirmInstall   bool              `json:"confirmInstall"`
 	ConfirmPackages  bool              `json:"confirmPackages"`
@@ -94,6 +101,8 @@ type runnerToolInstallResult struct {
 	RunnerHostID       uint                    `json:"runnerHostId"`
 	RunnerID           string                  `json:"runnerId"`
 	Mode               string                  `json:"mode"`
+	ExecutionMode      string                  `json:"executionMode"`
+	ToolImage          string                  `json:"toolImage,omitempty"`
 	DryRun             bool                    `json:"dryRun"`
 	Profiles           []string                `json:"profiles"`
 	OfflinePackageID   uint                    `json:"offlinePackageId,omitempty"`
@@ -143,7 +152,7 @@ func (uc *UseCase) InstallRunnerTools(ctx context.Context, runnerHostID uint, re
 		return nil, fmt.Errorf("CentOS 7.x Runner 默认禁止直接安装数据库备份工具，请更换 Runner 或显式允许风险系统")
 	}
 	var offlinePackage *DatabaseRunnerToolOfflinePackage
-	if normalized.InstallMode == "offline" {
+	if normalized.InstallMode == "offline" && normalizeToolExecutionMode(normalized.ExecutionMode) != DatabaseToolExecutionModeContainer {
 		if uc.runnerToolOfflineRepo == nil {
 			return nil, fmt.Errorf("Runner 工具离线包仓库未配置")
 		}
@@ -152,7 +161,7 @@ func (uc *UseCase) InstallRunnerTools(ctx context.Context, runnerHostID uint, re
 		}
 		offlinePackage, err = uc.runnerToolOfflineRepo.GetByID(ctx, normalized.OfflinePackageID)
 		if err != nil {
-			return nil, fmt.Errorf("Runner 工具offline package missing")
+			return nil, fmt.Errorf("Runner 工具离线包不存在")
 		}
 		if err := validateRunnerToolOfflinePackageForProfile(profile, offlinePackage, normalized.Profiles); err != nil {
 			return nil, err
@@ -165,7 +174,7 @@ func (uc *UseCase) InstallRunnerTools(ctx context.Context, runnerHostID uint, re
 		RunnerID:       runnerIDForHost(host),
 		Status:         DatabaseRunnerJobStatusQueued,
 		AllowedCommand: DatabaseRunnerAllowedCommandToolInstall,
-		CommandSummary: trimText(fmt.Sprintf("Runner 工具安装: %s / dryRun=%t / profiles=%s", normalized.InstallMode, normalized.DryRun, strings.Join(normalized.Profiles, ",")), 500),
+		CommandSummary: trimText(fmt.Sprintf("Runner 工具安装: %s/%s / dryRun=%t / profiles=%s", normalized.InstallMode, normalizeToolExecutionMode(normalized.ExecutionMode), normalized.DryRun, strings.Join(normalized.Profiles, ",")), 500),
 		WorkDir:        host.WorkDir,
 		OperatorID:     operator.ID,
 		OperatorName:   trimText(operator.Username, 120),
@@ -364,13 +373,13 @@ func (uc *UseCase) runRunnerToolInstallCommand(ctx context.Context, host *Databa
 	}
 	var offlinePackage *DatabaseRunnerToolOfflinePackage
 	remotePackagePath := ""
-	if req.InstallMode == "offline" && req.OfflinePackageID > 0 {
+	if req.InstallMode == "offline" && normalizeToolExecutionMode(req.ExecutionMode) != DatabaseToolExecutionModeContainer && req.OfflinePackageID > 0 {
 		if uc.runnerToolOfflineRepo == nil {
 			return "", "", 1, fmt.Errorf("Runner 工具离线包仓库未配置")
 		}
 		offlinePackage, err = uc.runnerToolOfflineRepo.GetByID(ctx, req.OfflinePackageID)
 		if err != nil {
-			return "", "", 1, fmt.Errorf("Runner 工具offline package missing")
+			return "", "", 1, fmt.Errorf("Runner 工具离线包不存在")
 		}
 		if !req.DryRun {
 			workDir := normalizeRunnerWorkDir(host.WorkDir)
@@ -403,10 +412,33 @@ func normalizeRunnerToolInstallRequest(req *DatabaseRunnerToolInstallRequest) (*
 	if mode != "online" && mode != "offline" {
 		return nil, fmt.Errorf("安装模式仅支持 online/offline")
 	}
+	executionMode := normalizeToolExecutionMode(req.ExecutionMode)
+	toolImage := strings.TrimSpace(req.ToolImage)
+	if executionMode == DatabaseToolExecutionModeContainer {
+		if toolImage == "" {
+			return nil, fmt.Errorf("容器化工具模式必须填写工具镜像")
+		}
+		if err := validateContainerToolImage(toolImage); err != nil {
+			return nil, err
+		}
+		if err := validateContainerNetworkMode(req.NetworkMode); err != nil {
+			return nil, err
+		}
+		if runnerToolProfilesRequireDatadir(profiles) && strings.TrimSpace(req.DatadirMount) == "" {
+			return nil, fmt.Errorf("MySQL/MariaDB 物理备份容器模式必须填写 datadir 挂载路径")
+		}
+	}
 	return &DatabaseRunnerToolInstallRequest{
 		Profiles:         profiles,
 		TargetDBVersions: req.TargetDBVersions,
 		InstallMode:      mode,
+		ExecutionMode:    executionMode,
+		ToolImage:        toolImage,
+		ToolImageDigest:  trimText(strings.TrimSpace(req.ToolImageDigest), 255),
+		DatadirMount:     trimText(strings.TrimSpace(req.DatadirMount), 500),
+		WorkdirMount:     trimText(strings.TrimSpace(req.WorkdirMount), 500),
+		NetworkMode:      normalizeContainerNetworkMode(req.NetworkMode),
+		ReadOnlyDatadir:  req.ReadOnlyDatadir,
 		DryRun:           req.DryRun,
 		ConfirmInstall:   req.ConfirmInstall,
 		ConfirmPackages:  req.ConfirmPackages,
@@ -426,6 +458,13 @@ func buildRunnerToolInstallExecutionScript(host *DatabaseRunnerHost, profile *Da
 		Profiles:         req.Profiles,
 		TargetDBVersions: req.TargetDBVersions,
 		InstallMode:      req.InstallMode,
+		ExecutionMode:    req.ExecutionMode,
+		ToolImage:        req.ToolImage,
+		ToolImageDigest:  req.ToolImageDigest,
+		DatadirMount:     req.DatadirMount,
+		WorkdirMount:     req.WorkdirMount,
+		NetworkMode:      req.NetworkMode,
+		ReadOnlyDatadir:  req.ReadOnlyDatadir,
 		DryRun:           req.DryRun,
 	})
 	installScriptB64 := base64.StdEncoding.EncodeToString([]byte(installScript.Script))
@@ -434,6 +473,12 @@ func buildRunnerToolInstallExecutionScript(host *DatabaseRunnerHost, profile *Da
 		"runnerId":         runnerIDForHost(host),
 		"jobId":            jobID,
 		"mode":             req.InstallMode,
+		"executionMode":    normalizeToolExecutionMode(req.ExecutionMode),
+		"toolImage":        req.ToolImage,
+		"toolImageDigest":  req.ToolImageDigest,
+		"datadirMount":     req.DatadirMount,
+		"workdirMount":     req.WorkdirMount,
+		"networkMode":      normalizeContainerNetworkMode(req.NetworkMode),
 		"dryRun":           req.DryRun,
 		"profiles":         req.Profiles,
 		"targetDbVersions": req.TargetDBVersions,
@@ -452,6 +497,9 @@ func buildRunnerToolInstallExecutionScript(host *DatabaseRunnerHost, profile *Da
 	}
 	manifestB64 := base64.StdEncoding.EncodeToString([]byte(runnerToolJSON(manifest)))
 	requiredChecks := buildRunnerToolRequiredCheckScript(req.Profiles, req.DryRun)
+	if normalizeToolExecutionMode(req.ExecutionMode) == DatabaseToolExecutionModeContainer {
+		requiredChecks = buildRunnerToolContainerRequiredCheckScript(req)
+	}
 	mode := req.InstallMode
 	dryRunFlag := "0"
 	if req.DryRun {
@@ -487,7 +535,9 @@ func buildRunnerToolInstallExecutionScript(host *DatabaseRunnerHost, profile *Da
 		"chmod 700 \"$INSTALL_SCRIPT\"",
 		"emit_step install_repo success install script written to runner workdir",
 	}
-	if mode == "offline" {
+	if normalizeToolExecutionMode(req.ExecutionMode) == DatabaseToolExecutionModeContainer {
+		lines = append(lines, buildRunnerToolContainerInstallLines(req)...)
+	} else if mode == "offline" {
 		lines = append(lines, buildRunnerToolOfflineInstallLines(req, offlinePackage, remotePackagePath)...)
 	} else {
 		lines = append(lines,
@@ -560,6 +610,40 @@ func buildRunnerToolOfflineInstallLines(req *DatabaseRunnerToolInstallRequest, o
 	}
 }
 
+func buildRunnerToolContainerInstallLines(req *DatabaseRunnerToolInstallRequest) []string {
+	if req == nil {
+		req = &DatabaseRunnerToolInstallRequest{}
+	}
+	dryRunFlag := "0"
+	if req.DryRun {
+		dryRunFlag = "1"
+	}
+	readOnly := "ro"
+	if !req.ReadOnlyDatadir {
+		readOnly = "rw"
+	}
+	return []string{
+		"emit_step install_packages running verify containerized tool runtime",
+		fmt.Sprintf("DRY_RUN=%s", dryRunFlag),
+		"CONTAINER_TOOL_IMAGE=" + shellSingleQuote(req.ToolImage),
+		"CONTAINER_TOOL_DIGEST=" + shellSingleQuote(req.ToolImageDigest),
+		"CONTAINER_DATADIR=" + shellSingleQuote(req.DatadirMount),
+		"CONTAINER_WORKDIR_MOUNT=" + shellSingleQuote(req.WorkdirMount),
+		"CONTAINER_NETWORK_MODE=" + shellSingleQuote(normalizeContainerNetworkMode(req.NetworkMode)),
+		"CONTAINER_DATADIR_MODE=" + shellSingleQuote(readOnly),
+		`command -v docker >/dev/null 2>&1 || { emit_step install_packages failed "docker missing"; emit_result; exit 30; }`,
+		`case "$CONTAINER_TOOL_IMAGE" in ""|*:latest) emit_step install_packages failed "container image must use explicit non-latest tag or digest"; emit_result; exit 31 ;; esac`,
+		`if [ -n "$CONTAINER_DATADIR" ] && [ ! -d "$CONTAINER_DATADIR" ]; then emit_step install_packages failed "datadir mount path missing"; emit_result; exit 32; fi`,
+		`if [ "$DRY_RUN" = "1" ]; then`,
+		`  emit_step install_packages skipped "dry-run: docker image pull/check skipped"`,
+		`else`,
+		`  docker image inspect "$CONTAINER_TOOL_IMAGE" >/dev/null 2>&1 || docker pull "$CONTAINER_TOOL_IMAGE" >>"$LOG_PATH" 2>&1 || { emit_step install_packages failed "container image unavailable"; emit_result; exit 33; }`,
+		`  if [ -n "$CONTAINER_TOOL_DIGEST" ]; then docker inspect --format='{{index .RepoDigests 0}}' "$CONTAINER_TOOL_IMAGE" 2>/dev/null | grep -q "$CONTAINER_TOOL_DIGEST" || { emit_step install_packages failed "container digest mismatch"; emit_result; exit 34; }; fi`,
+		`  emit_step install_packages success "container image and mount precheck passed"`,
+		`fi`,
+	}
+}
+
 func buildRunnerToolRequiredCheckScript(profiles []string, dryRun bool) string {
 	if dryRun {
 		return `echo "dry-run skip verify" >>"$LOG_PATH"; true`
@@ -590,19 +674,45 @@ func buildRunnerToolRequiredCheckScript(profiles []string, dryRun bool) string {
 	return strings.Join(lines, "\n")
 }
 
+func buildRunnerToolContainerRequiredCheckScript(req *DatabaseRunnerToolInstallRequest) string {
+	if req != nil && req.DryRun {
+		return `echo "dry-run skip container verify" >>"$LOG_PATH"; true`
+	}
+	readOnly := "ro"
+	if req != nil && !req.ReadOnlyDatadir {
+		readOnly = "rw"
+	}
+	lines := []string{
+		"CONTAINER_TOOL_IMAGE=" + shellSingleQuote(req.ToolImage),
+		"CONTAINER_DATADIR=" + shellSingleQuote(req.DatadirMount),
+		"CONTAINER_NETWORK_MODE=" + shellSingleQuote(normalizeContainerNetworkMode(req.NetworkMode)),
+		"CONTAINER_DATADIR_MODE=" + shellSingleQuote(readOnly),
+		`RUN_ARGS="--rm --network $CONTAINER_NETWORK_MODE"`,
+		`if [ -n "$CONTAINER_DATADIR" ]; then RUN_ARGS="$RUN_ARGS -v $CONTAINER_DATADIR:/var/lib/mysql:$CONTAINER_DATADIR_MODE"; fi`,
+		`docker run $RUN_ARGS "$CONTAINER_TOOL_IMAGE" sh -lc 'ok=0; for bin in xtrabackup mariadb-backup mariabackup mysqlbinlog mariadb-binlog mysql mariadb psql pg_basebackup pg_receivewal pg_combinebackup pg_verifybackup barman tar sha256sum; do if command -v "$bin" >/dev/null 2>&1; then ok=1; printf "%s: " "$bin"; "$bin" --version 2>&1 | head -n 1 || true; fi; done; [ "$ok" = "1" ]' >>"$LOG_PATH" 2>&1`,
+	}
+	return strings.Join(lines, "\n")
+}
+
+func runnerToolProfilesRequireDatadir(profiles []string) bool {
+	return hasAnyProfile(profiles, "mysql_57_physical", "mysql_80_physical", "mysql_84_physical", "mariadb_physical")
+}
+
 func buildRunnerToolInstallResult(host *DatabaseRunnerHost, req *DatabaseRunnerToolInstallRequest, started, finished time.Time, stdout, stderr string, exitCode int) runnerToolInstallResult {
 	result := runnerToolInstallResult{
-		RunnerHostID: host.ID,
-		RunnerID:     runnerIDForHost(host),
-		Mode:         req.InstallMode,
-		DryRun:       req.DryRun,
-		Profiles:     req.Profiles,
-		Stdout:       trimText(stdout, maxRunnerOutputLength),
-		Stderr:       trimText(stderr, maxRunnerOutputLength),
-		ExitCode:     exitCode,
-		StartedAt:    started.Format("2006-01-02 15:04:05"),
-		FinishedAt:   finished.Format("2006-01-02 15:04:05"),
-		DurationMs:   finished.Sub(started).Milliseconds(),
+		RunnerHostID:  host.ID,
+		RunnerID:      runnerIDForHost(host),
+		Mode:          req.InstallMode,
+		ExecutionMode: normalizeToolExecutionMode(req.ExecutionMode),
+		ToolImage:     req.ToolImage,
+		DryRun:        req.DryRun,
+		Profiles:      req.Profiles,
+		Stdout:        trimText(stdout, maxRunnerOutputLength),
+		Stderr:        trimText(stderr, maxRunnerOutputLength),
+		ExitCode:      exitCode,
+		StartedAt:     started.Format("2006-01-02 15:04:05"),
+		FinishedAt:    finished.Format("2006-01-02 15:04:05"),
+		DurationMs:    finished.Sub(started).Milliseconds(),
 	}
 	if req != nil {
 		result.OfflinePackageID = req.OfflinePackageID

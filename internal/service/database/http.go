@@ -1325,6 +1325,82 @@ func (s *Service) InstallRunnerTools(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) GenerateRunnerAgentConfigSnippet(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRunnerAgentLifecycleRequest
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.ErrorCode(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+			return
+		}
+	}
+	item, err := s.useCase.GenerateRunnerAgentConfigSnippet(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "生成 Runner Agent 配置失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) InstallRunnerAgent(c *gin.Context) {
+	s.runnerAgentLifecycle(c, "install")
+}
+
+func (s *Service) UpgradeRunnerAgent(c *gin.Context) {
+	s.runnerAgentLifecycle(c, "upgrade")
+}
+
+func (s *Service) RestartRunnerAgent(c *gin.Context) {
+	s.runnerAgentLifecycle(c, "restart")
+}
+
+func (s *Service) runnerAgentLifecycle(c *gin.Context, action string) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRunnerAgentLifecycleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	operator := dbbiz.QueryOperator{ID: rbacservice.GetUserID(c), Username: rbacservice.GetUsername(c)}
+	var (
+		item *dbbiz.DatabaseRunnerJobVO
+		err  error
+	)
+	switch action {
+	case "upgrade":
+		item, err = s.useCase.UpgradeRunnerAgent(c.Request.Context(), id, &req, operator)
+	case "restart":
+		item, err = s.useCase.RestartRunnerAgent(c.Request.Context(), id, &req, operator)
+	default:
+		item, err = s.useCase.InstallRunnerAgent(c.Request.Context(), id, &req, operator)
+	}
+	if err != nil {
+		writeDatabaseError(c, "Runner Agent 操作失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) GetRunnerAgentLogs(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	lines, _ := strconv.Atoi(c.Query("lines"))
+	item, err := s.useCase.GetRunnerAgentLogs(c.Request.Context(), id, lines)
+	if err != nil {
+		writeDatabaseError(c, "读取 Runner Agent 日志失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) ListRunnerToolOfflinePackages(c *gin.Context) {
 	var req dbbiz.DatabaseRunnerToolOfflinePackageListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {

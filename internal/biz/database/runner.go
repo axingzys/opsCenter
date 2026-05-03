@@ -647,6 +647,12 @@ func RunnerJobTypeText(value string) string {
 		return "Runner 工具巡检"
 	case DatabaseRunnerJobTypeToolInstall:
 		return "Runner 工具安装"
+	case DatabaseRunnerJobTypeAgentInstall:
+		return "Runner Agent 安装"
+	case DatabaseRunnerJobTypeAgentUpgrade:
+		return "Runner Agent 升级"
+	case DatabaseRunnerJobTypeAgentRestart:
+		return "Runner Agent 重启"
 	case DatabaseRunnerJobTypePhysicalBackup:
 		return "MySQL/MariaDB 物理备份"
 	case DatabaseRunnerJobTypeBinlogArchive:

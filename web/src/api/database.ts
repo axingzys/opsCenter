@@ -227,6 +227,13 @@ export interface DatabaseBackupPolicyPayload {
   sourceRole?: string
   name: string
   backupEngine?: string
+  toolExecutionMode?: string
+  toolImage?: string
+  toolImageDigest?: string
+  containerDatadirPath?: string
+  containerWorkdirPath?: string
+  containerNetworkMode?: string
+  containerDatadirRo?: boolean
   runnerHostId: number
   storageProfileId?: number
   secretProfileId?: number
@@ -393,6 +400,13 @@ export interface DatabaseBackupPolicyResult {
   name: string
   engine: string
   backupEngine: string
+  toolExecutionMode: string
+  toolImage: string
+  toolImageDigest: string
+  containerDatadirPath: string
+  containerWorkdirPath: string
+  containerNetworkMode: string
+  containerDatadirRo: boolean
   runnerHostId: number
   runnerHostName: string
   storageProfileId: number
@@ -970,6 +984,13 @@ export interface DatabaseRunnerToolInstallScriptPayload {
   profiles: string[]
   targetDbVersions?: Record<string, string>
   installMode?: string
+  executionMode?: string
+  toolImage?: string
+  toolImageDigest?: string
+  datadirMount?: string
+  workdirMount?: string
+  networkMode?: string
+  readOnlyDatadir?: boolean
   dryRun?: boolean
 }
 
@@ -992,11 +1013,52 @@ export interface DatabaseRunnerToolInstallScriptResult {
   profiles: string[]
   targetDbVersions?: Record<string, string>
   installMode: string
+  executionMode: string
+  toolImage: string
+  toolImageDigest: string
+  datadirMount: string
+  workdirMount: string
+  networkMode: string
+  readOnlyDatadir: boolean
   dryRun: boolean
   warnings: string[]
   unsupported: string[]
   script: string
   generatedAt: string
+}
+
+export interface DatabaseRunnerAgentLifecyclePayload {
+  serverUrl?: string
+  installPath?: string
+  serviceName?: string
+  listenAddr?: string
+  intervalSeconds?: number
+  databaseArchiverEnabled?: boolean
+  dryRun?: boolean
+  regenerateAuth?: boolean
+  confirm?: boolean
+  reason?: string
+}
+
+export interface DatabaseRunnerAgentConfigSnippetResult {
+  runnerHostId: number
+  runnerId: string
+  runnerAuthSha256: string
+  configJson: string
+  serviceName: string
+  installPath: string
+  generatedAt: string
+  message: string
+}
+
+export interface DatabaseRunnerAgentLogsResult {
+  runnerHostId: number
+  runnerId: string
+  serviceName: string
+  stdout: string
+  stderr: string
+  exitCode: number
+  fetchedAt: string
 }
 
 export interface DatabaseRunnerToolOfflinePackageResult {
@@ -1797,6 +1859,21 @@ export const generateDatabaseRunnerToolInstallScript = (id: number, data: Databa
 
 export const installDatabaseRunnerTools = (id: number, data: DatabaseRunnerToolInstallPayload) =>
   request.post(`/api/v1/databases/runner-hosts/${id}/tool-install`, data)
+
+export const generateDatabaseRunnerAgentConfigSnippet = (id: number, data: DatabaseRunnerAgentLifecyclePayload) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/agent-config-snippet`, data)
+
+export const installDatabaseRunnerAgent = (id: number, data: DatabaseRunnerAgentLifecyclePayload) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/agent-install`, data)
+
+export const upgradeDatabaseRunnerAgent = (id: number, data: DatabaseRunnerAgentLifecyclePayload) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/agent-upgrade`, data)
+
+export const restartDatabaseRunnerAgent = (id: number, data: DatabaseRunnerAgentLifecyclePayload) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/agent-restart`, data)
+
+export const getDatabaseRunnerAgentLogs = (id: number, params?: { lines?: number }) =>
+  request.get(`/api/v1/databases/runner-hosts/${id}/agent-logs`, { params })
 
 export const listDatabaseRunnerToolOfflinePackages = (params?: {
   page?: number

@@ -3931,6 +3931,41 @@ docker run --rm \
 3. 容器工具版本不匹配时阻断。
 4. 产物仍落在 Runner workdir，并登记 `runner://` URI。
 
+2026-05-03 落地状态：
+
+1. 备份策略新增工具执行模式：
+   - `host_tools`：继续使用 Runner 宿主机已安装的 `xtrabackup/mariadb-backup/mysqlbinlog/pg_basebackup` 等工具。
+   - `container_tools`：通过 Runner 宿主机 Docker 启动固定版本工具镜像执行物理备份或 synthetic full prepare。
+2. `database_backup_policy_configs` 新增容器化字段：
+   - `tool_execution_mode`
+   - `tool_image`
+   - `tool_image_digest`
+   - `container_datadir_path`
+   - `container_workdir_path`
+   - `container_network_mode`
+   - `container_datadir_ro`
+3. MySQL/MariaDB 物理备份策略支持容器化执行：
+   - full 备份在容器内执行 `--backup --datadir=/var/lib/mysql --target-dir=/work/backup`。
+   - incremental 备份在容器内执行 `--incremental-basedir=/work/parent`。
+   - 备份产物仍由 Runner workdir 打包，并登记为 `runner://runner-host-<id>/<path>`。
+4. synthetic full prepare 支持容器化工具：
+   - 基础全量和增量链解包仍在 Runner workdir。
+   - `--prepare`、`--apply-log-only`、最终 prepare 均可由容器内工具执行。
+   - 不改变 proof、链路校验和旧链清理安全门禁。
+5. Runner 工具安装/脚本页面支持容器化工具模式：
+   - 不再强制要求离线包。
+   - 检查 Docker 是否可用。
+   - 校验镜像必须显式 tag 或 digest，禁止 `latest`。
+   - datadir 挂载缺失时阻断需要 datadir 的 profile。
+6. 备份策略保存前增加 readiness gate：
+   - 容器化模式必须填写工具镜像。
+   - MySQL/MariaDB 物理备份必须填写 Runner 宿主机 datadir 绝对路径。
+   - 容器网络模式禁止 shell 元字符。
+   - 若 Runner 工具画像显示没有 Docker，创建/保存策略时阻断。
+7. 当前测试边界：
+   - 已通过后端目标包测试和前端 typecheck。
+   - 用户当前没有 CentOS 7.9 环境，因此 CentOS 7.9 兼容性仍按 `container_tools` 设计验收，真实发行版矩阵后续补测。
+
 #### P2.19：Runner Agent 自动部署和升级
 
 目标：把 P2.6 binlog archiver 所需的 `opshub-agent` 从手工部署升级为页面托管。
@@ -3966,6 +4001,46 @@ docker run --rm \
 5. binlog 归档成功登记 `database_log_archives`。
 6. Agent 升级不丢失本地配置。
 7. Agent 重启后能继续接管归档流。
+
+2026-05-03 落地状态：
+
+1. Runner 主机页面的 Runner Agent 配置入口升级为后端托管：
+   - 生成 Agent 配置。
+   - 安装 Agent。
+   - 升级 Agent。
+   - 重启 Agent。
+   - 查看最近 Agent 日志。
+2. 后端新增 Runner Agent 生命周期接口：
+   - `POST /api/v1/databases/runner-hosts/:id/agent-config-snippet`
+   - `POST /api/v1/databases/runner-hosts/:id/agent-install`
+   - `POST /api/v1/databases/runner-hosts/:id/agent-upgrade`
+   - `POST /api/v1/databases/runner-hosts/:id/agent-restart`
+   - `GET /api/v1/databases/runner-hosts/:id/agent-logs`
+3. 安装和升级复用 `agent-bundles`：
+   - `agent-bundles/opshub-agent-linux-amd64`
+   - `agent-bundles/opshub-agent-linux-arm64`
+   - 架构优先读取 Runner 工具画像，缺失时按 backend 运行架构默认选择。
+4. 安装脚本行为：
+   - 通过 SSH 上传二进制到 Runner 工作目录下的临时生命周期目录。
+   - 安装到 `/opt/opshub-agent/opshub-agent`，配置写入 `/opt/opshub-agent/config.json`。
+   - systemd 可用时创建并启动 `${serviceName}.service`。
+   - systemd 不可用时使用 `nohup` 兜底。
+   - dry-run 不上传二进制、不写远端安装目录，只做参数和脚本路径演练。
+5. 配置生成规则：
+   - 后端生成一次性 `runnerAuth` 明文并写入返回的配置 JSON。
+   - Runner 主机配置中只持久化 `runnerAuthSha256`。
+   - `databaseArchiver` 默认包含 P2.6 所需字段：`baseUrl/runnerId/runnerAuth/storageRoot/stopNeverEnabled/uploadRetryEnabled` 等。
+   - 数据库密码、对象存储密钥、普通资产 Agent token 均保留本机占位符，不从 backend 下发明文。
+6. 安装、升级、重启均记录 `database_runner_jobs`：
+   - `job_type=runner_agent_install`
+   - `job_type=runner_agent_upgrade`
+   - `job_type=runner_agent_restart`
+   - `allowed_command` 使用对应白名单值。
+   - 记录操作人、原因、stdout/stderr 摘要、退出码和 Runner 状态。
+7. 当前边界：
+   - 第一版只管理 Linux amd64/arm64 Runner Agent。
+   - Agent 安装后是否能立刻心跳，取决于 Runner 到 OpsHub `serverUrl` 的网络可达性，以及本机配置中是否补齐数据库和对象存储凭据。
+   - 不在 Runner 主机配置中保存 `runnerAuth` 明文；用户应以生成配置或安装动作返回值为准写入本机配置。
 
 #### P2.14-P2.19 总体验收
 

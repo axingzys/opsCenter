@@ -88,6 +88,55 @@ func TestBuildMySQLPhysicalBackupPolicyScriptIncrementalUsesCnfAndParent(t *test
 	}
 }
 
+func TestBuildMySQLPhysicalBackupPolicyScriptContainerMode(t *testing.T) {
+	policy := &DatabaseBackupPolicyConfig{
+		Model:                gorm.Model{ID: 7},
+		Engine:               DBTypeMySQL,
+		BackupEngine:         "xtrabackup_8_0",
+		ToolExecutionMode:    DatabaseToolExecutionModeContainer,
+		ToolImage:            "opshub-runner-tools:mysql80",
+		ContainerDatadirPath: "/var/lib/mysql",
+		ContainerNetworkMode: "host",
+		ContainerDatadirRO:   true,
+	}
+	record := &DatabaseBackupRecord{
+		Model:       gorm.Model{ID: 99},
+		BackupLevel: DatabaseBackupLevelFull,
+		FileName:    "full.physical.tar.gz",
+	}
+	instance := &DatabaseInstance{Host: "10.0.0.8", Port: 3306}
+	host := &DatabaseRunnerHost{Model: gorm.Model{ID: 3}, WorkDir: "/var/lib/opshub-runner"}
+	credential := &ConnectionCredential{Username: "backup_user", Password: "secret-pass"}
+
+	script := buildMySQLPhysicalBackupPolicyScript(policy, record, "", instance, host, credential)
+	for _, expected := range []string{
+		`TOOL_EXECUTION_MODE='container_tools'`,
+		`CONTAINER_TOOL_IMAGE='opshub-runner-tools:mysql80'`,
+		`CONTAINER_DATADIR='/var/lib/mysql'`,
+		`CONTAINER_DATADIR_MODE='ro'`,
+		`"$DOCKER_BIN" image inspect "$CONTAINER_TOOL_IMAGE"`,
+		`--datadir=/var/lib/mysql --target-dir=/work/backup`,
+		`OPSHUB_STORAGE_URI=runner://runner-host-3`,
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("container script missing %q\n%s", expected, script)
+		}
+	}
+}
+
+func TestValidateContainerToolImageRejectsUnsafeTags(t *testing.T) {
+	for _, image := range []string{"mysql", "mysql:latest", "repo/mysql:latest@sha256:abc", "mysql:8.0 bad"} {
+		if err := validateContainerToolImage(image); err == nil {
+			t.Fatalf("expected invalid container image %q", image)
+		}
+	}
+	for _, image := range []string{"opshub-runner-tools:mysql80", "registry.local/opshub-runner-tools@sha256:abcdef"} {
+		if err := validateContainerToolImage(image); err != nil {
+			t.Fatalf("expected valid container image %q: %v", image, err)
+		}
+	}
+}
+
 func TestBuildMySQLPhysicalBackupPolicyScriptBinlogGTIDAwkIsShellValid(t *testing.T) {
 	policy := &DatabaseBackupPolicyConfig{
 		Model:        gorm.Model{ID: 7},
