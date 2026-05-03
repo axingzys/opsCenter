@@ -685,6 +685,8 @@ func reqPage(req any) int {
 		return item.Page
 	case *dbbiz.DatabaseBarmanServerListRequest:
 		return item.Page
+	case *dbbiz.DatabaseBackupPolicyListRequest:
+		return item.Page
 	case *dbbiz.DatabaseInstanceReplicaListRequest:
 		return item.Page
 	case *dbbiz.DatabaseReplicationCheckListRequest:
@@ -717,6 +719,8 @@ func reqPageSize(req any) int {
 	case *dbbiz.DatabaseRunnerJobListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseBarmanServerListRequest:
+		return item.PageSize
+	case *dbbiz.DatabaseBackupPolicyListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseInstanceReplicaListRequest:
 		return item.PageSize

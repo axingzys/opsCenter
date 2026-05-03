@@ -110,6 +110,8 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	auditRepo := dbdata.NewQueryAuditRepo(db)
 	backupTaskRepo := dbdata.NewBackupTaskRepo(db)
 	backupRecordRepo := dbdata.NewBackupRecordRepo(db)
+	backupPolicyConfigRepo := dbdata.NewBackupPolicyConfigRepo(db)
+	backupChainStateRepo := dbdata.NewBackupChainStateRepo(db)
 	restoreJobRepo := dbdata.NewRestoreJobRepo(db)
 	capacitySnapshotRepo := dbdata.NewCapacitySnapshotRepo(db)
 	inspectionReportRepo := dbdata.NewInspectionReportRepo(db)
@@ -200,6 +202,8 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		runnerHostRepo,
 		runnerJobRepo,
 		barmanServerRepo,
+		backupPolicyConfigRepo,
+		backupChainStateRepo,
 	)
 	useCase.SetReplicaGovernanceRepos(instanceReplicaRepo, replicationCheckRepo, replicaIncidentGuideRepo, replicaActionRepo)
 
@@ -291,6 +295,13 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.PUT("/backup-tasks/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateBackupTask)
 		databases.DELETE("/backup-tasks/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBackupTask)
 		databases.POST("/backup-tasks/:id/run", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupTask)
+		databases.GET("/backup-policies", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupPolicies)
+		databases.POST("/backup-policies", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateBackupPolicy)
+		databases.PUT("/backup-policies/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateBackupPolicy)
+		databases.DELETE("/backup-policies/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBackupPolicy)
+		databases.GET("/backup-policies/:id/chain", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.GetBackupPolicyChain)
+		databases.POST("/backup-policies/:id/run-full", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupPolicyFull)
+		databases.POST("/backup-policies/:id/run-incremental", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupPolicyIncremental)
 		databases.GET("/backup-records", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupRecords)
 		databases.POST("/backup-records/external", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.RegisterExternalBackupRecord)
 		databases.GET("/backup-records/:id/download", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDownload), s.service.DownloadBackupRecord)

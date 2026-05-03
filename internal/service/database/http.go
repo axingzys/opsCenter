@@ -233,6 +233,9 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseBackupRecordListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseBackupPolicyListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseRestoreJobListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
@@ -760,6 +763,158 @@ func (s *Service) RunBackupTask(c *gin.Context) {
 		Username: rbacservice.GetUsername(c),
 		ClientIP: c.ClientIP(),
 	})
+	if err != nil {
+		writeDatabaseError(c, "触发失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListBackupPolicies(c *gin.Context) {
+	var req dbbiz.DatabaseBackupPolicyListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListBackupPolicies(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+func (s *Service) CreateBackupPolicy(c *gin.Context) {
+	var req dbbiz.DatabaseBackupPolicyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.CreateBackupPolicy(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) UpdateBackupPolicy(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseBackupPolicyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	existingInstanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, existingInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if req.InstanceID != existingInstanceID && !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.UpdateBackupPolicy(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) DeleteBackupPolicy(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if err := s.useCase.DeleteBackupPolicy(c.Request.Context(), id); err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+func (s *Service) GetBackupPolicyChain(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	instanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.GetBackupPolicyChain(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) RunBackupPolicyFull(c *gin.Context) {
+	s.runBackupPolicy(c, true)
+}
+
+func (s *Service) RunBackupPolicyIncremental(c *gin.Context) {
+	s.runBackupPolicy(c, false)
+}
+
+func (s *Service) runBackupPolicy(c *gin.Context, full bool) {
+	id, ok := parseUintParam(c, "id", "策略ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseBackupPolicyRunRequest
+	_ = c.ShouldBindJSON(&req)
+	instanceID, err := s.useCase.GetBackupPolicyInstanceID(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "触发失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	operator := dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	}
+	var item *dbbiz.DatabaseBackupPolicyRunVO
+	if full {
+		item, err = s.useCase.RunBackupPolicyFull(c.Request.Context(), id, operator)
+	} else {
+		item, err = s.useCase.RunBackupPolicyIncremental(c.Request.Context(), id, operator)
+	}
 	if err != nil {
 		writeDatabaseError(c, "触发失败: ", err)
 		return

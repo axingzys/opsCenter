@@ -2097,15 +2097,135 @@
                 <el-button type="warning" plain @click="openRestorePlanDialog">
                   生成恢复计划
                 </el-button>
+                <el-button type="primary" plain @click="openBackupPolicyDialog()">
+                  新增备份策略
+                </el-button>
               </div>
               <div class="backup-toolbar-group">
-                <el-button :loading="storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
+                <el-button :loading="storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || backupPolicyLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
                   刷新 PITR
                 </el-button>
               </div>
             </div>
 
             <el-tabs v-model="backupPitrTab" class="pitr-tabs">
+              <el-tab-pane label="备份策略" name="backupPolicies">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="backupPolicyQuery.keyword"
+                      placeholder="搜索策略名称"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadBackupPolicies"
+                      @clear="loadBackupPolicies"
+                    />
+                    <el-select v-model="backupPolicyQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadBackupPolicies">
+                      <el-option
+                        v-for="item in mysqlPhysicalBackupPolicyInstances"
+                        :key="item.id"
+                        :label="`${item.name}（${item.dbTypeText || item.dbType}）`"
+                        :value="item.id"
+                      />
+                    </el-select>
+                    <el-select v-model="backupPolicyQuery.status" placeholder="策略状态" clearable class="audit-select" @change="loadBackupPolicies">
+                      <el-option label="启用" value="active" />
+                      <el-option label="降级" value="degraded" />
+                      <el-option label="失败" value="failed" />
+                      <el-option label="禁用" value="disabled" />
+                    </el-select>
+                    <el-select v-model="backupPolicyQuery.enabled" placeholder="启用状态" clearable class="audit-select" @change="loadBackupPolicies">
+                      <el-option label="启用" value="enabled" />
+                      <el-option label="禁用" value="disabled" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetBackupPolicyQuery">重置</el-button>
+                    <el-button type="primary" plain @click="openBackupPolicyDialog()">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      新增策略
+                    </el-button>
+                    <el-button type="primary" plain :loading="backupPolicyLoading" @click="loadBackupPolicies">刷新</el-button>
+                  </div>
+                </div>
+
+                <el-table :data="backupPolicies" v-loading="backupPolicyLoading" stripe class="modern-table">
+                  <el-table-column label="策略" min-width="210">
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.name }}</span>
+                        <el-tag size="small" :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '禁用' }}</el-tag>
+                      </div>
+                      <div class="muted-text">{{ row.instanceName || `#${row.instanceId}` }} / {{ row.instanceDbType || row.engine || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="执行源 / Runner" min-width="230" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ row.sourceRole || 'primary' }}
+                      <span v-if="row.sourceInstanceId" class="muted-text"> / source #{{ row.sourceInstanceId }}</span>
+                      <span class="muted-text"> / {{ row.runnerHostName || `Runner #${row.runnerHostId}` }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="工具 / binlog" min-width="210" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      {{ row.backupEngine || '-' }}
+                      <span class="muted-text"> / {{ row.binlogStreamId ? `binlog流 #${row.binlogStreamId}` : '未绑定binlog流' }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="计划" min-width="230" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>Full：{{ row.fullSchedule || '仅手动' }}</div>
+                      <div class="muted-text">Incremental：{{ row.incrementalSchedule || '仅手动' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="链状态" min-width="180">
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" :type="backupPolicyStatusTag(row.chain?.status || row.status)">
+                          {{ row.chain?.statusText || row.statusText || row.status || '-' }}
+                        </el-tag>
+                        <span class="muted-text">base #{{ row.chain?.currentBaseRecordId || '-' }} / latest #{{ row.chain?.latestRecordId || '-' }}</span>
+                        <span class="muted-text">增量 {{ row.chain?.incrementalCount || 0 }} 条</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="下次运行" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>Full：{{ row.nextFullRunAt || '-' }}</div>
+                      <div class="muted-text">Incremental：{{ row.nextIncrementalRunAt || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最近结果" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>
+                        <el-tag size="small" :type="backupStatusTag(row.lastStatus || row.status)">{{ row.lastStatusText || row.lastStatus || '-' }}</el-tag>
+                        <span class="muted-text"> {{ row.lastRunAt || '-' }}</span>
+                      </div>
+                      <div class="muted-text">{{ row.lastMessage || row.lastError || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="260" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button link type="warning" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'full'" @click="handleRunBackupPolicy(row, 'full')">跑Full</el-button>
+                      <el-button link type="success" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'incremental'" @click="handleRunBackupPolicy(row, 'incremental')">跑增量</el-button>
+                      <el-button link type="primary" @click="openBackupPolicyDialog(row)">编辑</el-button>
+                      <el-button link type="danger" @click="handleDeleteBackupPolicy(row)">删除</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="backupPolicyQuery.page"
+                    v-model:page-size="backupPolicyQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="backupPolicyTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadBackupPolicies"
+                    @current-change="loadBackupPolicies"
+                  />
+                </div>
+              </el-tab-pane>
+
               <el-tab-pane label="存储配置" name="storageProfiles">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
@@ -4065,6 +4185,145 @@
     </el-dialog>
 
     <el-dialog
+      v-model="backupPolicyDialogVisible"
+      :title="backupPolicyForm.id ? '编辑备份策略' : '新增备份策略'"
+      width="980px"
+      @close="resetBackupPolicyForm"
+    >
+      <el-alert
+        title="P2.8/P2.9 策略会由后端自动选择上一条成功 full/incremental 作为增量基线，并通过 Runner 执行 XtraBackup 或 mariadb-backup；synthetic full 合并仍在后续阶段。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="backupPolicyFormRef" :model="backupPolicyForm" :rules="backupPolicyRules" label-width="125px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="数据库实例" prop="instanceId">
+              <el-select v-model="backupPolicyForm.instanceId" placeholder="请选择 MySQL/MariaDB 实例" filterable style="width: 100%;">
+                <el-option
+                  v-for="item in mysqlPhysicalBackupPolicyInstances"
+                  :key="item.id"
+                  :label="`${item.name}（${item.dbTypeText || item.dbType}${item.version ? ` / ${item.version}` : ''}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="策略名称" prop="name">
+              <el-input v-model="backupPolicyForm.name" placeholder="如：opshub-mysql-monthly-full-daily-inc" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="备份工具" prop="backupEngine">
+              <el-select v-model="backupPolicyForm.backupEngine" style="width: 100%;">
+                <el-option
+                  v-for="item in availableBackupPolicyEngineOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="来源角色">
+              <el-select v-model="backupPolicyForm.sourceRole" style="width: 100%;">
+                <el-option label="主库" value="primary" />
+                <el-option label="实时从库" value="replica" />
+                <el-option label="延迟从库" value="delayed_replica" />
+                <el-option label="备份从库" value="backup_replica" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="来源实例">
+              <el-select v-model="backupPolicyForm.sourceInstanceId" placeholder="默认同主实例" clearable filterable style="width: 100%;">
+                <el-option
+                  v-for="item in mysqlPhysicalBackupPolicyInstances"
+                  :key="item.id"
+                  :label="`${item.name}（${item.dbTypeText || item.dbType}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="Runner" prop="runnerHostId">
+              <el-select v-model="backupPolicyForm.runnerHostId" placeholder="请选择 Runner" filterable style="width: 100%;">
+                <el-option v-for="item in runnerHostOptions" :key="item.id" :label="item.label" :value="item.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="存储配置">
+              <el-select v-model="backupPolicyForm.storageProfileId" placeholder="可选；默认 runner:// 本地" clearable filterable style="width: 100%;">
+                <el-option
+                  v-for="item in storageProfiles"
+                  :key="item.id"
+                  :label="`${item.name}（${item.storageTypeText || item.storageType}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="binlog归档流">
+              <el-select v-model="backupPolicyForm.binlogStreamId" placeholder="建议绑定连续归档流" clearable filterable style="width: 100%;">
+                <el-option v-for="item in backupPolicyBinlogStreamOptions" :key="item.id" :label="item.label" :value="item.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Full Cron">
+              <el-input v-model="backupPolicyForm.fullSchedule" placeholder="如 0 2 1 * *，留空仅手动" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="增量 Cron">
+              <el-input v-model="backupPolicyForm.incrementalSchedule" placeholder="如 0 3 * * *，留空仅手动" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="Synthetic Full">
+              <el-switch v-model="backupPolicyForm.syntheticEnabled" active-text="启用" inactive-text="关闭" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="恢复演练门禁">
+              <el-switch v-model="backupPolicyForm.restoreDrillRequired" active-text="要求" inactive-text="不要求" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="状态">
+              <el-switch v-model="backupPolicyForm.enabled" active-text="启用" inactive-text="禁用" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="Synthetic规则">
+          <el-input v-model="backupPolicyForm.syntheticRuleJson" type="textarea" :rows="4" placeholder="后续 P2.11 使用；当前只登记规则，不自动合并" />
+        </el-form-item>
+        <el-form-item label="保留策略">
+          <el-input v-model="backupPolicyForm.retentionJson" type="textarea" :rows="4" placeholder="JSON，仅保存非敏感保留规则" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="backupPolicyDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="backupPolicySubmitting" @click="submitBackupPolicyForm">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="externalBackupDialogVisible"
       title="登记外部备份记录"
       width="1080px"
@@ -5746,6 +6005,7 @@ import {
   checkDatabaseStorageProfilePosture,
   cleanupDatabaseRestoreJob,
   createDatabaseBarmanServer,
+  createDatabaseBackupPolicy,
   createDatabaseLogArchiveStream,
   createDatabaseReplicaIncidentGuide,
   createDatabaseRestorePlan,
@@ -5755,6 +6015,7 @@ import {
   createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
   deleteDatabaseBarmanServer,
+  deleteDatabaseBackupPolicy,
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
   deleteDatabaseInstancePermission,
@@ -5780,6 +6041,7 @@ import {
   exportDatabaseTableDictionary,
   formatDatabaseQuery,
   listDatabaseBackupRecords,
+  listDatabaseBackupPolicies,
   listDatabaseBackupTasks,
   listDatabaseBarmanServers,
   listDatabaseDiagnosisSessions,
@@ -5814,6 +6076,8 @@ import {
   registerExternalDatabaseLogArchive,
   resumeDatabaseLogArchiveStream,
   resumeDatabaseReplicaApply,
+  runDatabaseBackupPolicyFull,
+  runDatabaseBackupPolicyIncremental,
   runDatabaseBackupTask,
   runDatabaseLogArchiveCatchUp,
   runDatabaseLogArchiveOnce,
@@ -5826,6 +6090,7 @@ import {
   syncDatabaseMetadata,
   testDatabaseInstance,
   testDatabaseRunnerHost,
+  updateDatabaseBackupPolicy,
   updateDatabaseBackupTask,
   updateDatabaseBarmanServer,
   updateDatabaseInstance,
@@ -5834,6 +6099,8 @@ import {
   validateDatabaseDDLQuery,
   verifyDatabaseBackupRecord,
   type DatabaseBackupRecordResult,
+  type DatabaseBackupPolicyPayload,
+  type DatabaseBackupPolicyResult,
   type DatabaseBackupRunResult,
   type DatabaseBackupTaskPayload,
   type DatabaseBackupTaskResult,
@@ -6083,6 +6350,14 @@ const runningBackupTaskId = ref(0)
 const backupTasks = ref<DatabaseBackupTaskResult[]>([])
 const backupTaskTotal = ref(0)
 const backupTaskFormRef = ref<FormInstance>()
+const backupPolicyLoading = ref(false)
+const backupPolicySubmitting = ref(false)
+const backupPolicyDialogVisible = ref(false)
+const runningBackupPolicyId = ref(0)
+const runningBackupPolicyLevel = ref('')
+const backupPolicies = ref<DatabaseBackupPolicyResult[]>([])
+const backupPolicyTotal = ref(0)
+const backupPolicyFormRef = ref<FormInstance>()
 const permissionFormRef = ref<FormInstance>()
 const permissionLoading = ref(false)
 const permissionSubmitting = ref(false)
@@ -6209,7 +6484,7 @@ const barmanCheckingId = ref(0)
 const barmanCatalogSyncingId = ref(0)
 const barmanWalSyncingId = ref(0)
 const barmanBackingUpId = ref(0)
-const backupPitrTab = ref('streams')
+const backupPitrTab = ref('backupPolicies')
 const restoreJobLoading = ref(false)
 const restoreSubmitting = ref(false)
 const restoreDialogVisible = ref(false)
@@ -6300,6 +6575,15 @@ const backupTaskQuery = reactive({
   pageSize: 10,
   keyword: '',
   instanceId: undefined as number | undefined,
+  enabled: ''
+})
+
+const backupPolicyQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  instanceId: undefined as number | undefined,
+  status: '',
   enabled: ''
 })
 
@@ -6566,6 +6850,26 @@ const backupTaskForm = reactive<DatabaseBackupTaskPayload & { id?: number }>({
 })
 const backupTaskFormInstanceDbType = ref('')
 
+const backupPolicyForm = reactive<DatabaseBackupPolicyPayload & { id?: number }>({
+  id: undefined,
+  instanceId: 0,
+  sourceInstanceId: undefined,
+  sourceRole: 'primary',
+  name: '',
+  backupEngine: 'xtrabackup_8_0',
+  runnerHostId: 0,
+  storageProfileId: undefined,
+  secretProfileId: undefined,
+  binlogStreamId: undefined,
+  fullSchedule: '0 2 1 * *',
+  incrementalSchedule: '0 3 * * *',
+  syntheticEnabled: false,
+  syntheticRuleJson: '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true\n}',
+  restoreDrillRequired: true,
+  retentionJson: '{\n  "fullKeepMonths": 6,\n  "incrementalKeepDays": 45,\n  "binlogKeepDays": 45,\n  "neverDeleteWithoutProof": true\n}',
+  enabled: true
+})
+
 const externalBackupForm = reactive<DatabaseExternalBackupRecordPayload>({
   instanceId: 0,
   sourceInstanceId: undefined,
@@ -6761,6 +7065,13 @@ const backupTaskRules: FormRules = {
   instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
   name: [{ required: true, message: '请输入任务名称', trigger: 'blur' }],
   retentionDays: [{ required: true, message: '请输入保留天数', trigger: 'change' }]
+}
+
+const backupPolicyRules: FormRules = {
+  instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
+  name: [{ required: true, message: '请输入策略名称', trigger: 'blur' }],
+  backupEngine: [{ required: true, message: '请选择物理备份工具', trigger: 'change' }],
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }]
 }
 
 const externalBackupRules: FormRules = {
@@ -7038,6 +7349,10 @@ const pitrBackupInstances = computed(() =>
   instanceOptions.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
+const mysqlPhysicalBackupPolicyInstances = computed(() =>
+  instanceOptions.value.filter(item => ['mysql', 'mariadb'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
+)
+
 const postgresqlBackupInstances = computed(() =>
   instanceOptions.value.filter(item => item.dbType === 'postgresql' && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
@@ -7139,6 +7454,47 @@ const postgresqlRestoreRunAlertTitle = computed(() => {
 
 const selectedBackupTaskInstance = computed(() =>
   instanceOptions.value.find(item => item.id === backupTaskForm.instanceId)
+)
+
+const selectedBackupPolicyInstance = computed(() =>
+  instanceOptions.value.find(item => item.id === backupPolicyForm.instanceId)
+)
+
+const selectedBackupPolicyDbType = computed(() =>
+  selectedBackupPolicyInstance.value?.dbType || ''
+)
+
+const availableBackupPolicyEngineOptions = computed(() => {
+  if (selectedBackupPolicyDbType.value === 'mariadb') {
+    return [
+      { label: 'mariadb-backup', value: 'mariadb_backup' }
+    ]
+  }
+  return [
+    { label: 'XtraBackup 8.0（MySQL 8.0.x）', value: 'xtrabackup_8_0' },
+    { label: 'XtraBackup 8.4（MySQL 8.4.x）', value: 'xtrabackup_8_4' },
+    { label: 'XtraBackup 2.4 legacy（MySQL 5.7）', value: 'xtrabackup_2_4' }
+  ]
+})
+
+const defaultPhysicalBackupPolicyEngine = () => {
+  if (selectedBackupPolicyDbType.value === 'mariadb') return 'mariadb_backup'
+  const version = String(selectedBackupPolicyInstance.value?.version || '')
+  const match = version.match(/(\d+)\.(\d+)/)
+  const major = match ? Number(match[1]) : 0
+  const minor = match ? Number(match[2]) : 0
+  if (major === 5) return 'xtrabackup_2_4'
+  if (major === 8 && minor >= 4) return 'xtrabackup_8_4'
+  return 'xtrabackup_8_0'
+}
+
+const backupPolicyBinlogStreamOptions = computed(() =>
+  logArchiveStreams.value
+    .filter(item => item.archiveType === 'binlog' && (!backupPolicyForm.instanceId || item.instanceId === backupPolicyForm.instanceId))
+    .map(item => ({
+      id: item.id,
+      label: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveEngine || item.archiveMode || 'binlog'} / ${item.statusText || item.status || '-'}`
+    }))
 )
 
 const selectedBackupTaskDbType = computed(() =>
@@ -8319,6 +8675,19 @@ const loadBackupTasks = async () => {
   }
 }
 
+const loadBackupPolicies = async () => {
+  backupPolicyLoading.value = true
+  try {
+    const res: any = await listDatabaseBackupPolicies(backupPolicyQuery)
+    backupPolicies.value = res.list || []
+    backupPolicyTotal.value = res.total || 0
+    if (res.page) backupPolicyQuery.page = res.page
+    if (res.pageSize) backupPolicyQuery.pageSize = res.pageSize
+  } finally {
+    backupPolicyLoading.value = false
+  }
+}
+
 const loadBackupRecords = async () => {
   backupRecordLoading.value = true
   try {
@@ -8466,7 +8835,7 @@ const loadBarmanServers = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
+  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
 }
 
 const loadRestoreJobs = async () => {
@@ -8515,6 +8884,27 @@ const resetBackupTaskForm = () => {
   backupTaskForm.enabled = true
   backupTaskFormInstanceDbType.value = ''
   backupTaskFormRef.value?.clearValidate()
+}
+
+const resetBackupPolicyForm = () => {
+  backupPolicyForm.id = undefined
+  backupPolicyForm.instanceId = mysqlPhysicalBackupPolicyInstances.value[0]?.id || 0
+  backupPolicyForm.sourceInstanceId = undefined
+  backupPolicyForm.sourceRole = 'primary'
+  backupPolicyForm.name = ''
+  backupPolicyForm.backupEngine = defaultPhysicalBackupPolicyEngine()
+  backupPolicyForm.runnerHostId = runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id || runnerHosts.value.find(item => item.enabled)?.id || 0
+  backupPolicyForm.storageProfileId = undefined
+  backupPolicyForm.secretProfileId = undefined
+  backupPolicyForm.binlogStreamId = undefined
+  backupPolicyForm.fullSchedule = '0 2 1 * *'
+  backupPolicyForm.incrementalSchedule = '0 3 * * *'
+  backupPolicyForm.syntheticEnabled = false
+  backupPolicyForm.syntheticRuleJson = '{\n  "mode": "weekly_consolidation",\n  "triggerAfterDays": 7,\n  "mergeOldestIncrementals": 4,\n  "requireRestoreProof": true\n}'
+  backupPolicyForm.restoreDrillRequired = true
+  backupPolicyForm.retentionJson = '{\n  "fullKeepMonths": 6,\n  "incrementalKeepDays": 45,\n  "binlogKeepDays": 45,\n  "neverDeleteWithoutProof": true\n}'
+  backupPolicyForm.enabled = true
+  backupPolicyFormRef.value?.clearValidate()
 }
 
 const resetRestoreForm = () => {
@@ -8793,6 +9183,75 @@ const submitBackupTaskForm = async () => {
     await Promise.all([loadBackupTasks(), loadBackupRecords()])
   } finally {
     backupTaskSubmitting.value = false
+  }
+}
+
+const openBackupPolicyDialog = async (row?: DatabaseBackupPolicyResult) => {
+  if (!runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  if (!logArchiveStreams.value.length) {
+    await loadLogArchiveStreams()
+  }
+  resetBackupPolicyForm()
+  if (row?.id) {
+    backupPolicyForm.id = row.id
+    backupPolicyForm.instanceId = row.instanceId
+    backupPolicyForm.sourceInstanceId = row.sourceInstanceId || undefined
+    backupPolicyForm.sourceRole = row.sourceRole || 'primary'
+    backupPolicyForm.name = row.name || ''
+    backupPolicyForm.backupEngine = row.backupEngine || defaultPhysicalBackupPolicyEngine()
+    backupPolicyForm.runnerHostId = row.runnerHostId || 0
+    backupPolicyForm.storageProfileId = row.storageProfileId || undefined
+    backupPolicyForm.secretProfileId = row.secretProfileId || undefined
+    backupPolicyForm.binlogStreamId = row.binlogStreamId || undefined
+    backupPolicyForm.fullSchedule = row.fullSchedule || ''
+    backupPolicyForm.incrementalSchedule = row.incrementalSchedule || ''
+    backupPolicyForm.syntheticEnabled = !!row.syntheticEnabled
+    backupPolicyForm.syntheticRuleJson = row.syntheticRuleJson || ''
+    backupPolicyForm.restoreDrillRequired = !!row.restoreDrillRequired
+    backupPolicyForm.retentionJson = row.retentionJson || ''
+    backupPolicyForm.enabled = !!row.enabled
+  } else if (!backupPolicyForm.name && selectedBackupPolicyInstance.value?.name) {
+    backupPolicyForm.name = `${selectedBackupPolicyInstance.value.name}-物理增量策略`
+  }
+  backupPolicyDialogVisible.value = true
+}
+
+const submitBackupPolicyForm = async () => {
+  if (!backupPolicyFormRef.value) return
+  await backupPolicyFormRef.value.validate()
+  backupPolicySubmitting.value = true
+  try {
+    const payload: DatabaseBackupPolicyPayload = {
+      instanceId: backupPolicyForm.instanceId,
+      sourceInstanceId: backupPolicyForm.sourceInstanceId || undefined,
+      sourceRole: backupPolicyForm.sourceRole || 'primary',
+      name: backupPolicyForm.name.trim(),
+      backupEngine: backupPolicyForm.backupEngine || defaultPhysicalBackupPolicyEngine(),
+      runnerHostId: backupPolicyForm.runnerHostId,
+      storageProfileId: backupPolicyForm.storageProfileId || undefined,
+      secretProfileId: backupPolicyForm.secretProfileId || undefined,
+      binlogStreamId: backupPolicyForm.binlogStreamId || undefined,
+      fullSchedule: (backupPolicyForm.fullSchedule || '').trim(),
+      incrementalSchedule: (backupPolicyForm.incrementalSchedule || '').trim(),
+      syntheticEnabled: backupPolicyForm.syntheticEnabled === true,
+      syntheticRuleJson: (backupPolicyForm.syntheticRuleJson || '').trim(),
+      restoreDrillRequired: backupPolicyForm.restoreDrillRequired === true,
+      retentionJson: (backupPolicyForm.retentionJson || '').trim(),
+      enabled: backupPolicyForm.enabled !== false
+    }
+    if (backupPolicyForm.id) {
+      await updateDatabaseBackupPolicy(backupPolicyForm.id, payload)
+      ElMessage.success('备份策略已更新')
+    } else {
+      await createDatabaseBackupPolicy(payload)
+      ElMessage.success('备份策略已创建')
+    }
+    backupPolicyDialogVisible.value = false
+    await loadBackupPolicies()
+  } finally {
+    backupPolicySubmitting.value = false
   }
 }
 
@@ -10866,6 +11325,16 @@ const resetBackupTaskQuery = () => {
   loadBackupTasks()
 }
 
+const resetBackupPolicyQuery = () => {
+  backupPolicyQuery.page = 1
+  backupPolicyQuery.pageSize = 10
+  backupPolicyQuery.keyword = ''
+  backupPolicyQuery.instanceId = undefined
+  backupPolicyQuery.status = ''
+  backupPolicyQuery.enabled = ''
+  loadBackupPolicies()
+}
+
 const resetBackupRecordQuery = () => {
   backupRecordQuery.page = 1
   backupRecordQuery.pageSize = 10
@@ -11313,6 +11782,48 @@ const handleDeleteBackupTask = async (row: DatabaseBackupTaskResult) => {
   await Promise.all([loadBackupTasks(), loadBackupRecords()])
 }
 
+const handleDeleteBackupPolicy = async (row: DatabaseBackupPolicyResult) => {
+  await ElMessageBox.confirm(`确定删除备份策略「${row.name}」吗？备份记录不会被删除，但后续自动增量链不会再由该策略调度。`, '删除备份策略', {
+    type: 'warning',
+    confirmButtonText: '删除',
+    cancelButtonText: '取消'
+  })
+  await deleteDatabaseBackupPolicy(row.id)
+  ElMessage.success('备份策略已删除')
+  await loadBackupPolicies()
+}
+
+const handleRunBackupPolicy = async (row: DatabaseBackupPolicyResult, level: 'full' | 'incremental') => {
+  const actionText = level === 'full' ? '全量备份' : '增量备份'
+  await ElMessageBox.confirm(
+    `确定手动触发策略「${row.name}」的${actionText}吗？该操作会下发 Runner 执行 MySQL/MariaDB 物理备份，并更新策略链状态。`,
+    `触发${actionText}`,
+    {
+      type: 'warning',
+      confirmButtonText: '触发',
+      cancelButtonText: '取消'
+    }
+  )
+  runningBackupPolicyId.value = row.id
+  runningBackupPolicyLevel.value = level
+  try {
+    const reason = `manual ${level} from backup policy page`
+    const res: any = level === 'full'
+      ? await runDatabaseBackupPolicyFull(row.id, { reason })
+      : await runDatabaseBackupPolicyIncremental(row.id, { reason })
+    ElMessage.success(res?.message || `${actionText}已下发 Runner`)
+    await Promise.all([loadBackupPolicies(), loadBackupRecords(), loadRunnerJobs()])
+    window.setTimeout(() => {
+      loadBackupPolicies()
+      loadBackupRecords()
+      loadRunnerJobs()
+    }, 3000)
+  } finally {
+    runningBackupPolicyId.value = 0
+    runningBackupPolicyLevel.value = ''
+  }
+}
+
 const handleRunBackupTask = async (row: DatabaseBackupTaskResult) => {
   await ElMessageBox.confirm(
     `确定手动触发备份任务「${row.name}」吗？系统会创建一条队列记录并在后台执行逻辑全量备份，所有动作会写入统一审计。`,
@@ -11608,6 +12119,24 @@ const backupStatusTag = (status: string) => {
     case 'cleaned':
       return 'success'
     case 'pending':
+      return 'info'
+    default:
+      return 'info'
+  }
+}
+
+const backupPolicyStatusTag = (status?: string) => {
+  switch (status) {
+    case 'active':
+    case 'healthy':
+      return 'success'
+    case 'degraded':
+    case 'consolidating':
+      return 'warning'
+    case 'failed':
+    case 'broken':
+      return 'danger'
+    case 'disabled':
       return 'info'
     default:
       return 'info'
@@ -12049,6 +12578,21 @@ watch(
 )
 
 watch(
+  () => [backupPolicyForm.instanceId, selectedBackupPolicyDbType.value],
+  () => {
+    if (!availableBackupPolicyEngineOptions.value.some(item => item.value === backupPolicyForm.backupEngine)) {
+      backupPolicyForm.backupEngine = defaultPhysicalBackupPolicyEngine()
+    }
+    if (backupPolicyForm.binlogStreamId && !backupPolicyBinlogStreamOptions.value.some(item => item.id === backupPolicyForm.binlogStreamId)) {
+      backupPolicyForm.binlogStreamId = undefined
+    }
+    if (!backupPolicyForm.name && selectedBackupPolicyInstance.value?.name) {
+      backupPolicyForm.name = `${selectedBackupPolicyInstance.value.name}-物理增量策略`
+    }
+  }
+)
+
+watch(
   () => logArchiveStreamForm.instanceId,
   (instanceId) => {
     logArchiveStreamForm.archiveType = archiveTypeForInstance(instanceId)
@@ -12112,6 +12656,7 @@ watch(activeTab, async (tab) => {
       loadRunnerHosts(),
       loadRunnerJobs(),
       loadBarmanServers(),
+      loadBackupPolicies(),
       loadLogArchiveStreams(),
       loadLogArchives(),
       loadLogArchiveEvents(),

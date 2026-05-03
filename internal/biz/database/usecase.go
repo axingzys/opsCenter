@@ -52,6 +52,8 @@ type UseCase struct {
 	auditRepo              QueryAuditRepo
 	backupTaskRepo         BackupTaskRepo
 	backupRecordRepo       BackupRecordRepo
+	backupPolicyConfigRepo BackupPolicyConfigRepo
+	backupChainStateRepo   BackupChainStateRepo
 	restoreJobRepo         RestoreJobRepo
 	capacitySnapshotRepo   CapacitySnapshotRepo
 	inspectionReportRepo   InspectionReportRepo
@@ -74,6 +76,7 @@ type UseCase struct {
 	backupPolicyResolver   func(ctx context.Context) (*DatabaseBackupPolicy, error)
 	backupRunMu            sync.Mutex
 	backupRunningTasks     map[uint]struct{}
+	backupRunningPolicies  map[uint]struct{}
 	backupRunningInstances map[uint]struct{}
 	restoreRunMu           sync.Mutex
 	restoreRunningTargets  map[string]struct{}
@@ -120,6 +123,7 @@ func NewUseCase(
 		writePolicyResolver:    writePolicyResolver,
 		backupPolicyResolver:   backupPolicyResolver,
 		backupRunningTasks:     make(map[uint]struct{}),
+		backupRunningPolicies:  make(map[uint]struct{}),
 		backupRunningInstances: make(map[uint]struct{}),
 		restoreRunningTargets:  make(map[string]struct{}),
 		startedAt:              time.Now(),
@@ -136,6 +140,8 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	runnerHostRepo RunnerHostRepo,
 	runnerJobRepo RunnerJobRepo,
 	barmanServerRepo BarmanServerRepo,
+	backupPolicyConfigRepo BackupPolicyConfigRepo,
+	backupChainStateRepo BackupChainStateRepo,
 ) {
 	if uc == nil {
 		return
@@ -149,6 +155,8 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	uc.runnerHostRepo = runnerHostRepo
 	uc.runnerJobRepo = runnerJobRepo
 	uc.barmanServerRepo = barmanServerRepo
+	uc.backupPolicyConfigRepo = backupPolicyConfigRepo
+	uc.backupChainStateRepo = backupChainStateRepo
 }
 
 func (uc *UseCase) SetReplicaGovernanceRepos(
@@ -215,6 +223,18 @@ type DatabaseBackupTaskListRequest struct {
 	PageSize           int    `form:"pageSize"`
 	Keyword            string `form:"keyword"`
 	InstanceID         uint   `form:"instanceId"`
+	Enabled            string `form:"enabled"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
+}
+
+type DatabaseBackupPolicyListRequest struct {
+	Page               int    `form:"page"`
+	PageSize           int    `form:"pageSize"`
+	Keyword            string `form:"keyword"`
+	InstanceID         uint   `form:"instanceId"`
+	RunnerHostID       uint   `form:"runnerHostId"`
+	Status             string `form:"status"`
 	Enabled            string `form:"enabled"`
 	RestrictToAllowed  bool   `form:"-" json:"-"`
 	AllowedInstanceIDs []uint `form:"-" json:"-"`
@@ -405,6 +425,29 @@ type DatabaseBackupTaskRequest struct {
 	Compression        string `json:"compression" binding:"omitempty,max=30"`
 	EncryptionEnabled  bool   `json:"encryptionEnabled"`
 	Enabled            bool   `json:"enabled"`
+}
+
+type DatabaseBackupPolicyRequest struct {
+	InstanceID           uint   `json:"instanceId" binding:"required"`
+	SourceInstanceID     uint   `json:"sourceInstanceId"`
+	SourceRole           string `json:"sourceRole" binding:"omitempty,max=40"`
+	Name                 string `json:"name" binding:"required,max=120"`
+	BackupEngine         string `json:"backupEngine" binding:"omitempty,max=60"`
+	RunnerHostID         uint   `json:"runnerHostId" binding:"required"`
+	StorageProfileID     uint   `json:"storageProfileId"`
+	SecretProfileID      uint   `json:"secretProfileId"`
+	BinlogStreamID       uint   `json:"binlogStreamId"`
+	FullSchedule         string `json:"fullSchedule" binding:"omitempty,max=120"`
+	IncrementalSchedule  string `json:"incrementalSchedule" binding:"omitempty,max=120"`
+	SyntheticEnabled     bool   `json:"syntheticEnabled"`
+	SyntheticRuleJSON    string `json:"syntheticRuleJson" binding:"omitempty,max=4000"`
+	RestoreDrillRequired bool   `json:"restoreDrillRequired"`
+	RetentionJSON        string `json:"retentionJson" binding:"omitempty,max=4000"`
+	Enabled              bool   `json:"enabled"`
+}
+
+type DatabaseBackupPolicyRunRequest struct {
+	Reason string `json:"reason" binding:"omitempty,max=500"`
 }
 
 type DatabaseRestoreDryRunRequest struct {
@@ -867,61 +910,147 @@ type DatabaseBackupTaskVO struct {
 	UpdatedAt                 string `json:"updatedAt"`
 }
 
+type DatabaseBackupPolicyVO struct {
+	ID                   uint                        `json:"id"`
+	InstanceID           uint                        `json:"instanceId"`
+	InstanceName         string                      `json:"instanceName"`
+	InstanceDBType       string                      `json:"instanceDbType"`
+	SourceInstanceID     uint                        `json:"sourceInstanceId"`
+	SourceRole           string                      `json:"sourceRole"`
+	Name                 string                      `json:"name"`
+	Engine               string                      `json:"engine"`
+	BackupEngine         string                      `json:"backupEngine"`
+	RunnerHostID         uint                        `json:"runnerHostId"`
+	RunnerHostName       string                      `json:"runnerHostName"`
+	StorageProfileID     uint                        `json:"storageProfileId"`
+	SecretProfileID      uint                        `json:"secretProfileId"`
+	BinlogStreamID       uint                        `json:"binlogStreamId"`
+	FullSchedule         string                      `json:"fullSchedule"`
+	IncrementalSchedule  string                      `json:"incrementalSchedule"`
+	SyntheticEnabled     bool                        `json:"syntheticEnabled"`
+	SyntheticRuleJSON    string                      `json:"syntheticRuleJson"`
+	RestoreDrillRequired bool                        `json:"restoreDrillRequired"`
+	RetentionJSON        string                      `json:"retentionJson"`
+	Enabled              bool                        `json:"enabled"`
+	Status               string                      `json:"status"`
+	StatusText           string                      `json:"statusText"`
+	NextFullRunAt        string                      `json:"nextFullRunAt"`
+	NextIncrementalRunAt string                      `json:"nextIncrementalRunAt"`
+	LastRunAt            string                      `json:"lastRunAt"`
+	LastFullAt           string                      `json:"lastFullAt"`
+	LastIncrementalAt    string                      `json:"lastIncrementalAt"`
+	LastSyntheticAt      string                      `json:"lastSyntheticAt"`
+	LastRestoreDrillAt   string                      `json:"lastRestoreDrillAt"`
+	LastStatus           string                      `json:"lastStatus"`
+	LastStatusText       string                      `json:"lastStatusText"`
+	LastMessage          string                      `json:"lastMessage"`
+	LastError            string                      `json:"lastError"`
+	Chain                *DatabaseBackupChainStateVO `json:"chain,omitempty"`
+	CreatedAt            string                      `json:"createdAt"`
+	UpdatedAt            string                      `json:"updatedAt"`
+}
+
+type DatabaseBackupChainStateVO struct {
+	ID                      uint   `json:"id"`
+	PolicyID                uint   `json:"policyId"`
+	InstanceID              uint   `json:"instanceId"`
+	ChainID                 string `json:"chainId"`
+	CurrentBaseRecordID     uint   `json:"currentBaseRecordId"`
+	LatestRecordID          uint   `json:"latestRecordId"`
+	LatestFullRecordID      uint   `json:"latestFullRecordId"`
+	LatestSyntheticRecordID uint   `json:"latestSyntheticRecordId"`
+	IncrementalCount        int    `json:"incrementalCount"`
+	ChainStartedAt          string `json:"chainStartedAt"`
+	LastSuccessAt           string `json:"lastSuccessAt"`
+	RecoverableUntil        string `json:"recoverableUntil"`
+	Status                  string `json:"status"`
+	StatusText              string `json:"statusText"`
+	LastValidationStatus    string `json:"lastValidationStatus"`
+	LastError               string `json:"lastError"`
+}
+
+type DatabaseBackupPolicyRunVO struct {
+	PolicyID     uint   `json:"policyId"`
+	PolicyName   string `json:"policyName"`
+	RecordID     uint   `json:"recordId"`
+	RunnerJobID  uint   `json:"runnerJobId"`
+	InstanceID   uint   `json:"instanceId"`
+	InstanceName string `json:"instanceName"`
+	BackupLevel  string `json:"backupLevel"`
+	Status       string `json:"status"`
+	StatusText   string `json:"statusText"`
+	FileName     string `json:"fileName"`
+	Message      string `json:"message"`
+	TriggeredAt  string `json:"triggeredAt"`
+}
+
 type DatabaseBackupRecordVO struct {
-	ID                    uint   `json:"id"`
-	TaskID                uint   `json:"taskId"`
-	TaskName              string `json:"taskName"`
-	InstanceID            uint   `json:"instanceId"`
-	InstanceName          string `json:"instanceName"`
-	TriggerType           string `json:"triggerType"`
-	TriggerTypeText       string `json:"triggerTypeText"`
-	BackupType            string `json:"backupType"`
-	BackupTypeText        string `json:"backupTypeText"`
-	ChainID               string `json:"chainId"`
-	BaseRecordID          uint   `json:"baseRecordId"`
-	ParentRecordID        uint   `json:"parentRecordId"`
-	BackupMethod          string `json:"backupMethod"`
-	BackupMethodText      string `json:"backupMethodText"`
-	BackupLevel           string `json:"backupLevel"`
-	BackupLevelText       string `json:"backupLevelText"`
-	BackupEngine          string `json:"backupEngine"`
-	ExternalBackupID      string `json:"externalBackupId"`
-	ExternalServerName    string `json:"externalServerName"`
-	BackupScope           string `json:"backupScope"`
-	ToolName              string `json:"toolName"`
-	ToolVersion           string `json:"toolVersion"`
-	SourceInstanceID      uint   `json:"sourceInstanceId"`
-	SourceRole            string `json:"sourceRole"`
-	StorageProfileID      uint   `json:"storageProfileId"`
-	StorageType           string `json:"storageType"`
-	StorageTypeText       string `json:"storageTypeText"`
-	StorageURI            string `json:"storageUri"`
-	ManifestJSON          string `json:"manifestJson"`
-	PrepareStatus         string `json:"prepareStatus"`
-	Status                string `json:"status"`
-	StatusText            string `json:"statusText"`
-	FileName              string `json:"fileName"`
-	FileSize              int64  `json:"fileSize"`
-	ChecksumSHA256        string `json:"checksumSha256"`
-	Encrypted             bool   `json:"encrypted"`
-	Compression           string `json:"compression"`
-	ExpiresAt             string `json:"expiresAt"`
-	VerifiedAt            string `json:"verifiedAt"`
-	VerifyStatus          string `json:"verifyStatus"`
-	VerifyStatusText      string `json:"verifyStatusText"`
-	VerifyMessage         string `json:"verifyMessage"`
-	RestoreTestedAt       string `json:"restoreTestedAt"`
-	RestoreTestStatus     string `json:"restoreTestStatus"`
-	RestoreTestStatusText string `json:"restoreTestStatusText"`
-	StartedAt             string `json:"startedAt"`
-	LastHeartbeatAt       string `json:"lastHeartbeatAt"`
-	FinishedAt            string `json:"finishedAt"`
-	RecoverableFrom       string `json:"recoverableFrom"`
-	RecoverableUntil      string `json:"recoverableUntil"`
-	DurationMs            int64  `json:"durationMs"`
-	Message               string `json:"message"`
-	CreatedAt             string `json:"createdAt"`
-	UpdatedAt             string `json:"updatedAt"`
+	ID                       uint   `json:"id"`
+	TaskID                   uint   `json:"taskId"`
+	PolicyID                 uint   `json:"policyId"`
+	TaskName                 string `json:"taskName"`
+	InstanceID               uint   `json:"instanceId"`
+	InstanceName             string `json:"instanceName"`
+	TriggerType              string `json:"triggerType"`
+	TriggerTypeText          string `json:"triggerTypeText"`
+	BackupType               string `json:"backupType"`
+	BackupTypeText           string `json:"backupTypeText"`
+	ChainID                  string `json:"chainId"`
+	BaseRecordID             uint   `json:"baseRecordId"`
+	ParentRecordID           uint   `json:"parentRecordId"`
+	BackupMethod             string `json:"backupMethod"`
+	BackupMethodText         string `json:"backupMethodText"`
+	BackupLevel              string `json:"backupLevel"`
+	BackupLevelText          string `json:"backupLevelText"`
+	BackupEngine             string `json:"backupEngine"`
+	ExternalBackupID         string `json:"externalBackupId"`
+	ExternalServerName       string `json:"externalServerName"`
+	BackupScope              string `json:"backupScope"`
+	ToolName                 string `json:"toolName"`
+	ToolVersion              string `json:"toolVersion"`
+	SourceInstanceID         uint   `json:"sourceInstanceId"`
+	SourceRole               string `json:"sourceRole"`
+	StorageProfileID         uint   `json:"storageProfileId"`
+	StorageType              string `json:"storageType"`
+	StorageTypeText          string `json:"storageTypeText"`
+	StorageURI               string `json:"storageUri"`
+	ManifestJSON             string `json:"manifestJson"`
+	PrepareStatus            string `json:"prepareStatus"`
+	BackupOrigin             string `json:"backupOrigin"`
+	CheckpointFromLSN        string `json:"checkpointFromLsn"`
+	CheckpointToLSN          string `json:"checkpointToLsn"`
+	CheckpointLastLSN        string `json:"checkpointLastLsn"`
+	CheckpointBackupType     string `json:"checkpointBackupType"`
+	ArtifactState            string `json:"artifactState"`
+	ArtifactCacheURI         string `json:"artifactCacheUri"`
+	SyntheticSourceRecordIDs string `json:"syntheticSourceRecordIds"`
+	SupersededByRecordID     uint   `json:"supersededByRecordId"`
+	PurgeEligibleAt          string `json:"purgeEligibleAt"`
+	ProtectedUntil           string `json:"protectedUntil"`
+	Status                   string `json:"status"`
+	StatusText               string `json:"statusText"`
+	FileName                 string `json:"fileName"`
+	FileSize                 int64  `json:"fileSize"`
+	ChecksumSHA256           string `json:"checksumSha256"`
+	Encrypted                bool   `json:"encrypted"`
+	Compression              string `json:"compression"`
+	ExpiresAt                string `json:"expiresAt"`
+	VerifiedAt               string `json:"verifiedAt"`
+	VerifyStatus             string `json:"verifyStatus"`
+	VerifyStatusText         string `json:"verifyStatusText"`
+	VerifyMessage            string `json:"verifyMessage"`
+	RestoreTestedAt          string `json:"restoreTestedAt"`
+	RestoreTestStatus        string `json:"restoreTestStatus"`
+	RestoreTestStatusText    string `json:"restoreTestStatusText"`
+	StartedAt                string `json:"startedAt"`
+	LastHeartbeatAt          string `json:"lastHeartbeatAt"`
+	FinishedAt               string `json:"finishedAt"`
+	RecoverableFrom          string `json:"recoverableFrom"`
+	RecoverableUntil         string `json:"recoverableUntil"`
+	DurationMs               int64  `json:"durationMs"`
+	Message                  string `json:"message"`
+	CreatedAt                string `json:"createdAt"`
+	UpdatedAt                string `json:"updatedAt"`
 
 	ServerUUID             string `json:"serverUuid,omitempty"`
 	ServerID               string `json:"serverId,omitempty"`

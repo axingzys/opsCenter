@@ -115,6 +115,22 @@ type BackupRecordRepo interface {
 	List(ctx context.Context, req *DatabaseBackupRecordListRequest) ([]*DatabaseBackupRecord, int64, error)
 	ListExpiredSuccessByTask(ctx context.Context, taskID uint, before time.Time) ([]*DatabaseBackupRecord, error)
 	ListSuccessfulForRestore(ctx context.Context, instanceID uint, targetTime *time.Time) ([]*DatabaseBackupRecord, error)
+	ListSuccessfulPhysicalByPolicy(ctx context.Context, policyID uint) ([]*DatabaseBackupRecord, error)
+}
+
+type BackupPolicyConfigRepo interface {
+	Create(ctx context.Context, item *DatabaseBackupPolicyConfig) error
+	Update(ctx context.Context, item *DatabaseBackupPolicyConfig) error
+	Delete(ctx context.Context, id uint) error
+	GetByID(ctx context.Context, id uint) (*DatabaseBackupPolicyConfig, error)
+	List(ctx context.Context, req *DatabaseBackupPolicyListRequest) ([]*DatabaseBackupPolicyConfig, int64, error)
+	ListEnabled(ctx context.Context) ([]*DatabaseBackupPolicyConfig, error)
+}
+
+type BackupChainStateRepo interface {
+	Create(ctx context.Context, item *DatabaseBackupChainState) error
+	Update(ctx context.Context, item *DatabaseBackupChainState) error
+	GetByPolicyID(ctx context.Context, policyID uint) (*DatabaseBackupChainState, error)
 }
 
 type RestoreJobRepo interface {

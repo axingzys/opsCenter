@@ -2141,6 +2141,666 @@ validation-results.json
 4. 不做长期运行恢复 Worker 池；本期由后端下发 SSH Runner 任务并记录审计。
 5. 不承诺 PostgreSQL 隔离恢复；PostgreSQL 仍放在后续 Barman/WAL-G/pg_basebackup 专项。
 
+### P2.8-P2.12：MySQL/MariaDB 自动增量链和 Synthetic Full 策略
+
+本章节是 P2.7 之后的 MySQL/MariaDB 物理备份深化规划。当前落地状态：
+
+| 阶段 | 状态 | 说明 |
+| --- | --- | --- |
+| P2.8 备份策略模型 | 已落地 | 新增策略表、链状态表、策略 API、前端“备份策略”页签、调度器接入 |
+| P2.9 Runner 化 MySQL/MariaDB 物理备份 | 已落地 | 策略可手动/定时下发 full 或 incremental 到 SSH Runner，后端自动选择增量父记录 |
+| P2.10 自动增量链选择和链路校验 | 部分随 P2.8/P2.9 落地 | 第一版已校验父记录状态、策略归属、备份引擎、来源实例、checksum、checkpoint 和 Runner 可读 URI；更完整的链路巡检仍在 P2.10 |
+| P2.11 Synthetic Full | 待落地 | 当前只登记 synthetic 规则，不执行合成全量 |
+| P2.12 Purge 门禁 | 待落地 | 当前只预留 superseded/protected 字段，不自动清理旧链 |
+
+目标是把“单个物理备份任务”升级为“可长期运行的备份策略编排”，让 OpsHub 可以自动回答并执行：
+
+1. 今天应该跑 full 还是 incremental。
+2. incremental 应该依赖哪一条上一备份记录。
+3. 上一备份 artifact 是否仍可读、可校验、可作为 `incrementalBaseDir`。
+4. full + incremental chain + binlog 是否仍可 PITR。
+5. 运行一段时间后，能否把一段旧 incremental 安全合成新的 synthetic full。
+6. 旧 full / incremental 何时才允许进入清理窗口。
+
+#### 为什么不能只改现有 backup task
+
+当前 `database_backup_tasks` 已能表达 `backup_method=physical` 和 `backup_level=incremental`，但 MySQL/MariaDB 增量备份有几个额外约束，不能只靠一个固定 cron 和一个固定 `incrementalBaseDir` 长期运行：
+
+1. `xtrabackup --incremental-basedir` 必须指向上一份可读的 full 或 incremental 目录。
+2. OpsHub 当前物理备份完成后会打包为 `.physical.tar.gz`，临时目录会被删除；下一次增量前需要先把 parent artifact 解包到 Runner staging。
+3. 增量链必须校验 LSN 连续性，不能只按时间选择上一条记录。
+4. 备份源发生主从切换、server UUID 变化、备份工具版本变化时，链路可能不能继续复用。
+5. synthetic full 不是简单修改元数据，而是需要 Runner 真实执行 prepare/apply-log，生成新的 artifact，并做隔离恢复证明。
+
+因此本能力应该新增“策略编排层”，由策略自动派生 full / incremental / synthetic full / restore drill，而不是让用户手工维护每天变化的 `incrementalBaseDir`。
+
+#### 推荐生产策略
+
+默认推荐策略：
+
+```text
+full: 每周 1 次
+incremental: 每天 1 次
+binlog archive: 连续归档
+synthetic full: 可选，按链长或增量数量触发
+restore drill: synthetic full 成功后必须演练
+purge: 只有恢复证明成功后才允许清理旧链
+```
+
+如果用户明确希望每月全量：
+
+```text
+full: 每月 1 次
+incremental: 每天 1 次
+binlog archive: 连续归档，保留期必须覆盖整个月度链
+synthetic full: 建议每周滚动合成，避免恢复时应用过长增量链
+restore drill: 至少每周一次
+purge: synthetic full + 后续增量 + binlog 恢复演练成功后再清理
+```
+
+月度 full 的风险：
+
+1. 最坏恢复需要应用接近 30 条 incremental 和对应 binlog。
+2. 任意一个关键 incremental artifact 损坏都会影响后续恢复。
+3. 恢复时间、临时磁盘、Runner CPU/IO 压力会明显增加。
+4. 对 binlog 归档连续性的要求更高。
+
+#### P2.8：备份策略模型
+
+目标：新增策略层，统一描述 full / incremental / synthetic full / restore drill / purge。
+
+新增表建议：
+
+```text
+database_backup_policies
+```
+
+核心字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `instance_id` | 主实例 |
+| `source_instance_id` | 实际备份源，可为主库、实时从库或专用备份从库 |
+| `source_role` | `primary / replica / delayed_replica / backup_replica` |
+| `name` | 策略名称 |
+| `engine` | `mysql / mariadb` |
+| `backup_engine` | `xtrabackup_8_0 / xtrabackup_8_4 / xtrabackup_2_4 / mariadb_backup` |
+| `runner_host_id` | 执行物理备份和 synthetic full 的 Runner |
+| `storage_profile_id` | 备份 artifact 存储配置 |
+| `secret_profile_id` | 可选，外部凭据引用 |
+| `full_schedule` | full cron，例如 `0 2 1 * *` |
+| `incremental_schedule` | incremental cron，例如 `0 3 * * *` |
+| `synthetic_enabled` | 是否启用 synthetic full |
+| `synthetic_rule_json` | synthetic full 触发规则 |
+| `restore_drill_required` | synthetic full 或链路切换前是否必须恢复演练 |
+| `binlog_stream_id` | 绑定的 binlog 归档流 |
+| `retention_json` | full、incremental、binlog、synthetic 的保留策略 |
+| `enabled` | 是否启用 |
+| `status` | `pending / active / degraded / failed / disabled` |
+| `last_full_at` | 最近 full 成功时间 |
+| `last_incremental_at` | 最近 incremental 成功时间 |
+| `last_synthetic_at` | 最近 synthetic full 成功时间 |
+| `last_restore_drill_at` | 最近恢复演练成功时间 |
+| `last_error` | 最近错误 |
+
+`synthetic_rule_json` 示例：
+
+```json
+{
+  "mode": "weekly_consolidation",
+  "triggerAfterDays": 7,
+  "mergeOldestIncrementals": 4,
+  "maxIncrementalsBeforeSynthetic": 10,
+  "requireRestoreProof": true,
+  "markSupersededAfterProof": true
+}
+```
+
+`retention_json` 示例：
+
+```json
+{
+  "fullKeepMonths": 6,
+  "incrementalKeepDays": 45,
+  "syntheticKeepMonths": 6,
+  "binlogKeepDays": 45,
+  "supersededKeepDaysAfterProof": 7,
+  "neverDeleteWithoutProof": true
+}
+```
+
+新增链状态表建议：
+
+```text
+database_backup_chain_states
+```
+
+核心字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `policy_id` | 所属策略 |
+| `instance_id` | 主实例 |
+| `chain_id` | 当前链 ID |
+| `current_base_record_id` | 当前有效 base full 或 synthetic full |
+| `latest_record_id` | 当前链最新成功记录 |
+| `latest_full_record_id` | 最近原生 full |
+| `latest_synthetic_record_id` | 最近 synthetic full |
+| `incremental_count` | 当前 base 后累计 incremental 数 |
+| `chain_started_at` | 当前链开始时间 |
+| `last_success_at` | 最近成功时间 |
+| `recoverable_until` | 当前链理论可恢复终点 |
+| `status` | `healthy / degraded / broken / consolidating` |
+| `last_validation_status` | 最近链路校验结果 |
+| `last_error` | 最近错误 |
+
+设计原则：
+
+1. `database_backup_tasks` 继续保留，用于单次或简单 cron 任务。
+2. `database_backup_policies` 负责长期策略编排。
+3. 策略可以自动生成内部运行记录，但不要求暴露为多个用户手工维护的 backup task。
+4. 全量、增量、synthetic full 的最终事实仍落在 `database_backup_records`。
+5. PITR 恢复计划仍只读取 `database_backup_records` 和 `database_log_archives`，不直接依赖策略表。
+
+#### P2.9：Runner 化 MySQL/MariaDB 物理备份
+
+目标：MySQL/MariaDB 物理备份不再依赖 `opshub-api` 容器本地安装 `xtrabackup`，改由 Runner 执行。
+
+新增 Runner job 类型建议：
+
+```text
+mysql_physical_backup
+mysql_physical_backup_prepare_parent
+mysql_physical_backup_pack
+```
+
+Runner 前置条件：
+
+1. 能访问源库地址和端口。
+2. 安装匹配数据库版本的工具：
+   - MySQL 5.7：`xtrabackup` 2.4。
+   - MySQL 8.0.x：`xtrabackup` 8.0。
+   - MySQL 8.4.x：`xtrabackup` 8.4。
+   - MariaDB：`mariadb-backup`。
+3. 有足够本地 staging 空间，至少能容纳：
+   - 当前备份输出。
+   - parent 解包目录。
+   - synthetic full 临时目录。
+4. 能读取或下载 parent artifact。
+5. 能把最终 artifact 发布到 `storage_profile` 指定存储。
+
+full 执行步骤：
+
+```text
+1. 后端根据策略创建 backup record，状态 running。
+2. 下发 Runner job。
+3. Runner 创建 staging workdir。
+4. Runner 执行 xtrabackup/mariadb-backup --backup。
+5. Runner 读取 xtrabackup_checkpoints。
+6. Runner 读取 xtrabackup_binlog_info 或 mariadb_backup_binlog_info。
+7. Runner 打包 artifact。
+8. Runner 计算 SHA256。
+9. Runner 上传或落地 storage URI。
+10. 后端登记 record 为 success，更新 chain state。
+```
+
+incremental 执行步骤：
+
+```text
+1. 后端锁定 policy + instance，避免并发执行。
+2. 后端选择 parent record。
+3. 后端校验 parent 状态、checksum、server UUID、backup engine、tool version、LSN。
+4. Runner 准备 parent basedir：
+   - 优先复用已校验 staging cache。
+   - 否则解包 parent artifact。
+   - 校验 SHA256 和 checkpoints。
+5. Runner 执行 xtrabackup/mariadb-backup --backup --incremental-basedir=<parent_basedir>。
+6. Runner 读取 incremental checkpoints。
+7. 校验 incremental.from_lsn == parent.to_lsn 或符合工具允许的连续性规则。
+8. Runner 打包 incremental artifact。
+9. 后端登记 incremental record：
+   - `base_record_id`
+   - `parent_record_id`
+   - `chain_id`
+   - `backup_level=incremental`
+10. 更新 chain state。
+```
+
+失败保护：
+
+1. parent artifact 不可读时，不执行增量。
+2. parent checksum 不匹配时，不执行增量。
+3. LSN 不连续时，record 标记 failed，chain state 标记 degraded 或 broken。
+4. server UUID 不一致时，默认阻止继续链路，除非存在明确 promotion history。
+5. 工具版本不兼容时阻止执行。
+
+P2.8/P2.9 已落地实现边界：
+
+1. 后端新增 `database_backup_policies` 和 `database_backup_chain_states` 自动迁移。
+2. 策略 API：
+   - `GET /api/v1/databases/backup-policies`
+   - `POST /api/v1/databases/backup-policies`
+   - `PUT /api/v1/databases/backup-policies/:id`
+   - `DELETE /api/v1/databases/backup-policies/:id`
+   - `GET /api/v1/databases/backup-policies/:id/chain`
+   - `POST /api/v1/databases/backup-policies/:id/run-full`
+   - `POST /api/v1/databases/backup-policies/:id/run-incremental`
+3. 策略只支持 MySQL/MariaDB 物理备份，PostgreSQL 仍走 P3 的 Barman / pg_basebackup 链路。
+4. 调度器会读取启用策略：
+   - full schedule 到期时优先跑 full；
+   - incremental schedule 到期时跑 incremental；
+   - 同一策略和同一实例有互斥锁，避免并发备份打断链。
+5. 增量 parent 第一版自动选择策略链状态里的 `latest_record_id`。
+6. parent 第一版必须满足：
+   - 同一策略；
+   - 成功状态；
+   - 物理备份；
+   - full 或 incremental；
+   - 备份引擎一致；
+   - 来源实例一致；
+   - checksum 存在；
+   - checkpoint `to_lsn` 存在；
+   - artifact URI 可被当前 Runner 读取。
+7. Runner 执行方式：
+   - 后端通过 SSH Runner 下发内置白名单脚本；
+   - 使用临时 `mysql-client.cnf` 传递数据库凭据，避免把密码放进 `xtrabackup --password` 参数；
+   - full 执行 `xtrabackup/mariadb-backup --backup --target-dir=...`；
+   - incremental 先解包 parent artifact，再执行 `--incremental-basedir=<parent_dir>`；
+   - 成功后打包 `.physical.tar.gz`，登记 SHA256、checkpoint、binlog info、manifest 和 Runner URI。
+8. 前端在 PITR 区域新增“备份策略”页签：
+   - 创建/编辑策略；
+   - 查看 full / incremental cron；
+   - 查看当前 base/latest/incremental count；
+   - 手动触发 full / incremental；
+   - 查看最近运行状态。
+9. 当前暂不自动上传策略物理备份 artifact 到对象存储。第一版登记 `runner://runner-host-<id>/<path>`，要求恢复 Runner 或后续同步机制可读该路径。
+10. 当前不执行 synthetic full，不清理 superseded 链，不自动要求恢复演练后 purge；这些继续由 P2.11/P2.12 落地。
+
+#### P2.10：自动增量链选择和链路校验
+
+目标：让 incremental 不需要用户手工填写 `incrementalBaseDir`。
+
+parent 选择规则：
+
+1. 优先使用同一策略、同一 `chain_id`、状态 `success` 的最新物理记录。
+2. 只允许选择 `backup_level=full`、`backup_level=incremental` 或 `backup_origin=synthetic_full` 的记录。
+3. 必须满足：
+   - `backup_method=physical`
+   - `backup_engine` 与策略一致
+   - `instance_id` 与策略一致
+   - `source_instance_id` 与策略一致或在允许的备份源集合内
+   - `server_uuid` 一致
+   - `to_lsn` 可读
+   - artifact 可读且 checksum 通过
+4. 如果没有 parent：
+   - 若允许自动 full，则本次改跑 full。
+   - 若不允许自动 full，则任务失败并提示需要先跑 full。
+
+需要扩展 `database_backup_records` 或 `manifest_json` 的字段：
+
+```text
+backup_origin: native_full / native_incremental / synthetic_full / external
+checkpoint_from_lsn
+checkpoint_to_lsn
+checkpoint_last_lsn
+checkpoint_backup_type
+artifact_state: local / remote / cached / missing / checksum_failed
+artifact_cache_uri
+synthetic_source_record_ids
+superseded_by_record_id
+purge_eligible_at
+protected_until
+```
+
+如果不想立刻扩表，第一版可以先把上述内容放入 `manifest_json`，但用于查询和链路校验的字段建议最终落列。
+
+链路校验内容：
+
+1. base 是否存在。
+2. parent 是否存在。
+3. incremental 顺序是否连续。
+4. 每个 artifact 是否可读。
+5. 每个 artifact checksum 是否匹配。
+6. 每个 record 的 `from_lsn / to_lsn` 是否连续。
+7. binlog 归档是否覆盖 base 之后的恢复窗口。
+8. 是否存在 server UUID / GTID / binlog 文件断链。
+
+新增 API 建议：
+
+```text
+GET  /api/v1/databases/backup-policies
+POST /api/v1/databases/backup-policies
+PUT  /api/v1/databases/backup-policies/:id
+POST /api/v1/databases/backup-policies/:id/run-full
+POST /api/v1/databases/backup-policies/:id/run-incremental
+POST /api/v1/databases/backup-policies/:id/validate-chain
+GET  /api/v1/databases/backup-policies/:id/chain
+```
+
+验收标准：
+
+1. full 成功后，chain state 指向该 full。
+2. incremental 自动选择 full 作为 parent。
+3. 第二次 incremental 自动选择上一次 incremental 作为 parent。
+4. 删除或破坏 parent artifact 后，incremental 被阻止。
+5. LSN 不连续时，链路标记 broken。
+6. 同一实例不会同时跑两个物理备份。
+7. full 到期日不会重复执行 full 和 incremental。
+
+#### P2.11：Synthetic Full / 合成全量
+
+目标：把一段旧 full + incremental 合成为新的 synthetic full，缩短恢复链长度，但不破坏旧链。
+
+示例：
+
+```text
+full_0 -> inc_1 -> inc_2 -> inc_3 -> inc_4 -> inc_5 -> inc_6
+```
+
+合成前四条增量：
+
+```text
+full_0 + inc_1 + inc_2 + inc_3 + inc_4 => synthetic_full_4
+synthetic_full_4 -> inc_5 -> inc_6
+```
+
+触发条件建议：
+
+1. 链运行满 `triggerAfterDays`。
+2. 当前 base 后 incremental 数量超过阈值。
+3. 最早 N 条 incremental 已经超过用户配置的压缩窗口。
+4. 所有待合成记录 artifact 可读且 checksum 通过。
+5. binlog 归档覆盖 synthetic full 之后的恢复窗口。
+6. 当前没有正在运行的备份、恢复、合成或清理任务。
+
+Runner 执行步骤：
+
+```text
+1. 创建 synthetic workdir。
+2. 解包 full_0 到 base dir。
+3. 解包 inc_1..inc_4 到 incremental dirs。
+4. 校验所有 artifact SHA256。
+5. 校验所有 xtrabackup_checkpoints。
+6. prepare base：
+   xtrabackup --prepare --apply-log-only --target-dir=<base>
+7. 依次 apply incremental：
+   xtrabackup --prepare --apply-log-only --target-dir=<base> --incremental-dir=<inc_1>
+   xtrabackup --prepare --apply-log-only --target-dir=<base> --incremental-dir=<inc_2>
+   xtrabackup --prepare --apply-log-only --target-dir=<base> --incremental-dir=<inc_3>
+   xtrabackup --prepare --apply-log-only --target-dir=<base> --incremental-dir=<inc_4>
+8. 读取最终 checkpoints。
+9. 打包 synthetic full artifact。
+10. 计算 checksum。
+11. 登记新的 backup record。
+```
+
+synthetic full 记录建议：
+
+```text
+backup_method = physical
+backup_level = full
+backup_origin = synthetic_full
+backup_engine = xtrabackup_8_0 / xtrabackup_8_4 / mariadb_backup
+base_record_id = self
+parent_record_id = inc_4
+chain_id = 新链 ID 或原链延续 ID
+synthetic_source_record_ids = [full_0, inc_1, inc_2, inc_3, inc_4]
+checkpoint_from_lsn = full_0.from_lsn
+checkpoint_to_lsn = inc_4.to_lsn
+prepare_status = synthetic_prepared
+restore_test_status = pending
+```
+
+关键边界：
+
+1. 不直接修改原 full 目录或原 artifact。
+2. synthetic full 是新 artifact，不是覆盖旧 artifact。
+3. synthetic full 成功不代表旧链可删。
+4. 必须经过隔离恢复演练后，旧链才允许进入 superseded 状态。
+5. 如果 synthetic full 失败，旧链继续保持可用。
+
+新增 Runner job 类型建议：
+
+```text
+mysql_synthetic_full
+mysql_synthetic_full_validate
+mysql_synthetic_full_pack
+```
+
+新增 API 建议：
+
+```text
+POST /api/v1/databases/backup-policies/:id/synthetic-full/preview
+POST /api/v1/databases/backup-policies/:id/synthetic-full/run
+GET  /api/v1/databases/backup-policies/:id/synthetic-full/jobs
+```
+
+preview 返回内容：
+
+```json
+{
+  "selectedBaseRecordId": 100,
+  "selectedIncrementalRecordIds": [101, 102, 103, 104],
+  "newSyntheticFullAfterRecordId": 104,
+  "estimatedInputSize": 1234567890,
+  "estimatedWorkdirSize": 2469135780,
+  "requiresRestoreProof": true,
+  "blockingReasons": []
+}
+```
+
+验收标准：
+
+1. 可以从 full + 多条 incremental 生成 synthetic full。
+2. synthetic full 登记为新的 full 记录。
+3. synthetic full 不覆盖原始 full。
+4. 合成过程中任一 artifact 缺失或 checksum 错误都会失败。
+5. 合成后可以用 synthetic full + 后续 incremental + binlog 创建 PITR 恢复计划。
+6. synthetic full 未恢复演练前，旧链不能自动删除。
+
+#### P2.12：Synthetic Full 后的恢复演练和清理
+
+目标：确保合成全量可恢复后，再把旧链标记为可清理。
+
+清理状态建议：
+
+```text
+active
+synthetic_created
+restore_proof_pending
+restore_proof_passed
+superseded
+purge_eligible
+purged
+purge_blocked
+```
+
+流程：
+
+```text
+1. synthetic full 生成成功。
+2. 自动创建恢复计划：
+   synthetic_full_4 + inc_5..inc_N + binlog。
+3. 下发隔离恢复 Runner。
+4. 执行 validation SQL 断言。
+5. proof 成功后：
+   - synthetic full 标记 restore_test_status=success。
+   - full_0 + inc_1..inc_4 标记 superseded。
+   - 设置 superseded_by_record_id=synthetic_full_4。
+   - 设置 purge_eligible_at=now + supersededKeepDaysAfterProof。
+6. 到达 purge_eligible_at 后，按保留策略提示或执行清理。
+```
+
+清理原则：
+
+1. `neverDeleteWithoutProof=true` 时，没有恢复证明绝不删除。
+2. 如果 binlog 归档断链，不允许清理旧链。
+3. 如果 synthetic full artifact 丢失或 checksum 失败，旧链重新保护。
+4. 如果后续 incremental 仍依赖旧 parent，不允许清理。
+5. 清理动作必须审计，并记录删除的 artifact URI、checksum 和 record ID。
+
+新增 API 建议：
+
+```text
+POST /api/v1/databases/backup-policies/:id/synthetic-full/:jobId/run-restore-proof
+POST /api/v1/databases/backup-policies/:id/purge-preview
+POST /api/v1/databases/backup-policies/:id/purge
+```
+
+purge preview 必须返回：
+
+```json
+{
+  "eligibleRecordIds": [100, 101, 102, 103, 104],
+  "blockedRecordIds": [],
+  "requiredProofRecordId": 150,
+  "proofStatus": "success",
+  "binlogCoverageStatus": "complete",
+  "storageDeletePlan": [
+    {
+      "recordId": 100,
+      "storageUri": "s3://bucket/mysql/full_0.tar.gz",
+      "checksumSha256": "..."
+    }
+  ]
+}
+```
+
+验收标准：
+
+1. synthetic full 成功后自动进入 `restore_proof_pending`。
+2. 恢复演练成功后，旧链进入 `superseded`。
+3. 恢复演练失败时，旧链保持 active/protected。
+4. binlog 断链时 purge preview 阻止删除。
+5. purge 删除前必须展示 record、storage URI、大小和 checksum。
+6. purge 后 records 不直接硬删除，先标记 `expired/purged` 并保留审计。
+
+#### 前端改造
+
+新增或扩展页面：
+
+1. `备份策略`
+   - 创建 full/incremental/synthetic 策略。
+   - 选择 Runner。
+   - 选择 binlog 归档流。
+   - 配置 full cron、incremental cron、synthetic rule 和 retention。
+2. `备份链路`
+   - 展示 full、incremental、synthetic full 的链路图。
+   - 展示 base、parent、LSN、binlog 起点、恢复窗口。
+3. `合成全量`
+   - 预览将合成哪些记录。
+   - 展示预计工作目录大小。
+   - 展示阻塞原因。
+   - 发起 synthetic full。
+4. `恢复证明`
+   - synthetic full 生成后提示必须做恢复演练。
+   - 展示 proof 状态和校验 SQL 断言。
+5. `清理预览`
+   - 只展示可清理记录。
+   - 阻塞项必须明确原因。
+
+链路图示例：
+
+```text
+native_full_0
+  -> inc_1
+  -> inc_2
+  -> inc_3
+  -> inc_4
+       => synthetic_full_4
+            -> inc_5
+            -> inc_6
+```
+
+风险提示：
+
+1. 未绑定 binlog 归档流：只能恢复到备份点，不能 PITR。
+2. binlog 归档延迟过大：RPO 不达标。
+3. incremental 数量过多：恢复时间可能过长。
+4. synthetic full 未恢复演练：旧链不能清理。
+5. Runner staging 空间不足：不允许发起 synthetic full。
+6. 当前 source 是 primary：提示优先使用备份从库或实时从库卸载压力。
+
+#### 权限和审计
+
+新增权限建议：
+
+```text
+database:backup-policy:view
+database:backup-policy:create
+database:backup-policy:update
+database:backup-policy:delete
+database:backup-policy:run-full
+database:backup-policy:run-incremental
+database:backup-policy:run-synthetic
+database:backup-policy:purge-preview
+database:backup-policy:purge
+```
+
+审计事件：
+
+1. 创建、更新、禁用策略。
+2. 手动触发 full。
+3. 手动触发 incremental。
+4. 手动触发 synthetic full。
+5. synthetic full preview。
+6. 恢复证明执行。
+7. purge preview。
+8. purge 执行。
+9. 链路 broken/degraded。
+10. artifact checksum 失败。
+
+#### 总体验收矩阵
+
+必须覆盖：
+
+1. MySQL 8.0 monthly full + daily incremental。
+2. MySQL 8.0 weekly full + daily incremental。
+3. MariaDB full + incremental。
+4. parent artifact 缺失。
+5. parent checksum 错误。
+6. LSN 不连续。
+7. server UUID 不一致。
+8. synthetic full 成功。
+9. synthetic full 失败后旧链仍可恢复。
+10. synthetic full + 后续 incremental + binlog PITR 成功。
+11. synthetic full 未恢复证明时 purge 被阻止。
+12. 恢复证明成功后 purge preview 正确。
+13. purge 执行后审计完整。
+
+#### 对 `opshub-mysql` 的建议落地策略
+
+`opshub-mysql` 当前是 MySQL 8.0.44，后续策略建议：
+
+```text
+backup_engine: xtrabackup_8_0
+full_schedule: 0 2 1 * *
+incremental_schedule: 0 3 * * *
+binlog_archive: 必须启用
+synthetic_enabled: true
+synthetic_rule:
+  triggerAfterDays: 7
+  mergeOldestIncrementals: 4
+  requireRestoreProof: true
+retention:
+  fullKeepMonths: 6
+  syntheticKeepMonths: 6
+  binlogKeepDays: 45
+  supersededKeepDaysAfterProof: 7
+```
+
+生产上线顺序：
+
+1. 先准备安装 `xtrabackup_8_0` 的 Runner。
+2. 开启 `opshub-mysql` binlog 归档流。
+3. 手动跑一次 full。
+4. 手动跑一次 incremental，验证 parent 自动选择。
+5. 连续跑 3-7 天 incremental。
+6. 执行 synthetic full preview。
+7. 执行 synthetic full。
+8. 用 synthetic full 创建并运行隔离恢复演练。
+9. 恢复 proof 成功后，才允许旧链进入清理窗口。
+
 ## 文档定位
 
 本文是 OpsHub 数据库管理模块在“大库备份、日志归档、延迟副本、PITR 恢复演练”方向的长期改造基准。后续分期实施、表结构扩展、接口设计、前端页面、Runner 执行边界、权限和验收标准均以本文为准。

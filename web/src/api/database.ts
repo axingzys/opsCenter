@@ -221,9 +221,103 @@ export interface DatabaseBackupTaskResult {
   updatedAt: string
 }
 
+export interface DatabaseBackupPolicyPayload {
+  instanceId: number
+  sourceInstanceId?: number
+  sourceRole?: string
+  name: string
+  backupEngine?: string
+  runnerHostId: number
+  storageProfileId?: number
+  secretProfileId?: number
+  binlogStreamId?: number
+  fullSchedule?: string
+  incrementalSchedule?: string
+  syntheticEnabled?: boolean
+  syntheticRuleJson?: string
+  restoreDrillRequired?: boolean
+  retentionJson?: string
+  enabled: boolean
+}
+
+export interface DatabaseBackupChainStateResult {
+  id: number
+  policyId: number
+  instanceId: number
+  chainId: string
+  currentBaseRecordId: number
+  latestRecordId: number
+  latestFullRecordId: number
+  latestSyntheticRecordId: number
+  incrementalCount: number
+  chainStartedAt: string
+  lastSuccessAt: string
+  recoverableUntil: string
+  status: string
+  statusText: string
+  lastValidationStatus: string
+  lastError: string
+}
+
+export interface DatabaseBackupPolicyResult {
+  id: number
+  instanceId: number
+  instanceName: string
+  instanceDbType: string
+  sourceInstanceId: number
+  sourceRole: string
+  name: string
+  engine: string
+  backupEngine: string
+  runnerHostId: number
+  runnerHostName: string
+  storageProfileId: number
+  secretProfileId: number
+  binlogStreamId: number
+  fullSchedule: string
+  incrementalSchedule: string
+  syntheticEnabled: boolean
+  syntheticRuleJson: string
+  restoreDrillRequired: boolean
+  retentionJson: string
+  enabled: boolean
+  status: string
+  statusText: string
+  nextFullRunAt: string
+  nextIncrementalRunAt: string
+  lastRunAt: string
+  lastFullAt: string
+  lastIncrementalAt: string
+  lastSyntheticAt: string
+  lastRestoreDrillAt: string
+  lastStatus: string
+  lastStatusText: string
+  lastMessage: string
+  lastError: string
+  chain?: DatabaseBackupChainStateResult
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseBackupPolicyRunResult {
+  policyId: number
+  policyName: string
+  recordId: number
+  runnerJobId: number
+  instanceId: number
+  instanceName: string
+  backupLevel: string
+  status: string
+  statusText: string
+  fileName: string
+  message: string
+  triggeredAt: string
+}
+
 export interface DatabaseBackupRecordResult {
   id: number
   taskId: number
+  policyId?: number
   taskName: string
   instanceId: number
   instanceName: string
@@ -252,6 +346,17 @@ export interface DatabaseBackupRecordResult {
   storageUri?: string
   manifestJson?: string
   prepareStatus?: string
+  backupOrigin?: string
+  checkpointFromLsn?: string
+  checkpointToLsn?: string
+  checkpointLastLsn?: string
+  checkpointBackupType?: string
+  artifactState?: string
+  artifactCacheUri?: string
+  syntheticSourceRecordIds?: string
+  supersededByRecordId?: number
+  purgeEligibleAt?: string
+  protectedUntil?: string
   status: string
   statusText: string
   fileName: string
@@ -1260,6 +1365,33 @@ export const deleteDatabaseBackupTask = (id: number) =>
 
 export const runDatabaseBackupTask = (id: number) =>
   request.post(`/api/v1/databases/backup-tasks/${id}/run`)
+
+export const listDatabaseBackupPolicies = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  instanceId?: number
+  status?: string
+  enabled?: string
+}) => request.get('/api/v1/databases/backup-policies', { params })
+
+export const createDatabaseBackupPolicy = (data: DatabaseBackupPolicyPayload) =>
+  request.post('/api/v1/databases/backup-policies', data)
+
+export const updateDatabaseBackupPolicy = (id: number, data: DatabaseBackupPolicyPayload) =>
+  request.put(`/api/v1/databases/backup-policies/${id}`, data)
+
+export const deleteDatabaseBackupPolicy = (id: number) =>
+  request.delete(`/api/v1/databases/backup-policies/${id}`)
+
+export const getDatabaseBackupPolicyChain = (id: number) =>
+  request.get(`/api/v1/databases/backup-policies/${id}/chain`)
+
+export const runDatabaseBackupPolicyFull = (id: number, data?: { reason?: string }) =>
+  request.post(`/api/v1/databases/backup-policies/${id}/run-full`, data || {})
+
+export const runDatabaseBackupPolicyIncremental = (id: number, data?: { reason?: string }) =>
+  request.post(`/api/v1/databases/backup-policies/${id}/run-incremental`, data || {})
 
 export const listDatabaseBackupRecords = (params?: {
   page?: number

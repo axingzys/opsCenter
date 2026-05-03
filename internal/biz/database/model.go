@@ -93,6 +93,25 @@ const (
 	DatabaseBackupVerifyStatusFailed  = "failed"
 	DatabaseBackupVerifyStatusExpired = "expired"
 
+	DatabaseBackupPolicyStatusPending         = "pending"
+	DatabaseBackupPolicyStatusActive          = "active"
+	DatabaseBackupPolicyStatusDegraded        = "degraded"
+	DatabaseBackupPolicyStatusFailed          = "failed"
+	DatabaseBackupPolicyStatusDisabled        = "disabled"
+	DatabaseBackupChainStateHealthy           = "healthy"
+	DatabaseBackupChainStateDegraded          = "degraded"
+	DatabaseBackupChainStateBroken            = "broken"
+	DatabaseBackupChainStateConsolidating     = "consolidating"
+	DatabaseBackupOriginNativeFull            = "native_full"
+	DatabaseBackupOriginNativeIncremental     = "native_incremental"
+	DatabaseBackupOriginSyntheticFull         = "synthetic_full"
+	DatabaseBackupOriginExternal              = "external"
+	DatabaseBackupArtifactStateLocal          = "local"
+	DatabaseBackupArtifactStateRemote         = "remote"
+	DatabaseBackupArtifactStateCached         = "cached"
+	DatabaseBackupArtifactStateMissing        = "missing"
+	DatabaseBackupArtifactStateChecksumFailed = "checksum_failed"
+
 	DatabaseRestoreCapabilityNone               = "none"
 	DatabaseRestoreCapabilityLogicalRestoreOnly = "logical_restore_only"
 	DatabaseRestoreCapabilityPhysicalRestore    = "physical_restore"
@@ -183,6 +202,7 @@ const (
 	DatabaseRunnerAllowedCommandBinlogArchiveOnce    = "mysqlbinlog_archive_once"
 	DatabaseRunnerAllowedCommandBinlogArchiveCatchUp = "mysqlbinlog_archive_catch_up"
 	DatabaseRunnerAllowedCommandPhysicalRestore      = "mysql_physical_restore"
+	DatabaseRunnerAllowedCommandMySQLPhysicalBackup  = "mysql_physical_backup"
 	DatabaseRunnerAllowedCommandBarmanCheck          = "barman_check"
 	DatabaseRunnerAllowedCommandBarmanCatalogSync    = "barman_catalog_sync"
 	DatabaseRunnerAllowedCommandBarmanWALSync        = "barman_wal_sync"
@@ -665,48 +685,60 @@ func (DatabaseBackupTask) TableName() string {
 // DatabaseBackupRecord 备份执行记录
 type DatabaseBackupRecord struct {
 	gorm.Model
-	TaskID             uint       `gorm:"column:task_id;index;comment:任务ID" json:"taskId"`
-	InstanceID         uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
-	TriggerType        string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发方式" json:"triggerType"`
-	BackupType         string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
-	ChainID            string     `gorm:"column:chain_id;type:varchar(64);index;comment:备份链ID" json:"chainId"`
-	BaseRecordID       uint       `gorm:"column:base_record_id;index;comment:所属全量备份记录ID" json:"baseRecordId"`
-	ParentRecordID     uint       `gorm:"column:parent_record_id;index;comment:直接依赖的上一备份记录ID" json:"parentRecordId"`
-	BackupMethod       string     `gorm:"column:backup_method;type:varchar(30);index;default:'logical';comment:备份方法" json:"backupMethod"`
-	BackupLevel        string     `gorm:"column:backup_level;type:varchar(30);index;default:'full';comment:备份层级" json:"backupLevel"`
-	BackupEngine       string     `gorm:"column:backup_engine;type:varchar(60);comment:备份引擎" json:"backupEngine"`
-	ExternalBackupID   string     `gorm:"column:external_backup_id;type:varchar(120);index;comment:外部备份ID" json:"externalBackupId"`
-	ExternalServerName string     `gorm:"column:external_server_name;type:varchar(120);index;comment:外部工具server名称" json:"externalServerName"`
-	BackupScope        string     `gorm:"column:backup_scope;type:varchar(30);default:'database';comment:备份范围" json:"backupScope"`
-	ToolName           string     `gorm:"column:tool_name;type:varchar(60);comment:实际工具名" json:"toolName"`
-	ToolVersion        string     `gorm:"column:tool_version;type:varchar(120);comment:实际工具版本" json:"toolVersion"`
-	SourceInstanceID   uint       `gorm:"column:source_instance_id;index;comment:实际备份源实例ID" json:"sourceInstanceId"`
-	SourceRole         string     `gorm:"column:source_role;type:varchar(30);comment:源角色" json:"sourceRole"`
-	StorageProfileID   uint       `gorm:"column:storage_profile_id;index;comment:存储配置ID" json:"storageProfileId"`
-	StorageType        string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
-	StorageURI         string     `gorm:"column:storage_uri;type:varchar(1000);comment:存储URI" json:"storageUri"`
-	ManifestJSON       string     `gorm:"column:manifest_json;type:text;comment:工具manifest或摘要" json:"manifestJson"`
-	PrepareStatus      string     `gorm:"column:prepare_status;type:varchar(30);comment:物理备份prepare状态" json:"prepareStatus"`
-	Status             string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
-	FilePath           string     `gorm:"column:file_path;type:varchar(500);comment:文件路径" json:"filePath"`
-	FileName           string     `gorm:"column:file_name;type:varchar(255);comment:文件名" json:"fileName"`
-	FileSize           int64      `gorm:"column:file_size;type:bigint;default:0;comment:文件大小" json:"fileSize"`
-	ChecksumSHA256     string     `gorm:"column:checksum_sha256;type:varchar(64);comment:文件SHA256校验和" json:"checksumSha256"`
-	Encrypted          bool       `gorm:"default:false;comment:备份是否加密" json:"encrypted"`
-	Compression        string     `gorm:"type:varchar(30);comment:压缩方式" json:"compression"`
-	ExpiresAt          *time.Time `gorm:"column:expires_at;index;comment:过期时间" json:"expiresAt,omitempty"`
-	VerifiedAt         *time.Time `gorm:"column:verified_at;comment:最近校验时间" json:"verifiedAt,omitempty"`
-	VerifyStatus       string     `gorm:"column:verify_status;type:varchar(20);comment:校验状态" json:"verifyStatus"`
-	VerifyMessage      string     `gorm:"column:verify_message;type:varchar(500);comment:校验结果" json:"verifyMessage"`
-	RestoreTestedAt    *time.Time `gorm:"column:restore_tested_at;comment:最近恢复演练时间" json:"restoreTestedAt,omitempty"`
-	RestoreTestStatus  string     `gorm:"column:restore_test_status;type:varchar(20);comment:最近恢复演练状态" json:"restoreTestStatus"`
-	StartedAt          *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
-	LastHeartbeatAt    *time.Time `gorm:"column:last_heartbeat_at;comment:最近心跳时间" json:"lastHeartbeatAt,omitempty"`
-	FinishedAt         *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
-	RecoverableFrom    *time.Time `gorm:"column:recoverable_from;comment:理论恢复窗口起点" json:"recoverableFrom,omitempty"`
-	RecoverableUntil   *time.Time `gorm:"column:recoverable_until;comment:理论恢复窗口终点" json:"recoverableUntil,omitempty"`
-	DurationMs         int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
-	ErrorMessage       string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
+	TaskID                   uint       `gorm:"column:task_id;index;comment:任务ID" json:"taskId"`
+	PolicyID                 uint       `gorm:"column:policy_id;index;comment:备份策略ID" json:"policyId"`
+	InstanceID               uint       `gorm:"column:instance_id;not null;index;comment:实例ID" json:"instanceId"`
+	TriggerType              string     `gorm:"column:trigger_type;type:varchar(30);default:'manual';comment:触发方式" json:"triggerType"`
+	BackupType               string     `gorm:"column:backup_type;type:varchar(30);default:'logical';comment:备份类型" json:"backupType"`
+	ChainID                  string     `gorm:"column:chain_id;type:varchar(64);index;comment:备份链ID" json:"chainId"`
+	BaseRecordID             uint       `gorm:"column:base_record_id;index;comment:所属全量备份记录ID" json:"baseRecordId"`
+	ParentRecordID           uint       `gorm:"column:parent_record_id;index;comment:直接依赖的上一备份记录ID" json:"parentRecordId"`
+	BackupMethod             string     `gorm:"column:backup_method;type:varchar(30);index;default:'logical';comment:备份方法" json:"backupMethod"`
+	BackupLevel              string     `gorm:"column:backup_level;type:varchar(30);index;default:'full';comment:备份层级" json:"backupLevel"`
+	BackupEngine             string     `gorm:"column:backup_engine;type:varchar(60);comment:备份引擎" json:"backupEngine"`
+	ExternalBackupID         string     `gorm:"column:external_backup_id;type:varchar(120);index;comment:外部备份ID" json:"externalBackupId"`
+	ExternalServerName       string     `gorm:"column:external_server_name;type:varchar(120);index;comment:外部工具server名称" json:"externalServerName"`
+	BackupScope              string     `gorm:"column:backup_scope;type:varchar(30);default:'database';comment:备份范围" json:"backupScope"`
+	ToolName                 string     `gorm:"column:tool_name;type:varchar(60);comment:实际工具名" json:"toolName"`
+	ToolVersion              string     `gorm:"column:tool_version;type:varchar(120);comment:实际工具版本" json:"toolVersion"`
+	SourceInstanceID         uint       `gorm:"column:source_instance_id;index;comment:实际备份源实例ID" json:"sourceInstanceId"`
+	SourceRole               string     `gorm:"column:source_role;type:varchar(30);comment:源角色" json:"sourceRole"`
+	StorageProfileID         uint       `gorm:"column:storage_profile_id;index;comment:存储配置ID" json:"storageProfileId"`
+	StorageType              string     `gorm:"column:storage_type;type:varchar(30);default:'local';comment:存储类型" json:"storageType"`
+	StorageURI               string     `gorm:"column:storage_uri;type:varchar(1000);comment:存储URI" json:"storageUri"`
+	ManifestJSON             string     `gorm:"column:manifest_json;type:text;comment:工具manifest或摘要" json:"manifestJson"`
+	PrepareStatus            string     `gorm:"column:prepare_status;type:varchar(30);comment:物理备份prepare状态" json:"prepareStatus"`
+	BackupOrigin             string     `gorm:"column:backup_origin;type:varchar(40);index;comment:备份来源 native_full/native_incremental/synthetic_full/external" json:"backupOrigin"`
+	CheckpointFromLSN        string     `gorm:"column:checkpoint_from_lsn;type:varchar(120);comment:物理备份checkpoint from_lsn" json:"checkpointFromLsn"`
+	CheckpointToLSN          string     `gorm:"column:checkpoint_to_lsn;type:varchar(120);comment:物理备份checkpoint to_lsn" json:"checkpointToLsn"`
+	CheckpointLastLSN        string     `gorm:"column:checkpoint_last_lsn;type:varchar(120);comment:物理备份checkpoint last_lsn" json:"checkpointLastLsn"`
+	CheckpointBackupType     string     `gorm:"column:checkpoint_backup_type;type:varchar(60);comment:物理备份checkpoint backup_type" json:"checkpointBackupType"`
+	ArtifactState            string     `gorm:"column:artifact_state;type:varchar(40);index;comment:artifact状态" json:"artifactState"`
+	ArtifactCacheURI         string     `gorm:"column:artifact_cache_uri;type:varchar(1000);comment:Runner artifact缓存URI" json:"artifactCacheUri"`
+	SyntheticSourceRecordIDs string     `gorm:"column:synthetic_source_record_ids;type:varchar(1000);comment:合成全量来源记录ID" json:"syntheticSourceRecordIds"`
+	SupersededByRecordID     uint       `gorm:"column:superseded_by_record_id;index;comment:被哪条记录替代" json:"supersededByRecordId"`
+	PurgeEligibleAt          *time.Time `gorm:"column:purge_eligible_at;index;comment:允许清理时间" json:"purgeEligibleAt,omitempty"`
+	ProtectedUntil           *time.Time `gorm:"column:protected_until;index;comment:保护到期时间" json:"protectedUntil,omitempty"`
+	Status                   string     `gorm:"type:varchar(20);default:'pending';index;comment:状态" json:"status"`
+	FilePath                 string     `gorm:"column:file_path;type:varchar(500);comment:文件路径" json:"filePath"`
+	FileName                 string     `gorm:"column:file_name;type:varchar(255);comment:文件名" json:"fileName"`
+	FileSize                 int64      `gorm:"column:file_size;type:bigint;default:0;comment:文件大小" json:"fileSize"`
+	ChecksumSHA256           string     `gorm:"column:checksum_sha256;type:varchar(64);comment:文件SHA256校验和" json:"checksumSha256"`
+	Encrypted                bool       `gorm:"default:false;comment:备份是否加密" json:"encrypted"`
+	Compression              string     `gorm:"type:varchar(30);comment:压缩方式" json:"compression"`
+	ExpiresAt                *time.Time `gorm:"column:expires_at;index;comment:过期时间" json:"expiresAt,omitempty"`
+	VerifiedAt               *time.Time `gorm:"column:verified_at;comment:最近校验时间" json:"verifiedAt,omitempty"`
+	VerifyStatus             string     `gorm:"column:verify_status;type:varchar(20);comment:校验状态" json:"verifyStatus"`
+	VerifyMessage            string     `gorm:"column:verify_message;type:varchar(500);comment:校验结果" json:"verifyMessage"`
+	RestoreTestedAt          *time.Time `gorm:"column:restore_tested_at;comment:最近恢复演练时间" json:"restoreTestedAt,omitempty"`
+	RestoreTestStatus        string     `gorm:"column:restore_test_status;type:varchar(20);comment:最近恢复演练状态" json:"restoreTestStatus"`
+	StartedAt                *time.Time `gorm:"column:started_at;comment:开始时间" json:"startedAt,omitempty"`
+	LastHeartbeatAt          *time.Time `gorm:"column:last_heartbeat_at;comment:最近心跳时间" json:"lastHeartbeatAt,omitempty"`
+	FinishedAt               *time.Time `gorm:"column:finished_at;comment:结束时间" json:"finishedAt,omitempty"`
+	RecoverableFrom          *time.Time `gorm:"column:recoverable_from;comment:理论恢复窗口起点" json:"recoverableFrom,omitempty"`
+	RecoverableUntil         *time.Time `gorm:"column:recoverable_until;comment:理论恢复窗口终点" json:"recoverableUntil,omitempty"`
+	DurationMs               int64      `gorm:"column:duration_ms;type:bigint;default:0;comment:耗时毫秒" json:"durationMs"`
+	ErrorMessage             string     `gorm:"column:error_message;type:varchar(500);comment:错误信息" json:"errorMessage"`
 
 	ServerUUID             string `gorm:"column:server_uuid;type:varchar(120);index;comment:MySQL server UUID" json:"serverUuid"`
 	ServerID               string `gorm:"column:server_id;type:varchar(60);comment:MySQL server_id" json:"serverId"`
@@ -733,6 +765,66 @@ type DatabaseBackupRecord struct {
 
 func (DatabaseBackupRecord) TableName() string {
 	return "database_backup_records"
+}
+
+// DatabaseBackupPolicy MySQL/MariaDB 长期物理备份策略。
+type DatabaseBackupPolicyConfig struct {
+	gorm.Model
+	InstanceID           uint       `gorm:"column:instance_id;not null;index;comment:主实例ID" json:"instanceId"`
+	SourceInstanceID     uint       `gorm:"column:source_instance_id;index;comment:实际备份源实例ID" json:"sourceInstanceId"`
+	SourceRole           string     `gorm:"column:source_role;type:varchar(40);comment:源角色" json:"sourceRole"`
+	Name                 string     `gorm:"type:varchar(120);not null;comment:策略名称" json:"name"`
+	Engine               string     `gorm:"type:varchar(30);not null;index;comment:数据库类型" json:"engine"`
+	BackupEngine         string     `gorm:"column:backup_engine;type:varchar(60);comment:物理备份引擎" json:"backupEngine"`
+	RunnerHostID         uint       `gorm:"column:runner_host_id;not null;index;comment:Runner主机ID" json:"runnerHostId"`
+	StorageProfileID     uint       `gorm:"column:storage_profile_id;index;comment:存储配置ID" json:"storageProfileId"`
+	SecretProfileID      uint       `gorm:"column:secret_profile_id;index;comment:密钥配置ID" json:"secretProfileId"`
+	BinlogStreamID       uint       `gorm:"column:binlog_stream_id;index;comment:绑定binlog归档流ID" json:"binlogStreamId"`
+	FullSchedule         string     `gorm:"column:full_schedule;type:varchar(120);comment:全量cron" json:"fullSchedule"`
+	IncrementalSchedule  string     `gorm:"column:incremental_schedule;type:varchar(120);comment:增量cron" json:"incrementalSchedule"`
+	SyntheticEnabled     bool       `gorm:"column:synthetic_enabled;default:false;comment:是否启用合成全量" json:"syntheticEnabled"`
+	SyntheticRuleJSON    string     `gorm:"column:synthetic_rule_json;type:text;comment:合成全量规则JSON" json:"syntheticRuleJson"`
+	RestoreDrillRequired bool       `gorm:"column:restore_drill_required;default:true;comment:是否要求恢复演练" json:"restoreDrillRequired"`
+	RetentionJSON        string     `gorm:"column:retention_json;type:text;comment:保留策略JSON" json:"retentionJson"`
+	Enabled              bool       `gorm:"default:true;comment:是否启用" json:"enabled"`
+	Status               string     `gorm:"type:varchar(30);default:'pending';index;comment:策略状态" json:"status"`
+	NextFullRunAt        *time.Time `gorm:"column:next_full_run_at;comment:下次全量执行时间" json:"nextFullRunAt,omitempty"`
+	NextIncrementalRunAt *time.Time `gorm:"column:next_incremental_run_at;comment:下次增量执行时间" json:"nextIncrementalRunAt,omitempty"`
+	LastRunAt            *time.Time `gorm:"column:last_run_at;comment:最近执行时间" json:"lastRunAt,omitempty"`
+	LastFullAt           *time.Time `gorm:"column:last_full_at;comment:最近全量成功时间" json:"lastFullAt,omitempty"`
+	LastIncrementalAt    *time.Time `gorm:"column:last_incremental_at;comment:最近增量成功时间" json:"lastIncrementalAt,omitempty"`
+	LastSyntheticAt      *time.Time `gorm:"column:last_synthetic_at;comment:最近合成全量成功时间" json:"lastSyntheticAt,omitempty"`
+	LastRestoreDrillAt   *time.Time `gorm:"column:last_restore_drill_at;comment:最近恢复演练成功时间" json:"lastRestoreDrillAt,omitempty"`
+	LastStatus           string     `gorm:"column:last_status;type:varchar(30);comment:最近执行状态" json:"lastStatus"`
+	LastMessage          string     `gorm:"column:last_message;type:varchar(500);comment:最近执行结果" json:"lastMessage"`
+	LastError            string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误" json:"lastError"`
+}
+
+func (DatabaseBackupPolicyConfig) TableName() string {
+	return "database_backup_policies"
+}
+
+// DatabaseBackupChainState 当前物理备份链状态。
+type DatabaseBackupChainState struct {
+	gorm.Model
+	PolicyID                uint       `gorm:"column:policy_id;not null;uniqueIndex;comment:策略ID" json:"policyId"`
+	InstanceID              uint       `gorm:"column:instance_id;not null;index;comment:主实例ID" json:"instanceId"`
+	ChainID                 string     `gorm:"column:chain_id;type:varchar(64);index;comment:当前链ID" json:"chainId"`
+	CurrentBaseRecordID     uint       `gorm:"column:current_base_record_id;index;comment:当前base记录ID" json:"currentBaseRecordId"`
+	LatestRecordID          uint       `gorm:"column:latest_record_id;index;comment:当前最新记录ID" json:"latestRecordId"`
+	LatestFullRecordID      uint       `gorm:"column:latest_full_record_id;index;comment:最近原生full记录ID" json:"latestFullRecordId"`
+	LatestSyntheticRecordID uint       `gorm:"column:latest_synthetic_record_id;index;comment:最近synthetic full记录ID" json:"latestSyntheticRecordId"`
+	IncrementalCount        int        `gorm:"column:incremental_count;type:int;default:0;comment:当前base后增量数量" json:"incrementalCount"`
+	ChainStartedAt          *time.Time `gorm:"column:chain_started_at;comment:链开始时间" json:"chainStartedAt,omitempty"`
+	LastSuccessAt           *time.Time `gorm:"column:last_success_at;comment:最近成功时间" json:"lastSuccessAt,omitempty"`
+	RecoverableUntil        *time.Time `gorm:"column:recoverable_until;comment:理论恢复终点" json:"recoverableUntil,omitempty"`
+	Status                  string     `gorm:"type:varchar(30);default:'healthy';index;comment:链状态" json:"status"`
+	LastValidationStatus    string     `gorm:"column:last_validation_status;type:varchar(60);comment:最近校验状态" json:"lastValidationStatus"`
+	LastError               string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误" json:"lastError"`
+}
+
+func (DatabaseBackupChainState) TableName() string {
+	return "database_backup_chain_states"
 }
 
 // DatabaseBarmanServer PostgreSQL Barman server 纳管配置。

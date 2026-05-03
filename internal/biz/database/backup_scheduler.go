@@ -169,9 +169,81 @@ func (s *BackupScheduler) runOnce(ctx context.Context) {
 		go s.executeScheduledTask(ctx, task.ID, nextRun)
 	}
 
+	policies, err := s.useCase.ListEnabledBackupPolicies(ctx)
+	if err != nil {
+		appLogger.Warn("读取数据库备份策略失败", zap.Error(err))
+	} else {
+		for _, policy := range policies {
+			fullDue, fullNext, fullErr := duePolicyRunAt(policy.FullSchedule, policy.LastFullAt, policy.CreatedAt, now)
+			if fullErr != nil {
+				appLogger.Warn("数据库备份策略全量 Cron 表达式无效",
+					zap.Uint("policyID", policy.ID),
+					zap.String("policyName", policy.Name),
+					zap.String("schedule", policy.FullSchedule),
+					zap.Error(fullErr),
+				)
+			}
+			incrementalDue, incrementalNext, incrementalErr := duePolicyRunAt(policy.IncrementalSchedule, policy.LastIncrementalAt, policy.CreatedAt, now)
+			if incrementalErr != nil {
+				appLogger.Warn("数据库备份策略增量 Cron 表达式无效",
+					zap.Uint("policyID", policy.ID),
+					zap.String("policyName", policy.Name),
+					zap.String("schedule", policy.IncrementalSchedule),
+					zap.Error(incrementalErr),
+				)
+			}
+			s.persistPolicyNextRun(ctx, policy, fullNext, incrementalNext)
+			if fullDue {
+				go s.executeScheduledPolicy(ctx, policy.ID, DatabaseBackupLevelFull, fullNext)
+				continue
+			}
+			if incrementalDue {
+				go s.executeScheduledPolicy(ctx, policy.ID, DatabaseBackupLevelIncremental, incrementalNext)
+			}
+		}
+	}
+
 	if s.shouldRunCleanup(now) {
 		s.runCleanupSweep(ctx)
 	}
+}
+
+func (s *BackupScheduler) executeScheduledPolicy(ctx context.Context, policyID uint, level string, nextRun time.Time) {
+	if !s.tryAcquireRunSlot() {
+		appLogger.Warn("数据库备份策略定时执行跳过，调度器全局并发已满",
+			zap.Uint("policyID", policyID),
+			zap.String("level", level),
+			zap.Time("scheduledAt", nextRun),
+		)
+		return
+	}
+	defer s.releaseRunSlot()
+
+	result, err := s.useCase.RunScheduledBackupPolicy(ctx, policyID, level)
+	if err != nil {
+		if isBackupTaskRunningError(err) || strings.Contains(err.Error(), "备份策略正在执行中") {
+			appLogger.Info("数据库备份策略定时执行跳过，策略或实例仍在执行中",
+				zap.Uint("policyID", policyID),
+				zap.String("level", level),
+				zap.Time("scheduledAt", nextRun),
+			)
+			return
+		}
+		appLogger.Error("数据库备份策略定时执行失败",
+			zap.Uint("policyID", policyID),
+			zap.String("level", level),
+			zap.Time("scheduledAt", nextRun),
+			zap.Error(err),
+		)
+		return
+	}
+	appLogger.Info("数据库备份策略定时执行已入队",
+		zap.Uint("policyID", policyID),
+		zap.Uint("recordID", result.RecordID),
+		zap.Uint("runnerJobID", result.RunnerJobID),
+		zap.String("level", level),
+		zap.String("status", result.Status),
+	)
 }
 
 func (s *BackupScheduler) shouldRunCleanup(now time.Time) bool {
@@ -258,6 +330,24 @@ func (s *BackupScheduler) persistTaskNextRun(ctx context.Context, task *Database
 	}
 	task.NextRunAt = &nextRun
 	_ = s.useCase.backupTaskRepo.Update(ctx, task)
+}
+
+func (s *BackupScheduler) persistPolicyNextRun(ctx context.Context, policy *DatabaseBackupPolicyConfig, fullNext, incrementalNext time.Time) {
+	if s == nil || s.useCase == nil || s.useCase.backupPolicyConfigRepo == nil || policy == nil || policy.ID == 0 {
+		return
+	}
+	changed := false
+	if !fullNext.IsZero() && (policy.NextFullRunAt == nil || !policy.NextFullRunAt.Equal(fullNext)) {
+		policy.NextFullRunAt = &fullNext
+		changed = true
+	}
+	if !incrementalNext.IsZero() && (policy.NextIncrementalRunAt == nil || !policy.NextIncrementalRunAt.Equal(incrementalNext)) {
+		policy.NextIncrementalRunAt = &incrementalNext
+		changed = true
+	}
+	if changed {
+		_ = s.useCase.backupPolicyConfigRepo.Update(ctx, policy)
+	}
 }
 
 func (s *BackupScheduler) runCleanupSweep(ctx context.Context) {

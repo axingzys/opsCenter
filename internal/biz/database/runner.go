@@ -642,7 +642,7 @@ func RunnerHostStatusText(value string) string {
 func RunnerJobTypeText(value string) string {
 	switch strings.TrimSpace(value) {
 	case DatabaseRunnerJobTypePhysicalBackup:
-		return "物理备份"
+		return "MySQL/MariaDB 物理备份"
 	case DatabaseRunnerJobTypeBinlogArchive:
 		return "binlog 归档"
 	case DatabaseRunnerJobTypePhysicalRestore:

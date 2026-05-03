@@ -232,6 +232,23 @@ func (r *backupRecordRepo) ListSuccessfulForRestore(ctx context.Context, instanc
 	return items, nil
 }
 
+func (r *backupRecordRepo) ListSuccessfulPhysicalByPolicy(ctx context.Context, policyID uint) ([]*dbbiz.DatabaseBackupRecord, error) {
+	var items []*dbbiz.DatabaseBackupRecord
+	if policyID == 0 {
+		return items, nil
+	}
+	if err := r.db.WithContext(ctx).
+		Model(&dbbiz.DatabaseBackupRecord{}).
+		Where("policy_id = ?", policyID).
+		Where("backup_method = ?", dbbiz.DatabaseBackupMethodPhysical).
+		Where("status = ?", dbbiz.DatabaseBackupStatusSuccess).
+		Order("finished_at ASC, id ASC").
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 type restoreJobRepo struct {
 	db *gorm.DB
 }
