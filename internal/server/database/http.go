@@ -18,43 +18,47 @@ import (
 )
 
 const (
-	permDatabaseInstanceView    = "database:instance:view"
-	permDatabaseInstanceCreate  = "database:instance:create"
-	permDatabaseInstanceUpdate  = "database:instance:update"
-	permDatabaseInstanceDelete  = "database:instance:delete"
-	permDatabaseInstanceStatus  = "database:instance:status"
-	permDatabaseConnectionTest  = "database:connection:test"
-	permDatabaseMetadataView    = "database:metadata:view"
-	permDatabaseMetadataSync    = "database:metadata:sync"
-	permDatabaseMetadataExport  = "database:metadata:export"
-	permDatabaseQueryExecute    = "database:query:execute"
-	permDatabaseQueryWrite      = "database:query:write"
-	permDatabaseQueryExplain    = "database:query:explain"
-	permDatabaseQueryWritePlan  = "database:query:write-explain"
-	permDatabaseQueryDDL        = "database:query:ddl"
-	permDatabaseQueryExport     = "database:query:export"
-	permDatabaseQueryHistory    = "database:query:history:view"
-	permDatabaseDiagnosisView   = "database:diagnosis:view"
-	permDatabaseTopologyView    = "database:topology:view"
-	permDatabaseAuditView       = "database:audit:view"
-	permDatabaseAuditExport     = "database:audit:export"
-	permDatabaseBackupView      = "database:backup:view"
-	permDatabaseBackupCreate    = "database:backup:create"
-	permDatabaseBackupUpdate    = "database:backup:update"
-	permDatabaseBackupDelete    = "database:backup:delete"
-	permDatabaseBackupRun       = "database:backup:run"
-	permDatabaseBackupDownload  = "database:backup:download"
-	permDatabaseRestoreView     = "database:restore:view"
-	permDatabaseRestoreRun      = "database:restore:run"
-	permDatabaseCapacityView    = "database:capacity:view"
-	permDatabaseCapacityCollect = "database:capacity:collect"
-	permDatabaseInspectionView  = "database:inspection:view"
-	permDatabaseInspectionRun   = "database:inspection:run"
-	permDatabaseReplicaView     = "database:replica:view"
-	permDatabaseReplicaCheck    = "database:replica:check"
-	permDatabaseReplicaIncident = "database:replica:incident-guide"
-	permDatabaseReplicaPause    = "database:replica:pause-apply"
-	permDatabaseReplicaResume   = "database:replica:resume-apply"
+	permDatabaseInstanceView      = "database:instance:view"
+	permDatabaseInstanceCreate    = "database:instance:create"
+	permDatabaseInstanceUpdate    = "database:instance:update"
+	permDatabaseInstanceDelete    = "database:instance:delete"
+	permDatabaseInstanceStatus    = "database:instance:status"
+	permDatabaseConnectionTest    = "database:connection:test"
+	permDatabaseMetadataView      = "database:metadata:view"
+	permDatabaseMetadataSync      = "database:metadata:sync"
+	permDatabaseMetadataExport    = "database:metadata:export"
+	permDatabaseQueryExecute      = "database:query:execute"
+	permDatabaseQueryWrite        = "database:query:write"
+	permDatabaseQueryExplain      = "database:query:explain"
+	permDatabaseQueryWritePlan    = "database:query:write-explain"
+	permDatabaseQueryDDL          = "database:query:ddl"
+	permDatabaseQueryExport       = "database:query:export"
+	permDatabaseQueryHistory      = "database:query:history:view"
+	permDatabaseDiagnosisView     = "database:diagnosis:view"
+	permDatabaseTopologyView      = "database:topology:view"
+	permDatabaseAuditView         = "database:audit:view"
+	permDatabaseAuditExport       = "database:audit:export"
+	permDatabaseBackupView        = "database:backup:view"
+	permDatabaseBackupCreate      = "database:backup:create"
+	permDatabaseBackupUpdate      = "database:backup:update"
+	permDatabaseBackupDelete      = "database:backup:delete"
+	permDatabaseBackupRun         = "database:backup:run"
+	permDatabaseBackupDownload    = "database:backup:download"
+	permDatabaseRestoreView       = "database:restore:view"
+	permDatabaseRestoreRun        = "database:restore:run"
+	permDatabaseCapacityView      = "database:capacity:view"
+	permDatabaseCapacityCollect   = "database:capacity:collect"
+	permDatabaseInspectionView    = "database:inspection:view"
+	permDatabaseInspectionRun     = "database:inspection:run"
+	permDatabaseReplicaView       = "database:replica:view"
+	permDatabaseReplicaCheck      = "database:replica:check"
+	permDatabaseReplicaIncident   = "database:replica:incident-guide"
+	permDatabaseReplicaPause      = "database:replica:pause-apply"
+	permDatabaseReplicaResume     = "database:replica:resume-apply"
+	permDatabaseRunnerToolView    = "database:runner-tool:view"
+	permDatabaseRunnerToolProbe   = "database:runner-tool:probe"
+	permDatabaseRunnerToolInstall = "database:runner-tool:install"
+	permDatabaseRunnerToolScript  = "database:runner-tool:generate-script"
 )
 
 var databaseUIPermissionCodes = map[string]string{
@@ -85,6 +89,10 @@ var databaseUIPermissionCodes = map[string]string{
 	"replicaIncidentGuide":       permDatabaseReplicaIncident,
 	"replicaPauseApply":          permDatabaseReplicaPause,
 	"replicaResumeApply":         permDatabaseReplicaResume,
+	"runnerToolView":             permDatabaseRunnerToolView,
+	"runnerToolProbe":            permDatabaseRunnerToolProbe,
+	"runnerToolInstall":          permDatabaseRunnerToolInstall,
+	"runnerToolGenerateScript":   permDatabaseRunnerToolScript,
 	"instancePermissionView":     permDatabaseInstanceView,
 	"instancePermissionManage":   permDatabaseInstanceUpdate,
 	"instanceObjectPermissionUI": permDatabaseInstanceUpdate,
@@ -123,6 +131,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	secretProfileRepo := dbdata.NewSecretProfileRepo(db)
 	runnerHostRepo := dbdata.NewRunnerHostRepo(db)
 	runnerToolProfileRepo := dbdata.NewRunnerToolProfileRepo(db)
+	runnerToolOfflinePackageRepo := dbdata.NewRunnerToolOfflinePackageRepo(db)
 	runnerJobRepo := dbdata.NewRunnerJobRepo(db)
 	barmanServerRepo := dbdata.NewBarmanServerRepo(db)
 	instanceReplicaRepo := dbdata.NewInstanceReplicaRepo(db)
@@ -206,7 +215,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		backupPolicyConfigRepo,
 		backupChainStateRepo,
 	)
-	useCase.SetRunnerToolProfileRepo(runnerToolProfileRepo)
+	useCase.SetRunnerToolRepos(runnerToolProfileRepo, runnerToolOfflinePackageRepo)
 	useCase.SetReplicaGovernanceRepos(instanceReplicaRepo, replicationCheckRepo, replicaIncidentGuideRepo, replicaActionRepo)
 
 	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
@@ -344,9 +353,13 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/runner-hosts", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateRunnerHost)
 		databases.PUT("/runner-hosts/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateRunnerHost)
 		databases.POST("/runner-hosts/:id/test", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.TestRunnerHost)
-		databases.GET("/runner-hosts/:id/tool-profile", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.GetRunnerToolProfile)
-		databases.POST("/runner-hosts/:id/tool-probe", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.ProbeRunnerTools)
-		databases.POST("/runner-hosts/:id/tool-install-script", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.GenerateRunnerToolInstallScript)
+		databases.GET("/runner-hosts/:id/tool-profile", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolView), s.service.GetRunnerToolProfile)
+		databases.POST("/runner-hosts/:id/tool-probe", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolProbe), s.service.ProbeRunnerTools)
+		databases.POST("/runner-hosts/:id/tool-install-script", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolScript), s.service.GenerateRunnerToolInstallScript)
+		databases.POST("/runner-hosts/:id/tool-install", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolInstall), s.service.InstallRunnerTools)
+		databases.GET("/runner-tool-offline-packages", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolView), s.service.ListRunnerToolOfflinePackages)
+		databases.POST("/runner-tool-offline-packages", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolInstall), s.service.UploadRunnerToolOfflinePackage)
+		databases.GET("/runner-tool-offline-packages/:id/download", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolView), s.service.DownloadRunnerToolOfflinePackage)
 		databases.GET("/runner-jobs", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListRunnerJobs)
 		databases.GET("/barman-servers", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBarmanServers)
 		databases.POST("/barman-servers", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateBarmanServer)

@@ -182,6 +182,7 @@ const (
 
 	DatabaseRunnerJobTypeProbe                       = "runner_probe"
 	DatabaseRunnerJobTypeToolProbe                   = "runner_tool_probe"
+	DatabaseRunnerJobTypeToolInstall                 = "runner_tool_install"
 	DatabaseRunnerJobTypePhysicalBackup              = "physical_backup"
 	DatabaseRunnerJobTypeBinlogArchive               = "binlog_archive"
 	DatabaseRunnerJobTypePhysicalRestore             = "physical_restore"
@@ -201,6 +202,7 @@ const (
 	DatabaseRunnerJobStatusCancelled                 = "cancelled"
 	DatabaseRunnerAllowedCommandProbe                = "runner_probe"
 	DatabaseRunnerAllowedCommandToolProbe            = "tool_probe"
+	DatabaseRunnerAllowedCommandToolInstall          = "runner_tool_install"
 	DatabaseRunnerAllowedCommandBinlogArchiveOnce    = "mysqlbinlog_archive_once"
 	DatabaseRunnerAllowedCommandBinlogArchiveCatchUp = "mysqlbinlog_archive_catch_up"
 	DatabaseRunnerAllowedCommandPhysicalRestore      = "mysql_physical_restore"
@@ -1123,6 +1125,33 @@ type DatabaseRunnerToolProfile struct {
 
 func (DatabaseRunnerToolProfile) TableName() string {
 	return "database_runner_tool_profiles"
+}
+
+// DatabaseRunnerToolOfflinePackage Runner 数据库备份工具离线安装包。
+type DatabaseRunnerToolOfflinePackage struct {
+	gorm.Model
+	Name           string     `gorm:"column:name;type:varchar(160);not null;index;comment:离线包名称" json:"name"`
+	PackageVersion string     `gorm:"column:package_version;type:varchar(80);comment:包版本" json:"packageVersion"`
+	OSFamily       string     `gorm:"column:os_family;type:varchar(80);index;comment:OS家族" json:"osFamily"`
+	OSVersion      string     `gorm:"column:os_version;type:varchar(80);comment:OS版本，可为空表示同家族通用" json:"osVersion"`
+	Arch           string     `gorm:"column:arch;type:varchar(80);index;comment:CPU架构" json:"arch"`
+	PackageManager string     `gorm:"column:package_manager;type:varchar(40);comment:包管理器" json:"packageManager"`
+	ProfilesJSON   string     `gorm:"column:profiles_json;type:text;comment:支持的工具Profile JSON" json:"profilesJson"`
+	FileName       string     `gorm:"column:file_name;type:varchar(255);comment:文件名" json:"fileName"`
+	FileSize       int64      `gorm:"column:file_size;type:bigint;default:0;comment:文件大小" json:"fileSize"`
+	ChecksumSHA256 string     `gorm:"column:checksum_sha256;type:varchar(80);index;comment:SHA256" json:"checksumSha256"`
+	StoragePath    string     `gorm:"column:storage_path;type:varchar(1000);comment:后端本地存储路径" json:"storagePath"`
+	Status         string     `gorm:"column:status;type:varchar(30);default:'available';index;comment:状态" json:"status"`
+	ManifestJSON   string     `gorm:"column:manifest_json;type:text;comment:离线包清单JSON" json:"manifestJson"`
+	UploadedByID   uint       `gorm:"column:uploaded_by_id;index;comment:上传人ID" json:"uploadedById"`
+	UploadedByName string     `gorm:"column:uploaded_by_name;type:varchar(120);comment:上传人" json:"uploadedByName"`
+	UploadedAt     *time.Time `gorm:"column:uploaded_at;comment:上传时间" json:"uploadedAt,omitempty"`
+	LastVerifiedAt *time.Time `gorm:"column:last_verified_at;comment:最近校验时间" json:"lastVerifiedAt,omitempty"`
+	LastError      string     `gorm:"column:last_error;type:varchar(1000);comment:最近错误" json:"lastError"`
+}
+
+func (DatabaseRunnerToolOfflinePackage) TableName() string {
+	return "database_runner_tool_offline_packages"
 }
 
 // DatabaseRunnerJob Runner 长任务记录

@@ -584,6 +584,61 @@ func (r *runnerToolProfileRepo) GetByRunnerHostID(ctx context.Context, runnerHos
 	return &item, nil
 }
 
+type runnerToolOfflinePackageRepo struct {
+	db *gorm.DB
+}
+
+func NewRunnerToolOfflinePackageRepo(db *gorm.DB) dbbiz.RunnerToolOfflinePackageRepo {
+	return &runnerToolOfflinePackageRepo{db: db}
+}
+
+func (r *runnerToolOfflinePackageRepo) Create(ctx context.Context, item *dbbiz.DatabaseRunnerToolOfflinePackage) error {
+	return r.db.WithContext(ctx).Create(item).Error
+}
+
+func (r *runnerToolOfflinePackageRepo) Update(ctx context.Context, item *dbbiz.DatabaseRunnerToolOfflinePackage) error {
+	return r.db.WithContext(ctx).Save(item).Error
+}
+
+func (r *runnerToolOfflinePackageRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseRunnerToolOfflinePackage, error) {
+	var item dbbiz.DatabaseRunnerToolOfflinePackage
+	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *runnerToolOfflinePackageRepo) List(ctx context.Context, req *dbbiz.DatabaseRunnerToolOfflinePackageListRequest) ([]*dbbiz.DatabaseRunnerToolOfflinePackage, int64, error) {
+	var (
+		items []*dbbiz.DatabaseRunnerToolOfflinePackage
+		total int64
+	)
+	query := r.db.WithContext(ctx).Model(&dbbiz.DatabaseRunnerToolOfflinePackage{})
+	if req != nil {
+		if keyword := strings.TrimSpace(req.Keyword); keyword != "" {
+			like := "%" + keyword + "%"
+			query = query.Where("name LIKE ? OR file_name LIKE ? OR checksum_sha256 LIKE ?", like, like, like)
+		}
+		if osFamily := strings.TrimSpace(req.OSFamily); osFamily != "" {
+			query = query.Where("os_family = ?", osFamily)
+		}
+		if arch := strings.TrimSpace(req.Arch); arch != "" {
+			query = query.Where("arch = ?", arch)
+		}
+		if status := strings.TrimSpace(req.Status); status != "" {
+			query = query.Where("status = ?", status)
+		}
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	page, pageSize := normalizeRepoPage(reqPage(req), reqPageSize(req))
+	if err := query.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 func NewRunnerJobRepo(db *gorm.DB) dbbiz.RunnerJobRepo {
 	return &runnerJobRepo{db: db}
 }
@@ -730,6 +785,8 @@ func reqPage(req any) int {
 		return item.Page
 	case *dbbiz.DatabaseRunnerJobListRequest:
 		return item.Page
+	case *dbbiz.DatabaseRunnerToolOfflinePackageListRequest:
+		return item.Page
 	case *dbbiz.DatabaseBarmanServerListRequest:
 		return item.Page
 	case *dbbiz.DatabaseBackupPolicyListRequest:
@@ -764,6 +821,8 @@ func reqPageSize(req any) int {
 	case *dbbiz.DatabaseRunnerHostListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseRunnerJobListRequest:
+		return item.PageSize
+	case *dbbiz.DatabaseRunnerToolOfflinePackageListRequest:
 		return item.PageSize
 	case *dbbiz.DatabaseBarmanServerListRequest:
 		return item.PageSize

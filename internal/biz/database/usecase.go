@@ -65,6 +65,7 @@ type UseCase struct {
 	secretProfileRepo      SecretProfileRepo
 	runnerHostRepo         RunnerHostRepo
 	runnerToolProfileRepo  RunnerToolProfileRepo
+	runnerToolOfflineRepo  RunnerToolOfflinePackageRepo
 	runnerJobRepo          RunnerJobRepo
 	barmanServerRepo       BarmanServerRepo
 	instanceReplicaRepo    InstanceReplicaRepo
@@ -165,6 +166,14 @@ func (uc *UseCase) SetRunnerToolProfileRepo(runnerToolProfileRepo RunnerToolProf
 		return
 	}
 	uc.runnerToolProfileRepo = runnerToolProfileRepo
+}
+
+func (uc *UseCase) SetRunnerToolRepos(runnerToolProfileRepo RunnerToolProfileRepo, runnerToolOfflineRepo RunnerToolOfflinePackageRepo) {
+	if uc == nil {
+		return
+	}
+	uc.runnerToolProfileRepo = runnerToolProfileRepo
+	uc.runnerToolOfflineRepo = runnerToolOfflineRepo
 }
 
 func (uc *UseCase) SetReplicaGovernanceRepos(

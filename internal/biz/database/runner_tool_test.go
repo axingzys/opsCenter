@@ -80,3 +80,58 @@ func TestBuildRunnerToolInstallScriptUnsupportedPackageManager(t *testing.T) {
 		t.Fatalf("expected unsupported script, got:\n%s", result.Script)
 	}
 }
+
+func TestBuildRunnerToolInstallExecutionScriptDryRunHasStages(t *testing.T) {
+	host := &DatabaseRunnerHost{Model: gorm.Model{ID: 7}, Name: "runner", WorkDir: "/tmp/opshub-runner"}
+	profile := &DatabaseRunnerToolProfile{RunnerHostID: 7, OSFamily: "ubuntu", OSVersion: "22.04", PackageManager: "apt", HasSudo: true}
+	req := &DatabaseRunnerToolInstallRequest{
+		Profiles:    []string{"mysql_binlog_archiver", "restore_runner"},
+		InstallMode: "online",
+		DryRun:      true,
+		Reason:      "unit test",
+	}
+	script := buildRunnerToolInstallExecutionScript(host, profile, req, 99, nil, "")
+	for _, want := range []string{
+		runnerToolInstallStepMarker,
+		runnerToolInstallResultMarker,
+		"dry-run: script only",
+		"job-99",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("execution script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestParseRunnerToolInstallStepsAndResult(t *testing.T) {
+	stdout := strings.Join([]string{
+		"noise",
+		"OPSHUB_RUNNER_TOOL_STEP=detect_os|success|ubuntu 22.04",
+		"OPSHUB_RUNNER_TOOL_STEP=install_packages|skipped|dry-run",
+		"OPSHUB_RUNNER_TOOL_RESULT=eyJsb2dQYXRoIjoiL3RtcC9pbnN0YWxsLmxvZyIsIm1hbmlmZXN0UGF0aCI6Ii90bXAvbWFuaWZlc3QuanNvbiJ9",
+	}, "\n")
+	steps := parseRunnerToolInstallSteps(stdout)
+	if len(steps) != 2 || steps[0].Name != "detect_os" || steps[1].Status != "skipped" {
+		t.Fatalf("unexpected steps: %+v", steps)
+	}
+	result := parseRunnerToolInstallResult(stdout)
+	if result["logPath"] != "/tmp/install.log" || result["manifestPath"] != "/tmp/manifest.json" {
+		t.Fatalf("unexpected result payload: %+v", result)
+	}
+}
+
+func TestValidateRunnerToolOfflinePackageMetadataMismatch(t *testing.T) {
+	profile := &DatabaseRunnerToolProfile{OSFamily: "ubuntu", OSVersion: "22.04", Arch: "x86_64", PackageManager: "apt"}
+	pkg := &DatabaseRunnerToolOfflinePackage{
+		OSFamily:       "rocky",
+		OSVersion:      "9",
+		Arch:           "x86_64",
+		PackageManager: "dnf",
+		ProfilesJSON:   `["restore_runner"]`,
+		StoragePath:    "/not/exist",
+	}
+	err := validateRunnerToolOfflinePackageForProfile(profile, pkg, []string{"restore_runner"})
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+}

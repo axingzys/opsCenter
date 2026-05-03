@@ -3786,6 +3786,104 @@ opshub-runner-tools-offline/
 3. OS 不匹配时阻断。
 4. 离线包安装过程完整审计。
 
+已落地边界（P2.16 + P2.17 第一版）：
+
+1. 后端新增 `runner_tool_install` Runner Job，接口为：
+
+```text
+POST /api/v1/databases/runner-hosts/:id/tool-install
+```
+
+请求必须包含：
+
+```json
+{
+  "profiles": ["mysql_binlog_archiver", "restore_runner"],
+  "installMode": "online",
+  "dryRun": true,
+  "confirmInstall": true,
+  "confirmPackages": true,
+  "reason": "安装或演练原因"
+}
+```
+
+2. 新增权限：
+
+```text
+database:runner-tool:view
+database:runner-tool:probe
+database:runner-tool:generate-script
+database:runner-tool:install
+```
+
+3. 在线安装仍使用 P2.15 的白名单脚本生成逻辑，执行时由 OpsHub 包一层受控 Runner Job：
+   - 写入远端 `<runner_workdir>/tool-install/job-<id>/install.sh`。
+   - 写入远端 `<runner_workdir>/tool-install/job-<id>/manifest.json`。
+   - 执行输出阶段标记 `OPSHUB_RUNNER_TOOL_STEP=<stage>|<status>|<message>`。
+   - 完成输出 `OPSHUB_RUNNER_TOOL_RESULT=<base64-json>`。
+   - stdout/stderr、远端 log path、manifest path、阶段结果写入 `database_runner_jobs.result_json`。
+4. 在线安装支持 `dryRun=true`：
+   - 只生成远端脚本和 manifest。
+   - 不执行包安装。
+   - `verify_tools` 阶段跳过强校验。
+   - 用于先验证 SSH、workdir、权限和任务审计链路。
+5. 非 dry-run 安装成功后会自动执行工具巡检，并刷新 `database_runner_tool_profiles`。
+   - 巡检刷新失败不会把安装任务直接判失败，但会写入 `refreshError`，便于排查。
+6. 新增离线包表：
+
+```text
+database_runner_tool_offline_packages
+```
+
+核心字段包括：
+   - `name`
+   - `package_version`
+   - `os_family`
+   - `os_version`
+   - `arch`
+   - `package_manager`
+   - `profiles_json`
+   - `file_name`
+   - `file_size`
+   - `checksum_sha256`
+   - `storage_path`
+   - `manifest_json`
+   - `uploaded_by_id`
+   - `uploaded_at`
+   - `last_verified_at`
+7. 离线包 API：
+
+```text
+GET  /api/v1/databases/runner-tool-offline-packages
+POST /api/v1/databases/runner-tool-offline-packages
+GET  /api/v1/databases/runner-tool-offline-packages/:id/download
+```
+
+8. 离线安装执行流程：
+   - 后端先校验离线包本地文件大小和 SHA256。
+   - 校验 OS family、OS version、arch、package manager 与 Runner 工具画像是否匹配。
+   - 校验请求的 `profiles` 是否被离线包声明支持。
+   - 通过 SFTP 上传到 `<runner_workdir>/tool-install/job-<id>/offline/<file>`。
+   - 远端再次 `sha256sum -c`。
+   - 支持 `tar`、`tgz`、`tar.gz`、`tar.zst` 包格式。
+   - 查找并执行离线包内的 `install.sh --offline`。
+   - 安装后继续执行 `verify_tools`、`smoke_test` 和工具巡检刷新。
+9. 前端已补齐：
+   - Runner 主机列表可打开离线包管理弹窗。
+   - 安装脚本弹窗可直接执行安装任务。
+   - 离线模式可选择已上传离线包。
+   - 执行前要求安装原因、执行确认、包范围确认。
+   - Runner 任务列表支持 `runner_tool_probe`、`runner_tool_install` 过滤。
+   - Runner 任务详情弹窗展示阶段、stdout/stderr、远端 log path 和 manifest path。
+
+未做或后续深化：
+
+1. 第一版不会在后端容器直接安装数据库备份工具。
+2. 第一版不开放任意 shell 命令。
+3. 第一版离线包的 `install.sh` 仍需由可信管理员制作和上传，OpsHub 只做元数据、checksum、兼容性和执行审计。
+4. Rocky/Debian/CentOS 7.9 的真实安装路径需要继续在测试主机矩阵中补验。
+5. 容器化工具 Runner、工具升级/回滚、企业源 profile 和离线包生成器继续放在 P2.18/P2.19 深化。
+
 #### P2.18：容器化工具 Runner
 
 目标：解决 CentOS 7.9、老 Debian、依赖冲突主机无法原生安装工具的问题。

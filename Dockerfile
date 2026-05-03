@@ -13,13 +13,14 @@ ENV GOPROXY=https://goproxy.cn,https://mirrors.aliyun.com/goproxy/,direct \
 # Set working directory
 WORKDIR /build
 
+# Copy module files first so dependency download can be cached across source changes.
+COPY go.mod go.sum ./
+RUN mkdir -p plugins/kubernetes
+COPY plugins/kubernetes/go.mod ./plugins/kubernetes/go.mod
+RUN go mod download
+
 # Copy source code
 COPY . .
-
-# Copy go mod files
-#COPY go.mod go.sum ./
-# Download dependencies
-RUN go mod download
 # Build the application and Linux agent bundles
 RUN mkdir -p /build/agent-bundles && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o /build/agent-bundles/opshub-agent-linux-amd64 ./cmd/agent && \

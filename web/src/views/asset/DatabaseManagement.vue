@@ -2350,6 +2350,7 @@
                     </el-select>
                   </div>
                   <div class="backup-toolbar-group">
+                    <el-button plain @click="openRunnerToolOfflinePackageDialog">离线包</el-button>
                     <el-button @click="resetRunnerHostQuery">重置</el-button>
                     <el-button type="primary" plain @click="openRunnerHostDialog">
                       <el-icon style="margin-right: 4px;"><Plus /></el-icon>
@@ -2393,7 +2394,7 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="340" align="center" fixed="right">
+                  <el-table-column label="操作" width="380" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="primary" @click="openRunnerHostDialog(row)">编辑</el-button>
                       <el-button link type="primary" @click="openRunnerAgentConfigDialog(row)">配置</el-button>
@@ -2426,6 +2427,8 @@
                     </el-select>
                     <el-select v-model="runnerJobQuery.jobType" placeholder="任务类型" clearable class="audit-select" @change="loadRunnerJobs">
                       <el-option label="Runner 探测" value="runner_probe" />
+                      <el-option label="Runner 工具巡检" value="runner_tool_probe" />
+                      <el-option label="Runner 工具安装" value="runner_tool_install" />
                       <el-option label="物理备份" value="physical_backup" />
                       <el-option label="MySQL 合成全量" value="mysql_synthetic_full" />
                       <el-option label="binlog 归档" value="binlog_archive" />
@@ -2480,6 +2483,11 @@
                   </el-table-column>
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.errorMessage || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="90" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button link type="primary" @click="openRunnerJobDetail(row)">详情</el-button>
+                    </template>
                   </el-table-column>
                 </el-table>
                 <div class="pagination-container">
@@ -5737,7 +5745,7 @@
       width="1040px"
     >
       <el-alert
-        title="P2.15 只生成脚本，不会远程执行安装。执行前请按 Runner OS、数据库版本和企业源策略审阅脚本。"
+        title="可先生成脚本审阅；点击执行安装会创建 Runner 工具安装任务，只运行白名单安装流程并写入审计。"
         type="warning"
         show-icon
         :closable="false"
@@ -5788,9 +5796,39 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-row v-if="runnerToolScriptForm.installMode === 'offline'" :gutter="16">
+          <el-col :span="24">
+            <el-form-item label="离线包">
+              <el-select v-model="runnerToolScriptForm.offlinePackageId" placeholder="选择已登记离线包" clearable filterable style="width: 100%;">
+                <el-option
+                  v-for="item in runnerToolOfflinePackages"
+                  :key="item.id"
+                  :label="`${item.name} / ${item.osFamily || '*'} ${item.osVersion || ''} / ${item.arch || '*'} / ${item.fileName}`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="安装原因">
+          <el-input v-model="runnerToolScriptForm.reason" type="textarea" :rows="2" placeholder="必填，用于审计和二次确认" />
+        </el-form-item>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="执行确认">
+              <el-checkbox v-model="runnerToolScriptForm.confirmInstall">确认在该 Runner 上执行工具安装任务</el-checkbox>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="包范围确认">
+              <el-checkbox v-model="runnerToolScriptForm.confirmPackages">已审阅安装包/Profile 范围</el-checkbox>
+            </el-form-item>
+          </el-col>
+        </el-row>
       </el-form>
       <div class="runner-tool-script-actions">
         <el-button type="primary" :loading="runnerToolScriptGenerating" @click="handleGenerateRunnerToolScript">生成脚本</el-button>
+        <el-button type="danger" plain :loading="runnerToolInstalling" @click="handleInstallRunnerTools">执行安装</el-button>
         <el-button :disabled="!runnerToolScriptResult?.script" @click="copyText(runnerToolScriptResult?.script || '', '安装脚本')">复制脚本</el-button>
       </div>
       <template v-if="runnerToolScriptResult">
@@ -5815,6 +5853,143 @@
       </template>
       <template #footer>
         <el-button @click="runnerToolScriptDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="runnerToolOfflinePackageDialogVisible"
+      title="Runner 工具离线包"
+      width="1080px"
+    >
+      <el-alert
+        title="离线包用于 P2.17 的 SSH Runner 离线安装：上传时校验 SHA256，执行时还会检查 OS、架构、包管理器和 Profile。"
+        type="info"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form label-width="120px">
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="名称">
+              <el-input v-model="runnerToolOfflinePackageForm.name" placeholder="如 ubuntu22-pg-client" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="版本">
+              <el-input v-model="runnerToolOfflinePackageForm.packageVersion" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="SHA256">
+              <el-input v-model="runnerToolOfflinePackageForm.checksumSha256" placeholder="可选，填了会严格校验" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="6">
+            <el-form-item label="OS">
+              <el-input v-model="runnerToolOfflinePackageForm.osFamily" placeholder="ubuntu / rocky" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="OS版本">
+              <el-input v-model="runnerToolOfflinePackageForm.osVersion" placeholder="如 22.04，可空" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="架构">
+              <el-input v-model="runnerToolOfflinePackageForm.arch" placeholder="x86_64 / amd64" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="包管理器">
+              <el-input v-model="runnerToolOfflinePackageForm.packageManager" placeholder="apt / yum / dnf" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="Profile">
+          <el-select v-model="runnerToolOfflinePackageForm.profiles" multiple filterable style="width: 100%;">
+            <el-option label="MySQL 8.0 物理备份（XtraBackup 8.0）" value="mysql_80_physical" />
+            <el-option label="MySQL 8.4 物理备份（XtraBackup 8.4）" value="mysql_84_physical" />
+            <el-option label="MySQL/MariaDB binlog 归档" value="mysql_binlog_archiver" />
+            <el-option label="MariaDB 物理备份" value="mariadb_physical" />
+            <el-option label="PostgreSQL Barman" value="postgres_barman" />
+            <el-option label="PostgreSQL pg_basebackup" value="postgres_native_pg_basebackup" />
+            <el-option label="隔离恢复容器 Runner" value="restore_runner" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="离线包文件">
+          <input type="file" @change="handleRunnerToolOfflineFileChange" />
+          <span class="muted-text" style="margin-left: 12px;">{{ runnerToolOfflinePackageFile?.name || '未选择文件' }}</span>
+        </el-form-item>
+        <el-form-item label="Manifest">
+          <el-input v-model="runnerToolOfflinePackageForm.manifestJson" type="textarea" :rows="3" placeholder="可选，保存离线包清单摘要" />
+        </el-form-item>
+      </el-form>
+      <div class="runner-tool-script-actions">
+        <el-button type="primary" :loading="runnerToolOfflinePackageUploading" @click="submitRunnerToolOfflinePackage">上传离线包</el-button>
+        <el-button :loading="runnerToolOfflinePackageLoading" @click="loadRunnerToolOfflinePackages">刷新</el-button>
+      </div>
+      <el-table :data="runnerToolOfflinePackages" v-loading="runnerToolOfflinePackageLoading" stripe class="modern-table">
+        <el-table-column prop="name" label="名称" min-width="160" />
+        <el-table-column label="系统" min-width="170">
+          <template #default="{ row }">{{ row.osFamily || '*' }} {{ row.osVersion || '' }} / {{ row.arch || '*' }} / {{ row.packageManager || '*' }}</template>
+        </el-table-column>
+        <el-table-column label="Profile" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">{{ (row.profiles || []).join(', ') || '-' }}</template>
+        </el-table-column>
+        <el-table-column prop="fileName" label="文件" min-width="180" show-overflow-tooltip />
+        <el-table-column label="大小" width="110" align="right">
+          <template #default="{ row }">{{ formatBytes(row.fileSize || 0) }}</template>
+        </el-table-column>
+        <el-table-column label="SHA256" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.checksumSha256 || '-' }}</template>
+        </el-table-column>
+        <el-table-column prop="uploadedAt" label="上传时间" width="170" />
+        <el-table-column label="操作" width="100" align="center">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="downloadRunnerToolOfflinePackage(row)">下载</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="runnerToolOfflinePackageDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="runnerJobDetailVisible"
+      title="Runner 任务详情"
+      width="1040px"
+    >
+      <template v-if="runnerJobDetail">
+        <el-descriptions :column="3" border class="backup-detail-descriptions">
+          <el-descriptions-item label="任务">{{ runnerJobDetail.jobTypeText || runnerJobDetail.jobType }}</el-descriptions-item>
+          <el-descriptions-item label="状态">{{ runnerJobDetail.statusText || runnerJobDetail.status }}</el-descriptions-item>
+          <el-descriptions-item label="退出码">{{ runnerJobDetail.exitCode ?? '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Runner">{{ runnerJobDetail.runnerHostName || runnerJobDetail.runnerId || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="日志">{{ runnerJobParsedResult.logPath || runnerJobDetail.logPath || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="Manifest">{{ runnerJobParsedResult.manifestPath || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <el-table v-if="runnerJobInstallSteps.length" :data="runnerJobInstallSteps" stripe class="modern-table">
+          <el-table-column prop="name" label="阶段" width="180" />
+          <el-table-column prop="status" label="状态" width="120" />
+          <el-table-column prop="message" label="说明" min-width="420" show-overflow-tooltip />
+        </el-table>
+        <el-row :gutter="16" style="margin-top: 12px;">
+          <el-col :span="12">
+            <div class="runner-config-title"><span>stdout</span></div>
+            <el-input :model-value="runnerJobParsedResult.stdout || ''" type="textarea" :rows="10" readonly />
+          </el-col>
+          <el-col :span="12">
+            <div class="runner-config-title"><span>stderr</span></div>
+            <el-input :model-value="runnerJobParsedResult.stderr || ''" type="textarea" :rows="10" readonly />
+          </el-col>
+        </el-row>
+      </template>
+      <template #footer>
+        <el-button @click="runnerJobDetailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -6368,6 +6543,7 @@ import {
   deleteDatabaseInstancePermission,
   disableDatabaseInstance,
   downloadDatabaseBackupRecord,
+  downloadDatabaseRunnerToolOfflinePackage,
   executeDatabaseDDLQuery,
   explainDatabaseQuery,
   enableDatabaseInstance,
@@ -6376,6 +6552,7 @@ import {
   explainDatabaseWriteQuery,
   generateDatabaseInspectionReport,
   generateDatabaseRunnerToolInstallScript,
+  installDatabaseRunnerTools,
   previewDatabaseBackupPolicyPurge,
   previewDatabaseBackupPolicySyntheticFull,
   getDatabaseCapacityTrend,
@@ -6404,6 +6581,7 @@ import {
   listDatabaseRestorePlans,
   listDatabaseRunnerHosts,
   listDatabaseRunnerJobs,
+  listDatabaseRunnerToolOfflinePackages,
   listDatabaseStorageProfiles,
   getDatabaseSupportedTypes,
   getDatabaseTableDDL,
@@ -6449,6 +6627,7 @@ import {
   updateDatabaseBarmanServer,
   updateDatabaseInstance,
   updateDatabaseRunnerHost,
+  uploadDatabaseRunnerToolOfflinePackage,
   upsertDatabaseInstancePermission,
   validateDatabaseBackupPolicyChain,
   validateDatabaseDDLQuery,
@@ -6498,8 +6677,10 @@ import {
   type DatabaseRunnerHostPayload,
   type DatabaseRunnerHostResult,
   type DatabaseRunnerJobResult,
+  type DatabaseRunnerToolInstallPayload,
   type DatabaseRunnerToolInstallScriptPayload,
   type DatabaseRunnerToolInstallScriptResult,
+  type DatabaseRunnerToolOfflinePackageResult,
   type DatabaseRunnerToolProfileResult,
   type DatabaseStorageProfilePayload,
   type DatabaseStorageProfilePostureCheckPayload,
@@ -6842,8 +7023,16 @@ const runnerToolProfileDialogVisible = ref(false)
 const runnerToolProfile = ref<DatabaseRunnerToolProfileResult>()
 const runnerToolScriptDialogVisible = ref(false)
 const runnerToolScriptGenerating = ref(false)
+const runnerToolInstalling = ref(false)
 const runnerToolScriptHost = ref<DatabaseRunnerHostResult>()
 const runnerToolScriptResult = ref<DatabaseRunnerToolInstallScriptResult>()
+const runnerToolOfflinePackageDialogVisible = ref(false)
+const runnerToolOfflinePackageLoading = ref(false)
+const runnerToolOfflinePackageUploading = ref(false)
+const runnerToolOfflinePackages = ref<DatabaseRunnerToolOfflinePackageResult[]>([])
+const runnerToolOfflinePackageFile = ref<File | null>(null)
+const runnerJobDetailVisible = ref(false)
+const runnerJobDetail = ref<DatabaseRunnerJobResult | null>(null)
 const runnerHostFormRef = ref<FormInstance>()
 const runnerHosts = ref<DatabaseRunnerHostResult[]>([])
 const runnerHostTotal = ref(0)
@@ -7425,7 +7614,23 @@ const runnerToolScriptForm = reactive({
   installMode: 'online',
   dryRun: true,
   mysqlVersion: '',
-  postgresqlVersion: ''
+  postgresqlVersion: '',
+  reason: '',
+  confirmInstall: false,
+  confirmPackages: false,
+  offlinePackageId: undefined as number | undefined
+})
+
+const runnerToolOfflinePackageForm = reactive({
+  name: '',
+  packageVersion: '',
+  osFamily: '',
+  osVersion: '',
+  arch: '',
+  packageManager: '',
+  profiles: ['restore_runner'] as string[],
+  checksumSha256: '',
+  manifestJson: ''
 })
 
 const barmanServerForm = reactive<DatabaseBarmanServerPayload & { id?: number }>({
@@ -8134,6 +8339,15 @@ const runnerToolWarnings = computed(() => [
   ...(runnerToolProfile.value?.capability?.warnings || []),
   ...(runnerToolProfile.value?.compatibility?.warnings || [])
 ])
+const runnerJobParsedResult = computed<Record<string, any>>(() => {
+  if (!runnerJobDetail.value?.resultJson) return {}
+  try {
+    return JSON.parse(runnerJobDetail.value.resultJson) || {}
+  } catch (_err) {
+    return {}
+  }
+})
+const runnerJobInstallSteps = computed(() => Array.isArray(runnerJobParsedResult.value.steps) ? runnerJobParsedResult.value.steps : [])
 
 const storagePostureChecks = computed(() => {
   const raw = currentStoragePostureDetail.value?.postureJson || ''
@@ -10604,6 +10818,11 @@ const openRunnerToolInstallScriptDialog = async (row: DatabaseRunnerHostResult) 
   runnerToolScriptForm.dryRun = true
   runnerToolScriptForm.mysqlVersion = ''
   runnerToolScriptForm.postgresqlVersion = ''
+  runnerToolScriptForm.reason = ''
+  runnerToolScriptForm.confirmInstall = false
+  runnerToolScriptForm.confirmPackages = false
+  runnerToolScriptForm.offlinePackageId = undefined
+  await loadRunnerToolOfflinePackages()
   runnerToolScriptDialogVisible.value = true
 }
 
@@ -10630,6 +10849,120 @@ const handleGenerateRunnerToolScript = async () => {
   } finally {
     runnerToolScriptGenerating.value = false
   }
+}
+
+const handleInstallRunnerTools = async () => {
+  if (!runnerToolScriptHost.value?.id) return
+  if (!runnerToolScriptForm.profiles.length) {
+    ElMessage.warning('请至少选择一个工具 Profile')
+    return
+  }
+  if (runnerToolScriptForm.installMode === 'offline' && !runnerToolScriptForm.offlinePackageId) {
+    ElMessage.warning('离线安装需要选择离线包')
+    return
+  }
+  if (!runnerToolScriptForm.reason.trim()) {
+    ElMessage.warning('请填写安装原因')
+    return
+  }
+  if (!runnerToolScriptForm.confirmInstall || !runnerToolScriptForm.confirmPackages) {
+    ElMessage.warning('请勾选执行确认和包范围确认')
+    return
+  }
+  await ElMessageBox.confirm(
+    `确认在 Runner「${runnerToolScriptHost.value.name}」上执行工具安装任务？`,
+    'Runner 工具安装确认',
+    { type: 'warning', confirmButtonText: '确认执行', cancelButtonText: '取消' }
+  )
+  runnerToolInstalling.value = true
+  try {
+    const targetDbVersions: Record<string, string> = {}
+    if (runnerToolScriptForm.mysqlVersion.trim()) targetDbVersions.mysql = runnerToolScriptForm.mysqlVersion.trim()
+    if (runnerToolScriptForm.postgresqlVersion.trim()) targetDbVersions.postgresql = runnerToolScriptForm.postgresqlVersion.trim()
+    const payload: DatabaseRunnerToolInstallPayload = {
+      profiles: runnerToolScriptForm.profiles,
+      installMode: runnerToolScriptForm.installMode,
+      dryRun: runnerToolScriptForm.dryRun,
+      targetDbVersions,
+      confirmInstall: runnerToolScriptForm.confirmInstall,
+      confirmPackages: runnerToolScriptForm.confirmPackages,
+      reason: runnerToolScriptForm.reason,
+      offlinePackageId: runnerToolScriptForm.offlinePackageId
+    }
+    await installDatabaseRunnerTools(runnerToolScriptHost.value.id, payload)
+    ElMessage.success('Runner 工具安装任务已下发')
+    await loadRunnerJobs()
+    window.setTimeout(() => {
+      loadRunnerHosts()
+      loadRunnerJobs()
+    }, 3000)
+  } finally {
+    runnerToolInstalling.value = false
+  }
+}
+
+const openRunnerToolOfflinePackageDialog = async () => {
+  runnerToolOfflinePackageDialogVisible.value = true
+  await loadRunnerToolOfflinePackages()
+}
+
+const loadRunnerToolOfflinePackages = async () => {
+  runnerToolOfflinePackageLoading.value = true
+  try {
+    const res: any = await listDatabaseRunnerToolOfflinePackages({ page: 1, pageSize: 100 })
+    runnerToolOfflinePackages.value = res.list || []
+  } finally {
+    runnerToolOfflinePackageLoading.value = false
+  }
+}
+
+const handleRunnerToolOfflineFileChange = (event: Event) => {
+  const input = event.target as HTMLInputElement
+  runnerToolOfflinePackageFile.value = input.files?.[0] || null
+  if (runnerToolOfflinePackageFile.value && !runnerToolOfflinePackageForm.name) {
+    runnerToolOfflinePackageForm.name = runnerToolOfflinePackageFile.value.name
+  }
+}
+
+const submitRunnerToolOfflinePackage = async () => {
+  if (!runnerToolOfflinePackageFile.value) {
+    ElMessage.warning('请选择离线包文件')
+    return
+  }
+  if (!runnerToolOfflinePackageForm.profiles.length) {
+    ElMessage.warning('请选择离线包支持的 Profile')
+    return
+  }
+  runnerToolOfflinePackageUploading.value = true
+  try {
+    const formData = new FormData()
+    formData.append('file', runnerToolOfflinePackageFile.value)
+    formData.append('name', runnerToolOfflinePackageForm.name)
+    formData.append('packageVersion', runnerToolOfflinePackageForm.packageVersion)
+    formData.append('osFamily', runnerToolOfflinePackageForm.osFamily)
+    formData.append('osVersion', runnerToolOfflinePackageForm.osVersion)
+    formData.append('arch', runnerToolOfflinePackageForm.arch)
+    formData.append('packageManager', runnerToolOfflinePackageForm.packageManager)
+    formData.append('profiles', runnerToolOfflinePackageForm.profiles.join(','))
+    formData.append('checksumSha256', runnerToolOfflinePackageForm.checksumSha256)
+    formData.append('manifestJson', runnerToolOfflinePackageForm.manifestJson)
+    await uploadDatabaseRunnerToolOfflinePackage(formData)
+    ElMessage.success('离线包已上传')
+    runnerToolOfflinePackageFile.value = null
+    await loadRunnerToolOfflinePackages()
+  } finally {
+    runnerToolOfflinePackageUploading.value = false
+  }
+}
+
+const downloadRunnerToolOfflinePackage = async (row: DatabaseRunnerToolOfflinePackageResult) => {
+  const blob = await downloadDatabaseRunnerToolOfflinePackage(row.id) as Blob
+  downloadBlob(blob, row.fileName || row.name || `runner-tool-package-${row.id}`)
+}
+
+const openRunnerJobDetail = (row: DatabaseRunnerJobResult) => {
+  runnerJobDetail.value = row
+  runnerJobDetailVisible.value = true
 }
 
 const openBarmanServerDialog = (row?: DatabaseBarmanServerResult) => {

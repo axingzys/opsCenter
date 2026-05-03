@@ -973,6 +973,14 @@ export interface DatabaseRunnerToolInstallScriptPayload {
   dryRun?: boolean
 }
 
+export interface DatabaseRunnerToolInstallPayload extends DatabaseRunnerToolInstallScriptPayload {
+  confirmInstall?: boolean
+  confirmPackages?: boolean
+  reason?: string
+  offlinePackageId?: number
+  allowRiskyOs?: boolean
+}
+
 export interface DatabaseRunnerToolInstallScriptResult {
   runnerHostId: number
   runnerHostName: string
@@ -989,6 +997,30 @@ export interface DatabaseRunnerToolInstallScriptResult {
   unsupported: string[]
   script: string
   generatedAt: string
+}
+
+export interface DatabaseRunnerToolOfflinePackageResult {
+  id: number
+  name: string
+  packageVersion: string
+  osFamily: string
+  osVersion: string
+  arch: string
+  packageManager: string
+  profiles: string[]
+  fileName: string
+  fileSize: number
+  checksumSha256: string
+  storagePath: string
+  status: string
+  manifestJson: string
+  uploadedById: number
+  uploadedByName: string
+  uploadedAt: string
+  lastVerifiedAt: string
+  lastError: string
+  createdAt: string
+  updatedAt: string
 }
 
 export interface DatabaseBarmanServerPayload {
@@ -1762,6 +1794,26 @@ export const probeDatabaseRunnerTools = (id: number) =>
 
 export const generateDatabaseRunnerToolInstallScript = (id: number, data: DatabaseRunnerToolInstallScriptPayload) =>
   request.post(`/api/v1/databases/runner-hosts/${id}/tool-install-script`, data)
+
+export const installDatabaseRunnerTools = (id: number, data: DatabaseRunnerToolInstallPayload) =>
+  request.post(`/api/v1/databases/runner-hosts/${id}/tool-install`, data)
+
+export const listDatabaseRunnerToolOfflinePackages = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  osFamily?: string
+  arch?: string
+  status?: string
+}) => request.get('/api/v1/databases/runner-tool-offline-packages', { params })
+
+export const uploadDatabaseRunnerToolOfflinePackage = (data: FormData) =>
+  request.post('/api/v1/databases/runner-tool-offline-packages', data, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+
+export const downloadDatabaseRunnerToolOfflinePackage = (id: number) =>
+  request.get(`/api/v1/databases/runner-tool-offline-packages/${id}/download`, { responseType: 'blob' })
 
 export const listDatabaseRunnerJobs = (params?: {
   page?: number

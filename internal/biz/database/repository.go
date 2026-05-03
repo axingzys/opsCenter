@@ -212,6 +212,13 @@ type RunnerToolProfileRepo interface {
 	GetByRunnerHostID(ctx context.Context, runnerHostID uint) (*DatabaseRunnerToolProfile, error)
 }
 
+type RunnerToolOfflinePackageRepo interface {
+	Create(ctx context.Context, item *DatabaseRunnerToolOfflinePackage) error
+	Update(ctx context.Context, item *DatabaseRunnerToolOfflinePackage) error
+	GetByID(ctx context.Context, id uint) (*DatabaseRunnerToolOfflinePackage, error)
+	List(ctx context.Context, req *DatabaseRunnerToolOfflinePackageListRequest) ([]*DatabaseRunnerToolOfflinePackage, int64, error)
+}
+
 type RunnerJobRepo interface {
 	Create(ctx context.Context, item *DatabaseRunnerJob) error
 	Update(ctx context.Context, item *DatabaseRunnerJob) error

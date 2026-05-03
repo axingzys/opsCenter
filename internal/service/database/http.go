@@ -100,6 +100,8 @@ func writeDatabaseError(c *gin.Context, prefix string, err error) {
 		strings.Contains(message, "范围"),
 		strings.Contains(message, "必须"),
 		strings.Contains(message, "缺少"),
+		strings.Contains(message, "不匹配"),
+		strings.Contains(message, "不一致"),
 		strings.Contains(message, "只能"):
 		statusCode = http.StatusBadRequest
 	}
@@ -1300,6 +1302,102 @@ func (s *Service) GenerateRunnerToolInstallScript(c *gin.Context) {
 		return
 	}
 	response.Success(c, item)
+}
+
+func (s *Service) InstallRunnerTools(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseRunnerToolInstallRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	item, err := s.useCase.InstallRunnerTools(c.Request.Context(), id, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+	})
+	if err != nil {
+		writeDatabaseError(c, "Runner 工具安装失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListRunnerToolOfflinePackages(c *gin.Context) {
+	var req dbbiz.DatabaseRunnerToolOfflinePackageListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	list, total, err := s.useCase.ListRunnerToolOfflinePackages(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询 Runner 工具离线包失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+func (s *Service) UploadRunnerToolOfflinePackage(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "离线包文件不能为空")
+		return
+	}
+	defer file.Close()
+	profiles := splitCSVPostForm(c.PostForm("profiles"))
+	req := dbbiz.DatabaseRunnerToolOfflinePackageRegisterRequest{
+		Name:           c.PostForm("name"),
+		PackageVersion: c.PostForm("packageVersion"),
+		OSFamily:       c.PostForm("osFamily"),
+		OSVersion:      c.PostForm("osVersion"),
+		Arch:           c.PostForm("arch"),
+		PackageManager: c.PostForm("packageManager"),
+		Profiles:       profiles,
+		ChecksumSHA256: c.PostForm("checksumSha256"),
+		ManifestJSON:   c.PostForm("manifestJson"),
+		FileName:       header.Filename,
+	}
+	item, err := s.useCase.RegisterRunnerToolOfflinePackage(c.Request.Context(), &req, file, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+	})
+	if err != nil {
+		writeDatabaseError(c, "上传 Runner 工具离线包失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) DownloadRunnerToolOfflinePackage(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "离线包ID")
+	if !ok {
+		return
+	}
+	item, err := s.useCase.GetRunnerToolOfflinePackage(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "下载 Runner 工具离线包失败: ", err)
+		return
+	}
+	c.FileAttachment(item.StoragePath, item.FileName)
+}
+
+func splitCSVPostForm(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (s *Service) ListRunnerJobs(c *gin.Context) {
