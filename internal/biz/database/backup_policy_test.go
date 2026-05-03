@@ -88,6 +88,34 @@ func TestBuildMySQLPhysicalBackupPolicyScriptIncrementalUsesCnfAndParent(t *test
 	}
 }
 
+func TestBuildMySQLPhysicalBackupPolicyScriptBinlogGTIDAwkIsShellValid(t *testing.T) {
+	policy := &DatabaseBackupPolicyConfig{
+		Model:        gorm.Model{ID: 7},
+		Engine:       DBTypeMySQL,
+		BackupEngine: "xtrabackup_8_0",
+	}
+	record := &DatabaseBackupRecord{
+		Model:       gorm.Model{ID: 99},
+		BackupLevel: DatabaseBackupLevelFull,
+		FileName:    "full.physical.tar.gz",
+	}
+	instance := &DatabaseInstance{Host: "10.0.0.8", Port: 3306}
+	host := &DatabaseRunnerHost{
+		Model:   gorm.Model{ID: 3},
+		WorkDir: "/var/lib/opshub-runner",
+	}
+	credential := &ConnectionCredential{Username: "backup_user", Password: "secret-pass"}
+
+	script := buildMySQLPhysicalBackupPolicyScript(policy, record, "", instance, host, credential)
+	expected := `binlog_gtid="$(awk 'NR==1 {$1=""; $2=""; sub(/^[ \t]+/,""); print}' "$binlog_info")"`
+	if !strings.Contains(script, expected) {
+		t.Fatalf("script should parse GTID without escaped shell quotes, missing %q\n%s", expected, script)
+	}
+	if strings.Contains(script, `{$1=\"\"; $2=\"\"`) {
+		t.Fatalf("script contains escaped quotes that break awk execution\n%s", script)
+	}
+}
+
 func TestValidateBackupPolicyChainRecordsCompleteAndBrokenLSN(t *testing.T) {
 	policy := &DatabaseBackupPolicyConfig{
 		Model:            gorm.Model{ID: 7},

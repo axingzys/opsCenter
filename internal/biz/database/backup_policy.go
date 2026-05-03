@@ -453,7 +453,7 @@ func buildMySQLPhysicalBackupPolicyScript(policy *DatabaseBackupPolicyConfig, re
 		`checkpoint_to_lsn="$(checkpoint_value to_lsn)"`,
 		`checkpoint_last_lsn="$(checkpoint_value last_lsn)"`,
 		`binlog_info="$TARGET_DIR/xtrabackup_binlog_info"; if [ ! -f "$binlog_info" ]; then binlog_info="$TARGET_DIR/mariadb_backup_binlog_info"; fi`,
-		`binlog_file=""; binlog_pos="0"; binlog_gtid=""; if [ -f "$binlog_info" ]; then binlog_file="$(awk 'NR==1 {print $1}' "$binlog_info")"; binlog_pos="$(awk 'NR==1 {print $2}' "$binlog_info")"; binlog_gtid="$(awk 'NR==1 {$1=\"\"; $2=\"\"; sub(/^[ \t]+/,\"\"); print}' "$binlog_info")"; fi`,
+		`binlog_file=""; binlog_pos="0"; binlog_gtid=""; if [ -f "$binlog_info" ]; then binlog_file="$(awk 'NR==1 {print $1}' "$binlog_info")"; binlog_pos="$(awk 'NR==1 {print $2}' "$binlog_info")"; binlog_gtid="$(awk 'NR==1 {$1=""; $2=""; sub(/^[ \t]+/,""); print}' "$binlog_info")"; fi`,
 		`printf 'OPSHUB_FILE_SIZE=%s\n' "$size"`,
 		`printf 'OPSHUB_CHECKSUM_SHA256=%s\n' "$sha"`,
 		`printf 'OPSHUB_STORAGE_URI=runner://runner-host-` + strconv.Itoa(int(host.ID)) + `%s\n' "$ARTIFACT"`,
