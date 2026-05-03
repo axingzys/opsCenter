@@ -811,6 +811,41 @@ export interface DatabaseReplicationStatusResult {
   message: string
 }
 
+export interface DatabaseReplicaProtectionResult {
+  primaryInstanceId: number
+  primaryInstanceName: string
+  primaryEndpoint: string
+  engine: string
+  engineText: string
+  hasReplica: boolean
+  hasDelayedReplica: boolean
+  delayedReplicaCount: number
+  preferredReplicaId: number
+  preferredReplicaInstanceId: number
+  preferredReplicaInstanceName: string
+  preferredReplicaEndpoint: string
+  preferredReplicaStatus: string
+  preferredReplicaStatusText: string
+  configuredDelaySeconds: number
+  remainingDelaySeconds: number
+  remainingDelayEstimated: boolean
+  applyLagSeconds: number
+  applyTime: string
+  lastCheckId: number
+  lastCheckedAt: string
+  protectionStatus: string
+  protectionStatusText: string
+  riskLevel: string
+  riskLevelText: string
+  riskMessages: string[]
+  riskFlagsJson: string
+  lagWarningSeconds: number
+  lagCriticalSeconds: number
+  remainingDelayWarningSeconds: number
+  relayLogBacklogWarningBytes: number
+  walBacklogWarningBytes: number
+}
+
 export interface DatabaseBackupRunResult {
   taskId: number
   taskName: string
@@ -1354,6 +1389,20 @@ export const listDatabaseReplicationChecks = (params?: {
   roleDetected?: string
   healthStatus?: string
 }) => request.get('/api/v1/databases/replication-checks', { params })
+
+export const listDatabaseReplicaProtections = (params?: {
+  page?: number
+  pageSize?: number
+  instanceId?: number
+  engine?: string
+  riskLevel?: string
+  protectionStatus?: string
+  lagWarningSeconds?: number
+  lagCriticalSeconds?: number
+  remainingDelayWarningSeconds?: number
+  relayLogBacklogWarningBytes?: number
+  walBacklogWarningBytes?: number
+}) => request.get('/api/v1/databases/replica-protections', { params })
 
 export const createDatabaseInstance = (data: DatabaseInstancePayload) =>
   request.post('/api/v1/databases/instances', data)

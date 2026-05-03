@@ -329,6 +329,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.GET("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.ListInspectionReports)
 		databases.POST("/inspection-reports", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionRun), s.service.GenerateInspectionReport)
 		databases.GET("/inspection-reports/:id", s.authMiddleware.RequireMenuPermission(permDatabaseInspectionView), s.service.GetInspectionReport)
+		databases.GET("/replica-protections", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicaProtections)
 		databases.GET("/replicas", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicas)
 		databases.GET("/replication-checks", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicationChecks)
 

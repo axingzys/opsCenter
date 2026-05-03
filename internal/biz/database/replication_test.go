@@ -58,6 +58,40 @@ func TestPostgreSQLWALReceiverStatusQueryUsesPortableLSNColumns(t *testing.T) {
 	}
 }
 
+func TestReplicaProtectionRiskMessagesForCaughtUpDelayedReplica(t *testing.T) {
+	replica := &DatabaseInstanceReplica{Status: DatabaseReplicaHealthHealthy}
+	check := &DatabaseReplicationCheck{
+		Engine:                 DBTypeMySQL,
+		HealthStatus:           DatabaseReplicaHealthHealthy,
+		ConfiguredDelaySeconds: 120,
+		RemainingDelaySeconds:  0,
+	}
+	vo := &DatabaseReplicaProtectionVO{RemainingDelaySeconds: 0}
+	thresholds := replicaProtectionThresholds{
+		lagWarningSeconds:            300,
+		lagCriticalSeconds:           1800,
+		remainingDelayWarningSeconds: 30,
+	}
+	messages := replicaProtectionRiskMessages(replica, check, vo, thresholds)
+	assertContainsFlag(t, messages, "延迟副本已追上，当前没有可截停窗口")
+	assertContainsFlag(t, messages, "剩余保护窗口偏小")
+	if got := replicaProtectionRiskLevel(messages, replica, check); got != DatabaseReplicaHealthWarning {
+		t.Fatalf("replicaProtectionRiskLevel() = %q, want %q", got, DatabaseReplicaHealthWarning)
+	}
+}
+
+func TestReplicaProtectionStatus(t *testing.T) {
+	if got := replicaProtectionStatus(DatabaseReplicaHealthHealthy, &DatabaseReplicaProtectionVO{HasDelayedReplica: true}); got != DatabaseReplicaProtectionProtected {
+		t.Fatalf("replicaProtectionStatus() = %q, want %q", got, DatabaseReplicaProtectionProtected)
+	}
+	if got := replicaProtectionStatus(DatabaseReplicaHealthWarning, &DatabaseReplicaProtectionVO{HasDelayedReplica: true}); got != DatabaseReplicaProtectionDegraded {
+		t.Fatalf("replicaProtectionStatus() = %q, want %q", got, DatabaseReplicaProtectionDegraded)
+	}
+	if got := replicaProtectionStatus(DatabaseReplicaHealthHealthy, &DatabaseReplicaProtectionVO{}); got != DatabaseReplicaProtectionUnprotected {
+		t.Fatalf("replicaProtectionStatus() = %q, want %q", got, DatabaseReplicaProtectionUnprotected)
+	}
+}
+
 func assertContainsFlag(t *testing.T, flags []string, want string) {
 	t.Helper()
 	for _, flag := range flags {

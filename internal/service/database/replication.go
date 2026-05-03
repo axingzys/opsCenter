@@ -84,6 +84,30 @@ func (s *Service) ListReplicationChecks(c *gin.Context) {
 	})
 }
 
+func (s *Service) ListReplicaProtections(c *gin.Context) {
+	var req dbbiz.DatabaseReplicaProtectionListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionTopology)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListReplicaProtections(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
 func (s *Service) GetInstanceReplicationStatus(c *gin.Context) {
 	instanceID, ok := parseUintParam(c, "id", "实例ID")
 	if !ok {

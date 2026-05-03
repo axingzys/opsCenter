@@ -257,6 +257,11 @@ const (
 	DatabaseReplicaHealthCritical = "critical"
 	DatabaseReplicaHealthUnknown  = "unknown"
 
+	DatabaseReplicaProtectionProtected   = "protected"
+	DatabaseReplicaProtectionDegraded    = "degraded"
+	DatabaseReplicaProtectionUnprotected = "unprotected"
+	DatabaseReplicaProtectionUnknown     = "unknown"
+
 	DatabaseReplicaDiscoveryReplicaStatus = "replica_status"
 	DatabaseReplicaDiscoveryPrimaryStat   = "primary_stat"
 	DatabaseReplicaDiscoveryManual        = "manual"

@@ -276,6 +276,22 @@ type DatabaseReplicationCheckListRequest struct {
 	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
+type DatabaseReplicaProtectionListRequest struct {
+	Page                         int    `form:"page"`
+	PageSize                     int    `form:"pageSize"`
+	InstanceID                   uint   `form:"instanceId"`
+	Engine                       string `form:"engine"`
+	RiskLevel                    string `form:"riskLevel"`
+	ProtectionStatus             string `form:"protectionStatus"`
+	LagWarningSeconds            int    `form:"lagWarningSeconds"`
+	LagCriticalSeconds           int    `form:"lagCriticalSeconds"`
+	RemainingDelayWarningSeconds int    `form:"remainingDelayWarningSeconds"`
+	RelayLogBacklogWarningBytes  int64  `form:"relayLogBacklogWarningBytes"`
+	WALBacklogWarningBytes       int64  `form:"walBacklogWarningBytes"`
+	RestrictToAllowed            bool   `form:"-" json:"-"`
+	AllowedInstanceIDs           []uint `form:"-" json:"-"`
+}
+
 type DatabaseInstancePermissionRequest struct {
 	RoleID      uint `json:"roleId" binding:"required"`
 	InstanceID  uint `json:"instanceId" binding:"required"`
@@ -468,6 +484,41 @@ type DatabaseReplicationStatusVO struct {
 	Checks    []*DatabaseReplicationCheckVO `json:"checks"`
 	LastCheck *DatabaseReplicationCheckVO   `json:"lastCheck,omitempty"`
 	Message   string                        `json:"message"`
+}
+
+type DatabaseReplicaProtectionVO struct {
+	PrimaryInstanceID            uint     `json:"primaryInstanceId"`
+	PrimaryInstanceName          string   `json:"primaryInstanceName"`
+	PrimaryEndpoint              string   `json:"primaryEndpoint"`
+	Engine                       string   `json:"engine"`
+	EngineText                   string   `json:"engineText"`
+	HasReplica                   bool     `json:"hasReplica"`
+	HasDelayedReplica            bool     `json:"hasDelayedReplica"`
+	DelayedReplicaCount          int      `json:"delayedReplicaCount"`
+	PreferredReplicaID           uint     `json:"preferredReplicaId"`
+	PreferredReplicaInstanceID   uint     `json:"preferredReplicaInstanceId"`
+	PreferredReplicaInstanceName string   `json:"preferredReplicaInstanceName"`
+	PreferredReplicaEndpoint     string   `json:"preferredReplicaEndpoint"`
+	PreferredReplicaStatus       string   `json:"preferredReplicaStatus"`
+	PreferredReplicaStatusText   string   `json:"preferredReplicaStatusText"`
+	ConfiguredDelaySeconds       int      `json:"configuredDelaySeconds"`
+	RemainingDelaySeconds        int      `json:"remainingDelaySeconds"`
+	RemainingDelayEstimated      bool     `json:"remainingDelayEstimated"`
+	ApplyLagSeconds              int      `json:"applyLagSeconds"`
+	ApplyTime                    string   `json:"applyTime"`
+	LastCheckID                  uint     `json:"lastCheckId"`
+	LastCheckedAt                string   `json:"lastCheckedAt"`
+	ProtectionStatus             string   `json:"protectionStatus"`
+	ProtectionStatusText         string   `json:"protectionStatusText"`
+	RiskLevel                    string   `json:"riskLevel"`
+	RiskLevelText                string   `json:"riskLevelText"`
+	RiskMessages                 []string `json:"riskMessages"`
+	RiskFlagsJSON                string   `json:"riskFlagsJson"`
+	LagWarningSeconds            int      `json:"lagWarningSeconds"`
+	LagCriticalSeconds           int      `json:"lagCriticalSeconds"`
+	RemainingDelayWarningSeconds int      `json:"remainingDelayWarningSeconds"`
+	RelayLogBacklogWarningBytes  int64    `json:"relayLogBacklogWarningBytes"`
+	WALBacklogWarningBytes       int64    `json:"walBacklogWarningBytes"`
 }
 
 type SupportedTypeVO struct {

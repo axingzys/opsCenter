@@ -1231,6 +1231,109 @@
 
           <div class="backup-card">
             <div class="section-title">
+              <span>误操作保护窗口</span>
+              <el-tag size="small" type="info">{{ replicationProtectionTotal }}</el-tag>
+            </div>
+            <div class="backup-toolbar">
+              <div class="backup-toolbar-group">
+                <el-select v-model="replicationProtectionQuery.instanceId" placeholder="主库实例" clearable filterable class="audit-search-input" @change="loadReplicationProtections">
+                  <el-option
+                    v-for="item in replicationInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+                <el-select v-model="replicationProtectionQuery.engine" placeholder="引擎" clearable class="audit-select" @change="loadReplicationProtections">
+                  <el-option label="MySQL" value="mysql" />
+                  <el-option label="MariaDB" value="mariadb" />
+                  <el-option label="PostgreSQL" value="postgresql" />
+                </el-select>
+                <el-select v-model="replicationProtectionQuery.protectionStatus" placeholder="保护状态" clearable class="audit-select" @change="loadReplicationProtections">
+                  <el-option label="有保护窗口" value="protected" />
+                  <el-option label="保护降级" value="degraded" />
+                  <el-option label="无延迟保护" value="unprotected" />
+                  <el-option label="未知" value="unknown" />
+                </el-select>
+                <el-select v-model="replicationProtectionQuery.riskLevel" placeholder="风险等级" clearable class="audit-select" @change="loadReplicationProtections">
+                  <el-option label="健康" value="healthy" />
+                  <el-option label="警告" value="warning" />
+                  <el-option label="异常" value="critical" />
+                </el-select>
+              </div>
+              <div class="backup-toolbar-group">
+                <el-button type="primary" plain :loading="replicationProtectionLoading" @click="loadReplicationProtections">刷新保护窗口</el-button>
+                <el-button type="warning" :loading="replicationCheckLoading" @click="handleCheckAllReplication">重新采集</el-button>
+              </div>
+            </div>
+
+            <el-table :data="replicationProtections" v-loading="replicationProtectionLoading" stripe class="modern-table">
+              <el-table-column label="主库" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.primaryInstanceName || `#${row.primaryInstanceId}` }}</span>
+                    <span class="muted-text">{{ row.primaryEndpoint || '-' }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="保护状态" width="130">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="replicationProtectionStatusTag(row.protectionStatus)">{{ row.protectionStatusText || row.protectionStatus || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="最佳延迟副本" min-width="190" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <span class="backup-name">{{ row.preferredReplicaInstanceName || (row.hasDelayedReplica ? `#${row.preferredReplicaInstanceId}` : '无延迟副本') }}</span>
+                    <span class="muted-text">{{ row.preferredReplicaEndpoint || `延迟副本 ${row.delayedReplicaCount || 0} 个` }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="配置延迟" width="110" align="right">
+                <template #default="{ row }">{{ replicationDelayText(row.configuredDelaySeconds) }}</template>
+              </el-table-column>
+              <el-table-column label="剩余窗口" width="130" align="right">
+                <template #default="{ row }">
+                  <span>{{ replicationDelayText(row.remainingDelaySeconds) }}</span>
+                  <el-tag v-if="row.remainingDelayEstimated" size="small" type="info" effect="plain" class="ml-1">估算</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="Apply / Replay" width="170" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.applyTime || (row.applyLagSeconds ? `${replicationDelayText(row.applyLagSeconds)} 前` : '-') }}</template>
+              </el-table-column>
+              <el-table-column label="风险" min-width="260" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="backup-name-cell">
+                    <el-tag size="small" :type="replicationHealthTag(row.riskLevel)">{{ row.riskLevelText || row.riskLevel || '-' }}</el-tag>
+                    <span class="muted-text">{{ replicationRiskText(row.riskMessages) }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="最近检查" width="170">
+                <template #default="{ row }">{{ row.lastCheckedAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="170" fixed="right">
+                <template #default="{ row }">
+                  <el-button v-if="row.preferredReplicaInstanceId" link type="primary" :loading="replicationCheckingId === row.preferredReplicaInstanceId" @click="handleCheckReplication(row.preferredReplicaInstanceId)">采集</el-button>
+                  <el-button link type="warning" @click="handleReplicaIncidentGuideEntry">生成事故指引</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div class="pagination-wrapper">
+              <el-pagination
+                v-model:current-page="replicationProtectionQuery.page"
+                v-model:page-size="replicationProtectionQuery.pageSize"
+                :total="replicationProtectionTotal"
+                :page-sizes="[6, 10, 20]"
+                layout="total, sizes, prev, pager, next"
+                @size-change="loadReplicationProtections"
+                @current-change="loadReplicationProtections"
+              />
+            </div>
+          </div>
+
+          <div class="backup-card">
+            <div class="section-title">
               <span>副本关系</span>
               <el-tag size="small" type="info">{{ replicationReplicaTotal }}</el-tag>
             </div>
@@ -5366,6 +5469,7 @@ import {
   listDatabaseTables,
   listDatabaseReplicas,
   listDatabaseReplicationChecks,
+  listDatabaseReplicaProtections,
   pauseDatabaseLogArchiveStream,
   registerExternalDatabaseBackupRecord,
   registerExternalDatabaseLogArchive,
@@ -5411,6 +5515,7 @@ import {
   type DatabaseInstanceReplicaResult,
   type DatabaseQueryPayload,
   type DatabaseReplicationCheckResult,
+  type DatabaseReplicaProtectionResult,
   type DatabaseReplicationStatusResult,
   type DatabaseRestoreDryRunPayload,
   type DatabaseRestoreJobResult,
@@ -5596,8 +5701,11 @@ const topologyInstanceId = ref<number>()
 const topologyLoading = ref(false)
 const topologyResult = ref<DatabaseTopologyResult>()
 const replicationLoading = ref(false)
+const replicationProtectionLoading = ref(false)
 const replicationCheckLoading = ref(false)
 const replicationCheckingId = ref(0)
+const replicationProtections = ref<DatabaseReplicaProtectionResult[]>([])
+const replicationProtectionTotal = ref(0)
 const replicationReplicas = ref<DatabaseInstanceReplicaResult[]>([])
 const replicationReplicaTotal = ref(0)
 const replicationChecks = ref<DatabaseReplicationCheckResult[]>([])
@@ -5915,6 +6023,15 @@ const replicationReplicaQuery = reactive({
   engine: '',
   replicaRole: '',
   status: ''
+})
+
+const replicationProtectionQuery = reactive({
+  page: 1,
+  pageSize: 6,
+  instanceId: undefined as number | undefined,
+  engine: '',
+  protectionStatus: '',
+  riskLevel: ''
 })
 
 const replicationCheckQuery = reactive({
@@ -7173,6 +7290,9 @@ const loadInstances = async () => {
     if (replicationReplicaQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationReplicaQuery.instanceId)) {
       replicationReplicaQuery.instanceId = undefined
     }
+    if (replicationProtectionQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationProtectionQuery.instanceId)) {
+      replicationProtectionQuery.instanceId = undefined
+    }
     if (replicationCheckQuery.instanceId && !replicationInstances.value.some(item => item.id === replicationCheckQuery.instanceId)) {
       replicationCheckQuery.instanceId = undefined
     }
@@ -7507,6 +7627,19 @@ const loadReplicationReplicas = async () => {
   }
 }
 
+const loadReplicationProtections = async () => {
+  replicationProtectionLoading.value = true
+  try {
+    const res: any = await listDatabaseReplicaProtections(replicationProtectionQuery)
+    replicationProtections.value = res.list || []
+    replicationProtectionTotal.value = res.total || 0
+    if (res.page) replicationProtectionQuery.page = res.page
+    if (res.pageSize) replicationProtectionQuery.pageSize = res.pageSize
+  } finally {
+    replicationProtectionLoading.value = false
+  }
+}
+
 const loadReplicationChecks = async () => {
   replicationCheckLoading.value = true
   try {
@@ -7521,7 +7654,7 @@ const loadReplicationChecks = async () => {
 }
 
 const refreshReplicationState = async () => {
-  await Promise.all([loadReplicationReplicas(), loadReplicationChecks()])
+  await Promise.all([loadReplicationProtections(), loadReplicationReplicas(), loadReplicationChecks()])
 }
 
 const handleCheckReplication = async (instanceId?: number) => {
@@ -7584,6 +7717,10 @@ const handleViewReplicationRaw = (row: DatabaseReplicationCheckResult) => {
   replicationRawDialogTitle.value = `副本状态原始采集 #${row.id}`
   replicationRawDialogContent.value = row.rawStatusJson ? formatJSONText(row.rawStatusJson) : '{}'
   replicationRawDialogVisible.value = true
+}
+
+const handleReplicaIncidentGuideEntry = () => {
+  ElMessage.info('事故指引将在 P4.3 启用；当前页面只做保护窗口监控和风险提示')
 }
 
 const loadBackupTasks = async () => {
@@ -10796,6 +10933,24 @@ const replicationRoleTag = (role?: string) => {
     default:
       return 'info'
   }
+}
+
+const replicationProtectionStatusTag = (status?: string) => {
+  switch (status) {
+    case 'protected':
+      return 'success'
+    case 'degraded':
+      return 'warning'
+    case 'unprotected':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const replicationRiskText = (messages?: string[]) => {
+  if (!messages || !messages.length) return '当前无明显风险'
+  return messages.join('；')
 }
 
 const replicationDelayText = (value?: number) => {

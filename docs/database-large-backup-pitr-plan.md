@@ -5316,6 +5316,38 @@ P4.1 已落地内容：
 3. 延迟副本不健康时有明确风险提示。
 4. 所有状态只读，不触发高风险命令。
 
+P4.2 已落地内容：
+
+1. 新增只读保护窗口汇总接口：
+   - `GET /api/v1/databases/replica-protections`
+   - 复用 `database:replica:view` 菜单权限和数据库实例拓扑权限范围。
+   - 支持按主库实例、引擎、保护状态、风险等级过滤。
+2. 后端按已登记副本关系聚合每个主库的误操作保护状态：
+   - 排除已识别为 replica/standby 的实例，避免把从库当作主库展示。
+   - 识别是否存在延迟副本。
+   - 选择最佳延迟副本。
+   - 展示 configured delay、remaining delay、apply/replay 时间、最近采集时间和风险消息。
+3. P4.2 第一版阈值采用 API 查询参数覆盖，默认值为：
+   - `lag_warning_seconds = 300`
+   - `lag_critical_seconds = 1800`
+   - `remaining_delay_warning_seconds = 300`
+   - `relay_log_backlog_warning_bytes = 0`，表示不启用。
+   - `wal_backlog_warning_bytes = 0`，表示不启用。
+4. MySQL/MariaDB 延迟副本风险判断：
+   - `SQL_Delay > 0` 的副本纳入延迟保护窗口。
+   - `SQL_Remaining_Delay = 0` 标记“延迟副本已追上，当前没有可截停窗口”。
+   - `Replica_IO_Running / Replica_SQL_Running` 异常继续按 P4.1 采集结果标记风险。
+   - `Seconds_Behind_Source` 超过阈值时标记复制延迟风险。
+5. PostgreSQL 延迟 standby 风险判断：
+   - `recovery_min_apply_delay > 0` 的 standby 纳入延迟保护窗口。
+   - `remainingDelaySeconds` 基于 `pg_last_xact_replay_timestamp()`、当前时间和配置延迟估算，前端明确显示“估算”。
+   - `pg_stat_wal_receiver.status != streaming` 或来源主库无法匹配时继续标记风险。
+6. 前端“副本治理”页签新增“误操作保护窗口”表格：
+   - 展示主库、保护状态、最佳延迟副本、配置延迟、剩余窗口、apply/replay 时间、风险消息和最近检查。
+   - 支持刷新保护窗口和重新采集。
+   - 预留“生成事故指引”入口，但只提示 P4.3 启用，不执行任何命令。
+7. P4.2 仍然只读；没有实现 pause、resume、promote、failover、switchover，也没有增加 Runner 执行动作。
+
 #### P4.3：误删事故指引
 
 目标：发生误删、误更新或错误发布时，OpsHub 先生成可审计的操作剧本，指导用户判断是否还能通过延迟副本截停；如果不能，则提示转 PITR 兜底。
