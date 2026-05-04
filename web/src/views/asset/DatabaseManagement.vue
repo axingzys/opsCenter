@@ -484,109 +484,136 @@
                     </el-table-column>
                   </el-table>
                   </el-tab-pane>
-                  <el-tab-pane label="关系" name="relations">
-                    <div class="relation-toolbar">
-                      <div class="relation-summary">
-                        <el-tag type="success" size="small">外键 {{ relationSummary?.foreignKeys || 0 }}</el-tag>
-                        <el-tag type="warning" size="small">推断 {{ relationSummary?.inferred || 0 }}</el-tag>
-                        <el-tag type="primary" size="small">引用外部 {{ relationSummary?.outgoing || 0 }}</el-tag>
-                        <el-tag type="success" size="small">被引用 {{ relationSummary?.incoming || 0 }}</el-tag>
-                      </div>
-                      <div class="relation-filters">
-                        <el-select v-model="relationSourceFilter" size="small" class="relation-filter-select" @change="handleRelationFilterChange">
-                          <el-option label="全部关系" value="all" />
-                          <el-option label="数据库外键" value="foreign_key" />
-                          <el-option label="推断关系" value="inferred" />
-                        </el-select>
-                        <el-switch
-                          v-model="includeInferredRelations"
-                          size="small"
-                          active-text="含推断"
-                          inactive-text="仅外键"
-                          @change="handleRelationFilterChange"
-                        />
-                      </div>
-                    </div>
-
-                    <div v-if="tableRelations.length > 0" class="relation-mini-graph">
-                      <div class="relation-graph-column">
-                        <span class="relation-graph-title">引用当前表</span>
-                        <button
-                          v-for="item in incomingTableRelations"
-                          :key="`in-${item.id}`"
-                          type="button"
-                          class="relation-node relation-node-related"
-                          @click="handleOpenRelationTable(item)"
-                        >
-                          {{ relationEndpointLabel(item.schemaName, item.tableName) }}
-                        </button>
-                      </div>
-                      <div class="relation-node relation-node-current">
-                        <strong>{{ selectedTable.tableName }}</strong>
-                        <span>{{ selectedTable.schemaName }}</span>
-                      </div>
-                      <div class="relation-graph-column">
-                        <span class="relation-graph-title">当前表引用</span>
-                        <button
-                          v-for="item in outgoingTableRelations"
-                          :key="`out-${item.id}`"
-                          type="button"
-                          class="relation-node relation-node-related"
-                          @click="handleOpenRelationTable(item)"
-                        >
-                          {{ relationEndpointLabel(item.referencedSchemaName, item.referencedTableName) }}
-                        </button>
-                      </div>
-                    </div>
-
-                    <el-table :data="tableRelations" v-loading="detailsLoading" stripe height="330" class="metadata-table relation-table">
-                      <el-table-column label="方向" width="96">
-                        <template #default="{ row }">
-                          <el-tag :type="relationDirectionTagType(row.direction)" size="small">{{ relationDirectionText(row.direction) }}</el-tag>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="来源字段" min-width="190" show-overflow-tooltip>
-                        <template #default="{ row }">{{ relationEndpointLabel(row.schemaName, row.tableName, row.columnName) }}</template>
-                      </el-table-column>
-                      <el-table-column label="目标字段" min-width="190" show-overflow-tooltip>
-                        <template #default="{ row }">{{ relationEndpointLabel(row.referencedSchemaName, row.referencedTableName, row.referencedColumnName) }}</template>
-                      </el-table-column>
-                      <el-table-column label="类型" width="90">
-                        <template #default="{ row }">
-                          <el-tag :type="relationTypeTagType(row.relationType)" size="small">{{ row.relationTypeText }}</el-tag>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="可信度" width="90" align="center">
-                        <template #default="{ row }">
-                          <el-tag :type="relationConfidenceTagType(row.confidence)" size="small">{{ row.confidence || '-' }}</el-tag>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="规则" min-width="150" show-overflow-tooltip>
-                        <template #default="{ row }">
-                          {{ row.constraintName || row.relationSourceText || '-' }}
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="影响" min-width="180" show-overflow-tooltip>
-                        <template #default="{ row }">
-                          <el-tag :type="relationImpactTagType(row.impactLevel)" size="small">{{ relationImpactText(row.impactLevel) }}</el-tag>
-                          <span class="relation-impact-text">{{ row.impactText || '-' }}</span>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="操作" width="176" fixed="right">
-                        <template #default="{ row }">
-                          <el-button link type="primary" @click.stop="handleOpenRelationTable(row)">跳转</el-button>
-                          <el-button link type="primary" @click.stop="handleCopyRelationJoin(row)">JOIN</el-button>
-                          <el-button link type="primary" @click.stop="openRelationDetail(row)">详情</el-button>
-                        </template>
-                      </el-table-column>
-                      <template #empty>
-                        <el-empty description="暂无表关系，重新同步后可查看外键或推断关系" :image-size="64" />
-                      </template>
-                    </el-table>
-                  </el-tab-pane>
                 </el-tabs>
               </div>
             </div>
+          </div>
+
+          <div v-if="selectedTable && !isRedisMetadataInstance" ref="relationPanelRef" class="relation-panel">
+            <div class="panel-title relation-panel-title">
+              <div class="detail-panel-heading">
+                <el-icon><Connection /></el-icon>
+                <span>表关系</span>
+                <el-tag size="small" type="info">{{ tableRelations.length }}</el-tag>
+              </div>
+              <div class="relation-filters">
+                <el-select v-model="relationSourceFilter" size="small" class="relation-filter-select" @change="handleRelationFilterChange">
+                  <el-option label="全部关系" value="all" />
+                  <el-option label="数据库外键" value="foreign_key" />
+                  <el-option label="推断关系" value="inferred" />
+                </el-select>
+                <el-switch
+                  v-model="includeInferredRelations"
+                  size="small"
+                  active-text="含推断"
+                  inactive-text="仅外键"
+                  @change="handleRelationFilterChange"
+                />
+              </div>
+            </div>
+
+            <div class="relation-toolbar relation-toolbar-wide">
+              <div class="relation-summary">
+                <el-tag type="success" size="small">外键 {{ relationSummary?.foreignKeys || 0 }}</el-tag>
+                <el-tag type="warning" size="small">推断 {{ relationSummary?.inferred || 0 }}</el-tag>
+                <el-tag type="primary" size="small">引用外部 {{ relationSummary?.outgoing || 0 }}</el-tag>
+                <el-tag type="success" size="small">被引用 {{ relationSummary?.incoming || 0 }}</el-tag>
+              </div>
+              <span class="relation-current-table">
+                当前表：{{ relationEndpointLabel(selectedTable.schemaName, selectedTable.tableName) }}
+              </span>
+            </div>
+
+            <div v-if="tableRelations.length > 0" class="relation-mini-graph relation-mini-graph-wide">
+              <div class="relation-graph-column">
+                <span class="relation-graph-title">引用当前表</span>
+                <button
+                  v-for="item in incomingTableRelations"
+                  :key="`in-${item.id}`"
+                  type="button"
+                  class="relation-node relation-node-related"
+                  @click="handleOpenRelationTable(item)"
+                >
+                  {{ relationEndpointLabel(item.schemaName, item.tableName) }}
+                </button>
+              </div>
+              <div class="relation-node relation-node-current">
+                <strong>{{ selectedTable.tableName }}</strong>
+                <span>{{ selectedTable.schemaName }}</span>
+              </div>
+              <div class="relation-graph-column">
+                <span class="relation-graph-title">当前表引用</span>
+                <button
+                  v-for="item in outgoingTableRelations"
+                  :key="`out-${item.id}`"
+                  type="button"
+                  class="relation-node relation-node-related"
+                  @click="handleOpenRelationTable(item)"
+                >
+                  {{ relationEndpointLabel(item.referencedSchemaName, item.referencedTableName) }}
+                </button>
+              </div>
+            </div>
+
+            <el-table :data="tableRelations" v-loading="detailsLoading" stripe height="460" class="metadata-table relation-table relation-table-wide">
+              <el-table-column label="方向" width="96">
+                <template #default="{ row }">
+                  <el-tag :type="relationDirectionTagType(row.direction)" size="small">{{ relationDirectionText(row.direction) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="来源表" min-width="210" show-overflow-tooltip>
+                <template #default="{ row }">{{ relationEndpointLabel(row.schemaName, row.tableName) }}</template>
+              </el-table-column>
+              <el-table-column label="来源字段" min-width="150" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.columnName || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="目标表" min-width="210" show-overflow-tooltip>
+                <template #default="{ row }">{{ relationEndpointLabel(row.referencedSchemaName, row.referencedTableName) }}</template>
+              </el-table-column>
+              <el-table-column label="目标字段" min-width="150" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.referencedColumnName || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="类型" width="96">
+                <template #default="{ row }">
+                  <el-tag :type="relationTypeTagType(row.relationType)" size="small">{{ row.relationTypeText }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="来源" min-width="130" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.relationSourceText || row.relationSource || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="可信度" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="relationConfidenceTagType(row.confidence)" size="small">{{ row.confidence || '-' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="影响" min-width="260" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <el-tag :type="relationImpactTagType(row.impactLevel)" size="small">{{ relationImpactText(row.impactLevel) }}</el-tag>
+                  <span class="relation-impact-text">{{ row.impactText || '-' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="ON UPDATE" width="120" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.onUpdate || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="ON DELETE" width="120" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.onDelete || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="规则" min-width="180" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ row.constraintName || row.comment || '-' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="176" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="primary" @click.stop="handleOpenRelationTable(row)">跳转</el-button>
+                  <el-button link type="primary" @click.stop="handleCopyRelationJoin(row)">JOIN</el-button>
+                  <el-button link type="primary" @click.stop="openRelationDetail(row)">详情</el-button>
+                </template>
+              </el-table-column>
+              <template #empty>
+                <el-empty description="暂无表关系，重新同步后可查看外键或推断关系" :image-size="64" />
+              </template>
+            </el-table>
           </div>
         </div>
       </el-tab-pane>
@@ -8710,6 +8737,7 @@ const relationSourceFilter = ref('all')
 const includeInferredRelations = ref(true)
 const relationDetailVisible = ref(false)
 const currentRelation = ref<DatabaseTableRelationResult>()
+const relationPanelRef = ref<HTMLElement>()
 const selectedSchema = ref('')
 const selectedTable = ref<any>()
 const detailTab = ref('columns')
@@ -15335,8 +15363,12 @@ const handleOpenRelationTable = async (row: DatabaseTableRelationResult) => {
   }
   selectedTable.value = nextTable
   currentDDL.value = undefined
-  detailTab.value = 'relations'
+  if (detailTab.value === 'relations') {
+    detailTab.value = 'columns'
+  }
   await loadTableDetails(nextTable)
+  await nextTick()
+  relationPanelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 const copyRelationText = async (text: string, successMessage = '内容已复制') => {
@@ -18416,6 +18448,31 @@ onBeforeUnmount(() => {
   width: 130px;
 }
 
+.relation-panel {
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.relation-panel-title {
+  margin-bottom: 12px;
+}
+
+.relation-toolbar-wide {
+  margin-bottom: 12px;
+  padding-bottom: 0;
+}
+
+.relation-current-table {
+  min-width: 0;
+  color: #6b7280;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .relation-mini-graph {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 170px minmax(0, 1fr);
@@ -18427,6 +18484,10 @@ onBeforeUnmount(() => {
   background: #f8fafc;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
+}
+
+.relation-mini-graph-wide {
+  grid-template-columns: minmax(220px, 1fr) 220px minmax(220px, 1fr);
 }
 
 .relation-graph-column {
@@ -18482,6 +18543,10 @@ onBeforeUnmount(() => {
 
 .relation-table {
   margin-top: 2px;
+}
+
+.relation-table-wide {
+  margin-top: 12px;
 }
 
 .relation-impact-text {
@@ -19879,7 +19944,9 @@ onBeforeUnmount(() => {
   .page-header,
   .search-bar,
   .metadata-toolbar,
-  .backup-toolbar {
+  .backup-toolbar,
+  .relation-toolbar,
+  .relation-panel-title {
     flex-direction: column;
     align-items: stretch;
   }
@@ -19898,6 +19965,14 @@ onBeforeUnmount(() => {
 
   .metadata-content {
     grid-template-columns: 1fr;
+  }
+
+  .relation-mini-graph-wide {
+    grid-template-columns: 1fr;
+  }
+
+  .relation-current-table {
+    white-space: normal;
   }
 
   .diagnosis-grid,
