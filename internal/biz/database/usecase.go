@@ -1508,6 +1508,7 @@ func (uc *UseCase) SyncMetadata(ctx context.Context, id uint) (*MetadataSyncResu
 	}
 	for _, relation := range relations {
 		relation.InstanceID = item.ID
+		relation.RelationKey = buildTableRelationKey(relation)
 		relation.LastSyncAt = &now
 	}
 

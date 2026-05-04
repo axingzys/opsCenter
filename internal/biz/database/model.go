@@ -583,16 +583,17 @@ func (DatabaseIndex) TableName() string {
 // DatabaseTableRelation 保存表与表之间的外键或推断关系元数据。
 type DatabaseTableRelation struct {
 	gorm.Model
-	InstanceID           uint       `gorm:"column:instance_id;not null;index:idx_database_table_relation,unique;comment:实例ID" json:"instanceId"`
-	SchemaName           string     `gorm:"column:schema_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:来源Schema" json:"schemaName"`
-	Table                string     `gorm:"column:table_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:来源表" json:"tableName"`
-	ColumnName           string     `gorm:"column:column_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:来源字段" json:"columnName"`
-	ReferencedSchemaName string     `gorm:"column:referenced_schema_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:目标Schema" json:"referencedSchemaName"`
-	ReferencedTableName  string     `gorm:"column:referenced_table_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:目标表" json:"referencedTableName"`
-	ReferencedColumnName string     `gorm:"column:referenced_column_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:目标字段" json:"referencedColumnName"`
+	InstanceID           uint       `gorm:"column:instance_id;not null;index:idx_database_table_relation_source;index:idx_database_table_relation_target;uniqueIndex:uk_database_table_relation;comment:实例ID" json:"instanceId"`
+	RelationKey          string     `gorm:"column:relation_key;type:varchar(64);not null;uniqueIndex:uk_database_table_relation;comment:关系唯一键" json:"relationKey"`
+	SchemaName           string     `gorm:"column:schema_name;type:varchar(150);not null;index:idx_database_table_relation_source;comment:来源Schema" json:"schemaName"`
+	Table                string     `gorm:"column:table_name;type:varchar(150);not null;index:idx_database_table_relation_source;comment:来源表" json:"tableName"`
+	ColumnName           string     `gorm:"column:column_name;type:varchar(150);not null;comment:来源字段" json:"columnName"`
+	ReferencedSchemaName string     `gorm:"column:referenced_schema_name;type:varchar(150);not null;index:idx_database_table_relation_target;comment:目标Schema" json:"referencedSchemaName"`
+	ReferencedTableName  string     `gorm:"column:referenced_table_name;type:varchar(150);not null;index:idx_database_table_relation_target;comment:目标表" json:"referencedTableName"`
+	ReferencedColumnName string     `gorm:"column:referenced_column_name;type:varchar(150);not null;comment:目标字段" json:"referencedColumnName"`
 	ConstraintName       string     `gorm:"column:constraint_name;type:varchar(150);comment:外键约束名或推断名称" json:"constraintName"`
-	RelationType         string     `gorm:"column:relation_type;type:varchar(30);not null;index:idx_database_table_relation,unique;comment:foreign_key/inferred" json:"relationType"`
-	RelationSource       string     `gorm:"column:relation_source;type:varchar(50);not null;index:idx_database_table_relation,unique;comment:database_constraint/naming_rule/unique_index" json:"relationSource"`
+	RelationType         string     `gorm:"column:relation_type;type:varchar(30);not null;index;comment:foreign_key/inferred" json:"relationType"`
+	RelationSource       string     `gorm:"column:relation_source;type:varchar(50);not null;index;comment:database_constraint/naming_rule/unique_index" json:"relationSource"`
 	Confidence           int        `gorm:"column:confidence;type:int;default:0;comment:可信度" json:"confidence"`
 	OnUpdate             string     `gorm:"column:on_update;type:varchar(50);comment:ON UPDATE行为" json:"onUpdate"`
 	OnDelete             string     `gorm:"column:on_delete;type:varchar(50);comment:ON DELETE行为" json:"onDelete"`

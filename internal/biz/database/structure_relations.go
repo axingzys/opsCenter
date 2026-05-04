@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -434,6 +436,22 @@ func tableRelationSignature(schemaName, tableName, columnName, refSchema, refTab
 		tableRelationNodeID(refSchema, refTable),
 		normalizeRelationName(refColumn),
 	}, "|")
+}
+
+func buildTableRelationKey(item *DatabaseTableRelation) string {
+	if item == nil {
+		return ""
+	}
+	raw := tableRelationSignature(
+		item.SchemaName,
+		item.Table,
+		item.ColumnName,
+		item.ReferencedSchemaName,
+		item.ReferencedTableName,
+		item.ReferencedColumnName,
+	) + "|" + normalizeRelationName(item.RelationType) + "|" + normalizeRelationName(item.RelationSource)
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
 
 func normalizeRelationName(value string) string {
