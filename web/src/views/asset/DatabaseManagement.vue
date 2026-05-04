@@ -498,155 +498,251 @@
             type="info"
             show-icon
             :closable="false"
+            class="query-safety-alert"
           />
 
-          <div v-if="!isRedisQueryInstance" class="database-write-policy-bar">
-            <div class="database-write-switch">
-              <span class="query-option-label">写操作总开关</span>
-              <el-switch
-                v-model="databaseConfig.writeEnabled"
-                :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
-                :disabled="!canManageInstancePermissions"
-                active-text="开启"
-                inactive-text="关闭"
-                :before-change="handleBeforeDatabaseWriteToggle"
-              />
+          <div class="query-context-panel">
+            <div class="query-context-selects">
+              <div class="query-field query-instance-field">
+                <span class="query-field-label">实例</span>
+                <el-select
+                  v-model="queryInstanceId"
+                  placeholder="请选择实例"
+                  filterable
+                  class="query-select"
+                  @change="handleQueryInstanceChange"
+                >
+                  <el-option
+                    v-for="item in queryInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </div>
+              <div class="query-field">
+                <span class="query-field-label">{{ isRedisQueryInstance ? '逻辑 DB' : 'Schema' }}</span>
+                <el-select v-model="querySchemaName" :placeholder="querySchemaPlaceholder" clearable filterable class="query-select query-schema-select">
+                  <el-option v-for="item in querySchemas" :key="item.schemaName" :label="item.schemaName" :value="item.schemaName" />
+                </el-select>
+              </div>
             </div>
-            <el-tag :type="databaseConfig.writeEnabled ? 'success' : 'warning'">
-              {{ databaseConfig.writeEnabled ? '写操作可进入预检查' : '写操作会被统一拦截' }}
-            </el-tag>
-            <div class="database-write-switch">
-              <span class="query-option-label">写 SQL 计划</span>
-              <el-switch
-                v-model="databaseConfig.writeExplainEnabled"
-                :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
-                :disabled="!canManageInstancePermissions"
-                active-text="开启"
-                inactive-text="关闭"
-                :before-change="handleBeforeDatabaseWriteExplainToggle"
-              />
-            </div>
-            <el-tag :type="databaseConfig.writeExplainEnabled ? 'success' : 'info'">
-              {{ databaseConfig.writeExplainEnabled ? '可查看写 SQL 执行计划' : '写 SQL 计划关闭' }}
-            </el-tag>
-            <div class="database-write-switch">
-              <span class="query-option-label">DDL 变更</span>
-              <el-switch
-                v-model="databaseConfig.ddlEnabled"
-                :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
-                :disabled="!canManageInstancePermissions"
-                active-text="开启"
-                inactive-text="关闭"
-                :before-change="handleBeforeDatabaseDDLToggle"
-              />
-            </div>
-            <el-tag :type="databaseConfig.ddlEnabled ? 'danger' : 'info'">
-              {{ databaseConfig.ddlEnabled ? 'DDL 可进入结构变更' : 'DDL 结构变更关闭' }}
-            </el-tag>
-            <el-tag v-if="!canManageInstancePermissions" type="info">仅管理员可切换</el-tag>
-            <el-tag :type="databaseConfig.highRiskRequiresConfirm ? 'warning' : 'info'">
-              {{ databaseConfig.highRiskRequiresConfirm ? '高风险需二次确认' : '高风险不强制确认' }}
-            </el-tag>
-            <el-tag :type="databaseConfig.operationReasonRequired ? 'warning' : 'info'">
-              {{ databaseConfig.operationReasonRequired ? '操作原因必填' : '操作原因选填' }}
-            </el-tag>
-            <el-tag type="info">影响阈值 {{ formatNumber(databaseConfig.maxAffectedRows) }} 行</el-tag>
-            <el-button link type="primary" :loading="databaseWriteConfigLoading" @click="loadDatabaseWriteConfig">
-              刷新
-            </el-button>
-          </div>
-
-          <div class="query-toolbar">
-            <el-select
-              v-model="queryInstanceId"
-              placeholder="请选择实例"
-              filterable
-              class="query-select"
-              @change="handleQueryInstanceChange"
-            >
-              <el-option
-                v-for="item in queryInstances"
-                :key="item.id"
-                :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
-                :value="item.id"
-              />
-            </el-select>
-            <el-select v-model="querySchemaName" :placeholder="querySchemaPlaceholder" clearable filterable class="query-select">
-              <el-option v-for="item in querySchemas" :key="item.schemaName" :label="item.schemaName" :value="item.schemaName" />
-            </el-select>
-            <span class="query-option-label">最大行数</span>
-            <el-input-number v-model="queryLimit" :min="1" :max="500" :step="50" class="query-number" :disabled="queryUnlimitedRows" />
-            <el-switch
-              v-if="!isRedisQueryInstance && canUseQueryUnlimitedRows"
-              v-model="queryUnlimitedRows"
-              active-text="不限行数"
-              inactive-text="限制行数"
-            />
-            <span class="query-option-label">超时秒数</span>
-            <el-input-number v-model="queryTimeoutSeconds" :min="1" :max="30" class="query-number" />
-            <span class="query-option-label">导出上限</span>
-            <el-input-number v-model="queryExportLimit" :min="1" :max="5000" :step="100" class="query-number" />
-            <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="executeQuery()">
-              {{ isRedisQueryInstance ? '执行命令' : '执行查询' }}
-            </el-button>
-            <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleFormatQuery">
-              {{ isRedisQueryInstance ? '格式化命令' : '格式化 SQL' }}
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleExplainQuery">
-              执行计划
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryWriteChecking" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handleValidateWriteQuery">
-              写前检查
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="danger" plain :loading="queryWritePreparing" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handlePrepareWriteExecute">
-              受控写入
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="warning" plain :loading="queryDDLChecking" :disabled="!queryInstanceId || !canDDLCurrentQueryInstance" @click="handleValidateDDLQuery">
-              DDL 检查
-            </el-button>
-            <el-button v-if="!isRedisQueryInstance" type="danger" :loading="queryDDLPreparing" :disabled="!queryInstanceId || !canDDLCurrentQueryInstance" @click="handlePrepareDDLExecute">
-              DDL 执行
-            </el-button>
-            <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')" @click="handleExportQuery">
-              <el-icon style="margin-right: 4px;"><Download /></el-icon>
-              导出结果
-            </el-button>
-            <el-button type="primary" plain :loading="queryHistoryLoading" @click="openQueryHistory">
-              最近历史
-            </el-button>
-            <el-button @click="resetQueryConsole">清空</el-button>
-          </div>
-
-          <el-input
-            v-model="querySQL"
-            type="textarea"
-            :rows="10"
-            class="sql-editor"
-            :placeholder="queryEditorPlaceholder"
-          />
-
-          <div class="query-hints">
-            <template v-if="isRedisQueryInstance">
-              <el-tag size="small">只读命令</el-tag>
-              <el-tag size="small" type="success">SCAN 自动 COUNT</el-tag>
-              <el-tag size="small" type="primary">命令格式化</el-tag>
-              <el-tag size="small" type="warning">CSV 导出</el-tag>
-              <el-tag size="small" type="danger">禁止写命令</el-tag>
-            </template>
-            <template v-else>
-              <el-tag size="small">只读</el-tag>
-              <el-tag size="small" type="danger">受控写入</el-tag>
-              <el-tag size="small" type="success">自动 LIMIT</el-tag>
+            <div class="query-context-tags">
+              <el-tag size="small" :type="dbTypeTag(currentQueryInstance?.dbType || '')">
+                {{ currentQueryInstance?.dbTypeText || currentQueryInstance?.dbType || '未选择' }}
+              </el-tag>
+              <el-tag v-if="currentQueryInstance?.environment" size="small" :type="currentQueryInstance.environment === 'prod' ? 'danger' : 'info'">
+                {{ environmentText(currentQueryInstance.environment) }}
+              </el-tag>
+              <span class="query-endpoint">
+                {{ currentQueryInstance?.endpoint || (currentQueryInstance ? `${currentQueryInstance.host}:${currentQueryInstance.port}` : '-') }}
+              </span>
+              <el-tag v-if="canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')" size="small" type="success">可导出</el-tag>
               <el-tag v-if="canUseQueryUnlimitedRows" size="small" type="danger">可不限行数</el-tag>
-              <el-tag size="small" type="primary">SQL 格式化</el-tag>
-              <el-tag size="small" type="warning">执行计划 / CSV 导出</el-tag>
-              <el-tag size="small" type="warning">禁止多语句</el-tag>
-              <el-tag size="small" type="warning">原因 / 高风险确认</el-tag>
-            </template>
-            <span>当前实例：{{ currentQueryInstance?.name || '-' }}</span>
+            </div>
           </div>
 
-	          <div v-if="writeResult" class="query-result">
+          <div class="query-workbench">
+            <div class="query-editor-panel">
+              <div class="query-panel-header">
+                <div>
+                  <span class="query-section-eyebrow">{{ isRedisQueryInstance ? 'COMMAND' : 'SQL' }}</span>
+                  <h3>编辑器</h3>
+                </div>
+                <div class="query-mode-control">
+                  <el-radio-group v-if="!isRedisQueryInstance" v-model="queryConsoleMode" size="small">
+                    <el-radio-button label="read">查询</el-radio-button>
+                    <el-radio-button label="write" :disabled="!canWriteCurrentQueryInstance">写入</el-radio-button>
+                    <el-radio-button label="ddl" :disabled="!canDDLCurrentQueryInstance">DDL</el-radio-button>
+                  </el-radio-group>
+                  <el-tag :type="queryConsoleModeTagType">{{ queryConsoleModeLabel }}</el-tag>
+                </div>
+              </div>
+
+              <div class="query-action-bar">
+                <template v-if="isRedisQueryInstance || queryConsoleMode === 'read'">
+                  <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="executeQuery()">
+                    {{ isRedisQueryInstance ? '执行命令' : '执行查询' }}
+                  </el-button>
+                  <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleFormatQuery">
+                    {{ isRedisQueryInstance ? '格式化命令' : '格式化 SQL' }}
+                  </el-button>
+                  <el-button v-if="!isRedisQueryInstance" :loading="queryExplaining" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleExplainQuery">
+                    执行计划
+                  </el-button>
+                  <el-button type="success" plain :loading="queryExporting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.EXPORT, 'queryEnabled')" @click="handleExportQuery">
+                    <el-icon style="margin-right: 4px;"><Download /></el-icon>
+                    导出结果
+                  </el-button>
+                </template>
+                <template v-else-if="queryConsoleMode === 'write'">
+                  <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleFormatQuery">
+                    格式化 SQL
+                  </el-button>
+                  <el-button :loading="queryExplaining" :disabled="!queryInstanceId || !canUseWriteExplainCurrentQueryInstance" @click="handleExplainQuery">
+                    写 SQL 计划
+                  </el-button>
+                  <el-button type="warning" plain :loading="queryWriteChecking" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handleValidateWriteQuery">
+                    写前检查
+                  </el-button>
+                  <el-button type="danger" plain :loading="queryWritePreparing" :disabled="!queryInstanceId || !canWriteCurrentQueryInstance" @click="handlePrepareWriteExecute">
+                    受控写入
+                  </el-button>
+                </template>
+                <template v-else>
+                  <el-button :loading="queryFormatting" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="handleFormatQuery">
+                    格式化 SQL
+                  </el-button>
+                  <el-button type="warning" plain :loading="queryDDLChecking" :disabled="!queryInstanceId || !canDDLCurrentQueryInstance" @click="handleValidateDDLQuery">
+                    DDL 检查
+                  </el-button>
+                  <el-button type="danger" :loading="queryDDLPreparing" :disabled="!queryInstanceId || !canDDLCurrentQueryInstance" @click="handlePrepareDDLExecute">
+                    DDL 执行
+                  </el-button>
+                </template>
+                <el-button type="primary" plain :loading="queryHistoryLoading" @click="openQueryHistory">
+                  最近历史
+                </el-button>
+                <el-button @click="resetQueryConsole">清空</el-button>
+              </div>
+
+              <el-input
+                v-model="querySQL"
+                type="textarea"
+                :rows="13"
+                class="sql-editor"
+                :placeholder="queryEditorPlaceholder"
+              />
+
+              <div class="query-hints">
+                <template v-if="isRedisQueryInstance">
+                  <el-tag size="small">只读命令</el-tag>
+                  <el-tag size="small" type="success">SCAN 自动 COUNT</el-tag>
+                  <el-tag size="small" type="primary">命令格式化</el-tag>
+                  <el-tag size="small" type="warning">CSV 导出</el-tag>
+                  <el-tag size="small" type="danger">禁止写命令</el-tag>
+                </template>
+                <template v-else>
+                  <el-tag size="small">只读</el-tag>
+                  <el-tag size="small" type="danger">受控写入</el-tag>
+                  <el-tag size="small" type="success">自动 LIMIT</el-tag>
+                  <el-tag v-if="canUseQueryUnlimitedRows" size="small" type="danger">可不限行数</el-tag>
+                  <el-tag size="small" type="primary">SQL 格式化</el-tag>
+                  <el-tag size="small" type="warning">执行计划 / CSV 导出</el-tag>
+                  <el-tag size="small" type="warning">禁止多语句</el-tag>
+                  <el-tag size="small" type="warning">原因 / 高风险确认</el-tag>
+                </template>
+              </div>
+            </div>
+
+            <aside class="query-side-panel">
+              <div class="query-side-card">
+                <div class="query-side-title">执行参数</div>
+                <div class="query-param-list">
+                  <div class="query-param-item">
+                    <span class="query-option-label">最大行数</span>
+                    <el-input-number v-model="queryLimit" :min="1" :max="500" :step="50" class="query-number" :disabled="queryUnlimitedRows" />
+                  </div>
+                  <div class="query-param-item">
+                    <span class="query-option-label">超时秒数</span>
+                    <el-input-number v-model="queryTimeoutSeconds" :min="1" :max="30" class="query-number" />
+                  </div>
+                  <div class="query-param-item">
+                    <span class="query-option-label">导出上限</span>
+                    <el-input-number v-model="queryExportLimit" :min="1" :max="5000" :step="100" class="query-number" />
+                  </div>
+                  <div v-if="!isRedisQueryInstance && canUseQueryUnlimitedRows" class="query-param-item query-param-switch">
+                    <span class="query-option-label">行数限制</span>
+                    <el-switch
+                      v-model="queryUnlimitedRows"
+                      active-text="不限"
+                      inactive-text="限制"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="!isRedisQueryInstance" class="query-side-card query-policy-card">
+                <div class="query-policy-header">
+                  <div class="query-side-title">安全策略</div>
+                  <el-button link type="primary" :loading="databaseWriteConfigLoading" @click="loadDatabaseWriteConfig">
+                    刷新
+                  </el-button>
+                </div>
+                <div class="query-policy-list">
+                  <div class="query-policy-row">
+                    <span>写操作</span>
+                    <el-switch
+                      v-model="databaseConfig.writeEnabled"
+                      :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
+                      :disabled="!canManageInstancePermissions"
+                      active-text="开"
+                      inactive-text="关"
+                      :before-change="handleBeforeDatabaseWriteToggle"
+                    />
+                  </div>
+                  <el-tag :type="databaseConfig.writeEnabled ? 'success' : 'warning'">
+                    {{ databaseConfig.writeEnabled ? '可预检查' : '统一拦截' }}
+                  </el-tag>
+                  <div class="query-policy-row">
+                    <span>写 SQL 计划</span>
+                    <el-switch
+                      v-model="databaseConfig.writeExplainEnabled"
+                      :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
+                      :disabled="!canManageInstancePermissions"
+                      active-text="开"
+                      inactive-text="关"
+                      :before-change="handleBeforeDatabaseWriteExplainToggle"
+                    />
+                  </div>
+                  <el-tag :type="databaseConfig.writeExplainEnabled ? 'success' : 'info'">
+                    {{ databaseConfig.writeExplainEnabled ? '可查看计划' : '计划关闭' }}
+                  </el-tag>
+                  <div class="query-policy-row">
+                    <span>DDL 变更</span>
+                    <el-switch
+                      v-model="databaseConfig.ddlEnabled"
+                      :loading="databaseWriteConfigLoading || databaseWriteConfigSaving"
+                      :disabled="!canManageInstancePermissions"
+                      active-text="开"
+                      inactive-text="关"
+                      :before-change="handleBeforeDatabaseDDLToggle"
+                    />
+                  </div>
+                  <el-tag :type="databaseConfig.ddlEnabled ? 'danger' : 'info'">
+                    {{ databaseConfig.ddlEnabled ? 'DDL 可执行' : 'DDL 关闭' }}
+                  </el-tag>
+                  <div class="query-policy-tags">
+                    <el-tag v-if="!canManageInstancePermissions" type="info">仅管理员可切换</el-tag>
+                    <el-tag :type="databaseConfig.highRiskRequiresConfirm ? 'warning' : 'info'">
+                      {{ databaseConfig.highRiskRequiresConfirm ? '高风险确认' : '确认非强制' }}
+                    </el-tag>
+                    <el-tag :type="databaseConfig.operationReasonRequired ? 'warning' : 'info'">
+                      {{ databaseConfig.operationReasonRequired ? '原因必填' : '原因选填' }}
+                    </el-tag>
+                    <el-tag type="info">阈值 {{ formatNumber(databaseConfig.maxAffectedRows) }} 行</el-tag>
+                  </div>
+                </div>
+              </div>
+            </aside>
+          </div>
+
+          <div class="query-result-panel">
+            <div class="query-result-header">
+              <div>
+                <span class="query-section-eyebrow">RESULT</span>
+                <h3>执行结果</h3>
+              </div>
+              <div class="query-result-status">
+                <el-tag v-if="writeResult" :type="riskLevelTag(writeResult.riskLevel)">{{ writeResult.riskLevelText }}</el-tag>
+                <el-tag v-if="ddlCheckResult" :type="riskLevelTag(ddlCheckResult.riskLevel)">{{ ddlCheckResult.riskLevelText }}</el-tag>
+                <el-tag v-if="writeCheckResult" :type="riskLevelTag(writeCheckResult.riskLevel)">{{ writeCheckResult.riskLevelText }}</el-tag>
+                <el-tag v-if="queryResult?.truncated" type="warning">结果已截断</el-tag>
+                <el-tag v-if="queryResult?.cellsMasked" type="info">敏感字段已脱敏</el-tag>
+              </div>
+            </div>
+
+            <div v-if="writeResult" class="query-result">
 	            <div class="result-summary">
 	              <div class="summary-card">
 	                <span class="summary-label">{{ isDDLWriteResult ? '结构变更' : '影响行数' }}</span>
@@ -817,7 +913,8 @@
               </el-table-column>
             </el-table>
           </div>
-          <el-empty v-else :description="isRedisQueryInstance ? '执行 Redis 只读命令后在这里查看结果' : '执行只读 SQL、写前检查或受控写入后在这里查看结果'" :image-size="80" />
+            <el-empty v-else :description="isRedisQueryInstance ? '执行 Redis 只读命令后查看结果' : '执行查询、预检查或受控操作后查看结果'" :image-size="72" />
+          </div>
         </div>
       </el-tab-pane>
 
@@ -4330,7 +4427,9 @@
     <el-dialog
       v-model="backupTaskDialogVisible"
       :title="backupTaskForm.id ? '编辑备份任务' : '新增备份任务'"
-      width="900px"
+      width="min(1180px, calc(100vw - 48px))"
+      class="backup-task-dialog"
+      top="5vh"
       @close="resetBackupTaskForm"
     >
       <el-alert
@@ -4367,7 +4466,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :span="8">
             <el-form-item :label="isPhysicalBackupTaskForm ? '备份类型' : '备份格式'">
               <el-select v-model="backupTaskForm.backupType" style="width: 100%;">
                 <el-option
@@ -4379,7 +4478,7 @@
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="4">
+          <el-col :span="8">
             <el-form-item label="级别">
               <el-select v-model="backupTaskForm.backupLevel" :disabled="!isPhysicalBackupTaskForm" style="width: 100%;">
                 <el-option
@@ -7722,6 +7821,8 @@ const queryInstanceId = ref<number>()
 const querySchemaName = ref('')
 const querySchemas = ref<any[]>([])
 const querySQL = ref('SELECT 1')
+type QueryConsoleMode = 'read' | 'write' | 'ddl'
+const queryConsoleMode = ref<QueryConsoleMode>('read')
 const queryLimit = ref(500)
 const queryUnlimitedRows = ref(false)
 const queryTimeoutSeconds = ref(30)
@@ -9029,6 +9130,20 @@ const queryEditorPlaceholder = computed(() =>
     ? '请输入 Redis 只读命令，例如：SCAN 0 MATCH user:* COUNT 50 或 GET app:config'
     : '请输入 SQL。只读查询可直接执行；写操作请先做预检查，再走受控确认执行。'
 )
+
+const queryConsoleModeLabel = computed(() => {
+  if (isRedisQueryInstance.value) return 'Redis 只读'
+  if (queryConsoleMode.value === 'write') return '受控写入'
+  if (queryConsoleMode.value === 'ddl') return 'DDL 变更'
+  return '只读查询'
+})
+
+const queryConsoleModeTagType = computed(() => {
+  if (isRedisQueryInstance.value) return 'primary'
+  if (queryConsoleMode.value === 'write') return 'warning'
+  if (queryConsoleMode.value === 'ddl') return 'danger'
+  return 'primary'
+})
 
 const currentDiagnosisInstance = computed(() =>
   instanceOptions.value.find(item => item.id === diagnosisInstanceId.value)
@@ -15513,6 +15628,20 @@ watch(canUseQueryUnlimitedRows, (canUse) => {
   }
 })
 
+watch([isRedisQueryInstance, canWriteCurrentQueryInstance, canDDLCurrentQueryInstance], ([isRedis, canWrite, canDDL]) => {
+  if (isRedis && queryConsoleMode.value !== 'read') {
+    queryConsoleMode.value = 'read'
+    return
+  }
+  if (queryConsoleMode.value === 'write' && !canWrite) {
+    queryConsoleMode.value = 'read'
+    return
+  }
+  if (queryConsoleMode.value === 'ddl' && !canDDL) {
+    queryConsoleMode.value = 'read'
+  }
+})
+
 watch(
   () => [
     diagnosisInstanceId.value,
@@ -15880,39 +16009,161 @@ onBeforeUnmount(() => {
 .query-console {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
-.database-write-policy-bar {
+.query-safety-alert :deep(.el-alert__title) {
+  line-height: 1.5;
+}
+
+.query-context-panel {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
-  gap: 10px;
-  padding: 12px 16px;
-  background: #fff7ed;
-  border: 1px solid #fed7aa;
-  border-radius: 8px;
-}
-
-.database-write-switch {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.query-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding: 16px;
-  background: #f8fafc;
+  gap: 14px;
+  padding: 14px 16px;
+  background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
 }
 
+.query-context-selects {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.query-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.query-instance-field {
+  flex: 1;
+  min-width: 320px;
+}
+
+.query-field-label {
+  flex: 0 0 auto;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .query-select {
   width: 300px;
+}
+
+.query-instance-field .query-select {
+  width: min(520px, 100%);
+}
+
+.query-schema-select {
+  width: 240px;
+}
+
+.query-context-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.query-endpoint {
+  max-width: 360px;
+  overflow: hidden;
+  color: #374151;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.query-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+.query-editor-panel,
+.query-side-card,
+.query-result-panel {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.query-editor-panel,
+.query-result-panel {
+  padding: 16px;
+}
+
+.query-side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.query-side-card {
+  padding: 14px;
+}
+
+.query-panel-header,
+.query-result-header,
+.query-policy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.query-panel-header,
+.query-result-header {
+  margin-bottom: 12px;
+}
+
+.query-panel-header h3,
+.query-result-header h3 {
+  margin: 2px 0 0;
+  color: #111827;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.query-section-eyebrow {
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.query-mode-control,
+.query-result-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.query-action-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
 }
 
 .query-number {
@@ -15929,6 +16180,9 @@ onBeforeUnmount(() => {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   line-height: 1.6;
   color: #111827;
+  background: #fbfdff;
+  border-color: #d7dde6;
+  min-height: 312px;
 }
 
 .mono-textarea :deep(.el-textarea__inner) {
@@ -15942,8 +16196,59 @@ onBeforeUnmount(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+  margin-top: 10px;
   color: #6b7280;
   font-size: 13px;
+}
+
+.query-side-title {
+  color: #111827;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.query-param-list,
+.query-policy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.query-param-item,
+.query-policy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+
+.query-param-switch {
+  justify-content: flex-start;
+}
+
+.query-policy-card {
+  background: #fffaf3;
+  border-color: #fed7aa;
+}
+
+.query-policy-row span {
+  color: #374151;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.query-policy-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.query-result-panel {
+  min-height: 180px;
 }
 
 .query-result {
@@ -15967,11 +16272,11 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 10px;
 }
 
 .summary-card {
-  min-width: 120px;
+  min-width: 118px;
   padding: 12px 14px;
   background: #f9fafb;
   border: 1px solid #e5e7eb;
@@ -16247,6 +16552,11 @@ onBeforeUnmount(() => {
 .backup-dialog-alert.compact-alert {
   margin-top: 8px;
   margin-bottom: 0;
+}
+
+.backup-task-dialog :deep(.el-dialog__body) {
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
 }
 
 .postgres-barman-wizard-dialog :deep(.el-dialog__body) {
@@ -16587,6 +16897,43 @@ onBeforeUnmount(() => {
   .capacity-chart {
     min-height: 260px;
     height: 260px;
+  }
+
+  .query-workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .query-context-panel,
+  .query-panel-header,
+  .query-result-header,
+  .query-policy-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .query-context-selects,
+  .query-field,
+  .query-instance-field,
+  .query-mode-control,
+  .query-result-status {
+    width: 100%;
+  }
+
+  .query-field {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .query-context-tags,
+  .query-mode-control,
+  .query-result-status {
+    justify-content: flex-start;
+  }
+
+  .query-param-item,
+  .query-policy-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 </style>
