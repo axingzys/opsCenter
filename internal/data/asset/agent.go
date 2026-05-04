@@ -50,7 +50,10 @@ func (r *assetAgentRepo) List(ctx context.Context, page, pageSize int, keyword s
 	query := r.db.WithContext(ctx).Model(&asset.AssetAgent{})
 	if keyword != "" {
 		query = query.Joins("JOIN hosts ON hosts.id = asset_agents.host_id AND hosts.deleted_at IS NULL").
-			Where("hosts.name LIKE ? OR hosts.ip LIKE ? OR asset_agents.agent_id LIKE ?", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%")
+			Where(
+				"hosts.name LIKE ? OR hosts.ip LIKE ? OR hosts.primary_private_ip LIKE ? OR hosts.primary_public_ip LIKE ? OR asset_agents.agent_id LIKE ?",
+				"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%",
+			)
 	}
 	if accessibleHostIDs != nil {
 		if len(accessibleHostIDs) == 0 {

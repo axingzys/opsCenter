@@ -48,6 +48,36 @@ func (uc *AgentUseCase) Deploy(ctx context.Context, hostIDs []uint, operatorID u
 	return results, nil
 }
 
+func (uc *AgentUseCase) Reinstall(ctx context.Context, hostIDs []uint, operatorID uint, baseURL string) ([]*AgentJobVO, error) {
+	baseURL = resolveAgentBaseURL(baseURL)
+
+	results := make([]*AgentJobVO, 0, len(hostIDs))
+	for _, hostID := range dedupeHostIDs(hostIDs) {
+		uninstallJob, uninstallErr := uc.uninstallOne(ctx, hostID, operatorID)
+		if uninstallErr != nil || isAgentJobFailed(uninstallJob) {
+			if uninstallJob != nil {
+				results = append(results, uninstallJob)
+				continue
+			}
+			results = append(results, newAgentJobFailureVO(hostID, AgentJobTypeReinstall, "卸载旧 Agent 失败", uninstallErr))
+			continue
+		}
+
+		deployJob, deployErr := uc.deployOne(ctx, hostID, operatorID, baseURL)
+		if deployErr != nil {
+			if deployJob != nil {
+				results = append(results, deployJob)
+				continue
+			}
+			results = append(results, newAgentJobFailureVO(hostID, AgentJobTypeReinstall, "重新部署 Agent 失败", deployErr))
+			continue
+		}
+		results = append(results, deployJob)
+	}
+
+	return results, nil
+}
+
 func (uc *AgentUseCase) Uninstall(ctx context.Context, hostIDs []uint, operatorID uint) ([]*AgentJobVO, error) {
 	results := make([]*AgentJobVO, 0, len(hostIDs))
 	for _, hostID := range dedupeHostIDs(hostIDs) {
@@ -90,10 +120,12 @@ func (uc *AgentUseCase) List(ctx context.Context, page, pageSize int, keyword, s
 		}
 
 		displayStatus := resolvedAgentDisplayStatus(agentModel)
+		hostIP := agentListHostIP(host)
 		item := &AgentListItemVO{
 			HostID:           host.ID,
 			HostName:         host.Name,
-			IP:               host.IP,
+			IP:               hostIP,
+			HostIP:           hostIP,
 			PrimaryPrivateIP: host.PrimaryPrivateIP,
 			PrimaryPublicIP:  host.PrimaryPublicIP,
 			Version:          firstNonEmpty([]string{agentModel.Version, host.AgentVersion}),
@@ -894,6 +926,34 @@ func dedupeHostIDs(hostIDs []uint) []uint {
 		items = append(items, hostID)
 	}
 	return items
+}
+
+func isAgentJobFailed(job *AgentJobVO) bool {
+	return job == nil || job.Status == AgentJobStatusFailed
+}
+
+func newAgentJobFailureVO(hostID uint, jobType, message string, err error) *AgentJobVO {
+	errorMessage := ""
+	if err != nil {
+		errorMessage = err.Error()
+	}
+	return &AgentJobVO{
+		HostID:     hostID,
+		JobType:    jobType,
+		Status:     AgentJobStatusFailed,
+		Progress:   0,
+		Stage:      "failed",
+		Message:    message,
+		Error:      errorMessage,
+		UpdateTime: time.Now().Format("2006-01-02 15:04:05"),
+	}
+}
+
+func agentListHostIP(host *Host) string {
+	if host == nil {
+		return ""
+	}
+	return firstNonEmpty([]string{host.IP, host.PrimaryPrivateIP, host.PrimaryPublicIP})
 }
 
 func firstPositive(values ...int) int {

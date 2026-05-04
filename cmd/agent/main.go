@@ -35,7 +35,7 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-const defaultVersion = "opshub-agent/0.1.0"
+const defaultVersion = "opshub-agent/0.1.1"
 
 const (
 	maxProcessMetrics              = 10

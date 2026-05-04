@@ -12,6 +12,14 @@ export const deployAgents = (data: { hostIds: number[] }) => {
   })
 }
 
+export const reinstallAgents = (data: { hostIds: number[] }) => {
+  return request.post('/api/v1/agents/reinstall', data, {
+    headers: {
+      'X-OpsHub-Base-URL': window.location.origin
+    }
+  })
+}
+
 export const uninstallAgents = (data: { hostIds: number[] }) => {
   return request.post('/api/v1/agents/uninstall', data)
 }

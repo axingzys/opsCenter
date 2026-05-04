@@ -16,6 +16,16 @@
           部署Agent
         </el-button>
         <el-button
+          type="warning"
+          plain
+          :disabled="!selectedAgentHostIds.length"
+          :loading="reinstallSubmitting"
+          @click="handleBatchReinstall"
+        >
+          <el-icon style="margin-right: 6px;"><Refresh /></el-icon>
+          批量重部署{{ selectedAgentHostIds.length ? `(${selectedAgentHostIds.length})` : '' }}
+        </el-button>
+        <el-button
           type="danger"
           plain
           :disabled="!selectedAgentHostIds.length"
@@ -87,7 +97,7 @@
               </div>
               <div class="host-meta">
                 <div class="host-name">{{ row.hostName }}</div>
-                <div class="host-ip">{{ row.ip }}</div>
+                <div class="host-ip">{{ agentDisplayIP(row) }}</div>
                 <div class="host-extra">
                   <span v-if="row.primaryPrivateIp">内网 {{ row.primaryPrivateIp }}</span>
                   <span v-if="row.primaryPublicIp">公网 {{ row.primaryPublicIp }}</span>
@@ -146,12 +156,17 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="160" fixed="right" align="center">
+        <el-table-column label="操作" width="200" fixed="right" align="center">
           <template #default="{ row }">
             <div class="action-buttons">
               <el-tooltip content="查看库存" placement="top">
                 <el-button link class="action-btn action-view" @click="openInventory(row)">
                   <el-icon><View /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="重新部署Agent" placement="top">
+                <el-button link class="action-btn action-reinstall" @click="handleSingleReinstall(row)">
+                  <el-icon><Refresh /></el-icon>
                 </el-button>
               </el-tooltip>
               <el-tooltip content="卸载Agent" placement="top">
@@ -297,7 +312,7 @@ import {
   View,
   Delete
 } from '@element-plus/icons-vue'
-import { deployAgents, getAgentInventory, getAgentList, uninstallAgents } from '@/api/agent'
+import { deployAgents, getAgentInventory, getAgentList, reinstallAgents, uninstallAgents } from '@/api/agent'
 import { getHostList } from '@/api/host'
 import AgentInventoryPanel from './components/AgentInventoryPanel.vue'
 
@@ -305,6 +320,7 @@ interface AgentListItem {
   hostId: number
   hostName: string
   ip: string
+  hostIp?: string
   primaryPrivateIp?: string
   primaryPublicIp?: string
   version?: string
@@ -363,6 +379,7 @@ interface InventoryState {
 const loading = ref(false)
 const deployLoading = ref(false)
 const deploySubmitting = ref(false)
+const reinstallSubmitting = ref(false)
 const uninstallSubmitting = ref(false)
 const inventoryLoading = ref(false)
 
@@ -419,6 +436,10 @@ const isRevokedAgentId = (agentId?: string) => {
 
 const hasActiveAgentIdentity = (item: HostItem) => {
   return !!item.agentId && !isRevokedAgentId(item.agentId)
+}
+
+const agentDisplayIP = (row: AgentListItem) => {
+  return row.ip || row.hostIp || row.primaryPrivateIp || row.primaryPublicIp || '-'
 }
 
 const loadAgentList = async () => {
@@ -537,6 +558,47 @@ const runUninstall = async (hostIds: number[], successMessage: string) => {
   }
 }
 
+const runReinstall = async (hostIds: number[], successMessage: string) => {
+  reinstallSubmitting.value = true
+  try {
+    const jobs = await reinstallAgents({ hostIds })
+    const successCount = Array.isArray(jobs)
+      ? jobs.filter((item: any) => item.status !== 'failed').length
+      : 0
+    const failedCount = Array.isArray(jobs)
+      ? jobs.filter((item: any) => item.status === 'failed').length
+      : 0
+
+    ElMessage.success(`${successMessage}，成功 ${successCount} 台，失败 ${failedCount} 台`)
+    await loadAgentList()
+  } finally {
+    reinstallSubmitting.value = false
+  }
+}
+
+const handleBatchReinstall = async () => {
+  if (!selectedAgentHostIds.value.length) {
+    ElMessage.warning('请选择要重新部署的 Agent')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要重新部署这 ${selectedAgentHostIds.value.length} 台主机上的 Agent 吗？系统会先卸载旧 Agent 再部署新版本。`,
+      '重部署确认',
+      {
+        type: 'warning',
+        confirmButtonText: '确认重部署',
+        cancelButtonText: '取消'
+      }
+    )
+
+    await runReinstall(selectedAgentHostIds.value, '批量重部署任务已提交')
+  } catch {
+    return
+  }
+}
+
 const handleBatchUninstall = async () => {
   if (!selectedAgentHostIds.value.length) {
     ElMessage.warning('请选择要卸载的 Agent')
@@ -555,6 +617,24 @@ const handleBatchUninstall = async () => {
     )
 
     await runUninstall(selectedAgentHostIds.value, '批量卸载任务已提交')
+  } catch {
+    return
+  }
+}
+
+const handleSingleReinstall = async (row: AgentListItem) => {
+  try {
+    await ElMessageBox.confirm(
+      `确定要重新部署主机 "${row.hostName}" 上的 Agent 吗？系统会先卸载旧 Agent 再部署新版本。`,
+      '重部署确认',
+      {
+        type: 'warning',
+        confirmButtonText: '确认重部署',
+        cancelButtonText: '取消'
+      }
+    )
+
+    await runReinstall([row.hostId], `主机 ${row.hostName} 重部署任务已提交`)
   } catch {
     return
   }
@@ -765,6 +845,11 @@ onMounted(() => {
 .action-view:hover {
   background: #eff6ff;
   color: #2563eb;
+}
+
+.action-reinstall:hover {
+  background: #fffbeb;
+  color: #d97706;
 }
 
 .action-delete:hover {

@@ -24,7 +24,7 @@ const (
 	agentHeartbeatTimeout = 3 * time.Minute
 	agentRegisterTokenTTL = 30 * time.Minute
 	agentAccessTokenTTL   = 365 * 24 * time.Hour
-	agentVersionMVP       = "opshub-agent/0.1.0"
+	agentVersionMVP       = "opshub-agent/0.1.1"
 	windowsAgentVersion   = agentVersionMVP
 	windowsAgentHome      = `C:\ProgramData\OpsHubAgent`
 	windowsWinRMPort      = 5985

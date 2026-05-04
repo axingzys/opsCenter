@@ -188,6 +188,38 @@ func TestBuildRevokedAgentID(t *testing.T) {
 	}
 }
 
+func TestAgentListHostIPFallsBackToPrimaryAddresses(t *testing.T) {
+	tests := []struct {
+		name string
+		host *Host
+		want string
+	}{
+		{
+			name: "uses management ip first",
+			host: &Host{IP: "192.168.1.9", PrimaryPrivateIP: "10.0.0.9", PrimaryPublicIP: "203.0.113.9"},
+			want: "192.168.1.9",
+		},
+		{
+			name: "falls back to primary private ip",
+			host: &Host{PrimaryPrivateIP: "10.0.0.9", PrimaryPublicIP: "203.0.113.9"},
+			want: "10.0.0.9",
+		},
+		{
+			name: "falls back to primary public ip",
+			host: &Host{PrimaryPublicIP: "203.0.113.9"},
+			want: "203.0.113.9",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := agentListHostIP(tt.host); got != tt.want {
+				t.Fatalf("agentListHostIP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyAgentMonitorStatusMarksRunningAgentErrorOnPrometheusDown(t *testing.T) {
 	item := &AgentListItemVO{
 		HostID:       1,

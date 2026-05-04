@@ -169,6 +169,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 	{
 		agents.GET("", s.agentService.List)
 		agents.POST("/deploy", s.agentService.Deploy)
+		agents.POST("/reinstall", s.agentService.Reinstall)
 		agents.POST("/uninstall", s.agentService.Uninstall)
 		agents.GET("/jobs/:id", s.agentService.GetJob)
 		agents.GET("/:id/inventory",

@@ -185,6 +185,7 @@ type AgentListItemVO struct {
 	HostID           uint   `json:"hostId"`
 	HostName         string `json:"hostName"`
 	IP               string `json:"ip"`
+	HostIP           string `json:"hostIp"`
 	PrimaryPrivateIP string `json:"primaryPrivateIp"`
 	PrimaryPublicIP  string `json:"primaryPublicIp"`
 	Version          string `json:"version"`
@@ -203,6 +204,10 @@ type AgentListItemVO struct {
 }
 
 type AgentDeployRequest struct {
+	HostIDs []uint `json:"hostIds" binding:"required"`
+}
+
+type AgentReinstallRequest struct {
 	HostIDs []uint `json:"hostIds" binding:"required"`
 }
 

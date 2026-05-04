@@ -76,6 +76,29 @@ func (s *AgentService) Deploy(c *gin.Context) {
 	response.SuccessWithMessage(c, "部署任务已执行", data)
 }
 
+func (s *AgentService) Reinstall(c *gin.Context) {
+	var req assetbiz.AgentReinstallRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	filteredHostIDs := s.filterHostIDs(c, req.HostIDs)
+	if len(filteredHostIDs) == 0 {
+		response.ErrorCode(c, http.StatusForbidden, "没有可重新部署的主机")
+		return
+	}
+
+	operatorID := rbacService.GetUserID(c)
+	data, err := s.useCase.Reinstall(c.Request.Context(), filteredHostIDs, operatorID, s.resolveBaseURL(c))
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "重新部署 Agent 失败: "+err.Error())
+		return
+	}
+
+	response.SuccessWithMessage(c, "重新部署任务已执行", data)
+}
+
 func (s *AgentService) Uninstall(c *gin.Context) {
 	var req assetbiz.AgentUninstallRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
