@@ -2024,7 +2024,7 @@
       <el-tab-pane label="备份与恢复" name="backup">
         <div class="backup-panel">
           <el-alert
-            title="P1 已支持外部物理备份、binlog/WAL 归档登记和 PITR 恢复计划预校验。定时备份执行仍以逻辑全量为主，大库生产主链路应改造为物理备份 + 日志连续归档。"
+            title="生产大库建议使用物理备份 + 日志连续归档；逻辑备份更适合小库、临时导出和轻量演练。"
             type="warning"
             show-icon
             :closable="false"
@@ -2043,9 +2043,9 @@
             </div>
           </el-alert>
 
-          <div class="backup-card">
+          <div class="backup-card backup-support-card">
             <div class="panel-title">
-              <span>逻辑备份任务</span>
+              <span>备份任务</span>
               <el-tag size="small" type="info">{{ backupTaskTotal }}</el-tag>
             </div>
             <div class="backup-toolbar">
@@ -2196,7 +2196,7 @@
             </div>
           </div>
 
-          <div class="backup-card">
+          <div class="backup-card backup-support-card">
             <div class="panel-title">
               <span>备份记录</span>
               <el-tag size="small" type="info">{{ backupRecordTotal }}</el-tag>
@@ -2392,29 +2392,55 @@
             </div>
           </div>
 
-          <div class="backup-card">
+          <div class="backup-card backup-workbench-card">
             <div class="panel-title">
-              <span>备份与恢复</span>
-              <el-tag size="small" type="success">P5</el-tag>
+              <span>保护概览</span>
+              <el-tag size="small" type="primary">核心视图</el-tag>
             </div>
             <el-alert
-              title="默认进入保护概览；底层备份策略、归档流、Runner、Barman、WAL 等资源已收敛到高级资源中。"
+              title="先确认数据库是否受保护、可恢复窗口和最近演练证明；Runner、Barman、WAL、归档流等底层配置统一放到高级资源。"
               type="info"
               show-icon
               :closable="false"
             />
+            <div class="backup-overview-summary">
+              <div
+                v-for="item in backupOverviewSummaryCards"
+                :key="item.key"
+                :class="['backup-summary-metric', `is-${item.tone}`]"
+              >
+                <span class="backup-summary-label">{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+                <span class="backup-summary-help">{{ item.help }}</span>
+              </div>
+            </div>
+            <div v-if="protectionRisks.length" class="backup-risk-strip">
+              <div
+                v-for="item in protectionRisks.slice(0, 3)"
+                :key="`${item.profileId || item.instanceId}-${item.issueType}`"
+                class="backup-risk-strip-item"
+              >
+                <div class="backup-risk-strip-main">
+                  <el-tag size="small" :type="riskLevelTag(item.riskLevel)">{{ item.riskLevelText || item.riskLevel || '风险' }}</el-tag>
+                  <span>{{ item.instanceName || `#${item.instanceId}` }}：{{ item.message || item.issueTypeText || item.issueType || '-' }}</span>
+                </div>
+                <el-button link type="primary" @click="handleOpenProtectionRisk(item)">处理</el-button>
+              </div>
+            </div>
             <div class="backup-toolbar">
               <div class="backup-toolbar-group">
-                <el-button type="primary" plain @click="openProtectionWizardDialog()">
-                  <el-icon style="margin-right: 4px;"><Plus /></el-icon>
-                  启用数据库保护
-                </el-button>
-                <el-button type="success" plain @click="openProtectionWizardDialog()">
-                  保护向导
-                </el-button>
-                <el-button type="primary" plain @click="openPostgresBarmanWizardDialog()">
-                  PostgreSQL Barman 向导
-                </el-button>
+                <el-dropdown trigger="click" @command="handleEnableProtectionCommand">
+                  <el-button type="primary" plain>
+                    <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                    启用保护
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="mysql">MySQL / MariaDB PITR</el-dropdown-item>
+                      <el-dropdown-item command="postgresql">PostgreSQL Barman</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
                 <el-button type="warning" plain @click="openRestorePlanDialog">
                   恢复演练
                 </el-button>
@@ -2631,14 +2657,24 @@
                       </div>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="300" align="center" fixed="right">
+                  <el-table-column label="操作" width="230" align="center" fixed="right">
                     <template #default="{ row }">
-                      <el-button link type="warning" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'full')">立即备份</el-button>
-                      <el-button link type="success" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'incremental')">增量</el-button>
+                      <el-button link :type="protectionProfilePrimaryActionType(row)" @click="handleProtectionProfilePrimaryAction(row)">
+                        {{ protectionProfilePrimaryActionText(row) }}
+                      </el-button>
+                      <el-button link type="warning" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'full')">备份</el-button>
                       <el-button link type="primary" @click="openProtectionRestoreDrillDialog(row)">恢复演练</el-button>
-                      <el-button link type="info" :loading="validatingProtectionProfileId === row.profileId" @click="handleValidateProtectionProfile(row)">校验</el-button>
-                      <el-button link type="primary" @click="openProtectionProfileResources(row)">详情</el-button>
-                      <el-button link type="danger" @click="openProtectionWizardDialog(row)">修复</el-button>
+                      <el-dropdown trigger="click" @command="handleProtectionProfileMoreCommand">
+                        <el-button link type="info">更多</el-button>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item :command="{ action: 'incremental', row }" :disabled="!row.backupPolicy">运行增量备份</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'validate', row }" :disabled="!row.profileId">校验保护状态</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'resources', row }">查看高级资源</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'repair', row }">修复保护配置</el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -2657,7 +2693,7 @@
 
               <el-tab-pane label="高级资源" name="advancedResources">
                 <el-alert
-                  title="这些是备份与恢复的底层资源。日常使用建议通过保护概览、保护策略向导和恢复演练入口操作。"
+                  title="高级资源用于管理员排障和维护底层链路。普通备份、启用保护和恢复演练建议从保护概览发起。"
                   type="info"
                   show-icon
                   :closable="false"
@@ -2687,7 +2723,7 @@
                   </div>
                 </div>
                 <el-tabs v-model="backupAdvancedTab" class="pitr-tabs">
-              <el-tab-pane label="备份策略" name="backupPolicies">
+              <el-tab-pane label="备份链路 / 策略" name="backupPolicies">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-input
@@ -2784,17 +2820,24 @@
                       <div class="muted-text">{{ row.lastMessage || row.lastError || '-' }}</div>
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="520" align="center" fixed="right">
+                  <el-table-column label="操作" width="210" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="warning" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'full'" @click="handleRunBackupPolicy(row, 'full')">跑Full</el-button>
-                      <el-button link type="success" :loading="runningBackupPolicyId === row.id && runningBackupPolicyLevel === 'incremental'" @click="handleRunBackupPolicy(row, 'incremental')">跑增量</el-button>
                       <el-button link type="primary" :loading="validatingBackupPolicyId === row.id" @click="handleValidateBackupPolicyChain(row)">校验链</el-button>
-                      <el-button link type="warning" :disabled="!row.syntheticEnabled" :loading="previewingSyntheticPolicyId === row.id" @click="openSyntheticFullPreview(row)">合成预览</el-button>
-                      <el-button link type="danger" :disabled="!row.syntheticEnabled" :loading="runningSyntheticPolicyId === row.id" @click="handleRunSyntheticFull(row)">合成Full</el-button>
-                      <el-button link type="warning" :disabled="!row.syntheticEnabled" :loading="previewingPurgePolicyId === row.id" @click="openBackupPolicyPurgePreview(row)">清理预览</el-button>
-                      <el-button link type="danger" :disabled="!row.syntheticEnabled" :loading="runningPurgePolicyId === row.id" @click="handleRunBackupPolicyPurge(row)">清理旧链</el-button>
-                      <el-button link type="primary" @click="openBackupPolicyDialog(row)">编辑</el-button>
-                      <el-button link type="danger" @click="handleDeleteBackupPolicy(row)">删除</el-button>
+                      <el-dropdown trigger="click" @command="handleBackupPolicyMoreCommand">
+                        <el-button link type="info">更多</el-button>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item :command="{ action: 'incremental', row }">跑增量</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'syntheticPreview', row }" :disabled="!row.syntheticEnabled">合成预览</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'syntheticRun', row }" :disabled="!row.syntheticEnabled">合成 Full</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'purgePreview', row }" :disabled="!row.syntheticEnabled">清理预览</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'purgeRun', row }" :disabled="!row.syntheticEnabled">清理旧链</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'edit', row }">编辑</el-dropdown-item>
+                            <el-dropdown-item :command="{ action: 'delete', row }">删除</el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -2811,7 +2854,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="存储配置" name="storageProfiles">
+              <el-tab-pane label="存储与保留 / 配置" name="storageProfiles">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-input
@@ -2905,7 +2948,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="Runner主机" name="runnerHosts">
+              <el-tab-pane label="执行资源 / Runner" name="runnerHosts">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-input
@@ -2999,7 +3042,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="Runner任务" name="runnerJobs">
+              <el-tab-pane label="执行资源 / 任务" name="runnerJobs">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-select v-model="runnerJobQuery.runnerHostId" placeholder="Runner" clearable filterable class="audit-search-input" @change="loadRunnerJobs">
@@ -3086,7 +3129,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="Barman Server" name="barmanServers">
+              <el-tab-pane label="PostgreSQL / Barman Server" name="barmanServers">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-input
@@ -3195,7 +3238,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="归档流" name="streams">
+              <el-tab-pane label="日志归档 / 流" name="streams">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-select v-model="logArchiveStreamQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadLogArchiveStreams">
@@ -3335,7 +3378,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="日志归档" name="archives">
+              <el-tab-pane label="日志归档 / 文件" name="archives">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-select v-model="logArchiveQuery.streamId" placeholder="归档流" clearable filterable class="audit-search-input" @change="loadLogArchives">
@@ -3406,7 +3449,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="Agent事件" name="events">
+              <el-tab-pane label="日志归档 / 事件" name="events">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-select v-model="logArchiveEventQuery.streamId" placeholder="归档流" clearable filterable class="audit-search-input" @change="loadLogArchiveEvents">
@@ -3475,7 +3518,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="恢复计划" name="plans">
+              <el-tab-pane label="恢复编排 / 计划" name="plans">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-select v-model="restorePlanQuery.sourceInstanceId" placeholder="来源实例" clearable filterable class="audit-select" @change="loadRestorePlans">
@@ -3587,7 +3630,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="Barman Catalog" name="barmanCatalog">
+              <el-tab-pane label="PostgreSQL / Barman Catalog" name="barmanCatalog">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-select
@@ -3711,7 +3754,7 @@
                 </div>
               </el-tab-pane>
 
-              <el-tab-pane label="WAL 状态" name="walStatus">
+              <el-tab-pane label="PostgreSQL / WAL 状态" name="walStatus">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
                     <el-select
@@ -3810,7 +3853,91 @@
             </el-tabs>
           </div>
 
-          <div class="backup-card">
+          <el-drawer
+            v-model="protectionProfileDetailVisible"
+            :title="protectionProfileDetail?.instanceName ? `${protectionProfileDetail.instanceName} 保护详情` : '保护详情'"
+            size="560px"
+            class="protection-detail-drawer"
+          >
+            <template v-if="protectionProfileDetail">
+              <el-descriptions :column="1" border size="small">
+                <el-descriptions-item label="实例">
+                  {{ protectionProfileDetail.instanceName || `#${protectionProfileDetail.instanceId}` }}
+                  <el-tag size="small" :type="dbTypeTag(protectionProfileDetail.engine)" style="margin-left: 6px;">
+                    {{ protectionProfileDetail.engineText || protectionProfileDetail.engine || '-' }}
+                  </el-tag>
+                </el-descriptions-item>
+                <el-descriptions-item label="地址">{{ protectionProfileDetail.endpoint || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="保护等级">
+                  <el-tag size="small" :type="protectionLevelTag(protectionProfileDetail.protectionLevel)">
+                    {{ protectionProfileDetail.protectionLevelText || protectionProfileDetail.protectionLevel || '-' }}
+                  </el-tag>
+                </el-descriptions-item>
+                <el-descriptions-item label="风险">
+                  <el-tag size="small" :type="riskLevelTag(protectionProfileDetail.riskLevel)">
+                    {{ protectionProfileDetail.riskLevelText || protectionProfileDetail.riskLevel || '-' }}
+                  </el-tag>
+                </el-descriptions-item>
+              </el-descriptions>
+
+              <div class="protection-detail-section">
+                <div class="section-title">可恢复窗口</div>
+                <div class="protection-detail-timeline">
+                  <div><span>窗口</span><strong>{{ protectionRecoverableWindowText(protectionProfileDetail) }}</strong></div>
+                  <div><span>最近全量</span><strong>{{ protectionProfileDetail.lastFullAt || '-' }}</strong></div>
+                  <div><span>最近增量</span><strong>{{ protectionProfileDetail.lastIncrementalAt || '-' }}</strong></div>
+                  <div><span>最近日志</span><strong>{{ protectionProfileDetail.lastLogArchiveAt || '-' }}</strong></div>
+                  <div><span>当前 RPO</span><strong>{{ protectionRPOText(protectionProfileDetail) }}</strong></div>
+                </div>
+              </div>
+
+              <div class="protection-detail-section">
+                <div class="section-title">恢复证明</div>
+                <div class="protection-detail-timeline">
+                  <div><span>最近演练</span><strong>{{ protectionProfileDetail.lastRestoreDrillAt || '-' }}</strong></div>
+                  <div><span>演练状态</span><strong>{{ protectionProfileDetail.restoreDrillStatusText || protectionProfileDetail.restoreDrillStatus || '-' }}</strong></div>
+                  <div><span>副本保护</span><strong>{{ protectionProfileDetail.replicaProtectionText || protectionProfileDetail.replicaProtectionStatus || '-' }}</strong></div>
+                </div>
+              </div>
+
+              <div class="protection-detail-section">
+                <div class="section-title">风险与建议</div>
+                <el-alert
+                  v-if="!(protectionProfileDetail.riskMessages || []).length"
+                  title="当前链路状态正常"
+                  type="success"
+                  show-icon
+                  :closable="false"
+                />
+                <el-alert
+                  v-for="item in protectionProfileDetail.riskMessages || []"
+                  :key="item"
+                  :title="item"
+                  type="warning"
+                  show-icon
+                  :closable="false"
+                  class="backup-inline-alert"
+                />
+              </div>
+
+              <div class="protection-detail-actions">
+                <el-button type="primary" plain @click="handleProtectionProfilePrimaryAction(protectionProfileDetail)">
+                  {{ protectionProfilePrimaryActionText(protectionProfileDetail) }}
+                </el-button>
+                <el-button type="warning" plain :disabled="!protectionProfileDetail.backupPolicy" @click="handleRunProtectionProfileBackup(protectionProfileDetail, 'full')">
+                  立即备份
+                </el-button>
+                <el-button type="success" plain @click="openProtectionRestoreDrillDialog(protectionProfileDetail)">
+                  恢复演练
+                </el-button>
+                <el-button plain @click="openProtectionProfileResources(protectionProfileDetail)">
+                  高级资源
+                </el-button>
+              </div>
+            </template>
+          </el-drawer>
+
+          <div class="backup-card backup-support-card">
             <div class="panel-title">
               <span>恢复演练记录</span>
               <el-tag size="small" type="info">{{ restoreJobTotal }}</el-tag>
@@ -4715,56 +4842,6 @@
           </el-col>
 	        </el-row>
 	        <el-row :gutter="16">
-	          <el-col :span="8">
-	            <el-form-item label="工具执行">
-	              <el-select v-model="backupPolicyForm.toolExecutionMode" style="width: 100%;">
-	                <el-option label="宿主机工具" value="host_tools" />
-	                <el-option label="容器化工具" value="container_tools" />
-	              </el-select>
-	            </el-form-item>
-	          </el-col>
-	          <el-col :span="8">
-	            <el-form-item label="工具镜像">
-	              <el-input v-model="backupPolicyForm.toolImage" :disabled="backupPolicyForm.toolExecutionMode !== 'container_tools'" placeholder="如 opshub-runner-tools:mysql80" />
-	            </el-form-item>
-	          </el-col>
-	          <el-col :span="8">
-	            <el-form-item label="镜像 Digest">
-	              <el-input v-model="backupPolicyForm.toolImageDigest" :disabled="backupPolicyForm.toolExecutionMode !== 'container_tools'" placeholder="可选 sha256:..." />
-	            </el-form-item>
-	          </el-col>
-	        </el-row>
-	        <el-row v-if="backupPolicyForm.toolExecutionMode === 'container_tools'" :gutter="16">
-	          <el-col :span="8">
-	            <el-form-item label="datadir挂载">
-	              <el-input v-model="backupPolicyForm.containerDatadirPath" placeholder="/var/lib/mysql 或只读挂载点" />
-	            </el-form-item>
-	          </el-col>
-	          <el-col :span="8">
-	            <el-form-item label="工作目录挂载">
-	              <el-input v-model="backupPolicyForm.containerWorkdirPath" placeholder="可选，默认 Runner 工作目录/仓库挂载" />
-	            </el-form-item>
-	          </el-col>
-	          <el-col :span="4">
-	            <el-form-item label="网络">
-	              <el-input v-model="backupPolicyForm.containerNetworkMode" placeholder="host" />
-	            </el-form-item>
-	          </el-col>
-	          <el-col :span="4">
-	            <el-form-item label="datadir只读">
-	              <el-switch v-model="backupPolicyForm.containerDatadirRo" active-text="是" inactive-text="否" />
-	            </el-form-item>
-	          </el-col>
-	        </el-row>
-	        <el-alert
-	          v-if="backupPolicyForm.toolExecutionMode === 'container_tools'"
-	          title="容器化模式会在 Runner 上用 Docker 运行固定镜像；MySQL/MariaDB 物理备份必须能把生产 datadir 只读挂载给容器。"
-	          type="warning"
-	          show-icon
-	          :closable="false"
-	          class="backup-dialog-alert compact-alert"
-	        />
-	        <el-row :gutter="16">
           <el-col v-if="isPhysicalBackupTaskForm" :span="12">
             <el-form-item label="备份引擎">
               <el-select v-model="backupTaskForm.backupEngine" style="width: 100%;">
@@ -5178,7 +5255,7 @@
       @close="resetExternalBackupForm"
     >
       <el-alert
-        title="用于登记 XtraBackup、mariadb-backup、Barman、WAL-G、pg_basebackup 等外部工具已经生成的备份元数据；OpsHub P1 只记录链路和做恢复预校验。"
+        title="用于登记 XtraBackup、mariadb-backup、Barman、WAL-G、pg_basebackup 等外部工具已经生成的备份元数据；当前用于链路纳管和恢复预校验。"
         type="info"
         show-icon
         :closable="false"
@@ -6385,7 +6462,7 @@
               :value="item.id"
             />
           </el-select>
-          <div class="field-tip">目标实例必须是非生产库；P1 只记录计划，不执行恢复。</div>
+          <div class="field-tip">目标实例必须是非生产库；当前只记录计划，不直接执行恢复。</div>
         </el-form-item>
         <el-row :gutter="16">
           <el-col :span="12">
@@ -8255,6 +8332,8 @@ const protectionRestoreDrillFormRef = ref<FormInstance>()
 const protectionRestoreDrillProfile = ref<DatabaseProtectionProfileResult>()
 const protectionRestoreDrillResult = ref<DatabaseProtectionRestoreDrillResult>()
 const protectionProfiles = ref<DatabaseProtectionProfileResult[]>([])
+const protectionProfileDetailVisible = ref(false)
+const protectionProfileDetail = ref<DatabaseProtectionProfileResult>()
 const protectionProfileTotal = ref(0)
 const protectionRiskLoading = ref(false)
 const protectionRisks = ref<DatabaseProtectionRiskResult[]>([])
@@ -9811,6 +9890,68 @@ const protectionRPOText = (row: DatabaseProtectionProfileResult) => {
   if (row.rpoLagSeconds < 60) return `${row.rpoLagSeconds}s`
   return `${Math.round(row.rpoLagSeconds / 60)}m`
 }
+
+const latestDateText = (values: Array<string | undefined>) => {
+  const sorted = values
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => {
+      const left = Date.parse(a)
+      const right = Date.parse(b)
+      if (Number.isNaN(left) || Number.isNaN(right)) return b.localeCompare(a)
+      return right - left
+    })
+  return sorted[0] || '-'
+}
+
+const backupOverviewSummaryCards = computed(() => {
+  const protectedCount = protectionProfiles.value.filter(item => item.protectionLevel && item.protectionLevel !== 'none').length
+  const pitrCount = protectionProfiles.value.filter(item => ['pitr_capable', 'pitr_verified', 'ha_and_pitr_verified'].includes(item.protectionLevel)).length
+  const criticalRiskCount = protectionRisks.value.filter(item => ['critical', 'high'].includes(item.riskLevel)).length
+  const latestBackupAt = latestDateText(protectionProfiles.value.flatMap(item => [
+    item.lastFullAt,
+    item.lastIncrementalAt,
+    item.lastSyntheticAt,
+    item.latestBackupRecord?.finishedAt,
+    item.latestBackupRecord?.createdAt
+  ]))
+  const failedRecordCount = backupRecords.value.filter(item => item.status === 'failed').length
+  const latestRestoreAt = latestDateText([
+    ...protectionProfiles.value.map(item => item.lastRestoreDrillAt),
+    ...restoreJobs.value.filter(item => item.status === 'success').map(item => item.createdAt)
+  ])
+  const staleRestoreCount = protectionProfiles.value.filter(item => !item.lastRestoreDrillAt || item.restoreDrillStatus === 'stale' || item.restoreDrillStatus === 'failed').length
+  return [
+    {
+      key: 'protected',
+      label: '已保护实例',
+      value: `${protectedCount}/${protectionProfileTotal.value || protectionProfiles.value.length}`,
+      help: `PITR 可用 ${pitrCount} 个`,
+      tone: protectedCount > 0 ? 'success' : 'neutral'
+    },
+    {
+      key: 'risk',
+      label: '存在风险',
+      value: `${protectionRiskTotal.value || protectionRisks.value.length}`,
+      help: `高危 ${criticalRiskCount} 个`,
+      tone: criticalRiskCount > 0 ? 'danger' : protectionRisks.value.length > 0 ? 'warning' : 'success'
+    },
+    {
+      key: 'backup',
+      label: '最近成功备份',
+      value: latestBackupAt,
+      help: `当前记录失败 ${failedRecordCount} 条`,
+      tone: failedRecordCount > 0 ? 'warning' : 'neutral'
+    },
+    {
+      key: 'restore',
+      label: '恢复演练',
+      value: latestRestoreAt,
+      help: `待补演练 ${staleRestoreCount} 个`,
+      tone: staleRestoreCount > 0 ? 'warning' : 'success'
+    }
+  ]
+})
 
 const backupPolicyFormSyntheticRuleSummary = computed(() => parseBackupPolicySyntheticRule(backupPolicyForm.syntheticRuleJson))
 
@@ -15551,6 +15692,89 @@ const handleValidateBackupPolicyChain = async (row: DatabaseBackupPolicyResult) 
   }
 }
 
+const handleEnableProtectionCommand = async (command: string) => {
+  if (command === 'postgresql') {
+    await openPostgresBarmanWizardDialog()
+    return
+  }
+  await openProtectionWizardDialog()
+}
+
+const protectionProfileNeedsRepair = (row: DatabaseProtectionProfileResult) =>
+  row.protectionLevel === 'none' || ['critical', 'high'].includes(row.riskLevel)
+
+const protectionProfilePrimaryActionText = (row: DatabaseProtectionProfileResult) => {
+  if (row.protectionLevel === 'none') return '启用保护'
+  if (protectionProfileNeedsRepair(row)) return '修复风险'
+  return '详情'
+}
+
+const protectionProfilePrimaryActionType = (row: DatabaseProtectionProfileResult) => {
+  if (row.protectionLevel === 'none') return 'primary'
+  if (protectionProfileNeedsRepair(row)) return 'danger'
+  return 'primary'
+}
+
+const openProtectionProfileDetail = (row: DatabaseProtectionProfileResult) => {
+  protectionProfileDetail.value = row
+  protectionProfileDetailVisible.value = true
+}
+
+const handleProtectionProfilePrimaryAction = async (row: DatabaseProtectionProfileResult) => {
+  if (protectionProfileNeedsRepair(row)) {
+    await openProtectionWizardDialog(row)
+    return
+  }
+  openProtectionProfileDetail(row)
+}
+
+const handleProtectionProfileMoreCommand = async (command: { action: string; row: DatabaseProtectionProfileResult }) => {
+  const { action, row } = command
+  switch (action) {
+    case 'incremental':
+      await handleRunProtectionProfileBackup(row, 'incremental')
+      return
+    case 'validate':
+      await handleValidateProtectionProfile(row)
+      return
+    case 'resources':
+      await openProtectionProfileResources(row)
+      return
+    case 'repair':
+      await openProtectionWizardDialog(row)
+      return
+    default:
+      openProtectionProfileDetail(row)
+  }
+}
+
+const handleBackupPolicyMoreCommand = async (command: { action: string; row: DatabaseBackupPolicyResult }) => {
+  const { action, row } = command
+  switch (action) {
+    case 'incremental':
+      await handleRunBackupPolicy(row, 'incremental')
+      return
+    case 'syntheticPreview':
+      await openSyntheticFullPreview(row)
+      return
+    case 'syntheticRun':
+      await handleRunSyntheticFull(row)
+      return
+    case 'purgePreview':
+      await openBackupPolicyPurgePreview(row)
+      return
+    case 'purgeRun':
+      await handleRunBackupPolicyPurge(row)
+      return
+    case 'edit':
+      await openBackupPolicyDialog(row)
+      return
+    case 'delete':
+      await handleDeleteBackupPolicy(row)
+      return
+  }
+}
+
 const handleValidateProtectionProfile = async (row: DatabaseProtectionProfileResult) => {
   if (!row.profileId) return
   validatingProtectionProfileId.value = row.profileId
@@ -15576,6 +15800,7 @@ const handleRunProtectionProfileBackup = async (row: DatabaseProtectionProfileRe
 }
 
 const openProtectionProfileResources = async (row: DatabaseProtectionProfileResult) => {
+  protectionProfileDetailVisible.value = false
   backupPitrTab.value = 'advancedResources'
   backupAdvancedTab.value = row.engine === 'postgresql' ? 'barmanServers' : row.backupPolicy ? 'backupPolicies' : 'streams'
   backupPolicyQuery.instanceId = row.instanceId
@@ -17681,6 +17906,107 @@ onBeforeUnmount(() => {
   border-radius: 8px;
 }
 
+.backup-workbench-card {
+  order: 1;
+}
+
+.backup-support-card {
+  order: 2;
+}
+
+.backup-overview-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.backup-summary-metric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-left: 1px solid #e5e7eb;
+}
+
+.backup-summary-metric:first-child {
+  border-left: 0;
+}
+
+.backup-summary-metric strong {
+  overflow: hidden;
+  color: #111827;
+  font-size: 20px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-summary-label {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.backup-summary-help {
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-summary-metric.is-success {
+  box-shadow: inset 3px 0 0 #67c23a;
+}
+
+.backup-summary-metric.is-warning {
+  box-shadow: inset 3px 0 0 #e6a23c;
+}
+
+.backup-summary-metric.is-danger {
+  box-shadow: inset 3px 0 0 #f56c6c;
+}
+
+.backup-summary-metric.is-neutral {
+  box-shadow: inset 3px 0 0 #909399;
+}
+
+.backup-risk-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.backup-risk-strip-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #fde2e2;
+  border-radius: 8px;
+  background: #fef2f2;
+}
+
+.backup-risk-strip-main {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.backup-risk-strip-main span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .backup-toolbar {
   display: flex;
   align-items: center;
@@ -17782,6 +18108,58 @@ onBeforeUnmount(() => {
 
 .backup-inline-alert {
   margin: 0;
+}
+
+.protection-detail-drawer :deep(.el-drawer__body) {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.protection-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.protection-detail-timeline {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.protection-detail-timeline > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.protection-detail-timeline > div:first-child {
+  border-top: 0;
+}
+
+.protection-detail-timeline span {
+  color: #6b7280;
+}
+
+.protection-detail-timeline strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.protection-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 .restore-assertions {
@@ -18093,8 +18471,18 @@ onBeforeUnmount(() => {
   .topology-grid,
   .table-overview-cards,
   .diagnosis-metric-cards,
-  .capacity-summary-cards {
+  .capacity-summary-cards,
+  .backup-overview-summary {
     grid-template-columns: 1fr;
+  }
+
+  .backup-summary-metric {
+    border-top: 1px solid #e5e7eb;
+    border-left: 0;
+  }
+
+  .backup-summary-metric:first-child {
+    border-top: 0;
   }
 
   .capacity-chart-body,
