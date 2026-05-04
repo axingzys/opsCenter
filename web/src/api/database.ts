@@ -2303,6 +2303,9 @@ export const listDatabaseReplicaIncidentGuides = (params?: {
 export const getDatabaseReplicaIncidentGuide = (id: number) =>
   request.get(`/api/v1/databases/replica-incident-guides/${id}`)
 
+export const deleteDatabaseReplicaIncidentGuide = (id: number) =>
+  request.delete(`/api/v1/databases/replica-incident-guides/${id}`)
+
 export const listDatabaseReplicaActions = (params?: {
   page?: number
   pageSize?: number

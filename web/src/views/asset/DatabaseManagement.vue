@@ -1687,9 +1687,18 @@
               <el-table-column label="生成时间" width="170">
                 <template #default="{ row }">{{ row.createdAt || '-' }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="110" fixed="right">
+              <el-table-column label="操作" width="150" fixed="right">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="handleViewReplicaIncidentGuide(row)">查看指引</el-button>
+                  <el-button
+                    v-if="uiPermissions.replicaIncidentGuide"
+                    link
+                    type="danger"
+                    :loading="replicaIncidentGuideDeletingId === row.id"
+                    @click="handleDeleteReplicaIncidentGuide(row)"
+                  >
+                    删除
+                  </el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -7800,6 +7809,7 @@ import {
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
   deleteDatabaseInstancePermission,
+  deleteDatabaseReplicaIncidentGuide,
   deleteDatabaseRunnerHost,
   disableDatabaseInstance,
   downloadDatabaseBackupRecord,
@@ -8177,10 +8187,12 @@ const replicationRawDialogTitle = ref('')
 const replicationRawDialogContent = ref('')
 const replicaIncidentGuideLoading = ref(false)
 const replicaIncidentGuideSubmitting = ref(false)
+const replicaIncidentGuideDeletingId = ref(0)
 const replicaIncidentGuides = ref<DatabaseReplicaIncidentGuideResult[]>([])
 const replicaIncidentGuideTotal = ref(0)
 const replicaIncidentGuideDialogVisible = ref(false)
 const replicaIncidentGuideDetailVisible = ref(false)
+const replicaIncidentGuideDetailId = ref(0)
 const replicaIncidentGuideDetailTitle = ref('')
 const replicaIncidentGuideDetailMarkdown = ref('')
 const replicaIncidentGuideFormRef = ref<FormInstance>()
@@ -11060,6 +11072,7 @@ const submitReplicaIncidentGuide = async () => {
     const result = await createDatabaseReplicaIncidentGuide(replicaIncidentGuideForm) as DatabaseReplicaIncidentGuideResult
     ElMessage.success('事故指引已生成')
     replicaIncidentGuideDialogVisible.value = false
+    replicaIncidentGuideDetailId.value = result.id
     replicaIncidentGuideDetailTitle.value = `事故指引 #${result.id} - ${result.instanceName || result.instanceId}`
     replicaIncidentGuideDetailMarkdown.value = result.guideMarkdown || ''
     replicaIncidentGuideDetailVisible.value = true
@@ -11073,11 +11086,41 @@ const handleViewReplicaIncidentGuide = async (row: DatabaseReplicaIncidentGuideR
   replicaIncidentGuideLoading.value = true
   try {
     const result = await getDatabaseReplicaIncidentGuide(row.id) as DatabaseReplicaIncidentGuideResult
+    replicaIncidentGuideDetailId.value = result.id
     replicaIncidentGuideDetailTitle.value = `事故指引 #${result.id} - ${result.instanceName || result.instanceId}`
     replicaIncidentGuideDetailMarkdown.value = result.guideMarkdown || ''
     replicaIncidentGuideDetailVisible.value = true
   } finally {
     replicaIncidentGuideLoading.value = false
+  }
+}
+
+const handleDeleteReplicaIncidentGuide = async (row: DatabaseReplicaIncidentGuideResult) => {
+  await ElMessageBox.confirm(
+    `确定删除事故指引 #${row.id} 吗？该操作只删除指引记录，不会执行任何数据库恢复或副本动作。`,
+    '删除事故指引',
+    {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    }
+  )
+  const shouldBackPage = replicaIncidentGuides.value.length <= 1 && replicaIncidentGuideQuery.page > 1
+  replicaIncidentGuideDeletingId.value = row.id
+  try {
+    await deleteDatabaseReplicaIncidentGuide(row.id)
+    ElMessage.success('事故指引已删除')
+    if (replicaIncidentGuideDetailId.value === row.id) {
+      replicaIncidentGuideDetailVisible.value = false
+      replicaIncidentGuideDetailId.value = 0
+      replicaIncidentGuideDetailMarkdown.value = ''
+    }
+    if (shouldBackPage) {
+      replicaIncidentGuideQuery.page -= 1
+    }
+    await loadReplicaIncidentGuides()
+  } finally {
+    replicaIncidentGuideDeletingId.value = 0
   }
 }
 

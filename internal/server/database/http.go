@@ -391,6 +391,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.POST("/replica-incident-guides", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaIncident), s.service.CreateReplicaIncidentGuide)
 		databases.GET("/replica-incident-guides", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicaIncidentGuides)
 		databases.GET("/replica-incident-guides/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.GetReplicaIncidentGuide)
+		databases.DELETE("/replica-incident-guides/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaIncident), s.service.DeleteReplicaIncidentGuide)
 		databases.GET("/replica-actions", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicaActions)
 		databases.GET("/replicas", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicas)
 		databases.POST("/replicas/:id/pause-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaPause), s.service.PauseReplicaApply)

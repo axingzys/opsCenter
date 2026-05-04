@@ -33,6 +33,7 @@ type ReplicationCheckRepo interface {
 
 type ReplicaIncidentGuideRepo interface {
 	Create(ctx context.Context, item *DatabaseReplicaIncidentGuide) error
+	Delete(ctx context.Context, id uint) error
 	GetByID(ctx context.Context, id uint) (*DatabaseReplicaIncidentGuide, error)
 	List(ctx context.Context, req *DatabaseReplicaIncidentGuideListRequest) ([]*DatabaseReplicaIncidentGuide, int64, error)
 }

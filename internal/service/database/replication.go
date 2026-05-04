@@ -169,6 +169,31 @@ func (s *Service) GetReplicaIncidentGuide(c *gin.Context) {
 	response.Success(c, result)
 }
 
+func (s *Service) DeleteReplicaIncidentGuide(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "事故指引ID")
+	if !ok {
+		return
+	}
+	result, err := s.useCase.GetReplicaIncidentGuide(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, result.InstanceID, dbbiz.DatabasePermissionTopology) {
+		return
+	}
+	err = s.useCase.DeleteReplicaIncidentGuide(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "事故指引已删除", gin.H{"id": id})
+}
+
 func (s *Service) ListReplicaActions(c *gin.Context) {
 	var req dbbiz.DatabaseReplicaActionListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {

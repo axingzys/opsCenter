@@ -2590,6 +2590,8 @@ func QueryAuditActionText(action string) string {
 		return "副本状态采集"
 	case DatabaseAuditActionReplicaIncident:
 		return "副本事故指引"
+	case DatabaseAuditActionReplicaIncidentDel:
+		return "副本事故指引删除"
 	case DatabaseAuditActionReplicaPauseApply:
 		return "暂停副本 Apply"
 	case DatabaseAuditActionReplicaResumeApply:
@@ -2645,6 +2647,8 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionReplicaCheckRun
 	case DatabaseAuditActionReplicaIncident:
 		return DatabaseAuditActionReplicaIncident
+	case DatabaseAuditActionReplicaIncidentDel:
+		return DatabaseAuditActionReplicaIncidentDel
 	case DatabaseAuditActionReplicaPauseApply:
 		return DatabaseAuditActionReplicaPauseApply
 	case DatabaseAuditActionReplicaResumeApply:

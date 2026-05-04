@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,64 @@ func TestReplicaIncidentCanInterceptRequiresDelayedReplicaAndRemainingWindow(t *
 	if replicaIncidentCanIntercept(protection, check) {
 		t.Fatalf("expected critical replica risk to be non-interceptable")
 	}
+}
+
+func TestDeleteReplicaIncidentGuideDeletesExistingGuide(t *testing.T) {
+	repo := &replicaIncidentGuideRepoForDeleteTest{
+		item: &DatabaseReplicaIncidentGuide{
+			Model:        gorm.Model{ID: 9},
+			InstanceID:   40,
+			IncidentType: ReplicaIncidentTypeDelete,
+			CanIntercept: true,
+		},
+	}
+	uc := &UseCase{replicaIncidentRepo: repo}
+
+	err := uc.DeleteReplicaIncidentGuide(context.Background(), 9, QueryOperator{Username: "admin"})
+	if err != nil {
+		t.Fatalf("delete incident guide: %v", err)
+	}
+	if repo.deletedID != 9 {
+		t.Fatalf("expected delete id 9, got %d", repo.deletedID)
+	}
+}
+
+func TestDeleteReplicaIncidentGuideRejectsMissingGuide(t *testing.T) {
+	repo := &replicaIncidentGuideRepoForDeleteTest{}
+	uc := &UseCase{replicaIncidentRepo: repo}
+
+	err := uc.DeleteReplicaIncidentGuide(context.Background(), 9, QueryOperator{Username: "admin"})
+	if err == nil {
+		t.Fatalf("expected missing guide error")
+	}
+	if repo.deletedID != 0 {
+		t.Fatalf("expected no delete call, got %d", repo.deletedID)
+	}
+}
+
+type replicaIncidentGuideRepoForDeleteTest struct {
+	item      *DatabaseReplicaIncidentGuide
+	deletedID uint
+}
+
+func (r *replicaIncidentGuideRepoForDeleteTest) Create(context.Context, *DatabaseReplicaIncidentGuide) error {
+	return nil
+}
+
+func (r *replicaIncidentGuideRepoForDeleteTest) Delete(_ context.Context, id uint) error {
+	r.deletedID = id
+	return nil
+}
+
+func (r *replicaIncidentGuideRepoForDeleteTest) GetByID(_ context.Context, id uint) (*DatabaseReplicaIncidentGuide, error) {
+	if r.item == nil || r.item.ID != id {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return r.item, nil
+}
+
+func (r *replicaIncidentGuideRepoForDeleteTest) List(context.Context, *DatabaseReplicaIncidentGuideListRequest) ([]*DatabaseReplicaIncidentGuide, int64, error) {
+	return nil, 0, nil
 }
 
 func TestBuildReplicaIncidentMarkdownContainsReadOnlyBoundary(t *testing.T) {

@@ -206,6 +206,10 @@ func (r *replicaIncidentGuideRepo) Create(ctx context.Context, item *dbbiz.Datab
 	return r.db.WithContext(ctx).Create(item).Error
 }
 
+func (r *replicaIncidentGuideRepo) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Delete(&dbbiz.DatabaseReplicaIncidentGuide{}, id).Error
+}
+
 func (r *replicaIncidentGuideRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseReplicaIncidentGuide, error) {
 	var item dbbiz.DatabaseReplicaIncidentGuide
 	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {

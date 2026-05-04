@@ -122,6 +122,24 @@ func (uc *UseCase) GetReplicaIncidentGuide(ctx context.Context, id uint) (*Datab
 	return uc.toReplicaIncidentGuideVO(ctx, item), nil
 }
 
+func (uc *UseCase) DeleteReplicaIncidentGuide(ctx context.Context, id uint, operator QueryOperator) error {
+	if uc.replicaIncidentRepo == nil {
+		return errors.New("事故指引仓储未配置")
+	}
+	if id == 0 {
+		return errors.New("事故指引ID不能为空")
+	}
+	item, err := uc.replicaIncidentRepo.GetByID(ctx, id)
+	if err != nil {
+		return errors.New("事故指引不存在")
+	}
+	if err := uc.replicaIncidentRepo.Delete(ctx, id); err != nil {
+		return err
+	}
+	uc.recordReplicaIncidentDeleteAudit(ctx, item, operator)
+	return nil
+}
+
 func (uc *UseCase) loadIncidentProtection(ctx context.Context, instanceID uint) *DatabaseReplicaProtectionVO {
 	list, _, err := uc.ListReplicaProtections(ctx, &DatabaseReplicaProtectionListRequest{
 		Page:       1,
@@ -337,6 +355,27 @@ func (uc *UseCase) recordReplicaIncidentAudit(ctx context.Context, instance *Dat
 		SQLText:        trimText(auditText, 20000),
 		SQLFingerprint: sqlFingerprint(auditText),
 		SQLType:        "REPLICA_INCIDENT_GUIDE",
+		RiskLevel:      DatabaseQueryRiskMedium,
+		Status:         DatabaseQueryStatusSuccess,
+		RowsReturned:   1,
+		ErrorMessage:   trimText(fmt.Sprintf("preferredReplica=%d preferredCheck=%d", guide.PreferredReplicaInstanceID, guide.PreferredCheckID), 500),
+		ClientIP:       trimText(operator.ClientIP, 64),
+	})
+}
+
+func (uc *UseCase) recordReplicaIncidentDeleteAudit(ctx context.Context, guide *DatabaseReplicaIncidentGuide, operator QueryOperator) {
+	if uc == nil || uc.auditRepo == nil || guide == nil {
+		return
+	}
+	auditText := fmt.Sprintf("delete replica incident guide #%d type=%s canIntercept=%t", guide.ID, guide.IncidentType, guide.CanIntercept)
+	_ = uc.auditRepo.Create(ctx, &DatabaseQueryAudit{
+		InstanceID:     guide.InstanceID,
+		OperatorID:     operator.ID,
+		OperatorName:   trimText(operator.Username, 100),
+		AuditAction:    DatabaseAuditActionReplicaIncidentDel,
+		SQLText:        trimText(auditText, 20000),
+		SQLFingerprint: sqlFingerprint(auditText),
+		SQLType:        "REPLICA_INCIDENT_GUIDE_DELETE",
 		RiskLevel:      DatabaseQueryRiskMedium,
 		Status:         DatabaseQueryStatusSuccess,
 		RowsReturned:   1,
