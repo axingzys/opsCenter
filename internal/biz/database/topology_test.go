@@ -204,6 +204,79 @@ func TestBuildReplicationTopologyCardsKeepsUnknownLagEmpty(t *testing.T) {
 	}
 }
 
+func TestReplicationTopologyFreshnessMetricsAndFinding(t *testing.T) {
+	checkedAt := time.Now().Add(-40 * time.Minute)
+	replica := &DatabaseInstanceReplica{
+		ReplicaInstanceID: 2,
+		LastCheckedAt:     &checkedAt,
+	}
+	metrics := replicationTopologyMetrics(nil, replica)
+	if metrics["check_freshness"] != "stale" {
+		t.Fatalf("check_freshness = %q, want stale", metrics["check_freshness"])
+	}
+	var findings []*DatabaseTopologyFindingVO
+	appendTopologyFindingsForFreshness(&findings, "instance:2", nil, replica)
+	if len(findings) != 1 {
+		t.Fatalf("findings len = %d, want 1", len(findings))
+	}
+	if findings[0].Title != "副本状态采集已过期" {
+		t.Fatalf("finding title = %q", findings[0].Title)
+	}
+}
+
+func TestBuildReplicationTopologyCardsSummarizesDelayedProtection(t *testing.T) {
+	nodes := []*DatabaseTopologyNodeVO{
+		{
+			ID:    "instance:1",
+			Name:  "mysql-primary",
+			Role:  DatabaseReplicationRolePrimary,
+			State: DatabaseReplicaHealthHealthy,
+			Metrics: map[string]string{
+				"last_checked_at":   "2026-05-04 20:00:00",
+				"check_freshness":   "fresh",
+				"check_age_seconds": "10",
+			},
+		},
+		{
+			ID:    "instance:2",
+			Name:  "mysql-delay-1",
+			Role:  DatabaseReplicaRoleDelayed,
+			State: DatabaseReplicaHealthHealthy,
+			Metrics: map[string]string{
+				"last_checked_at":         "2026-05-04 20:01:00",
+				"check_freshness":         "fresh",
+				"remaining_delay_seconds": "1800",
+			},
+		},
+		{
+			ID:    "instance:3",
+			Name:  "mysql-delay-2",
+			Role:  DatabaseReplicaRoleDelayed,
+			State: DatabaseReplicaHealthWarning,
+			Metrics: map[string]string{
+				"check_freshness":         "stale",
+				"remaining_delay_seconds": "600",
+			},
+		},
+	}
+	cards := buildReplicationTopologyCards(&DatabaseInstance{DBType: DBTypeMySQL}, nil, nodes, nil)
+	if got := topologyCardValue(cards, "delayed_replicas"); got != "2" {
+		t.Fatalf("delayed_replicas = %q, want 2", got)
+	}
+	if got := topologyCardValue(cards, "min_protection_window"); got != "10m0s" {
+		t.Fatalf("min_protection_window = %q, want 10m0s", got)
+	}
+	if got := topologyCardValue(cards, "protection_status"); got != "受保护" {
+		t.Fatalf("protection_status = %q, want 受保护", got)
+	}
+	if got := topologyCardValue(cards, "preferred_protection_replica"); got != "mysql-delay-1" {
+		t.Fatalf("preferred_protection_replica = %q, want mysql-delay-1", got)
+	}
+	if got := topologyCardValue(cards, "stale_nodes"); got != "1" {
+		t.Fatalf("stale_nodes = %q, want 1", got)
+	}
+}
+
 func TestAppendTopologyFindingsForCheck(t *testing.T) {
 	raw, _ := json.Marshal([]string{"SQL apply 线程异常", "来源主库未匹配"})
 	check := &DatabaseReplicationCheck{
@@ -272,5 +345,44 @@ func TestAppendPostgreSQLPrimaryRuntimeTopology(t *testing.T) {
 	}
 	if standby == nil || standby.Name != "standby-01" || standby.LagText != "2s" {
 		t.Fatalf("unexpected standby node: %#v", standby)
+	}
+}
+
+func TestAppendMySQLPrimaryReportedTopologyCreatesVirtualReplica(t *testing.T) {
+	raw := marshalReplicaJSON(map[string]any{
+		"role": "primary",
+		"reported_replicas": []map[string]string{
+			{
+				"Server_id": "2",
+				"Host":      "192.168.1.15",
+				"Port":      "3306",
+			},
+		},
+	})
+	check := &DatabaseReplicationCheck{
+		Engine:        DBTypeMySQL,
+		RoleDetected:  DatabaseReplicationRolePrimary,
+		HealthStatus:  DatabaseReplicaHealthHealthy,
+		RawStatusJSON: raw,
+	}
+	primary := &DatabaseTopologyNodeVO{ID: "instance:1", Name: "mysql-primary"}
+	nodes := map[string]*DatabaseTopologyNodeVO{primary.ID: primary}
+	links := map[string]*DatabaseTopologyLinkVO{}
+	uc := &UseCase{}
+	uc.appendMySQLPrimaryReportedTopology(nodes, links, primary, check)
+	if len(nodes) != 2 {
+		t.Fatalf("nodes len = %d, want 2", len(nodes))
+	}
+	if len(links) != 1 {
+		t.Fatalf("links len = %d, want 1", len(links))
+	}
+	var reported *DatabaseTopologyNodeVO
+	for _, node := range nodes {
+		if node.ID != primary.ID {
+			reported = node
+		}
+	}
+	if reported == nil || reported.Role != DatabaseReplicationRoleReplica || reported.Metrics["discovery_source"] != "mysql_primary_reported" {
+		t.Fatalf("unexpected reported replica: %#v", reported)
 	}
 }

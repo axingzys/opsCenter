@@ -1328,9 +1328,27 @@
                 {{ currentTopologyInstance.dbTypeText }}
               </el-tag>
             </div>
-            <el-button type="primary" :disabled="!topologyInstanceId" :loading="topologyLoading" @click="loadTopology">
-              刷新拓扑
-            </el-button>
+            <div class="topology-toolbar-actions">
+              <el-button
+                :disabled="!topologyInstanceId"
+                :loading="topologyCollectingId === topologyInstanceId"
+                @click="handleCheckCurrentTopology"
+              >
+                采集当前实例
+              </el-button>
+              <el-button
+                type="warning"
+                plain
+                :disabled="!topologyResult?.nodes?.length"
+                :loading="topologyCollectingAll"
+                @click="handleCheckTopologyRelated"
+              >
+                采集相关实例
+              </el-button>
+              <el-button type="primary" :disabled="!topologyInstanceId" :loading="topologyLoading" @click="loadTopology">
+                刷新拓扑
+              </el-button>
+            </div>
           </div>
 
           <div v-if="!topologyInstanceId" class="metadata-empty">
@@ -1369,6 +1387,7 @@
                       <span>{{ item.description || '-' }}</span>
                       <span class="muted-text">{{ item.suggestion || '-' }}</span>
                     </div>
+                    <el-button link type="primary" @click="handleTopologyFindingAction(item)">处理</el-button>
                   </div>
                 </div>
               </div>
@@ -1413,6 +1432,11 @@
                     <el-table-column label="备注" min-width="180" show-overflow-tooltip>
                       <template #default="{ row }">{{ row.message || '-' }}</template>
                     </el-table-column>
+                    <el-table-column label="操作" width="100" fixed="right">
+                      <template #default="{ row }">
+                        <el-button link type="primary" @click="openTopologyNodeDetail(row)">详情</el-button>
+                      </template>
+                    </el-table-column>
                   </el-table>
                 </div>
 
@@ -1441,6 +1465,11 @@
                     </el-table-column>
                     <el-table-column label="备注" min-width="160" show-overflow-tooltip>
                       <template #default="{ row }">{{ row.message || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="100" fixed="right">
+                      <template #default="{ row }">
+                        <el-button link type="primary" @click="openTopologyLinkDetail(row)">详情</el-button>
+                      </template>
                     </el-table-column>
                   </el-table>
                 </div>
@@ -7445,6 +7474,66 @@
       </template>
     </el-dialog>
 
+    <el-drawer v-model="topologyDetailVisible" :title="topologyDetailTitle" size="520px">
+      <template v-if="selectedTopologyNode">
+        <el-descriptions :column="1" border class="topology-detail-descriptions">
+          <el-descriptions-item label="节点">{{ selectedTopologyNode.name || selectedTopologyNode.id || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="实例 ID">{{ topologyDetailInstanceId || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="地址"><span class="mono">{{ selectedTopologyNode.address || '-' }}</span></el-descriptions-item>
+          <el-descriptions-item label="角色">
+            <el-tag size="small" :type="topologyRoleTag(selectedTopologyNode.role)">{{ selectedTopologyNode.roleText || selectedTopologyNode.role || '-' }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag size="small" :type="topologyStateTag(selectedTopologyNode.state)">{{ selectedTopologyNode.state || '-' }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="延迟">{{ selectedTopologyNode.lagText || selectedTopologyNode.slots || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="最近采集">{{ selectedTopologyNode.metrics?.last_checked_at || selectedTopologyNode.updatedAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="说明">{{ selectedTopologyNode.message || '-' }}</el-descriptions-item>
+        </el-descriptions>
+      </template>
+      <template v-else-if="selectedTopologyLink">
+        <el-descriptions :column="1" border class="topology-detail-descriptions">
+          <el-descriptions-item label="源节点">{{ selectedTopologyLink.sourceName || topologyNodeName(selectedTopologyLink.source) || selectedTopologyLink.source || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="目标节点">{{ selectedTopologyLink.targetName || topologyNodeName(selectedTopologyLink.target) || selectedTopologyLink.target || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="关系">{{ selectedTopologyLink.label || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag size="small" :type="topologyStateTag(selectedTopologyLink.state)">{{ selectedTopologyLink.state || '-' }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="延迟">{{ selectedTopologyLink.lagText || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="最近采集">{{ selectedTopologyLink.metrics?.last_checked_at || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="说明">{{ selectedTopologyLink.message || '-' }}</el-descriptions-item>
+        </el-descriptions>
+      </template>
+
+      <div class="topology-detail-actions">
+        <el-button
+          type="primary"
+          :disabled="!topologyDetailInstanceId"
+          :loading="topologyCollectingId === topologyDetailInstanceId"
+          @click="handleTopologyDetailCheck"
+        >
+          采集该实例
+        </el-button>
+        <el-button :disabled="!topologyDetailInstanceId" @click="handleTopologyDetailReplication">副本治理</el-button>
+        <el-button :disabled="!topologyDetailInstanceId" @click="handleTopologyDetailRaw">原始采集</el-button>
+      </div>
+
+      <div class="topology-detail-metrics">
+        <div class="panel-title">
+          <span>关键指标</span>
+          <el-tag size="small" type="info">{{ topologyDetailMetricEntries.length }}</el-tag>
+        </div>
+        <el-table :data="topologyDetailMetricEntries" stripe max-height="420" class="modern-table">
+          <el-table-column label="指标" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ topologyMetricLabel(row.key) }}</template>
+          </el-table-column>
+          <el-table-column label="值" min-width="220" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono">{{ row.value || '-' }}</span></template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </el-drawer>
+
     <el-dialog v-model="replicationRawDialogVisible" :title="replicationRawDialogTitle" width="860px">
       <el-input
         v-model="replicationRawDialogContent"
@@ -7880,6 +7969,7 @@ import {
   type DatabaseStorageProfilePostureCheckPayload,
   type DatabaseStorageProfileResult,
   type DatabaseSupportedType,
+  type DatabaseTopologyFinding,
   type DatabaseTopologyLink,
   type DatabaseTopologyNode,
   type DatabaseTopologyResult,
@@ -8066,6 +8156,11 @@ const topologyChartRef = ref<HTMLElement>()
 const topologyInstanceId = ref<number>()
 const topologyLoading = ref(false)
 const topologyResult = ref<DatabaseTopologyResult>()
+const topologyCollectingId = ref(0)
+const topologyCollectingAll = ref(false)
+const topologyDetailVisible = ref(false)
+const selectedTopologyNode = ref<DatabaseTopologyNode>()
+const selectedTopologyLink = ref<DatabaseTopologyLink>()
 const replicationLoading = ref(false)
 const replicationProtectionLoading = ref(false)
 const replicationCheckLoading = ref(false)
@@ -9343,6 +9438,30 @@ const isRedisDiagnosisInstance = computed(() =>
 const currentTopologyInstance = computed(() =>
   instanceOptions.value.find(item => item.id === topologyInstanceId.value)
 )
+
+const topologyDetailTitle = computed(() =>
+  selectedTopologyNode.value
+    ? `拓扑节点 - ${selectedTopologyNode.value.name || selectedTopologyNode.value.id || '-'}`
+    : `复制关系 - ${selectedTopologyLink.value?.sourceName || topologyNodeName(selectedTopologyLink.value?.source) || '-'} -> ${selectedTopologyLink.value?.targetName || topologyNodeName(selectedTopologyLink.value?.target) || '-'}`
+)
+
+const topologyDetailInstanceId = computed(() => {
+  if (selectedTopologyNode.value) {
+    return topologyNodeInstanceId(selectedTopologyNode.value)
+  }
+  if (selectedTopologyLink.value) {
+    return topologyLinkInstanceId(selectedTopologyLink.value)
+  }
+  return 0
+})
+
+const topologyDetailMetricEntries = computed(() => {
+  const metrics = selectedTopologyNode.value?.metrics || selectedTopologyLink.value?.metrics || {}
+  return Object.entries(metrics)
+    .filter(([, value]) => String(value || '').trim() !== '')
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => ({ key, value }))
+})
 
 const capacityTrendPoints = computed(() =>
   [...(capacityTrend.value?.points || [])].sort((left, right) => left.collectedAt.localeCompare(right.collectedAt))
@@ -10638,6 +10757,150 @@ const loadTopology = async () => {
   } finally {
     topologyLoading.value = false
   }
+}
+
+const topologyInstanceIdFromNodeId = (nodeId?: string) => {
+  const match = String(nodeId || '').match(/^instance:(\d+)$/)
+  return match ? Number(match[1]) : 0
+}
+
+const topologyNodeInstanceId = (node?: DatabaseTopologyNode) => {
+  const metricId = Number(node?.metrics?.instance_id || 0)
+  if (metricId > 0) return metricId
+  return topologyInstanceIdFromNodeId(node?.id)
+}
+
+const topologyLinkInstanceId = (link?: DatabaseTopologyLink) => {
+  const metricReplicaId = Number(link?.metrics?.replica_instance_id || 0)
+  if (metricReplicaId > 0) return metricReplicaId
+  return topologyInstanceIdFromNodeId(link?.target) || topologyInstanceIdFromNodeId(link?.source)
+}
+
+const topologyRelatedInstanceIds = () => {
+  const ids = new Set<number>()
+  ;(topologyResult.value?.nodes || []).forEach((node) => {
+    const id = topologyNodeInstanceId(node)
+    if (id > 0 && replicationInstances.value.some(item => item.id === id)) {
+      ids.add(id)
+    }
+  })
+  if (topologyInstanceId.value && replicationInstances.value.some(item => item.id === topologyInstanceId.value)) {
+    ids.add(topologyInstanceId.value)
+  }
+  return [...ids]
+}
+
+const collectTopologyReplicationChecks = async (ids: number[]) => {
+  if (!ids.length) {
+    ElMessage.warning('当前拓扑没有可采集的 MySQL / MariaDB / PostgreSQL 实例')
+    return
+  }
+  let success = 0
+  let failed = 0
+  try {
+    for (const id of ids) {
+      topologyCollectingId.value = id
+      try {
+        await checkDatabaseReplication(id)
+        success += 1
+      } catch {
+        failed += 1
+      }
+    }
+    await loadTopology()
+    if (failed > 0) {
+      ElMessage.warning(`拓扑相关实例采集完成：成功 ${success}，失败 ${failed}`)
+    } else {
+      ElMessage.success(`拓扑相关实例采集完成：成功 ${success}`)
+    }
+  } finally {
+    topologyCollectingId.value = 0
+  }
+}
+
+const handleCheckCurrentTopology = async () => {
+  const id = topologyInstanceId.value || 0
+  if (!id) {
+    ElMessage.warning('请先选择拓扑实例')
+    return
+  }
+  await collectTopologyReplicationChecks([id])
+}
+
+const handleCheckTopologyRelated = async () => {
+  topologyCollectingAll.value = true
+  try {
+    await collectTopologyReplicationChecks(topologyRelatedInstanceIds())
+  } finally {
+    topologyCollectingAll.value = false
+  }
+}
+
+const openTopologyNodeDetail = (row: DatabaseTopologyNode) => {
+  selectedTopologyNode.value = row
+  selectedTopologyLink.value = undefined
+  topologyDetailVisible.value = true
+}
+
+const openTopologyLinkDetail = (row: DatabaseTopologyLink) => {
+  selectedTopologyLink.value = row
+  selectedTopologyNode.value = undefined
+  topologyDetailVisible.value = true
+}
+
+const handleTopologyDetailCheck = async () => {
+  if (!topologyDetailInstanceId.value) {
+    ElMessage.warning('该拓扑对象未匹配到已纳管实例')
+    return
+  }
+  await collectTopologyReplicationChecks([topologyDetailInstanceId.value])
+}
+
+const openTopologyReplication = async (instanceId?: number) => {
+  const shouldRefreshImmediately = activeTab.value === 'replication'
+  if (instanceId) {
+    replicationReplicaQuery.instanceId = instanceId
+    replicationProtectionQuery.instanceId = instanceId
+    replicationCheckQuery.instanceId = instanceId
+    replicationReplicaQuery.page = 1
+    replicationProtectionQuery.page = 1
+    replicationCheckQuery.page = 1
+  }
+  activeTab.value = 'replication'
+  topologyDetailVisible.value = false
+  if (shouldRefreshImmediately) {
+    await nextTick()
+    await refreshReplicationState()
+  }
+}
+
+const handleTopologyDetailReplication = async () => {
+  if (!topologyDetailInstanceId.value) {
+    ElMessage.warning('该拓扑对象未匹配到已纳管实例')
+    return
+  }
+  await openTopologyReplication(topologyDetailInstanceId.value)
+}
+
+const handleTopologyDetailRaw = async () => {
+  if (!topologyDetailInstanceId.value) {
+    ElMessage.warning('该拓扑对象未匹配到已纳管实例')
+    return
+  }
+  topologyDetailVisible.value = false
+  await handleViewReplicationStatus(topologyDetailInstanceId.value)
+}
+
+const handleTopologyFindingAction = async (item: DatabaseTopologyFinding) => {
+  const nodeId = item.nodeId || ''
+  const link = item.linkId
+    ? (topologyResult.value?.links || []).find(row => `${row.source}->${row.target}` === item.linkId)
+    : undefined
+  const node = nodeId
+    ? (topologyResult.value?.nodes || []).find(row => row.id === nodeId)
+    : undefined
+  const instanceId = topologyNodeInstanceId(node) || topologyLinkInstanceId(link)
+  await openTopologyReplication(instanceId || topologyInstanceId.value)
 }
 
 const loadReplicationReplicas = async () => {
@@ -14747,6 +15010,53 @@ const resizeCapacityChart = () => {
 const topologyNodeName = (nodeId?: string) =>
   topologyResult.value?.nodes?.find(item => item.id === nodeId)?.name || ''
 
+const topologyMetricLabel = (key: string) => {
+  const labels: Record<string, string> = {
+    instance_id: '实例 ID',
+    replica_id: '副本关系 ID',
+    check_id: '采集 ID',
+    last_check_id: '最近采集 ID',
+    role_detected: '检测角色',
+    health_status: '健康状态',
+    primary_instance_id: '主库实例 ID',
+    replica_instance_id: '从库实例 ID',
+    replica_role: '副本角色',
+    discovery_source: '发现来源',
+    source_host: '来源主机',
+    source_port: '来源端口',
+    source_server_uuid: '来源 Server UUID',
+    seconds_behind_source: '复制延迟秒',
+    configured_delay_seconds: '配置延迟秒',
+    remaining_delay_seconds: '剩余延迟秒',
+    replica_io_running: 'IO 线程',
+    replica_sql_running: 'SQL 线程',
+    io: 'IO 线程',
+    sql: 'SQL 线程',
+    server_id: 'server_id',
+    server_uuid: 'server_uuid',
+    version: '版本',
+    read_only: 'read_only',
+    super_read_only: 'super_read_only',
+    log_bin: 'log_bin',
+    gtid_mode: 'GTID 模式',
+    binlog_format: 'binlog_format',
+    binlog_row_image: 'binlog_row_image',
+    last_checked_at: '最近采集时间',
+    check_age_seconds: '采集年龄秒',
+    check_freshness: '采集新鲜度',
+    pg_write_lag_ms: 'PG write lag ms',
+    pg_flush_lag_ms: 'PG flush lag ms',
+    pg_replay_lag_ms: 'PG replay lag ms',
+    pg_last_wal_replay_lsn: 'PG replay LSN',
+    wal_receiver_status: 'WAL receiver',
+    pg_is_wal_replay_paused: 'WAL replay paused',
+    recovery_min_apply_delay: 'PG apply delay',
+    report_host: '主库报告 Host',
+    report_port: '主库报告 Port'
+  }
+  return labels[key] || key
+}
+
 const topologyFindingTag = (level?: string) => {
   switch (String(level || '').toLowerCase()) {
     case 'critical':
@@ -14817,6 +15127,76 @@ const topologyGraphSymbol = (node: DatabaseTopologyNode) => {
   return 'circle'
 }
 
+const isRelationalTopologyResult = (result?: DatabaseTopologyResult) =>
+  ['mysql', 'mariadb', 'postgresql'].includes(String(result?.dbType || '').toLowerCase())
+
+const topologyGraphPosition = (
+  node: DatabaseTopologyNode,
+  allNodes: DatabaseTopologyNode[],
+  width: number,
+  height: number
+) => {
+  const role = String(node.role || '').toLowerCase()
+  const isPrimary = ['primary', 'master'].includes(role)
+  const isDelayed = ['delayed_replica', 'delayed_standby'].includes(role)
+  const isReplica = ['replica', 'slave', 'secondary', 'standby'].includes(role)
+  const group = allNodes.filter((item) => {
+    const itemRole = String(item.role || '').toLowerCase()
+    if (isPrimary) return ['primary', 'master'].includes(itemRole)
+    if (isDelayed) return ['delayed_replica', 'delayed_standby'].includes(itemRole)
+    if (isReplica) return ['replica', 'slave', 'secondary', 'standby'].includes(itemRole)
+    return !['primary', 'master', 'replica', 'slave', 'secondary', 'standby', 'delayed_replica', 'delayed_standby'].includes(itemRole)
+  })
+  const index = Math.max(group.findIndex(item => item.id === node.id), 0)
+  const stepY = (top: number, bottom: number) => {
+    if (group.length <= 1) return (top + bottom) / 2
+    return top + ((bottom - top) * index) / (group.length - 1)
+  }
+  if (isPrimary) return { x: width * 0.28, y: height * 0.5 }
+  if (isDelayed) return { x: width * 0.7, y: stepY(height * 0.58, height * 0.82) }
+  if (isReplica) return { x: width * 0.7, y: stepY(height * 0.22, height * 0.46) }
+  return { x: width * 0.48, y: stepY(height * 0.18, height * 0.82) }
+}
+
+const formatSecondsText = (seconds: number) => {
+  if (!Number.isFinite(seconds) || seconds < 0) return '-'
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`
+}
+
+const topologyGraphEdgeLabel = (link: DatabaseTopologyLink) => {
+  const parts: string[] = []
+  const label = String(link.label || '').toLowerCase()
+  if (label.includes('delayed')) {
+    parts.push('delayed')
+  } else if (label.includes('streaming')) {
+    parts.push('streaming')
+  } else if (label.includes('async')) {
+    parts.push('async')
+  } else if (link.label) {
+    parts.push(link.label)
+  }
+  if (link.lagText) {
+    parts.push(link.lagText)
+  } else if (link.metrics?.seconds_behind_source) {
+    parts.push(`${link.metrics.seconds_behind_source}s`)
+  }
+  if (link.metrics?.remaining_delay_seconds) {
+    parts.push(`remain ${formatSecondsText(Number(link.metrics.remaining_delay_seconds))}`)
+  }
+  const io = link.metrics?.io || link.metrics?.replica_io_running
+  const sql = link.metrics?.sql || link.metrics?.replica_sql_running
+  if (io || sql) {
+    parts.push(`IO ${io || '-'} / SQL ${sql || '-'}`)
+  }
+  if (link.metrics?.wal_receiver_status) {
+    parts.push(link.metrics.wal_receiver_status)
+  }
+  return parts.filter(Boolean).slice(0, 4).join(' · ')
+}
+
 const topologyGraphTooltip = (params: any) => {
   const data = params?.data || {}
   if (params?.dataType === 'edge') {
@@ -14858,16 +15238,25 @@ const renderTopologyChart = async () => {
   if (!topologyChart) {
     topologyChart = echarts.init(topologyChartRef.value)
   }
+  const chartWidth = topologyChartRef.value.clientWidth || 900
+  const chartHeight = topologyChartRef.value.clientHeight || 340
+  const useRelationalLayout = isRelationalTopologyResult(result)
   const graphNodes = nodes.map((node) => {
     const stateColor = topologyGraphStateColor(node.state)
+    const position = useRelationalLayout ? topologyGraphPosition(node, nodes, chartWidth, chartHeight) : undefined
     return {
       name: node.id,
       displayName: node.name || node.id,
+      id: node.id,
       roleText: node.roleText || node.role,
       address: node.address,
       state: node.state,
       lagText: node.lagText,
       message: node.message,
+      metrics: node.metrics || {},
+      x: position?.x,
+      y: position?.y,
+      fixed: useRelationalLayout,
       symbol: topologyGraphSymbol(node),
       symbolSize: ['primary', 'master'].includes(String(node.role || '').toLowerCase()) ? 72 : 58,
       itemStyle: {
@@ -14893,6 +15282,8 @@ const renderTopologyChart = async () => {
     state: link.state,
     lagText: link.lagText,
     message: link.message,
+    metrics: link.metrics || {},
+    displayLabel: topologyGraphEdgeLabel(link),
     lineStyle: {
       color: topologyGraphStateColor(link.state),
       width: String(link.state || '').toLowerCase() === 'critical' ? 3 : 2,
@@ -14917,14 +15308,14 @@ const renderTopologyChart = async () => {
     series: [
       {
         type: 'graph',
-        layout: 'force',
+        layout: useRelationalLayout ? 'none' : 'force',
         roam: true,
         draggable: true,
         edgeSymbol: ['none', 'arrow'],
         edgeSymbolSize: [0, 9],
         data: graphNodes,
         links: graphLinks,
-        force: {
+        force: useRelationalLayout ? undefined : {
           repulsion: 460,
           edgeLength: [120, 220],
           gravity: 0.08
@@ -14936,7 +15327,7 @@ const renderTopologyChart = async () => {
           show: true,
           color: '#475569',
           fontSize: 11,
-          formatter: (params: any) => params.data?.lagText || params.data?.label || ''
+          formatter: (params: any) => params.data?.displayLabel || params.data?.lagText || params.data?.label || ''
         },
         emphasis: {
           focus: 'adjacency',
@@ -14947,6 +15338,16 @@ const renderTopologyChart = async () => {
       }
     ]
   }, { notMerge: true })
+  topologyChart.off('click')
+  topologyChart.on('click', (params: any) => {
+    if (params?.dataType === 'edge') {
+      const link = (result?.links || []).find(item => item.source === params.data?.source && item.target === params.data?.target)
+      if (link) openTopologyLinkDetail(link)
+      return
+    }
+    const node = nodes.find(item => item.id === params?.data?.name || item.id === params?.data?.id)
+    if (node) openTopologyNodeDetail(node)
+  })
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       topologyChart?.resize()
@@ -17054,6 +17455,14 @@ onBeforeUnmount(() => {
   gap: 16px;
 }
 
+.topology-toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .topology-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
@@ -17120,6 +17529,23 @@ onBeforeUnmount(() => {
 
 .topology-message {
   margin-bottom: 0;
+}
+
+.topology-detail-descriptions {
+  margin-bottom: 16px;
+}
+
+.topology-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.topology-detail-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .backup-panel {

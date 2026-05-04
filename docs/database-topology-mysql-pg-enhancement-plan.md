@@ -1031,26 +1031,370 @@ primary -> replica
 
 ### 11.3 第三批：副本治理打通
 
-目标：拓扑页能成为副本排障入口，但不承载高风险动作。
+背景：第一批和第二批已经完成后，拓扑页已经能展示 MySQL / MariaDB / PostgreSQL 主从关系、延迟副本、关系图、风险发现和最大延迟。第三批不再继续堆大范围新能力，重点补齐“拓扑可解释性”和“排障动作闭环”。
 
-前端：
+目标：拓扑页能成为副本排障入口，但不承载高风险动作。用户在拓扑中看到异常后，应能直接知道“哪个节点异常、为什么异常、数据是否新鲜、下一步去哪里处理”。
 
-1. 节点详情抽屉增加“查看副本治理”。
-2. 节点详情抽屉增加“查看最近采集”。
-3. 当前实例支持“重新采集复制状态”。
-4. 对延迟副本显示保护窗口。
-5. 对 findings 提供跳转副本治理的快捷入口。
+边界：
 
-后端：
+1. 拓扑页允许低风险动作：刷新拓扑、采集相关实例、查看副本详情、跳转副本治理、查看原始采集。
+2. 拓扑页不直接执行 pause / resume apply，不做 promote、failover、主从切换。
+3. 拓扑页不替代副本治理页；副本治理页仍承载动作审批、原始记录、事故指引和操作审计。
+4. 不新增长期拓扑快照表；第三批继续复用 `database_instance_replicas` 和 `database_replication_checks`。
 
-1. 拓扑结果里补充 `replicaId`、`lastCheckId` 到 metrics 或专用字段。
-2. 支持从拓扑节点定位副本关系详情。
+#### 11.3.1 节点 / 链路详情抽屉
 
-验收：
+当前拓扑页已经有图、节点表和复制关系表，但节点细节主要压在 `message`、`lagText` 和 `metrics` 中。第三批建议点击节点或复制关系后打开详情抽屉。
 
-1. 从拓扑节点能跳到对应副本关系。
-2. 从 finding 能定位到对应采集记录。
-3. 重新采集后拓扑状态刷新。
+节点详情建议展示：
+
+1. 基础信息：
+   - 实例名。
+   - 实例 ID。
+   - 地址。
+   - 数据库类型。
+   - 角色。
+   - 健康状态。
+   - 最近采集时间。
+2. 复制状态：
+   - MySQL / MariaDB：`Replica_IO_Running`、`Replica_SQL_Running`、`Seconds_Behind_Source`、`SQL_Delay`、`SQL_Remaining_Delay`。
+   - PostgreSQL：`wal_receiver_status`、`pg_is_wal_replay_paused`、`pg_replay_lag_ms`、`pg_last_wal_replay_lsn`、`recovery_min_apply_delay`。
+3. 来源信息：
+   - `source_host`。
+   - `source_port`。
+   - `source_server_uuid`。
+   - `primary_instance_id`。
+   - `replica_instance_id`。
+4. 排障入口：
+   - 查看最近采集。
+   - 查看副本治理。
+   - 刷新该实例采集。
+   - 复制关键指标。
+
+链路详情建议展示：
+
+1. 源节点和目标节点。
+2. 复制关系类型：`async replication`、`delayed replication`、`streaming replication`。
+3. 当前延迟。
+4. 链路状态。
+5. IO / SQL 或 WAL receiver 状态。
+6. 最近采集 ID。
+7. 最近错误摘要。
+
+前端实现建议：
+
+1. 在 `DatabaseManagement.vue` 中新增 `topologyDetailVisible`、`selectedTopologyNode`、`selectedTopologyLink`。
+2. ECharts 节点和边增加 click 事件：
+   - 点击 node 打开节点详情。
+   - 点击 edge 打开链路详情。
+3. 节点表和复制关系表增加“详情”操作列。
+4. metrics 使用统一格式化函数展示，避免直接把 JSON 平铺成难读文本。
+
+#### 11.3.2 拓扑页联动副本治理
+
+第三批最重要的体验优化是把拓扑风险和副本治理页连接起来。
+
+建议入口：
+
+1. 风险项右侧增加“处理”按钮。
+2. 节点详情增加“查看副本治理”按钮。
+3. 复制关系详情增加“查看副本关系”按钮。
+4. 节点详情增加“查看原始采集”按钮。
+5. 节点详情增加“采集该实例”按钮。
+
+跳转行为：
+
+1. 点击“查看副本治理”：
+   - `activeTab = 'replication'`
+   - 设置 `replicationReplicaQuery.instanceId`
+   - 加载副本关系列表。
+2. 点击“查看原始采集”：
+   - 如果有 `check_id`，打开最近采集详情。
+   - 如果没有 `check_id`，提示先采集该实例。
+3. 点击“处理风险”：
+   - 根据 finding 类型跳到对应区域：
+     - `collection`：副本状态采集列表。
+     - `replication`：副本关系列表。
+     - `replica_relation`：副本关系列表。
+   - 自动带上实例筛选。
+
+注意事项：
+
+1. 拓扑页只做跳转和采集，不直接执行暂停 / 恢复。
+2. 如果用户没有副本治理权限，按钮置灰并提示权限不足。
+3. 跳转后要保留当前拓扑结果，方便用户回来继续看。
+
+#### 11.3.3 采集新鲜度和批量采集相关实例
+
+当前拓扑实时采集当前选中实例，其他相关节点来自最近一次 `database_replication_checks`。如果副本很久没有采集，拓扑可能显示旧状态。
+
+建议增加采集新鲜度能力：
+
+1. 后端计算每个节点最近采集年龄：
+   - `last_check_id`
+   - `last_checked_at`
+   - `check_age_seconds`
+   - `check_freshness`: `fresh` / `stale` / `unknown`
+2. 默认阈值：
+   - 5 分钟内：fresh。
+   - 5 到 30 分钟：warning。
+   - 超过 30 分钟：stale。
+   - 没有采集记录：unknown。
+3. 拓扑摘要卡增加：
+   - `最近采集`：拓扑内最新采集时间。
+   - `过期节点`：超过阈值的节点数量。
+4. findings 增加：
+   - `副本状态采集已过期`。
+   - `副本尚无采集记录`。
+5. 前端工具栏增加：
+   - `采集当前实例`。
+   - `采集相关实例`。
+
+采集相关实例行为：
+
+1. 从当前拓扑结果中提取 `nodes` 的实例 ID。
+2. 过滤 MySQL / MariaDB / PostgreSQL 实例。
+3. 调用已有 `checkDatabaseReplication(instanceId)`。
+4. 成功后自动刷新拓扑。
+5. 前端显示成功 / 失败数量。
+
+验收标准：
+
+1. 主库拓扑中，副本节点超过 30 分钟未采集会出现 warning finding。
+2. 点击“采集相关实例”后，主库和所有已纳管副本都会重新采集。
+3. 采集完成后拓扑自动刷新。
+
+#### 11.3.4 MySQL 角色安全检查
+
+MySQL 从库如果没有启用只读保护，拓扑应提示风险。第三批建议补充 MySQL / MariaDB 节点级变量采集。
+
+后端采集变量：
+
+```sql
+SELECT @@server_id;
+SELECT @@server_uuid;
+SELECT @@version;
+SELECT @@read_only;
+SELECT @@super_read_only;
+SELECT @@log_bin;
+SELECT @@gtid_mode;
+SELECT @@binlog_format;
+SELECT @@binlog_row_image;
+```
+
+兼容要求：
+
+1. MariaDB 或旧版本字段不存在时不能导致拓扑失败。
+2. 每个变量单独容错采集，失败时写入 metrics 中的 error 摘要。
+3. 变量只进入脱敏后的 `metrics`，不写敏感连接信息。
+
+新增风险规则：
+
+1. `role=replica` 且 `read_only=OFF`：warning，提示从库未开启只读保护。
+2. `role=replica` 且 `super_read_only=OFF`：info 或 warning，按 MySQL 版本和权限能力提示。
+3. `role=primary` 且 `log_bin=OFF`：warning，提示主库未开启 binlog，不利于复制和 PITR。
+4. `server_id` 缺失或为 0：warning，提示复制配置不完整。
+
+前端展示：
+
+1. 节点详情抽屉展示 `read_only`、`super_read_only`、`server_id`、`server_uuid`。
+2. 风险发现中展示“从库未开启只读保护”。
+3. 关系图中不强行把只读风险映射为红色，建议 warning 黄色即可。
+
+#### 11.3.5 延迟副本保护窗口汇总
+
+当前拓扑已经能识别延迟副本，但保护窗口摘要还可以更直接。建议从主库视角汇总所有延迟副本。
+
+后端摘要卡建议：
+
+1. `延迟副本`：延迟副本数量。
+2. `最小保护窗口`：所有延迟副本中最小 `remaining_delay_seconds`。
+3. `推荐保护副本`：剩余窗口最大且健康的延迟副本。
+4. `保护状态`：`受保护` / `降级` / `未保护`。
+
+计算规则：
+
+1. 只统计 `replica_role=delayed_replica` 或 `delayed_standby`。
+2. 健康副本优先。
+3. `remaining_delay_seconds < 0` 视为未知，不参与最小窗口计算，但生成 warning。
+4. `remaining_delay_seconds == 0` 表示延迟副本已追上，生成 warning。
+5. 没有延迟副本时，主库保护状态为 `未保护`。
+
+前端展示：
+
+1. 摘要卡突出显示保护状态。
+2. 延迟副本节点 label 或 tooltip 中展示剩余窗口。
+3. 详情抽屉展示推荐保护副本和当前可用窗口。
+
+#### 11.3.6 MySQL 主库侧辅助发现
+
+MySQL 主库端不能可靠发现所有从库，但可以做辅助发现，减少“从库已经起来但拓扑没显示”的困惑。
+
+建议采集：
+
+```sql
+SHOW REPLICAS;
+```
+
+兼容降级：
+
+```sql
+SHOW SLAVE HOSTS;
+```
+
+使用方式：
+
+1. 仅在当前实例被识别为 primary 时执行。
+2. 将返回的 host / port / server_id 与 OpsHub 已纳管实例匹配。
+3. 匹配成功：补充关系。
+4. 匹配失败：创建虚拟未纳管副本节点。
+5. 如果没有配置 `report_host` / `report_port`，不生成错误，只在 message 中提示“主库侧发现依赖 report_host/report_port”。
+
+限制：
+
+1. 不能把 `SHOW REPLICAS` 作为唯一数据源。
+2. 仍以从库主动采集和 `database_instance_replicas` 为准。
+3. 辅助发现的关系应标记 `discovery_source=mysql_primary_reported`。
+
+验收标准：
+
+1. 从库配置了 `report_host` 后，主库拓扑能看到未采集过的从库提示。
+2. 未匹配实例显示为灰色虚拟节点。
+3. 点击虚拟节点能看到“未纳管 / 未匹配”的说明。
+
+#### 11.3.7 关系图布局优化
+
+当前 ECharts 使用 force layout，节点少时可用，但主从链路变多后位置不稳定。第三批建议对 MySQL / PostgreSQL 使用确定性布局。
+
+布局规则：
+
+1. 主库固定在左侧或中心。
+2. 普通从库放右侧上半区。
+3. 延迟副本放右侧下半区。
+4. 未匹配来源或未纳管节点放灰色边缘区域。
+5. PostgreSQL primary 的 runtime standby 和已纳管 standby 尽量合并展示。
+
+边 label 规则：
+
+1. MySQL 普通复制：`async · 0s · IO Yes / SQL Yes`。
+2. MySQL 延迟复制：`delayed · lag 12s · remain 58m`。
+3. PostgreSQL：`streaming · async · replay 12ms`。
+4. 未知延迟：`async · lag unknown`。
+
+验收标准：
+
+1. 1 主 1 从、1 主多从、1 主多普通从 + 延迟从，图形布局稳定。
+2. 节点不会互相覆盖。
+3. 边 label 不遮挡主要节点。
+4. 窄屏下图形仍可滚动缩放。
+
+#### 11.3.8 后端返回字段建议
+
+短期可以继续放在 `metrics` 中，避免 API 破坏性变更。建议统一以下 key：
+
+节点 metrics：
+
+```json
+{
+  "instance_id": "1",
+  "replica_id": "4",
+  "check_id": "109",
+  "role_detected": "replica",
+  "health_status": "healthy",
+  "source_host": "192.168.1.12",
+  "source_port": "23306",
+  "server_id": "2",
+  "server_uuid": "xxx",
+  "read_only": "ON",
+  "super_read_only": "ON",
+  "last_checked_at": "2026-05-04 20:52:29",
+  "check_age_seconds": "120",
+  "check_freshness": "fresh"
+}
+```
+
+链路 metrics：
+
+```json
+{
+  "replica_id": "4",
+  "check_id": "109",
+  "io": "Yes",
+  "sql": "Yes",
+  "seconds_behind_source": "0",
+  "configured_delay_seconds": "3600",
+  "remaining_delay_seconds": "1800",
+  "discovery_source": "replica_status"
+}
+```
+
+后续如果前端依赖增多，再考虑将 `replicaId`、`checkId`、`freshness` 提升为一等字段。
+
+#### 11.3.9 第三批实施顺序
+
+建议按以下顺序实施：
+
+1. 采集新鲜度和采集相关实例。
+2. 节点 / 链路详情抽屉。
+3. 拓扑页跳转副本治理和原始采集。
+4. MySQL 角色安全检查。
+5. 延迟副本保护窗口汇总。
+6. 关系图确定性布局。
+7. MySQL 主库侧辅助发现。
+
+优先级理由：
+
+1. 新鲜度和批量采集解决“拓扑是否可信”的问题。
+2. 详情抽屉解决“为什么异常”的问题。
+3. 跳转副本治理解决“下一步怎么处理”的问题。
+4. MySQL 角色安全检查能直接发现生产从库未只读这类高价值风险。
+5. 延迟副本保护窗口对误删防护最有价值，但依赖前面采集准确性。
+6. 主库侧辅助发现有用，但受 MySQL `report_host` 配置限制，不能作为第一优先级。
+
+第三批验收：
+
+1. 从拓扑节点能打开详情抽屉并看到关键 metrics。
+2. 从复制关系能打开链路详情并定位到 `replica_id` 和 `check_id`。
+3. 从 finding 能跳转到副本治理，并自动带上实例筛选。
+4. 点击“采集相关实例”后，相关 MySQL / MariaDB / PostgreSQL 实例完成副本状态采集并刷新拓扑。
+5. 采集过期节点会产生 warning finding。
+6. MySQL 从库 `read_only=OFF` 时会产生 warning finding。
+7. 延迟副本能在摘要卡看到保护状态和最小保护窗口。
+8. 拓扑页没有 pause / resume / promote / failover 直接执行按钮。
+
+#### 11.3.10 第三批落地记录
+
+本次落地范围：
+
+1. 后端拓扑 metrics：
+   - 节点和链路补充 `instance_id`、`primary_instance_id`、`replica_instance_id`、`check_id`、`last_check_id`。
+   - 节点和链路补充 `last_checked_at`、`check_age_seconds`、`check_freshness`。
+   - `check_freshness` 使用 5 分钟 fresh、5 到 30 分钟 warning、超过 30 分钟 stale、无采集 unknown。
+2. 后端风险发现：
+   - stale / warning / unknown 采集状态生成 collection finding。
+   - MySQL / MariaDB 采集 `server_id`、`server_uuid`、`version`、`read_only`、`super_read_only`、`log_bin`、`gtid_mode`、`binlog_format`、`binlog_row_image`。
+   - MySQL / MariaDB 增加 `从库未开启只读保护`、`从库未开启 super_read_only`、`主库未开启 binlog`、`server_id 配置无效` 风险提示。
+3. 后端摘要卡：
+   - 增加 `最近采集`、`过期节点`、`延迟副本`、`最小保护窗口`、`保护状态`、`推荐保护副本`。
+   - 从主库视角汇总所有已识别延迟副本的剩余保护窗口。
+4. MySQL 主库侧辅助发现：
+   - 主库识别为 primary 时读取 `SHOW REPLICAS`，失败后降级 `SHOW SLAVE HOSTS`。
+   - 返回结果进入 `reported_replicas`。
+   - 拓扑中未匹配到 OpsHub 实例时生成灰色虚拟从库节点，`discovery_source=mysql_primary_reported`。
+5. 前端拓扑页：
+   - 工具栏增加 `采集当前实例` 和 `采集相关实例`。
+   - findings 增加 `处理` 入口，跳转副本治理并带上实例筛选。
+   - 节点表和复制关系表增加 `详情` 操作。
+   - 点击 ECharts 节点或边打开详情抽屉。
+   - 详情抽屉展示基础信息、状态、延迟、最近采集和 metrics，并提供 `采集该实例`、`副本治理`、`原始采集`。
+   - MySQL / MariaDB / PostgreSQL 拓扑图使用确定性布局：主库、普通副本、延迟副本分区展示；其他类型仍保留 force layout。
+
+仍保留在后续批次的内容：
+
+1. 拓扑页不执行 pause / resume / promote / failover。
+2. 不新增拓扑快照表。
+3. 不做人工绑定主从关系。
+4. 不在拓扑页直接配置复制链路。
 
 ### 11.4 第四批：拓扑历史和人工治理
 
@@ -1130,12 +1474,14 @@ npm run build
 
 ## 14. 推荐优先级
 
-建议下一步直接做第一批和第二批的核心闭环：
+第一批和第二批完成后，下一步建议进入第三批，优先做“可信度 + 详情 + 跳转”的闭环：
 
-1. 后端接入 MySQL / MariaDB / PostgreSQL 拓扑。
-2. 前端拓扑页增加 findings。
-3. 前端拓扑页增加图形化关系视图。
-4. 保留节点表和复制关系表。
-5. 从拓扑页跳转副本治理。
+1. 采集新鲜度和“采集相关实例”。
+2. 节点 / 链路详情抽屉。
+3. findings、节点、链路跳转副本治理。
+4. MySQL 角色安全检查：`read_only`、`super_read_only`、`server_id`、`log_bin`。
+5. 延迟副本保护窗口汇总。
+6. 关系图确定性布局。
+7. MySQL 主库侧辅助发现。
 
-这批完成后，拓扑页会从“复杂类型只读展示”升级为“数据库主从排障入口”，价值会明显高于继续扩展 SQL 控制台细节。
+这批完成后，拓扑页会从“主从关系展示”升级为“主从排障入口”。用户看到异常后，可以在同一条链路上完成确认、采集、定位和跳转治理，但高风险动作仍保留在副本治理页。

@@ -94,6 +94,11 @@ type DatabaseTopologyVO struct {
 	Message          string                       `json:"message"`
 }
 
+const (
+	topologyCheckFreshSeconds = 5 * 60
+	topologyCheckStaleSeconds = 30 * 60
+)
+
 func (uc *UseCase) GetTopology(ctx context.Context, instanceID uint, operator QueryOperator) (*DatabaseTopologyVO, error) {
 	item, err := uc.getDiagnosableInstance(ctx, instanceID)
 	if err != nil {
@@ -206,6 +211,7 @@ func (uc *UseCase) collectRelationalReplicationTopology(ctx context.Context, ite
 		link := buildReplicationTopologyLink(primaryNode, replicaNode, replica, replicaCheck)
 		linksByID[replicationTopologyLinkID(link.Source, link.Target)] = link
 		appendTopologyFindingsForCheck(&findings, replicaNode.ID, replicaCheck, nil)
+		appendTopologyFindingsForFreshness(&findings, replicaNode.ID, replicaCheck, replica)
 		appendTopologyFindingsForReplica(&findings, replicaNode.ID, replica)
 	}
 
@@ -221,6 +227,9 @@ func (uc *UseCase) collectRelationalReplicationTopology(ctx context.Context, ite
 
 	if currentCheck.RoleDetected == DatabaseReplicationRolePrimary && engine == DBTypePostgreSQL {
 		uc.appendPostgreSQLPrimaryRuntimeTopology(nodesByID, linksByID, currentNode, currentCheck)
+	}
+	if currentCheck.RoleDetected == DatabaseReplicationRolePrimary && (engine == DBTypeMySQL || engine == DBTypeMariaDB) {
+		uc.appendMySQLPrimaryReportedTopology(nodesByID, linksByID, currentNode, currentCheck)
 	}
 
 	nodes := topologyNodeMapValues(nodesByID)
@@ -447,10 +456,29 @@ func buildReplicationTopologyLink(primaryNode, replicaNode *DatabaseTopologyNode
 	metrics := map[string]string{}
 	if replica != nil {
 		metrics["replica_id"] = strconv.FormatUint(uint64(replica.ID), 10)
+		if replica.PrimaryInstanceID > 0 {
+			metrics["primary_instance_id"] = strconv.FormatUint(uint64(replica.PrimaryInstanceID), 10)
+		}
+		if replica.ReplicaInstanceID > 0 {
+			metrics["replica_instance_id"] = strconv.FormatUint(uint64(replica.ReplicaInstanceID), 10)
+		}
 		metrics["configured_delay_seconds"] = strconv.Itoa(replica.ConfiguredDelaySeconds)
+		metrics["discovery_source"] = replica.DiscoverySource
+		if replica.SourceHost != "" {
+			metrics["source_host"] = replica.SourceHost
+		}
+		if replica.SourcePort > 0 {
+			metrics["source_port"] = strconv.Itoa(replica.SourcePort)
+		}
+		if replica.LastCheckID > 0 {
+			metrics["last_check_id"] = strconv.FormatUint(uint64(replica.LastCheckID), 10)
+		}
 	}
 	if check != nil {
 		metrics["health"] = check.HealthStatus
+		if check.ID > 0 {
+			metrics["check_id"] = strconv.FormatUint(uint64(check.ID), 10)
+		}
 		if secondsBehind, ok := replicationTopologySecondsBehindSource(check); ok {
 			metrics["seconds_behind_source"] = strconv.Itoa(secondsBehind)
 		}
@@ -467,6 +495,14 @@ func buildReplicationTopologyLink(primaryNode, replicaNode *DatabaseTopologyNode
 			metrics["pg_replay_lag_ms"] = strconv.FormatInt(check.PGReplayLagMs, 10)
 		}
 	}
+	if checkedAt := replicationTopologyCheckedAt(check, replica); checkedAt != nil {
+		metrics["last_checked_at"] = formatTime(checkedAt)
+		ageSeconds, freshness := topologyCheckFreshness(checkedAt, time.Now())
+		metrics["check_age_seconds"] = strconv.FormatInt(ageSeconds, 10)
+		metrics["check_freshness"] = freshness
+	} else {
+		metrics["check_freshness"] = "unknown"
+	}
 	return &DatabaseTopologyLinkVO{
 		Source:     primaryNode.ID,
 		Target:     replicaNode.ID,
@@ -477,6 +513,110 @@ func buildReplicationTopologyLink(primaryNode, replicaNode *DatabaseTopologyNode
 		LagText:    replicationTopologyLagText(check),
 		Message:    replicationTopologyMessage(check, replica),
 		Metrics:    metrics,
+	}
+}
+
+func (uc *UseCase) appendMySQLPrimaryReportedTopology(
+	nodes map[string]*DatabaseTopologyNodeVO,
+	links map[string]*DatabaseTopologyLinkVO,
+	primaryNode *DatabaseTopologyNodeVO,
+	check *DatabaseReplicationCheck,
+) {
+	if primaryNode == nil || check == nil {
+		return
+	}
+	rows := topologyRawRows(decodeReplicaRawMap(check.RawStatusJSON)["reported_replicas"])
+	for _, row := range rows {
+		host := firstNonEmpty(toString(row["Host"]), toString(row["host"]))
+		port := parseInt(firstNonEmpty(toString(row["Port"]), toString(row["port"])), 0)
+		serverID := firstNonEmpty(
+			toString(row["Server_id"]),
+			toString(row["Server_Id"]),
+			toString(row["Server_ID"]),
+			toString(row["server_id"]),
+			toString(row["Id"]),
+		)
+		if strings.TrimSpace(host) == "" && strings.TrimSpace(serverID) == "" {
+			continue
+		}
+		metrics := map[string]string{
+			"discovery_source": "mysql_primary_reported",
+		}
+		if strings.TrimSpace(host) != "" {
+			metrics["report_host"] = strings.TrimSpace(host)
+		}
+		if port > 0 {
+			metrics["report_port"] = strconv.Itoa(port)
+		}
+		if strings.TrimSpace(serverID) != "" {
+			metrics["server_id"] = strings.TrimSpace(serverID)
+		}
+		if value := firstNonEmpty(toString(row["Source_UUID"]), toString(row["Master_UUID"]), toString(row["Uuid"]), toString(row["UUID"])); value != "" {
+			metrics["source_uuid"] = value
+		}
+
+		node := findTopologyNodeByAddress(nodes, host)
+		if node == nil {
+			nodeID := "mysql-reported-replica:" + valueOrDefault(strings.TrimSpace(host), "unknown")
+			if port > 0 {
+				nodeID += ":" + strconv.Itoa(port)
+			}
+			if strings.TrimSpace(serverID) != "" {
+				nodeID += ":" + strings.TrimSpace(serverID)
+			}
+			node = nodes[nodeID]
+			if node == nil {
+				address := strings.TrimSpace(host)
+				if address == "" {
+					address = "reported-server-" + valueOrDefault(strings.TrimSpace(serverID), "unknown")
+				} else if port > 0 {
+					address = net.JoinHostPort(address, strconv.Itoa(port))
+				}
+				node = &DatabaseTopologyNodeVO{
+					ID:        nodeID,
+					Name:      "未纳管从库",
+					Role:      DatabaseReplicationRoleReplica,
+					RoleText:  replicationTopologyRoleText(DatabaseReplicationRoleReplica),
+					Address:   address,
+					State:     DatabaseReplicaHealthUnknown,
+					Message:   "主库侧报告该从库，但未匹配到 OpsHub 已纳管实例",
+					Metrics:   metrics,
+					UpdatedAt: replicationTopologyUpdatedAt(check, nil),
+				}
+				nodes[nodeID] = node
+			}
+		} else {
+			if node.Metrics == nil {
+				node.Metrics = map[string]string{}
+			}
+			for key, value := range metrics {
+				if strings.TrimSpace(value) != "" {
+					node.Metrics[key] = value
+				}
+			}
+		}
+		linkID := replicationTopologyLinkID(primaryNode.ID, node.ID)
+		if existing := links[linkID]; existing != nil {
+			if existing.Metrics == nil {
+				existing.Metrics = map[string]string{}
+			}
+			for key, value := range metrics {
+				if strings.TrimSpace(value) != "" {
+					existing.Metrics[key] = value
+				}
+			}
+			continue
+		}
+		links[linkID] = &DatabaseTopologyLinkVO{
+			Source:     primaryNode.ID,
+			Target:     node.ID,
+			SourceName: primaryNode.Name,
+			TargetName: node.Name,
+			Label:      "async replication",
+			State:      node.State,
+			Message:    "主库侧 SHOW REPLICAS/SLAVE HOSTS 报告",
+			Metrics:    metrics,
+		}
 	}
 }
 
@@ -604,6 +744,13 @@ func buildReplicationTopologyCards(item *DatabaseInstance, currentCheck *Databas
 	maxLagKnown := false
 	health := DatabaseReplicaHealthHealthy
 	remainingWindow := ""
+	latestCheck := ""
+	staleNodeCount := 0
+	delayedReplicaCount := 0
+	minProtectionWindow := int64(0)
+	minProtectionKnown := false
+	preferredReplicaName := ""
+	preferredProtectionWindow := int64(0)
 	for _, node := range nodes {
 		if node == nil {
 			continue
@@ -612,6 +759,26 @@ func buildReplicationTopologyCards(item *DatabaseInstance, currentCheck *Databas
 			replicaCount++
 		}
 		health = worseReplicaHealth(health, node.State)
+		if value := strings.TrimSpace(node.Metrics["last_checked_at"]); value != "" && value > latestCheck {
+			latestCheck = value
+		}
+		switch strings.TrimSpace(node.Metrics["check_freshness"]) {
+		case "stale", "unknown":
+			staleNodeCount++
+		}
+		if isReplicationDelayedRole(node.Role) {
+			delayedReplicaCount++
+			if remaining, ok := parseMetricInt64OK(node.Metrics, "remaining_delay_seconds"); ok && remaining >= 0 {
+				if !minProtectionKnown || remaining < minProtectionWindow {
+					minProtectionWindow = remaining
+				}
+				minProtectionKnown = true
+				if node.State == DatabaseReplicaHealthHealthy && remaining > preferredProtectionWindow {
+					preferredProtectionWindow = remaining
+					preferredReplicaName = node.Name
+				}
+			}
+		}
 	}
 	for _, link := range links {
 		if link == nil {
@@ -640,12 +807,29 @@ func buildReplicationTopologyCards(item *DatabaseInstance, currentCheck *Databas
 	if maxLagKnown {
 		maxLagText = formatReplicationMaxLagMillis(maxLagMs)
 	}
+	protectionStatus := "未保护"
+	if delayedReplicaCount > 0 {
+		protectionStatus = "降级"
+		if minProtectionKnown && minProtectionWindow > 0 && preferredReplicaName != "" {
+			protectionStatus = "受保护"
+		}
+	}
+	minProtectionText := "-"
+	if minProtectionKnown {
+		minProtectionText = formatSeconds(minProtectionWindow)
+	}
 	return []*DatabaseTopologyCardVO{
 		{Key: "topology_type", Label: "拓扑类型", Value: replicationTopologyTypeText(normalizeDBType(item.DBType)), Description: "当前实例的复制拓扑类型"},
 		{Key: "role", Label: "当前角色", Value: replicationTopologyRoleText(replicationTopologyRole(currentCheck, nil, "")), Description: "实时采集识别出的当前实例角色"},
 		{Key: "replicas", Label: "副本数量", Value: strconv.Itoa(replicaCount), Description: "拓扑中已识别的副本节点数量"},
 		{Key: "health", Label: "复制健康", Value: ReplicaHealthText(health), Description: "根据节点和链路风险汇总出的健康状态"},
 		{Key: "max_lag", Label: "最大延迟", Value: maxLagText, Description: "拓扑中可识别的最大复制延迟"},
+		{Key: "latest_check", Label: "最近采集", Value: valueOrDefault(latestCheck, "-"), Description: "拓扑节点中最新一次副本状态采集时间"},
+		{Key: "stale_nodes", Label: "过期节点", Value: strconv.Itoa(staleNodeCount), Description: "采集状态为 stale 或 unknown 的节点数量"},
+		{Key: "delayed_replicas", Label: "延迟副本", Value: strconv.Itoa(delayedReplicaCount), Description: "拓扑中已识别的延迟副本数量"},
+		{Key: "min_protection_window", Label: "最小保护窗口", Value: minProtectionText, Description: "所有延迟副本中可识别的最小剩余保护窗口"},
+		{Key: "protection_status", Label: "保护状态", Value: protectionStatus, Description: "基于延迟副本健康状态和剩余窗口汇总"},
+		{Key: "preferred_protection_replica", Label: "推荐保护副本", Value: valueOrDefault(preferredReplicaName, "-"), Description: "健康且剩余保护窗口最大的延迟副本"},
 		{Key: "protection_window", Label: "保护窗口", Value: valueOrDefault(remainingWindow, "-"), Description: "延迟副本剩余保护窗口，仅在可识别时展示"},
 	}
 }
@@ -821,9 +1005,15 @@ func replicationTopologyMetrics(check *DatabaseReplicationCheck, replica *Databa
 		metrics["replica_id"] = strconv.FormatUint(uint64(replica.ID), 10)
 		metrics["primary_instance_id"] = strconv.FormatUint(uint64(replica.PrimaryInstanceID), 10)
 		metrics["replica_instance_id"] = strconv.FormatUint(uint64(replica.ReplicaInstanceID), 10)
+		if replica.ReplicaInstanceID > 0 {
+			metrics["instance_id"] = strconv.FormatUint(uint64(replica.ReplicaInstanceID), 10)
+		}
 		metrics["replica_role"] = replica.ReplicaRole
 		metrics["discovery_source"] = replica.DiscoverySource
 		metrics["configured_delay_seconds"] = strconv.Itoa(replica.ConfiguredDelaySeconds)
+		if replica.LastCheckID > 0 {
+			metrics["last_check_id"] = strconv.FormatUint(uint64(replica.LastCheckID), 10)
+		}
 		if replica.SourceHost != "" {
 			metrics["source_host"] = replica.SourceHost
 		}
@@ -832,7 +1022,11 @@ func replicationTopologyMetrics(check *DatabaseReplicationCheck, replica *Databa
 		}
 	}
 	if check != nil {
-		metrics["check_id"] = strconv.FormatUint(uint64(check.ID), 10)
+		metrics["instance_id"] = strconv.FormatUint(uint64(check.InstanceID), 10)
+		if check.ID > 0 {
+			metrics["check_id"] = strconv.FormatUint(uint64(check.ID), 10)
+			metrics["last_check_id"] = strconv.FormatUint(uint64(check.ID), 10)
+		}
 		metrics["role_detected"] = check.RoleDetected
 		metrics["health_status"] = check.HealthStatus
 		if secondsBehind, ok := replicationTopologySecondsBehindSource(check); ok {
@@ -873,8 +1067,49 @@ func replicationTopologyMetrics(check *DatabaseReplicationCheck, replica *Databa
 		if value := toString(raw["recovery_min_apply_delay"]); value != "" {
 			metrics["recovery_min_apply_delay"] = value
 		}
+		for _, key := range []string{"server_id", "server_uuid", "version", "read_only", "super_read_only", "log_bin", "gtid_mode", "binlog_format", "binlog_row_image"} {
+			if value := toString(raw[key]); value != "" {
+				metrics[key] = value
+			}
+		}
+	}
+	if checkedAt := replicationTopologyCheckedAt(check, replica); checkedAt != nil {
+		metrics["last_checked_at"] = formatTime(checkedAt)
+		ageSeconds, freshness := topologyCheckFreshness(checkedAt, time.Now())
+		metrics["check_age_seconds"] = strconv.FormatInt(ageSeconds, 10)
+		metrics["check_freshness"] = freshness
+	} else {
+		metrics["check_freshness"] = "unknown"
 	}
 	return metrics
+}
+
+func replicationTopologyCheckedAt(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) *time.Time {
+	if check != nil && check.CheckedAt != nil {
+		return check.CheckedAt
+	}
+	if replica != nil && replica.LastCheckedAt != nil {
+		return replica.LastCheckedAt
+	}
+	return nil
+}
+
+func topologyCheckFreshness(checkedAt *time.Time, now time.Time) (int64, string) {
+	if checkedAt == nil {
+		return -1, "unknown"
+	}
+	ageSeconds := int64(now.Sub(*checkedAt).Seconds())
+	if ageSeconds < 0 {
+		ageSeconds = 0
+	}
+	switch {
+	case ageSeconds <= topologyCheckFreshSeconds:
+		return ageSeconds, "fresh"
+	case ageSeconds <= topologyCheckStaleSeconds:
+		return ageSeconds, "warning"
+	default:
+		return ageSeconds, "stale"
+	}
 }
 
 func replicationTopologyUpdatedAt(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) string {
@@ -982,6 +1217,43 @@ func appendTopologyFindingsForReplica(findings *[]*DatabaseTopologyFindingVO, no
 	})
 }
 
+func appendTopologyFindingsForFreshness(findings *[]*DatabaseTopologyFindingVO, nodeID string, check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) {
+	if findings == nil {
+		return
+	}
+	checkedAt := replicationTopologyCheckedAt(check, replica)
+	ageSeconds, freshness := topologyCheckFreshness(checkedAt, time.Now())
+	switch freshness {
+	case "unknown":
+		*findings = append(*findings, &DatabaseTopologyFindingVO{
+			Level:       DatabaseReplicaHealthWarning,
+			Category:    "collection",
+			Title:       "副本尚无采集记录",
+			Description: "该副本关系没有可用的最近采集时间，拓扑只能展示静态关系。",
+			Suggestion:  "点击采集相关实例，或进入副本治理采集该实例后再刷新拓扑。",
+			NodeID:      nodeID,
+		})
+	case "warning":
+		*findings = append(*findings, &DatabaseTopologyFindingVO{
+			Level:       DatabaseReplicaHealthWarning,
+			Category:    "collection",
+			Title:       "副本状态采集不够新鲜",
+			Description: fmt.Sprintf("该副本最近一次状态采集距今约 %s，拓扑可能不是最新状态。", formatSeconds(ageSeconds)),
+			Suggestion:  "点击采集相关实例刷新当前拓扑中的主库和副本状态。",
+			NodeID:      nodeID,
+		})
+	case "stale":
+		*findings = append(*findings, &DatabaseTopologyFindingVO{
+			Level:       DatabaseReplicaHealthWarning,
+			Category:    "collection",
+			Title:       "副本状态采集已过期",
+			Description: fmt.Sprintf("该副本最近一次状态采集距今约 %s，拓扑中的延迟和线程状态可能已经过期。", formatSeconds(ageSeconds)),
+			Suggestion:  "点击采集相关实例刷新当前拓扑中的主库和副本状态。",
+			NodeID:      nodeID,
+		})
+	}
+}
+
 func decodeTopologyRiskFlags(raw string) []string {
 	var flags []string
 	if err := json.Unmarshal([]byte(raw), &flags); err != nil {
@@ -1016,6 +1288,14 @@ func topologyFindingDescription(flag string) string {
 		return "当前复制延迟超过默认预警阈值。"
 	case strings.Contains(flag, "延迟副本已追上"):
 		return "延迟副本剩余延迟为 0，当前没有可用于误操作截停的保护窗口。"
+	case strings.Contains(flag, "从库未开启只读保护"):
+		return "MySQL / MariaDB 从库 read_only 未开启，业务或误操作可能直接写入从库。"
+	case strings.Contains(flag, "从库未开启 super_read_only"):
+		return "MySQL / MariaDB 从库 super_read_only 未开启，具备高权限的会话仍可能写入。"
+	case strings.Contains(flag, "主库未开启 binlog"):
+		return "MySQL / MariaDB 主库 log_bin 未开启，不利于复制链路和时间点恢复。"
+	case strings.Contains(flag, "server_id 配置无效"):
+		return "MySQL / MariaDB server_id 缺失或为 0，复制身份配置不完整。"
 	case strings.Contains(flag, "WAL replay 已暂停"):
 		return "PostgreSQL standby 当前 WAL replay 处于暂停状态。"
 	case strings.Contains(flag, "WAL receiver"):
@@ -1035,6 +1315,14 @@ func topologyFindingSuggestion(flag string) string {
 		return "检查主从网络、从库负载和长事务，必要时查看慢 SQL 与容量趋势。"
 	case strings.Contains(flag, "延迟副本已追上"):
 		return "确认延迟副本配置是否符合误操作保护目标，必要时重新配置延迟窗口。"
+	case strings.Contains(flag, "从库未开启只读保护"):
+		return "检查从库配置 read_only=ON，并确认业务连接不会写入从库。"
+	case strings.Contains(flag, "从库未开启 super_read_only"):
+		return "如版本支持，建议开启 super_read_only=ON，避免高权限账号绕过只读保护。"
+	case strings.Contains(flag, "主库未开启 binlog"):
+		return "确认主库 binlog 配置；如需复制和 PITR，应按变更流程开启。"
+	case strings.Contains(flag, "server_id 配置无效"):
+		return "为每个 MySQL / MariaDB 节点配置唯一且非 0 的 server_id。"
 	case strings.Contains(flag, "WAL replay 已暂停"):
 		return "确认是否为计划内暂停；若非计划内，进入副本治理执行恢复流程。"
 	case strings.Contains(flag, "WAL receiver"):
@@ -1064,6 +1352,15 @@ func dedupeTopologyFindings(items []*DatabaseTopologyFindingVO) []*DatabaseTopol
 func isReplicationReplicaRole(role string) bool {
 	switch strings.TrimSpace(role) {
 	case DatabaseReplicationRoleReplica, DatabaseReplicaRoleDelayed, DatabaseReplicationRoleStandby, "delayed_standby":
+		return true
+	default:
+		return false
+	}
+}
+
+func isReplicationDelayedRole(role string) bool {
+	switch strings.TrimSpace(role) {
+	case DatabaseReplicaRoleDelayed, "delayed_standby":
 		return true
 	default:
 		return false

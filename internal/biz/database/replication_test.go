@@ -37,6 +37,23 @@ func TestMySQLReplicaRiskFlags(t *testing.T) {
 	}
 }
 
+func TestMySQLTopologyVariableRiskFlags(t *testing.T) {
+	replicaFlags := mysqlTopologyVariableRiskFlags(DatabaseReplicationRoleReplica, map[string]string{
+		"server_id":       "2",
+		"read_only":       "OFF",
+		"super_read_only": "0",
+	})
+	assertContainsFlag(t, replicaFlags, "从库未开启只读保护")
+	assertContainsFlag(t, replicaFlags, "从库未开启 super_read_only")
+
+	primaryFlags := mysqlTopologyVariableRiskFlags(DatabaseReplicationRolePrimary, map[string]string{
+		"server_id": "0",
+		"log_bin":   "OFF",
+	})
+	assertContainsFlag(t, primaryFlags, "server_id 配置无效")
+	assertContainsFlag(t, primaryFlags, "主库未开启 binlog")
+}
+
 func TestRedactReplicaValue(t *testing.T) {
 	raw := "user=opshub password=secret host=127.0.0.1"
 	got := redactReplicaValue("conninfo", raw)

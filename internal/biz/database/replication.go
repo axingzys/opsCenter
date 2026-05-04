@@ -169,6 +169,7 @@ func (uc *UseCase) collectMySQLReplicationStatus(ctx context.Context, item *Data
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
+	variables := collectMySQLTopologyVariables(ctx, db)
 
 	row, ok, queryErr := querySingleRowMap(ctx, db, "SHOW REPLICA STATUS")
 	if queryErr != nil {
@@ -187,14 +188,26 @@ func (uc *UseCase) collectMySQLReplicationStatus(ctx context.Context, item *Data
 		check.RoleDetected = DatabaseReplicationRoleUnknown
 		check.HealthStatus = DatabaseReplicaHealthUnknown
 		check.ErrorMessage = trimText(queryErr.Error(), 1000)
-		check.RawStatusJSON = marshalReplicaJSON(map[string]any{"error": queryErr.Error()})
+		check.RawStatusJSON = marshalReplicaJSON(mysqlTopologyRawMap(map[string]any{"error": queryErr.Error()}, variables))
 		return check, queryErr
 	}
 	if !ok {
-		check.RawStatusJSON = marshalReplicaJSON(map[string]any{
+		raw := map[string]any{
 			"role":    "primary_or_not_configured_as_replica",
 			"message": "SHOW REPLICA/SLAVE STATUS returned no rows",
-		})
+		}
+		if reported, reportedErr := collectMySQLReportedReplicas(ctx, db); reportedErr != nil {
+			raw["reported_replicas_error"] = reportedErr.Error()
+		} else if len(reported) > 0 {
+			raw["reported_replicas"] = redactReplicaStatusRows(reported)
+		}
+		riskFlags := mysqlTopologyVariableRiskFlags(DatabaseReplicationRolePrimary, variables)
+		check.HealthStatus = replicaHealthFromRiskFlags(riskFlags)
+		check.RiskFlagsJSON = marshalReplicaJSON(riskFlags)
+		check.RawStatusJSON = marshalReplicaJSON(mysqlTopologyRawMap(raw, variables))
+		if len(riskFlags) > 0 {
+			check.ErrorMessage = trimText(strings.Join(riskFlags, "；"), 1000)
+		}
 		return check, nil
 	}
 
@@ -207,6 +220,7 @@ func (uc *UseCase) collectMySQLReplicationStatus(ctx context.Context, item *Data
 	ioRunning := firstNonEmpty(row["Replica_IO_Running"], row["Slave_IO_Running"])
 	sqlRunning := firstNonEmpty(row["Replica_SQL_Running"], row["Slave_SQL_Running"])
 	riskFlags := mysqlReplicaRiskFlags(ioRunning, sqlRunning, secondsBehind, configuredDelay, remainingDelay, sourceInstanceID)
+	riskFlags = append(riskFlags, mysqlTopologyVariableRiskFlags(DatabaseReplicationRoleReplica, variables)...)
 
 	check.RoleDetected = DatabaseReplicationRoleReplica
 	check.SourceInstanceID = sourceInstanceID
@@ -217,11 +231,73 @@ func (uc *UseCase) collectMySQLReplicationStatus(ctx context.Context, item *Data
 	check.RemainingDelaySeconds = remainingDelay
 	check.HealthStatus = replicaHealthFromRiskFlags(riskFlags)
 	check.RiskFlagsJSON = marshalReplicaJSON(riskFlags)
-	check.RawStatusJSON = marshalReplicaJSON(redactReplicaStatusMap(row))
+	check.RawStatusJSON = marshalReplicaJSON(mysqlTopologyRawStringMap(redactReplicaStatusMap(row), variables))
 	if len(riskFlags) > 0 {
 		check.ErrorMessage = trimText(strings.Join(riskFlags, "；"), 1000)
 	}
 	return check, nil
+}
+
+func collectMySQLTopologyVariables(ctx context.Context, db *sql.DB) map[string]string {
+	result := make(map[string]string)
+	queries := []struct {
+		key   string
+		query string
+	}{
+		{key: "server_id", query: "SELECT @@server_id"},
+		{key: "server_uuid", query: "SELECT @@server_uuid"},
+		{key: "version", query: "SELECT @@version"},
+		{key: "read_only", query: "SELECT @@read_only"},
+		{key: "super_read_only", query: "SELECT @@super_read_only"},
+		{key: "log_bin", query: "SELECT @@log_bin"},
+		{key: "gtid_mode", query: "SELECT @@gtid_mode"},
+		{key: "binlog_format", query: "SELECT @@binlog_format"},
+		{key: "binlog_row_image", query: "SELECT @@binlog_row_image"},
+	}
+	for _, item := range queries {
+		if value := firstNonEmptyQueryValue(ctx, db, item.query); value != "" {
+			result[item.key] = value
+		}
+	}
+	if result["server_uuid"] == "" {
+		if value := firstNonEmptyQueryValue(ctx, db, "SELECT @@server_uid"); value != "" {
+			result["server_uuid"] = value
+			result["server_uid"] = value
+		}
+	}
+	return result
+}
+
+func collectMySQLReportedReplicas(ctx context.Context, db *sql.DB) ([]map[string]string, error) {
+	rows, err := queryRowsMap(ctx, db, "SHOW REPLICAS")
+	if err == nil {
+		return rows, nil
+	}
+	return queryRowsMap(ctx, db, "SHOW SLAVE HOSTS")
+}
+
+func mysqlTopologyRawMap(raw map[string]any, variables map[string]string) map[string]any {
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	for key, value := range variables {
+		if strings.TrimSpace(value) != "" {
+			raw[key] = value
+		}
+	}
+	return raw
+}
+
+func mysqlTopologyRawStringMap(raw map[string]string, variables map[string]string) map[string]string {
+	if raw == nil {
+		raw = map[string]string{}
+	}
+	for key, value := range variables {
+		if strings.TrimSpace(value) != "" {
+			raw[key] = value
+		}
+	}
+	return raw
 }
 
 func (uc *UseCase) collectPostgreSQLReplicationStatus(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, now time.Time) (*DatabaseReplicationCheck, error) {
@@ -649,6 +725,37 @@ func mysqlReplicaRiskFlags(ioRunning, sqlRunning string, secondsBehind, configur
 		flags = append(flags, "来源主库未匹配")
 	}
 	return flags
+}
+
+func mysqlTopologyVariableRiskFlags(role string, variables map[string]string) []string {
+	flags := make([]string, 0, 4)
+	serverID := strings.TrimSpace(variables["server_id"])
+	if serverID == "" || serverID == "0" {
+		flags = append(flags, "server_id 配置无效")
+	}
+	switch role {
+	case DatabaseReplicationRoleReplica:
+		if mysqlVariableOff(variables["read_only"]) {
+			flags = append(flags, "从库未开启只读保护")
+		}
+		if mysqlVariableOff(variables["super_read_only"]) {
+			flags = append(flags, "从库未开启 super_read_only")
+		}
+	case DatabaseReplicationRolePrimary:
+		if mysqlVariableOff(variables["log_bin"]) {
+			flags = append(flags, "主库未开启 binlog")
+		}
+	}
+	return flags
+}
+
+func mysqlVariableOff(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "off", "false", "no", "disabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func postgresStandbyRiskFlags(receiverStatus string, sourceInstanceID uint, receiverErr error, replayPaused bool) []string {
