@@ -114,6 +114,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	tableRepo := dbdata.NewTableRepo(db)
 	columnRepo := dbdata.NewColumnRepo(db)
 	indexRepo := dbdata.NewIndexRepo(db)
+	tableRelationRepo := dbdata.NewTableRelationRepo(db)
 	metadataRepo := dbdata.NewMetadataRepo(db)
 	redisMetadataRepo := dbdata.NewRedisMetadataRepo(db)
 	syncJobRepo := dbdata.NewSyncJobRepo(db)
@@ -151,6 +152,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		tableRepo,
 		columnRepo,
 		indexRepo,
+		tableRelationRepo,
 		metadataRepo,
 		redisMetadataRepo,
 		syncJobRepo,
@@ -417,6 +419,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 			instances.GET("/:id/tables", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListTables)
 			instances.GET("/:id/columns", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListColumns)
 			instances.GET("/:id/indexes", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListIndexes)
+			instances.GET("/:id/table-relations", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.ListTableRelations)
 			instances.GET("/:id/ddl", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataView), s.service.GetTableDDL)
 			instances.GET("/:id/dictionary/export", s.authMiddleware.RequireMenuPermission(permDatabaseMetadataExport), s.service.ExportTableDictionary)
 			instances.GET("/:id/metrics", s.authMiddleware.RequireMenuPermission(permDatabaseDiagnosisView), s.service.GetDiagnosisMetrics)

@@ -46,6 +46,7 @@ type UseCase struct {
 	tableRepo              TableRepo
 	columnRepo             ColumnRepo
 	indexRepo              IndexRepo
+	tableRelationRepo      TableRelationRepo
 	metadataRepo           MetadataRepo
 	redisMetadataRepo      RedisMetadataRepo
 	syncJobRepo            SyncJobRepo
@@ -91,6 +92,7 @@ func NewUseCase(
 	tableRepo TableRepo,
 	columnRepo ColumnRepo,
 	indexRepo IndexRepo,
+	tableRelationRepo TableRelationRepo,
 	metadataRepo MetadataRepo,
 	redisMetadataRepo RedisMetadataRepo,
 	syncJobRepo SyncJobRepo,
@@ -111,6 +113,7 @@ func NewUseCase(
 		tableRepo:              tableRepo,
 		columnRepo:             columnRepo,
 		indexRepo:              indexRepo,
+		tableRelationRepo:      tableRelationRepo,
 		metadataRepo:           metadataRepo,
 		redisMetadataRepo:      redisMetadataRepo,
 		syncJobRepo:            syncJobRepo,
@@ -374,6 +377,16 @@ type DatabaseReplicaActionListRequest struct {
 	Status             string `form:"status"`
 	RestrictToAllowed  bool   `form:"-" json:"-"`
 	AllowedInstanceIDs []uint `form:"-" json:"-"`
+}
+
+type DatabaseTableRelationListRequest struct {
+	InstanceID       uint   `form:"-" json:"-"`
+	SchemaName       string `form:"schemaName"`
+	TableName        string `form:"tableName"`
+	Direction        string `form:"direction"`
+	Source           string `form:"source"`
+	IncludeInferred  bool   `form:"includeInferred"`
+	CurrentTableName string `form:"-" json:"-"`
 }
 
 type DatabaseInstancePermissionRequest struct {
@@ -732,18 +745,19 @@ type ConnectionTestResultVO struct {
 }
 
 type MetadataSyncResultVO struct {
-	JobID        uint   `json:"jobId"`
-	InstanceID   uint   `json:"instanceId"`
-	Name         string `json:"name"`
-	Status       string `json:"status"`
-	Message      string `json:"message"`
-	Version      string `json:"version"`
-	DurationMs   int64  `json:"durationMs"`
-	SchemasCount int    `json:"schemasCount"`
-	TablesCount  int    `json:"tablesCount"`
-	ColumnsCount int    `json:"columnsCount"`
-	IndexesCount int    `json:"indexesCount"`
-	SyncedAt     string `json:"syncedAt"`
+	JobID          uint   `json:"jobId"`
+	InstanceID     uint   `json:"instanceId"`
+	Name           string `json:"name"`
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	Version        string `json:"version"`
+	DurationMs     int64  `json:"durationMs"`
+	SchemasCount   int    `json:"schemasCount"`
+	TablesCount    int    `json:"tablesCount"`
+	ColumnsCount   int    `json:"columnsCount"`
+	IndexesCount   int    `json:"indexesCount"`
+	RelationsCount int    `json:"relationsCount"`
+	SyncedAt       string `json:"syncedAt"`
 }
 
 type DatabaseSchemaVO struct {
@@ -805,6 +819,69 @@ type DatabaseIndexVO struct {
 	IsUnique    bool   `json:"isUnique"`
 	Cardinality int64  `json:"cardinality"`
 	Comment     string `json:"comment"`
+}
+
+type DatabaseTableRelationVO struct {
+	ID                   uint   `json:"id"`
+	InstanceID           uint   `json:"instanceId"`
+	SchemaName           string `json:"schemaName"`
+	TableName            string `json:"tableName"`
+	ColumnName           string `json:"columnName"`
+	ReferencedSchemaName string `json:"referencedSchemaName"`
+	ReferencedTableName  string `json:"referencedTableName"`
+	ReferencedColumnName string `json:"referencedColumnName"`
+	ConstraintName       string `json:"constraintName"`
+	RelationType         string `json:"relationType"`
+	RelationTypeText     string `json:"relationTypeText"`
+	RelationSource       string `json:"relationSource"`
+	RelationSourceText   string `json:"relationSourceText"`
+	Confidence           int    `json:"confidence"`
+	OnUpdate             string `json:"onUpdate"`
+	OnDelete             string `json:"onDelete"`
+	Cardinality          string `json:"cardinality"`
+	CardinalityText      string `json:"cardinalityText"`
+	Comment              string `json:"comment"`
+	Direction            string `json:"direction"`
+	JoinSQL              string `json:"joinSql"`
+	LastSyncAt           string `json:"lastSyncAt,omitempty"`
+}
+
+type DatabaseTableRelationNodeVO struct {
+	ID           string `json:"id"`
+	SchemaName   string `json:"schemaName"`
+	TableName    string `json:"tableName"`
+	Label        string `json:"label"`
+	Current      bool   `json:"current"`
+	Incoming     int    `json:"incoming"`
+	Outgoing     int    `json:"outgoing"`
+	RelationType string `json:"relationType"`
+}
+
+type DatabaseTableRelationLinkVO struct {
+	ID           string `json:"id"`
+	Source       string `json:"source"`
+	Target       string `json:"target"`
+	SourceLabel  string `json:"sourceLabel"`
+	TargetLabel  string `json:"targetLabel"`
+	Label        string `json:"label"`
+	RelationType string `json:"relationType"`
+	Confidence   int    `json:"confidence"`
+}
+
+type DatabaseTableRelationSummaryVO struct {
+	Total         int `json:"total"`
+	ForeignKeys   int `json:"foreignKeys"`
+	Inferred      int `json:"inferred"`
+	Incoming      int `json:"incoming"`
+	Outgoing      int `json:"outgoing"`
+	LowConfidence int `json:"lowConfidence"`
+}
+
+type DatabaseTableRelationGraphVO struct {
+	Relations []*DatabaseTableRelationVO     `json:"relations"`
+	Nodes     []*DatabaseTableRelationNodeVO `json:"nodes"`
+	Links     []*DatabaseTableRelationLinkVO `json:"links"`
+	Summary   DatabaseTableRelationSummaryVO `json:"summary"`
 }
 
 type DatabaseQueryResultVO struct {
@@ -1408,12 +1485,13 @@ func (uc *UseCase) SyncMetadata(ctx context.Context, id uint) (*MetadataSyncResu
 		return uc.syncRedisMetadata(ctx, item, credential, job, start)
 	}
 
-	version, schemas, tables, columns, indexes, err := collectSQLMetadata(ctx, item, credential)
+	version, schemas, tables, columns, indexes, relations, err := collectSQLMetadata(ctx, item, credential)
 	now := time.Now()
 	if err != nil {
 		uc.finishSyncJob(ctx, job, DatabaseSyncStatusFailed, err.Error(), start, now, 0, 0, 0, 0)
 		return nil, err
 	}
+	relations = append(relations, buildInferredTableRelations(tables, columns, indexes, relations)...)
 	for _, schema := range schemas {
 		schema.InstanceID = item.ID
 		schema.LastSyncAt = &now
@@ -1428,8 +1506,12 @@ func (uc *UseCase) SyncMetadata(ctx context.Context, id uint) (*MetadataSyncResu
 	for _, index := range indexes {
 		index.InstanceID = item.ID
 	}
+	for _, relation := range relations {
+		relation.InstanceID = item.ID
+		relation.LastSyncAt = &now
+	}
 
-	if err := uc.metadataRepo.ReplaceAll(ctx, item.ID, schemas, tables, columns, indexes); err != nil {
+	if err := uc.metadataRepo.ReplaceAll(ctx, item.ID, schemas, tables, columns, indexes, relations); err != nil {
 		uc.finishSyncJob(ctx, job, DatabaseSyncStatusFailed, "写入元数据失败: "+err.Error(), start, now, 0, 0, 0, 0)
 		return nil, fmt.Errorf("写入元数据失败: %w", err)
 	}
@@ -1448,18 +1530,19 @@ func (uc *UseCase) SyncMetadata(ctx context.Context, id uint) (*MetadataSyncResu
 	message := "元数据同步成功"
 	uc.finishSyncJob(ctx, job, DatabaseSyncStatusSuccess, message, start, now, len(schemas), len(tables), len(columns), len(indexes))
 	return &MetadataSyncResultVO{
-		JobID:        job.ID,
-		InstanceID:   item.ID,
-		Name:         item.Name,
-		Status:       DatabaseSyncStatusSuccess,
-		Message:      message,
-		Version:      version,
-		DurationMs:   duration,
-		SchemasCount: len(schemas),
-		TablesCount:  len(tables),
-		ColumnsCount: len(columns),
-		IndexesCount: len(indexes),
-		SyncedAt:     now.Format("2006-01-02 15:04:05"),
+		JobID:          job.ID,
+		InstanceID:     item.ID,
+		Name:           item.Name,
+		Status:         DatabaseSyncStatusSuccess,
+		Message:        message,
+		Version:        version,
+		DurationMs:     duration,
+		SchemasCount:   len(schemas),
+		TablesCount:    len(tables),
+		ColumnsCount:   len(columns),
+		IndexesCount:   len(indexes),
+		RelationsCount: len(relations),
+		SyncedAt:       now.Format("2006-01-02 15:04:05"),
 	}, nil
 }
 
@@ -1772,7 +1855,7 @@ func testMySQLConnection(ctx context.Context, item *DatabaseInstance, credential
 	return readMySQLCompatibleVersion(testCtx, db, item.DBType)
 }
 
-func collectSQLMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, error) {
+func collectSQLMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, []*DatabaseTableRelation, error) {
 	switch normalizeDBType(item.DBType) {
 	case DBTypeMySQL, DBTypeMariaDB, DBTypeTiDB, DBTypeOceanBase:
 		return collectMySQLMetadata(ctx, item, credential)
@@ -1785,7 +1868,7 @@ func collectSQLMetadata(ctx context.Context, item *DatabaseInstance, credential 
 	case DBTypeOracle:
 		return collectOracleMetadata(ctx, item, credential)
 	default:
-		return "", nil, nil, nil, nil, fmt.Errorf("%s 元数据同步将在后续批次接入", DBTypeText(item.DBType))
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("%s 元数据同步将在后续批次接入", DBTypeText(item.DBType))
 	}
 }
 
@@ -1880,41 +1963,45 @@ func openMySQLDB(item *DatabaseInstance, credential *ConnectionCredential) (*sql
 	return db, nil
 }
 
-func collectMySQLMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, error) {
+func collectMySQLMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, []*DatabaseTableRelation, error) {
 	db, err := openMySQLDB(item, credential)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	defer db.Close()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if err := db.PingContext(queryCtx); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
 
 	version, err := readMySQLCompatibleVersion(queryCtx, db, item.DBType)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 
 	schemas, err := collectMySQLSchemas(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	tables, err := collectMySQLTables(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	columns, err := collectMySQLColumns(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	indexes, err := collectMySQLIndexes(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
-	return version, schemas, tables, columns, indexes, nil
+	relations, err := collectMySQLRelations(queryCtx, db)
+	if err != nil {
+		return "", nil, nil, nil, nil, nil, err
+	}
+	return version, schemas, tables, columns, indexes, relations, nil
 }
 
 func collectMySQLSchemas(ctx context.Context, db *sql.DB) ([]*DatabaseSchema, error) {
@@ -2097,6 +2184,59 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME`)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历索引元数据失败: %w", err)
+	}
+	return items, nil
+}
+
+func collectMySQLRelations(ctx context.Context, db *sql.DB) ([]*DatabaseTableRelation, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT
+	kcu.TABLE_SCHEMA,
+	kcu.TABLE_NAME,
+	kcu.COLUMN_NAME,
+	COALESCE(kcu.REFERENCED_TABLE_SCHEMA, ''),
+	COALESCE(kcu.REFERENCED_TABLE_NAME, ''),
+	COALESCE(kcu.REFERENCED_COLUMN_NAME, ''),
+	COALESCE(kcu.CONSTRAINT_NAME, ''),
+	COALESCE(rc.UPDATE_RULE, ''),
+	COALESCE(rc.DELETE_RULE, '')
+FROM information_schema.KEY_COLUMN_USAGE kcu
+LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+	ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+	AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+WHERE kcu.REFERENCED_TABLE_NAME IS NOT NULL
+	AND UPPER(kcu.TABLE_SCHEMA) NOT IN ('INFORMATION_SCHEMA', 'MYSQL', 'PERFORMANCE_SCHEMA', 'SYS', 'METRICS_SCHEMA', 'INSPECTION_SCHEMA', 'OCEANBASE', '__RECYCLEBIN')
+ORDER BY kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`)
+	if err != nil {
+		return nil, fmt.Errorf("读取表关系元数据失败: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]*DatabaseTableRelation, 0)
+	for rows.Next() {
+		var item DatabaseTableRelation
+		if err := rows.Scan(
+			&item.SchemaName,
+			&item.Table,
+			&item.ColumnName,
+			&item.ReferencedSchemaName,
+			&item.ReferencedTableName,
+			&item.ReferencedColumnName,
+			&item.ConstraintName,
+			&item.OnUpdate,
+			&item.OnDelete,
+		); err != nil {
+			return nil, fmt.Errorf("解析表关系元数据失败: %w", err)
+		}
+		item.RelationType = DatabaseTableRelationTypeForeignKey
+		item.RelationSource = DatabaseTableRelationSourceConstraint
+		item.Confidence = 100
+		item.Cardinality = DatabaseTableRelationCardinalityManyToOne
+		item.Comment = "数据库外键约束"
+		items = append(items, &item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历表关系元数据失败: %w", err)
 	}
 	return items, nil
 }

@@ -1123,3 +1123,37 @@ MySQL/MariaDB PITR、PostgreSQL Barman、备份策略、日志归档流等表单
 - 未把备份恢复相关代码从大 SFC 中拆分为独立组件。
 - 未增加生产恢复审批、告警、风险快照和 SLA 日历。
 
+## 20. 第二轮落地范围
+
+落地时间：2026-05-05
+
+第二轮继续保持低风险改动，不调整后端 API 契约。改动目标是降低“启用保护”和“恢复演练”的理解成本，把高频必填项放在默认视图，把底层工具、路径、归档和 JSON 配置收进高级设置。
+
+改动前复查的相关文档和代码：
+
+- `docs/database-backup-restore-ux-optimization-plan.md`：第 3.3、4、5、8、10 节已明确指出“高级资源配置太多”和“启用保护路径分散”的问题。
+- `docs/database-large-backup-pitr-plan.md`：P5 方案要求 MySQL/MariaDB 以“物理备份 + binlog PITR + 滚动合成全量”为主路径，PostgreSQL 以 Barman Server、catalog 和 WAL 状态为主路径。
+- `web/src/views/asset/DatabaseManagement.vue`：备份恢复页、保护概览、MySQL/MariaDB PITR 向导、PostgreSQL Barman 向导、恢复演练对话框均集中在该大 SFC 内。
+- `internal/biz/database/protection_wizard.go`：MySQL/MariaDB 启用保护请求已支持工具、容器、binlog、Synthetic Full、保留策略和归档 JSON。
+- `internal/biz/database/postgres_barman_wizard.go`：PostgreSQL Barman 启用保护请求已支持 Barman Server、路径、归档器、slot、catalog/WAL 同步和配置 JSON。
+
+已落地：
+
+- 将 `启用保护` 从引擎下拉改为“先选实例，再进入推荐向导”的统一对话框，用户不需要先判断 MySQL/MariaDB 或 PostgreSQL 应该走哪个入口。
+- MySQL/MariaDB 向导默认只展示实例、保护方案、Runner、存储、首次全量、增量计划、RPO、日志保留、增量保留和恢复证明。
+- MySQL/MariaDB 向导把策略名称、来源角色、备份工具、工具模式、容器镜像/digest、datadir、网络、binlog 归档模式、复用资源、Synthetic Full 和 JSON 配置全部收进高级设置。
+- PostgreSQL Barman 向导默认只展示实例、Runner、Barman Server 名称、复用 Server、保留窗口以及 check/catalog/WAL/首次备份动作。
+- PostgreSQL Barman 向导把策略名称、备份方法、Barman home、配置路径、archiver、streaming archiver、slot 和配置 JSON 收进高级设置。
+- 恢复演练对话框默认只展示恢复点、Runner、隔离环境保留时间和风险确认。
+- 恢复演练把容器镜像、端口、PostgreSQL timeline/action/get-wal、失败清理、校验 SQL 和断言校验收进高级设置。
+
+后端结论：
+
+- 第二轮暂不需要后端改动。现有后端 payload 已能接收前端高级设置中的所有参数，且已有预览、校验和应用逻辑。
+- 后续如果继续优化，建议新增后端推荐接口，由后端按实例引擎、版本、Runner 在线状态和已有备份链生成默认模板，减少前端默认值判断。
+
+第二轮之后建议的后续轮次：
+
+- 第三轮：把高级资源改成“资源健康中心”，用分组摘要、异常优先和详情抽屉替代多张横向表。
+- 第四轮：拆分 `DatabaseManagement.vue` 中备份恢复相关组件，降低维护成本。
+- 第五轮：新增后端聚合与推荐接口，补齐风险历史、审批、告警和 SLA 视图。

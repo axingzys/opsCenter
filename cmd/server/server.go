@@ -223,6 +223,7 @@ func autoMigrate(db *gorm.DB) error {
 		&databasemodel.DatabaseTable{},
 		&databasemodel.DatabaseColumn{},
 		&databasemodel.DatabaseIndex{},
+		&databasemodel.DatabaseTableRelation{},
 		&databasemodel.DatabaseRedisKeyspace{},
 		&databasemodel.DatabaseRedisKeySample{},
 		&databasemodel.DatabaseSyncJob{},

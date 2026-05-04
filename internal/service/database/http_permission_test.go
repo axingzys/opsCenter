@@ -139,7 +139,7 @@ func newPermissionTestContext() (*gin.Context, *httptest.ResponseRecorder) {
 }
 
 func newPermissionAuditUseCase(auditRepo dbbiz.QueryAuditRepo) *dbbiz.UseCase {
-	return dbbiz.NewUseCase(nil, nil, nil, nil, nil, nil, nil, nil, auditRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return dbbiz.NewUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil, auditRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func TestEnsureInstancePermissionAllowsLegacyWhenNoRules(t *testing.T) {

@@ -30,41 +30,45 @@ func testOracleConnection(ctx context.Context, item *DatabaseInstance, credentia
 	return version, nil
 }
 
-func collectOracleMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, error) {
+func collectOracleMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, []*DatabaseTableRelation, error) {
 	db, err := openOracleDB(item, credential)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	defer db.Close()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if err := db.PingContext(queryCtx); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
 
 	version, err := readOracleVersion(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 
 	schemas, err := collectOracleSchemas(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	tables, err := collectOracleTables(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	columns, err := collectOracleColumns(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	indexes, err := collectOracleIndexes(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
-	return version, schemas, tables, columns, indexes, nil
+	relations, err := collectOracleRelations(queryCtx, db)
+	if err != nil {
+		return "", nil, nil, nil, nil, nil, err
+	}
+	return version, schemas, tables, columns, indexes, relations, nil
 }
 
 func executeOracleQuery(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlType, sqlText string, limit, timeoutSeconds int) (*DatabaseQueryResultVO, error) {
@@ -380,6 +384,68 @@ ORDER BY i.table_owner, i.table_name, i.index_name`)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历索引元数据失败: %w", err)
+	}
+	return items, nil
+}
+
+func collectOracleRelations(ctx context.Context, db *sql.DB) ([]*DatabaseTableRelation, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT
+	src.owner,
+	src.table_name,
+	src_col.column_name,
+	ref.owner,
+	ref.table_name,
+	ref_col.column_name,
+	src.constraint_name,
+	'',
+	COALESCE(src.delete_rule, '')
+FROM all_constraints src
+JOIN all_cons_columns src_col
+	ON src_col.owner = src.owner
+	AND src_col.constraint_name = src.constraint_name
+	AND src_col.table_name = src.table_name
+JOIN all_constraints ref
+	ON ref.owner = src.r_owner
+	AND ref.constraint_name = src.r_constraint_name
+JOIN all_cons_columns ref_col
+	ON ref_col.owner = ref.owner
+	AND ref_col.constraint_name = ref.constraint_name
+	AND ref_col.table_name = ref.table_name
+	AND ref_col.position = src_col.position
+WHERE src.constraint_type = 'R'
+	AND src.owner NOT IN ('SYS', 'SYSTEM', 'OUTLN', 'DBSNMP', 'APPQOSSYS', 'GSMADMIN_INTERNAL', 'XDB', 'CTXSYS', 'MDSYS', 'ORDSYS', 'WMSYS', 'OLAPSYS', 'LBACSYS', 'DVSYS', 'GGSYS', 'AUDSYS', 'ANONYMOUS')
+ORDER BY src.owner, src.table_name, src.constraint_name, src_col.position`)
+	if err != nil {
+		return nil, fmt.Errorf("读取表关系元数据失败: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]*DatabaseTableRelation, 0)
+	for rows.Next() {
+		var item DatabaseTableRelation
+		if err := rows.Scan(
+			&item.SchemaName,
+			&item.Table,
+			&item.ColumnName,
+			&item.ReferencedSchemaName,
+			&item.ReferencedTableName,
+			&item.ReferencedColumnName,
+			&item.ConstraintName,
+			&item.OnUpdate,
+			&item.OnDelete,
+		); err != nil {
+			return nil, fmt.Errorf("解析表关系元数据失败: %w", err)
+		}
+		item.RelationType = DatabaseTableRelationTypeForeignKey
+		item.RelationSource = DatabaseTableRelationSourceConstraint
+		item.Confidence = 100
+		item.Cardinality = DatabaseTableRelationCardinalityManyToOne
+		item.Comment = "数据库外键约束"
+		items = append(items, &item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历表关系元数据失败: %w", err)
 	}
 	return items, nil
 }

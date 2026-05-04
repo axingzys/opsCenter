@@ -484,6 +484,99 @@
                     </el-table-column>
                   </el-table>
                   </el-tab-pane>
+                  <el-tab-pane label="关系" name="relations">
+                    <div class="relation-toolbar">
+                      <div class="relation-summary">
+                        <el-tag type="success" size="small">外键 {{ relationSummary?.foreignKeys || 0 }}</el-tag>
+                        <el-tag type="warning" size="small">推断 {{ relationSummary?.inferred || 0 }}</el-tag>
+                        <el-tag type="primary" size="small">引用外部 {{ relationSummary?.outgoing || 0 }}</el-tag>
+                        <el-tag type="success" size="small">被引用 {{ relationSummary?.incoming || 0 }}</el-tag>
+                      </div>
+                      <div class="relation-filters">
+                        <el-select v-model="relationSourceFilter" size="small" class="relation-filter-select" @change="handleRelationFilterChange">
+                          <el-option label="全部关系" value="all" />
+                          <el-option label="数据库外键" value="foreign_key" />
+                          <el-option label="推断关系" value="inferred" />
+                        </el-select>
+                        <el-switch
+                          v-model="includeInferredRelations"
+                          size="small"
+                          active-text="含推断"
+                          inactive-text="仅外键"
+                          @change="handleRelationFilterChange"
+                        />
+                      </div>
+                    </div>
+
+                    <div v-if="tableRelations.length > 0" class="relation-mini-graph">
+                      <div class="relation-graph-column">
+                        <span class="relation-graph-title">引用当前表</span>
+                        <button
+                          v-for="item in incomingTableRelations"
+                          :key="`in-${item.id}`"
+                          type="button"
+                          class="relation-node relation-node-related"
+                          @click="handleOpenRelationTable(item)"
+                        >
+                          {{ relationEndpointLabel(item.schemaName, item.tableName) }}
+                        </button>
+                      </div>
+                      <div class="relation-node relation-node-current">
+                        <strong>{{ selectedTable.tableName }}</strong>
+                        <span>{{ selectedTable.schemaName }}</span>
+                      </div>
+                      <div class="relation-graph-column">
+                        <span class="relation-graph-title">当前表引用</span>
+                        <button
+                          v-for="item in outgoingTableRelations"
+                          :key="`out-${item.id}`"
+                          type="button"
+                          class="relation-node relation-node-related"
+                          @click="handleOpenRelationTable(item)"
+                        >
+                          {{ relationEndpointLabel(item.referencedSchemaName, item.referencedTableName) }}
+                        </button>
+                      </div>
+                    </div>
+
+                    <el-table :data="tableRelations" v-loading="detailsLoading" stripe height="330" class="metadata-table relation-table">
+                      <el-table-column label="方向" width="96">
+                        <template #default="{ row }">
+                          <el-tag :type="relationDirectionTagType(row.direction)" size="small">{{ relationDirectionText(row.direction) }}</el-tag>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="来源字段" min-width="190" show-overflow-tooltip>
+                        <template #default="{ row }">{{ relationEndpointLabel(row.schemaName, row.tableName, row.columnName) }}</template>
+                      </el-table-column>
+                      <el-table-column label="目标字段" min-width="190" show-overflow-tooltip>
+                        <template #default="{ row }">{{ relationEndpointLabel(row.referencedSchemaName, row.referencedTableName, row.referencedColumnName) }}</template>
+                      </el-table-column>
+                      <el-table-column label="类型" width="90">
+                        <template #default="{ row }">
+                          <el-tag :type="relationTypeTagType(row.relationType)" size="small">{{ row.relationTypeText }}</el-tag>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="可信度" width="90" align="center">
+                        <template #default="{ row }">
+                          <el-tag :type="relationConfidenceTagType(row.confidence)" size="small">{{ row.confidence || '-' }}</el-tag>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="规则" min-width="150" show-overflow-tooltip>
+                        <template #default="{ row }">
+                          {{ row.constraintName || row.relationSourceText || '-' }}
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="操作" width="138" fixed="right">
+                        <template #default="{ row }">
+                          <el-button link type="primary" @click.stop="handleOpenRelationTable(row)">跳转</el-button>
+                          <el-button link type="primary" @click.stop="handleCopyRelationJoin(row)">JOIN</el-button>
+                        </template>
+                      </el-table-column>
+                      <template #empty>
+                        <el-empty description="暂无表关系，重新同步后可查看外键或推断关系" :image-size="64" />
+                      </template>
+                    </el-table>
+                  </el-tab-pane>
                 </el-tabs>
               </div>
             </div>
@@ -2429,18 +2522,10 @@
             </div>
             <div class="backup-toolbar">
               <div class="backup-toolbar-group">
-                <el-dropdown trigger="click" @command="handleEnableProtectionCommand">
-                  <el-button type="primary" plain>
-                    <el-icon style="margin-right: 4px;"><Plus /></el-icon>
-                    启用保护
-                  </el-button>
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item command="mysql">MySQL / MariaDB PITR</el-dropdown-item>
-                      <el-dropdown-item command="postgresql">PostgreSQL Barman</el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
+                <el-button type="primary" plain @click="openEnableProtectionDialog">
+                  <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                  启用保护
+                </el-button>
                 <el-button type="warning" plain @click="openRestorePlanDialog">
                   恢复演练
                 </el-button>
@@ -3852,6 +3937,52 @@
               </el-tab-pane>
             </el-tabs>
           </div>
+
+          <el-dialog
+            v-model="enableProtectionDialogVisible"
+            title="启用数据库保护"
+            width="640px"
+            @close="resetEnableProtectionForm"
+          >
+            <el-alert
+              title="先选择要保护的实例，系统会按数据库引擎进入推荐向导；底层工具、路径和 JSON 配置在向导的高级设置中调整。"
+              type="info"
+              show-icon
+              :closable="false"
+              class="backup-dialog-alert"
+            />
+            <el-form label-width="110px">
+              <el-form-item label="数据库实例">
+                <el-select
+                  v-model="enableProtectionForm.instanceId"
+                  placeholder="请选择 MySQL、MariaDB 或 PostgreSQL 实例"
+                  filterable
+                  style="width: 100%;"
+                >
+                  <el-option
+                    v-for="item in pitrBackupInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.dbTypeText || item.dbType}${item.version ? ` / ${item.version}` : ''}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="推荐方案">
+                <div class="enable-protection-recommendation">
+                  <el-tag :type="enableProtectionSelectedInstance?.dbType === 'postgresql' ? 'primary' : 'success'">
+                    {{ enableProtectionRecommendation.title }}
+                  </el-tag>
+                  <span>{{ enableProtectionRecommendation.description }}</span>
+                </div>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="enableProtectionDialogVisible = false">取消</el-button>
+              <el-button type="primary" :disabled="!enableProtectionForm.instanceId" @click="continueEnableProtection">
+                进入向导
+              </el-button>
+            </template>
+          </el-dialog>
 
           <el-drawer
             v-model="protectionProfileDetailVisible"
@@ -5952,137 +6083,280 @@
         class="backup-dialog-alert"
       />
       <el-form ref="protectionWizardFormRef" :model="protectionWizardForm" :rules="protectionWizardRules" label-width="130px">
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="数据库实例" prop="instanceId">
-              <el-select v-model="protectionWizardForm.instanceId" placeholder="请选择 MySQL/MariaDB 实例" filterable style="width: 100%;" @change="handleProtectionWizardInstanceChange">
-                <el-option
-                  v-for="item in mysqlPhysicalBackupPolicyInstances"
-                  :key="item.id"
-                  :label="`${item.name}（${item.dbTypeText || item.dbType}${item.version ? ` / ${item.version}` : ''}）`"
-                  :value="item.id"
-                />
-              </el-select>
+        <div class="wizard-primary-section">
+          <div class="wizard-section-heading">
+            <span>推荐配置</span>
+            <small>{{ mysqlProtectionTemplateSummary }}</small>
+          </div>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="数据库实例" prop="instanceId">
+                <el-select v-model="protectionWizardForm.instanceId" placeholder="请选择 MySQL/MariaDB 实例" filterable style="width: 100%;" @change="handleProtectionWizardInstanceChange">
+                  <el-option
+                    v-for="item in mysqlPhysicalBackupPolicyInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.dbTypeText || item.dbType}${item.version ? ` / ${item.version}` : ''}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="保护方案">
+                <el-select v-model="protectionWizardForm.templateKey" style="width: 100%;">
+                  <el-option label="物理备份 + binlog PITR" value="rolling_synthetic_full" />
+                  <el-option label="物理备份 + 保守保留" value="conservative_pitr" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="Runner 主机" prop="runnerHostId">
+                <el-select v-model="protectionWizardForm.runnerHostId" placeholder="请选择 Runner" filterable style="width: 100%;">
+                  <el-option
+                    v-for="item in runnerHosts.filter(host => host.enabled !== false)"
+                    :key="item.id"
+                    :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="备份存储">
+                <el-select v-model="protectionWizardForm.storageProfileId" placeholder="默认使用 Runner 本地仓库" clearable filterable style="width: 100%;">
+                  <el-option v-for="item in storageProfiles" :key="item.id" :label="`${item.name}（${item.storageTypeText || item.storageType}）`" :value="item.id" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="8">
+              <el-form-item label="首次全量">
+                <el-switch v-model="protectionWizardForm.runInitialFullNow" active-text="立即执行" inactive-text="稍后手动" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="增量计划" prop="incrementalSchedule">
+                <el-input v-model="protectionWizardForm.incrementalSchedule" placeholder="0 3 * * *" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="RPO 目标">
+                <el-input-number v-model="protectionWizardForm.binlogRpoTargetSeconds" :min="30" :max="86400" class="query-number" />
+                <div class="field-tip">单位秒，默认 300 秒。</div>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="8">
+              <el-form-item label="日志保留">
+                <el-input-number v-model="protectionWizardForm.binlogRetentionDays" :min="1" :max="3650" class="query-number" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="增量保留">
+                <el-input-number v-model="protectionWizardForm.retentionIncrementalKeepDays" :min="1" :max="3650" class="query-number" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="8">
+              <el-form-item label="恢复证明">
+                <el-switch v-model="protectionWizardForm.restoreDrillRequired" active-text="要求" inactive-text="不强制" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </div>
+
+        <el-collapse v-model="protectionWizardAdvancedOpen" class="wizard-advanced-collapse">
+          <el-collapse-item name="advanced" title="高级设置：工具、来源、日志归档、Synthetic Full 与保留门禁">
+            <el-row :gutter="16">
+              <el-col :span="12">
+                <el-form-item label="策略名称">
+                  <el-input v-model="protectionWizardForm.policyName" placeholder="默认按实例名生成" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="来源角色">
+                  <el-select v-model="protectionWizardForm.sourceRole" style="width: 100%;">
+                    <el-option label="主库" value="primary" />
+                    <el-option label="实时从库" value="replica" />
+                    <el-option label="延迟从库" value="delayed_replica" />
+                    <el-option label="备份从库" value="backup_replica" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="来源实例">
+                  <el-select v-model="protectionWizardForm.sourceInstanceId" placeholder="默认同主实例" clearable filterable style="width: 100%;">
+                    <el-option
+                      v-for="item in mysqlPhysicalBackupPolicyInstances"
+                      :key="item.id"
+                      :label="`${item.name}（${item.dbTypeText || item.dbType}）`"
+                      :value="item.id"
+                    />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="备份工具" prop="backupEngine">
+                  <el-select v-model="protectionWizardForm.backupEngine" style="width: 100%;">
+                    <el-option v-for="item in protectionWizardBackupEngineOptions" :key="item.value" :label="item.label" :value="item.value" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="工具模式">
+                  <el-select v-model="protectionWizardForm.toolExecutionMode" style="width: 100%;">
+                    <el-option label="宿主机工具" value="host_tools" />
+                    <el-option label="容器化工具" value="container_tools" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="Full 计划">
+                  <el-input v-model="protectionWizardForm.fullSchedule" placeholder="留空表示仅手动或首次执行" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row v-if="protectionWizardForm.toolExecutionMode === 'container_tools'" :gutter="16">
+              <el-col :span="6">
+                <el-form-item label="工具镜像">
+                  <el-input v-model="protectionWizardForm.toolImage" placeholder="opshub-runner-tools:mysql80" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="镜像 Digest">
+                  <el-input v-model="protectionWizardForm.toolImageDigest" placeholder="sha256:..." />
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="datadir 挂载">
+                  <el-input v-model="protectionWizardForm.containerDatadirPath" placeholder="/var/lib/mysql" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="工作目录">
+                  <el-input v-model="protectionWizardForm.containerWorkdirPath" placeholder="默认 Runner 工作目录" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row v-if="protectionWizardForm.toolExecutionMode === 'container_tools'" :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="网络模式">
+                  <el-input v-model="protectionWizardForm.containerNetworkMode" placeholder="host" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="datadir 只读">
+                  <el-switch v-model="protectionWizardForm.containerDatadirRo" active-text="只读" inactive-text="可写" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="归档模式">
+                  <el-select v-model="protectionWizardForm.binlogArchiveMode" style="width: 100%;">
+                    <el-option label="polling" value="polling" />
+                    <el-option label="streaming" value="streaming" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="复用归档流">
+                  <el-select v-model="protectionWizardForm.reuseLogArchiveStreamId" placeholder="自动创建或复用" clearable filterable style="width: 100%;">
+                    <el-option v-for="item in protectionWizardBinlogStreamOptions" :key="item.id" :label="item.label" :value="item.id" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="复用策略">
+                  <el-select v-model="protectionWizardForm.reuseBackupPolicyId" placeholder="自动创建或复用" clearable filterable style="width: 100%;">
+                    <el-option
+                      v-for="item in backupPolicies.filter(policy => !protectionWizardForm.instanceId || policy.instanceId === protectionWizardForm.instanceId)"
+                      :key="item.id"
+                      :label="`${item.name}（${item.statusText || item.status || '-'}）`"
+                      :value="item.id"
+                    />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="自动合成">
+                  <el-switch v-model="protectionWizardForm.syntheticEnabled" active-text="启用" inactive-text="关闭" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="自动运行">
+                  <el-switch v-model="protectionWizardForm.syntheticAutoRun" active-text="开启" inactive-text="关闭" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="触发增量数">
+                  <el-input-number v-model="protectionWizardForm.syntheticTriggerAfterIncrementals" :min="1" :max="365" class="query-number" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="合并增量数">
+                  <el-input-number v-model="protectionWizardForm.syntheticMergeOldestIncrementals" :min="1" :max="365" class="query-number" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="证明门禁">
+                  <el-switch v-model="protectionWizardForm.syntheticRequireRestoreProof" active-text="要求" inactive-text="不要求" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="旧链保护">
+                  <el-switch v-model="protectionWizardForm.syntheticNeverDeleteWithoutProof" active-text="Proof 后清理" inactive-text="不强制" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="Proof后标记">
+                  <el-switch v-model="protectionWizardForm.syntheticMarkSupersededAfterProof" active-text="启用" inactive-text="关闭" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="旧链保留">
+                  <el-input-number v-model="protectionWizardForm.syntheticSupersededKeepDays" :min="1" :max="3650" class="query-number" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="全量保留月">
+                  <el-input-number v-model="protectionWizardForm.retentionFullKeepMonths" :min="1" :max="120" class="query-number" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="binlog保留">
+                  <el-input-number v-model="protectionWizardForm.retentionBinlogKeepDays" :min="1" :max="3650" class="query-number" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="删除门禁">
+                  <el-switch v-model="protectionWizardForm.retentionNeverDeleteWithoutProof" active-text="需要 Proof" inactive-text="不强制" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="归档配置 JSON">
+              <el-input
+                v-model="protectionWizardForm.archiveConfigJson"
+                type="textarea"
+                :rows="3"
+                placeholder="可选，仅保存非敏感归档参数；密钥、密码、私钥不要写入这里"
+              />
             </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="保护模板">
-              <el-select v-model="protectionWizardForm.templateKey" style="width: 100%;">
-                <el-option label="物理 PITR - 滚动合成全量" value="rolling_synthetic_full" />
-                <el-option label="物理 PITR - 保守策略" value="conservative_pitr" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="Runner 主机" prop="runnerHostId">
-              <el-select v-model="protectionWizardForm.runnerHostId" placeholder="请选择 Runner" filterable style="width: 100%;">
-                <el-option
-                  v-for="item in runnerHosts.filter(host => host.enabled !== false)"
-                  :key="item.id"
-                  :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
-                  :value="item.id"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="存储配置">
-              <el-select v-model="protectionWizardForm.storageProfileId" placeholder="可选；默认 runner:// 本地" clearable filterable style="width: 100%;">
-                <el-option v-for="item in storageProfiles" :key="item.id" :label="`${item.name}（${item.storageTypeText || item.storageType}）`" :value="item.id" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="备份工具" prop="backupEngine">
-              <el-select v-model="protectionWizardForm.backupEngine" style="width: 100%;">
-                <el-option v-for="item in protectionWizardBackupEngineOptions" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="工具模式">
-              <el-select v-model="protectionWizardForm.toolExecutionMode" style="width: 100%;">
-                <el-option label="宿主机工具" value="host_tools" />
-                <el-option label="容器化工具" value="container_tools" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row v-if="protectionWizardForm.toolExecutionMode === 'container_tools'" :gutter="16">
-          <el-col :span="8">
-            <el-form-item label="工具镜像">
-              <el-input v-model="protectionWizardForm.toolImage" placeholder="如 opshub-runner-tools:mysql80" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="datadir 挂载">
-              <el-input v-model="protectionWizardForm.containerDatadirPath" placeholder="/var/lib/mysql" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="网络模式">
-              <el-input v-model="protectionWizardForm.containerNetworkMode" placeholder="host" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="8">
-            <el-form-item label="立即 Full">
-              <el-switch v-model="protectionWizardForm.runInitialFullNow" active-text="启用后执行" inactive-text="只保存策略" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="Full Cron">
-              <el-input v-model="protectionWizardForm.fullSchedule" placeholder="留空表示不定期原生 Full" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="增量 Cron" prop="incrementalSchedule">
-              <el-input v-model="protectionWizardForm.incrementalSchedule" placeholder="0 3 * * *" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="8">
-            <el-form-item label="归档模式">
-              <el-select v-model="protectionWizardForm.binlogArchiveMode" style="width: 100%;">
-                <el-option label="polling" value="polling" />
-                <el-option label="streaming" value="streaming" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="RPO 秒">
-              <el-input-number v-model="protectionWizardForm.binlogRpoTargetSeconds" :min="30" :max="86400" class="query-number" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="binlog 保留">
-              <el-input-number v-model="protectionWizardForm.binlogRetentionDays" :min="1" :max="3650" class="query-number" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="8">
-            <el-form-item label="自动合成">
-              <el-switch v-model="protectionWizardForm.syntheticEnabled" active-text="启用" inactive-text="关闭" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="触发增量数">
-              <el-input-number v-model="protectionWizardForm.syntheticTriggerAfterIncrementals" :min="1" :max="365" class="query-number" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="合并增量数">
-              <el-input-number v-model="protectionWizardForm.syntheticMergeOldestIncrementals" :min="1" :max="365" class="query-number" />
-            </el-form-item>
-          </el-col>
-        </el-row>
+          </el-collapse-item>
+        </el-collapse>
       </el-form>
       <div v-if="protectionWizardPreview" class="wizard-preview">
         <el-alert
@@ -6139,127 +6413,136 @@
         class="backup-dialog-alert"
       />
       <el-form ref="postgresBarmanWizardFormRef" :model="postgresBarmanWizardForm" :rules="postgresBarmanWizardRules" label-width="130px">
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="PostgreSQL 实例" prop="instanceId">
-              <el-select v-model="postgresBarmanWizardForm.instanceId" placeholder="请选择 PostgreSQL 实例" filterable style="width: 100%;" @change="handlePostgresBarmanWizardInstanceChange">
-                <el-option
-                  v-for="item in postgresqlBackupInstances"
-                  :key="item.id"
-                  :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
-                  :value="item.id"
-                />
-              </el-select>
+        <div class="wizard-primary-section">
+          <div class="wizard-section-heading">
+            <span>推荐配置</span>
+            <small>{{ postgresBarmanTemplateSummary }}</small>
+          </div>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="PostgreSQL 实例" prop="instanceId">
+                <el-select v-model="postgresBarmanWizardForm.instanceId" placeholder="请选择 PostgreSQL 实例" filterable style="width: 100%;" @change="handlePostgresBarmanWizardInstanceChange">
+                  <el-option
+                    v-for="item in postgresqlBackupInstances"
+                    :key="item.id"
+                    :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Runner 主机" prop="runnerHostId">
+                <el-select v-model="postgresBarmanWizardForm.runnerHostId" placeholder="请选择 SSH Runner" filterable style="width: 100%;">
+                  <el-option
+                    v-for="item in runnerHosts.filter(host => host.runnerType === 'ssh' && host.enabled !== false)"
+                    :key="item.id"
+                    :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="Barman Server" prop="barmanServerName">
+                <el-input v-model="postgresBarmanWizardForm.barmanServerName" placeholder="barman.conf 中的 server name" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="复用 Server">
+                <el-select v-model="postgresBarmanWizardForm.reuseBarmanServerId" placeholder="可选；自动匹配当前实例" clearable filterable style="width: 100%;">
+                  <el-option
+                    v-for="item in barmanServers.filter(server => !postgresBarmanWizardForm.instanceId || server.sourceInstanceId === postgresBarmanWizardForm.instanceId)"
+                    :key="item.id"
+                    :label="`${item.name} / ${item.barmanServerName}`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="保留策略">
+            <el-input v-model="postgresBarmanWizardForm.retentionPolicy" placeholder="RECOVERY WINDOW OF 30 DAYS" />
+          </el-form-item>
+          <el-row :gutter="16" class="postgres-barman-wizard-switch-row">
+            <el-col :span="6">
+              <el-form-item label="Barman 检查">
+                <el-switch v-model="postgresBarmanWizardForm.runCheckNow" active-text="下发" inactive-text="跳过" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="6">
+              <el-form-item label="同步目录">
+                <el-switch v-model="postgresBarmanWizardForm.syncCatalogNow" active-text="下发" inactive-text="跳过" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="6">
+              <el-form-item label="同步 WAL">
+                <el-switch v-model="postgresBarmanWizardForm.syncWalNow" active-text="下发" inactive-text="跳过" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="6">
+              <el-form-item label="首次备份">
+                <el-switch v-model="postgresBarmanWizardForm.runInitialBackupNow" active-text="下发" inactive-text="跳过" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </div>
+
+        <el-collapse v-model="postgresBarmanWizardAdvancedOpen" class="wizard-advanced-collapse">
+          <el-collapse-item name="advanced" title="高级设置：Barman 路径、归档模式、slot 与原始配置">
+            <el-row :gutter="16">
+              <el-col :span="12">
+                <el-form-item label="显示名称">
+                  <el-input v-model="postgresBarmanWizardForm.name" placeholder="默认按实例名生成" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="备份方法">
+                  <el-input v-model="postgresBarmanWizardForm.backupMethod" placeholder="postgres / rsync" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="12">
+                <el-form-item label="Barman home">
+                  <el-input v-model="postgresBarmanWizardForm.barmanHome" placeholder="/var/lib/barman，可选" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="配置文件">
+                  <el-input v-model="postgresBarmanWizardForm.configPath" placeholder="/etc/barman.conf，可选" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="16">
+              <el-col :span="8">
+                <el-form-item label="archive">
+                  <el-switch v-model="postgresBarmanWizardForm.archiverEnabled" active-text="启用" inactive-text="关闭" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="streaming">
+                  <el-switch v-model="postgresBarmanWizardForm.streamingArchiverEnabled" active-text="启用" inactive-text="关闭" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="8">
+                <el-form-item label="replication slot">
+                  <el-input v-model="postgresBarmanWizardForm.slotName" placeholder="可选" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="配置 JSON">
+              <el-input
+                v-model="postgresBarmanWizardForm.configJson"
+                type="textarea"
+                :rows="3"
+                placeholder="可选；只保存非敏感摘要，密钥仍走 Runner/凭据配置"
+              />
             </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="Runner 主机" prop="runnerHostId">
-              <el-select v-model="postgresBarmanWizardForm.runnerHostId" placeholder="请选择 SSH Runner" filterable style="width: 100%;">
-                <el-option
-                  v-for="item in runnerHosts.filter(host => host.runnerType === 'ssh' && host.enabled !== false)"
-                  :key="item.id"
-                  :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
-                  :value="item.id"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="显示名称">
-              <el-input v-model="postgresBarmanWizardForm.name" placeholder="如 pg-prod-Barman-PITR保护" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="Barman server" prop="barmanServerName">
-              <el-input v-model="postgresBarmanWizardForm.barmanServerName" placeholder="barman.conf 中的 server name" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="复用 Server">
-              <el-select v-model="postgresBarmanWizardForm.reuseBarmanServerId" placeholder="可选；自动匹配当前实例" clearable filterable style="width: 100%;">
-                <el-option
-                  v-for="item in barmanServers.filter(server => !postgresBarmanWizardForm.instanceId || server.sourceInstanceId === postgresBarmanWizardForm.instanceId)"
-                  :key="item.id"
-                  :label="`${item.name} / ${item.barmanServerName}`"
-                  :value="item.id"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="保留策略">
-              <el-input v-model="postgresBarmanWizardForm.retentionPolicy" placeholder="RECOVERY WINDOW OF 30 DAYS" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="8">
-            <el-form-item label="Barman home">
-              <el-input v-model="postgresBarmanWizardForm.barmanHome" placeholder="/var/lib/barman，可选" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="配置文件">
-              <el-input v-model="postgresBarmanWizardForm.configPath" placeholder="/etc/barman.conf，可选" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="备份方法">
-              <el-input v-model="postgresBarmanWizardForm.backupMethod" placeholder="postgres / rsync" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="8">
-            <el-form-item label="archive">
-              <el-switch v-model="postgresBarmanWizardForm.archiverEnabled" active-text="启用" inactive-text="关闭" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="streaming">
-              <el-switch v-model="postgresBarmanWizardForm.streamingArchiverEnabled" active-text="启用" inactive-text="关闭" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item label="slot">
-              <el-input v-model="postgresBarmanWizardForm.slotName" placeholder="可选" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16" class="postgres-barman-wizard-switch-row">
-          <el-col :span="12">
-            <el-form-item label="Barman check">
-              <el-switch v-model="postgresBarmanWizardForm.runCheckNow" active-text="下发" inactive-text="跳过" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="Catalog sync">
-              <el-switch v-model="postgresBarmanWizardForm.syncCatalogNow" active-text="下发" inactive-text="跳过" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="WAL sync">
-              <el-switch v-model="postgresBarmanWizardForm.syncWalNow" active-text="下发" inactive-text="跳过" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="立即备份">
-              <el-switch v-model="postgresBarmanWizardForm.runInitialBackupNow" active-text="下发" inactive-text="跳过" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="配置 JSON">
-          <el-input
-            v-model="postgresBarmanWizardForm.configJson"
-            type="textarea"
-            :rows="3"
-            placeholder="可选；只保存非敏感摘要，密钥仍走 Runner/凭据配置"
-          />
-        </el-form-item>
+          </el-collapse-item>
+        </el-collapse>
       </el-form>
       <div v-if="postgresBarmanWizardPreview" class="wizard-preview">
         <el-alert
@@ -6314,107 +6597,149 @@
         class="backup-dialog-alert"
       />
       <el-form ref="protectionRestoreDrillFormRef" :model="protectionRestoreDrillForm" :rules="protectionRestoreDrillRules" label-width="130px">
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="目标类型" prop="restoreTargetType">
-              <el-select v-model="protectionRestoreDrillForm.restoreTargetType" style="width: 100%;">
-                <el-option label="按时间点" value="time" />
-                <el-option v-if="protectionRestoreDrillProfile?.engine === 'postgresql'" label="按 LSN" value="lsn" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item :label="protectionRestoreDrillForm.restoreTargetType === 'lsn' ? '目标 LSN' : '目标时间'" prop="restoreTargetValue">
-              <el-date-picker
-                v-if="protectionRestoreDrillForm.restoreTargetType !== 'lsn'"
-                v-model="protectionRestoreDrillForm.restoreTargetValue"
-                type="datetime"
-                value-format="YYYY-MM-DD HH:mm:ss"
-                placeholder="选择恢复目标时间"
-                style="width: 100%;"
-              />
-              <el-input v-else v-model="protectionRestoreDrillForm.restoreTargetValue" placeholder="如：A/18000098" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="Runner 主机" prop="runnerHostId">
-              <el-select v-model="protectionRestoreDrillForm.runnerHostId" placeholder="请选择 SSH Runner" filterable style="width: 100%;">
-                <el-option
-                  v-for="item in runnerHosts.filter(host => host.runnerType === 'ssh' && host.enabled !== false)"
-                  :key="item.id"
-                  :label="`${item.name}（${item.host || item.runnerType}）`"
-                  :value="item.id"
-                />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="容器镜像">
-              <el-input v-model="protectionRestoreDrillForm.containerImage" placeholder="留空使用默认 mysql/mariadb/postgres 镜像" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="监听端口">
-              <el-input-number v-model="protectionRestoreDrillForm.listenPort" :min="0" :max="65535" class="query-number" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="保留小时" prop="expiresInHours">
-              <el-input-number v-model="protectionRestoreDrillForm.expiresInHours" :min="1" :max="168" class="query-number" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-form-item label="额外校验 SQL">
-          <el-input
-            v-model="protectionRestoreDrillForm.validationSqlText"
-            type="textarea"
-            :rows="4"
-            placeholder="每行一条只读 SQL；断言校验可在底层恢复任务详情继续查看 proof"
-          />
-        </el-form-item>
-        <el-form-item label="断言校验">
-          <div class="restore-assertions">
-            <div class="restore-assertions-header">
-              <span class="field-tip">expectedRows 校验行数；expectedScalar 校验首行首列；expectedContains 校验输出中包含固定文本。</span>
-              <el-button size="small" type="primary" plain @click="addProtectionRestoreDrillAssertion">添加断言</el-button>
-            </div>
-            <div v-if="!protectionRestoreDrillForm.validationAssertions?.length" class="restore-empty-tip">未配置断言时，只记录校验 SQL 输出和执行状态。</div>
-            <div
-              v-for="(item, index) in protectionRestoreDrillForm.validationAssertions"
-              :key="index"
-              class="restore-assertion-item"
-            >
-              <div class="restore-assertion-toolbar">
-                <span>断言 {{ index + 1 }}</span>
-                <el-button link type="danger" @click="removeProtectionRestoreDrillAssertion(index)">删除</el-button>
-              </div>
-              <el-input
-                v-model="item.sql"
-                type="textarea"
-                :rows="2"
-                placeholder="只允许只读 SQL，例如 SELECT COUNT(*) FROM orders"
-              />
-              <el-row :gutter="10" class="restore-assertion-fields">
-                <el-col :span="8">
-                  <el-input-number v-model="item.expectedRows" :min="0" :max="1000000000" placeholder="expectedRows" class="assertion-number" />
-                </el-col>
-                <el-col :span="8">
-                  <el-input v-model="item.expectedScalar" placeholder="expectedScalar" clearable />
-                </el-col>
-                <el-col :span="8">
-                  <el-input v-model="item.expectedContains" placeholder="expectedContains" clearable />
-                </el-col>
-              </el-row>
-            </div>
+        <div class="wizard-primary-section">
+          <div class="wizard-section-heading">
+            <span>演练目标</span>
+            <small>默认恢复到 Runner 隔离环境，用于证明当前备份链可恢复。</small>
           </div>
-        </el-form-item>
-        <el-form-item label="风险确认" prop="confirmIsolated">
-          <el-checkbox v-model="protectionRestoreDrillForm.confirmIsolated">我确认本次只恢复到 Runner 隔离环境，不覆盖生产数据。</el-checkbox>
-        </el-form-item>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="恢复点" prop="restoreTargetType">
+                <el-select v-model="protectionRestoreDrillForm.restoreTargetType" style="width: 100%;">
+                  <el-option label="按时间点" value="time" />
+                  <el-option v-if="protectionRestoreDrillProfile?.engine === 'postgresql'" label="按 LSN" value="lsn" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item :label="protectionRestoreDrillForm.restoreTargetType === 'lsn' ? '目标 LSN' : '目标时间'" prop="restoreTargetValue">
+                <el-date-picker
+                  v-if="protectionRestoreDrillForm.restoreTargetType !== 'lsn'"
+                  v-model="protectionRestoreDrillForm.restoreTargetValue"
+                  type="datetime"
+                  value-format="YYYY-MM-DD HH:mm:ss"
+                  placeholder="选择恢复目标时间"
+                  style="width: 100%;"
+                />
+                <el-input v-else v-model="protectionRestoreDrillForm.restoreTargetValue" placeholder="如：A/18000098" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-row :gutter="16">
+            <el-col :span="12">
+              <el-form-item label="Runner 主机" prop="runnerHostId">
+                <el-select v-model="protectionRestoreDrillForm.runnerHostId" placeholder="请选择 SSH Runner" filterable style="width: 100%;">
+                  <el-option
+                    v-for="item in runnerHosts.filter(host => host.runnerType === 'ssh' && host.enabled !== false)"
+                    :key="item.id"
+                    :label="`${item.name}（${item.host || item.runnerType}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="环境保留" prop="expiresInHours">
+                <el-input-number v-model="protectionRestoreDrillForm.expiresInHours" :min="1" :max="168" class="query-number" />
+                <div class="field-tip">单位小时，到期后可在演练记录中清理。</div>
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <el-form-item label="风险确认" prop="confirmIsolated">
+            <el-checkbox v-model="protectionRestoreDrillForm.confirmIsolated">我确认本次只恢复到 Runner 隔离环境，不覆盖生产数据。</el-checkbox>
+          </el-form-item>
+        </div>
+
+        <el-collapse v-model="protectionRestoreDrillAdvancedOpen" class="wizard-advanced-collapse">
+          <el-collapse-item name="advanced" title="高级设置：容器、端口、PostgreSQL 恢复动作和校验 SQL">
+            <el-row :gutter="16">
+              <el-col :span="12">
+                <el-form-item label="容器镜像">
+                  <el-input v-model="protectionRestoreDrillForm.containerImage" placeholder="留空使用默认 mysql/mariadb/postgres 镜像" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="监听端口">
+                  <el-input-number v-model="protectionRestoreDrillForm.listenPort" :min="0" :max="65535" class="query-number" />
+                  <div class="field-tip">0 或留空表示自动分配。</div>
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row v-if="protectionRestoreDrillProfile?.engine === 'postgresql'" :gutter="16">
+              <el-col :span="6">
+                <el-form-item label="启动实例">
+                  <el-switch v-model="protectionRestoreDrillForm.postgresStartInstance" active-text="启动" inactive-text="仅目录" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="目标 Timeline">
+                  <el-input v-model="protectionRestoreDrillForm.targetTimelineId" placeholder="可选" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="目标动作">
+                  <el-select v-model="protectionRestoreDrillForm.targetAction" style="width: 100%;">
+                    <el-option label="pause" value="pause" />
+                    <el-option label="shutdown" value="shutdown" />
+                    <el-option label="promote" value="promote" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="6">
+                <el-form-item label="Barman Get WAL">
+                  <el-switch v-model="protectionRestoreDrillForm.barmanGetWal" active-text="启用" inactive-text="关闭" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="失败后清理">
+              <el-switch v-model="protectionRestoreDrillForm.cleanupOnFailure" active-text="清理现场" inactive-text="保留排障" />
+            </el-form-item>
+            <el-form-item label="额外校验 SQL">
+              <el-input
+                v-model="protectionRestoreDrillForm.validationSqlText"
+                type="textarea"
+                :rows="4"
+                placeholder="每行一条只读 SQL；断言校验可在恢复任务详情查看 proof"
+              />
+            </el-form-item>
+            <el-form-item label="断言校验">
+              <div class="restore-assertions">
+                <div class="restore-assertions-header">
+                  <span class="field-tip">expectedRows 校验行数；expectedScalar 校验首行首列；expectedContains 校验输出中包含固定文本。</span>
+                  <el-button size="small" type="primary" plain @click="addProtectionRestoreDrillAssertion">添加断言</el-button>
+                </div>
+                <div v-if="!protectionRestoreDrillForm.validationAssertions?.length" class="restore-empty-tip">未配置断言时，只记录校验 SQL 输出和执行状态。</div>
+                <div
+                  v-for="(item, index) in protectionRestoreDrillForm.validationAssertions"
+                  :key="index"
+                  class="restore-assertion-item"
+                >
+                  <div class="restore-assertion-toolbar">
+                    <span>断言 {{ index + 1 }}</span>
+                    <el-button link type="danger" @click="removeProtectionRestoreDrillAssertion(index)">删除</el-button>
+                  </div>
+                  <el-input
+                    v-model="item.sql"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="只允许只读 SQL，例如 SELECT COUNT(*) FROM orders"
+                  />
+                  <el-row :gutter="10" class="restore-assertion-fields">
+                    <el-col :span="8">
+                      <el-input-number v-model="item.expectedRows" :min="0" :max="1000000000" placeholder="expectedRows" class="assertion-number" />
+                    </el-col>
+                    <el-col :span="8">
+                      <el-input v-model="item.expectedScalar" placeholder="expectedScalar" clearable />
+                    </el-col>
+                    <el-col :span="8">
+                      <el-input v-model="item.expectedContains" placeholder="expectedContains" clearable />
+                    </el-col>
+                  </el-row>
+                </div>
+              </div>
+            </el-form-item>
+          </el-collapse-item>
+        </el-collapse>
       </el-form>
       <el-alert
         v-if="protectionRestoreDrillResult"
@@ -7969,6 +8294,7 @@ import {
   listDatabaseInstances,
   listDatabaseInstancePermissions,
   listDatabaseIndexes,
+  listDatabaseTableRelations,
   listDatabaseQueryAudits,
   listDatabaseSchemas,
   listDatabaseSlowQueries,
@@ -8080,6 +8406,8 @@ import {
   type DatabaseStorageProfilePostureCheckPayload,
   type DatabaseStorageProfileResult,
   type DatabaseSupportedType,
+  type DatabaseTableRelationGraphResult,
+  type DatabaseTableRelationResult,
   type DatabaseTopologyFinding,
   type DatabaseTopologyLink,
   type DatabaseTopologyNode,
@@ -8172,6 +8500,10 @@ const schemas = ref<any[]>([])
 const tables = ref<any[]>([])
 const columns = ref<any[]>([])
 const indexes = ref<any[]>([])
+const tableRelations = ref<DatabaseTableRelationResult[]>([])
+const tableRelationGraph = ref<DatabaseTableRelationGraphResult>()
+const relationSourceFilter = ref('all')
+const includeInferredRelations = ref(true)
 const selectedSchema = ref('')
 const selectedTable = ref<any>()
 const detailTab = ref('columns')
@@ -8316,19 +8648,23 @@ const backupTaskTotal = ref(0)
 const backupTaskFormRef = ref<FormInstance>()
 const protectionProfileLoading = ref(false)
 const validatingProtectionProfileId = ref('')
+const enableProtectionDialogVisible = ref(false)
 const protectionWizardDialogVisible = ref(false)
 const protectionWizardSubmitting = ref(false)
 const protectionWizardPreviewing = ref(false)
 const protectionWizardPreview = ref<DatabaseMySQLPITRWizardResult>()
 const protectionWizardFormRef = ref<FormInstance>()
+const protectionWizardAdvancedOpen = ref<string[]>([])
 const postgresBarmanWizardDialogVisible = ref(false)
 const postgresBarmanWizardSubmitting = ref(false)
 const postgresBarmanWizardPreviewing = ref(false)
 const postgresBarmanWizardPreview = ref<DatabasePostgresBarmanPITRWizardResult>()
 const postgresBarmanWizardFormRef = ref<FormInstance>()
+const postgresBarmanWizardAdvancedOpen = ref<string[]>([])
 const protectionRestoreDrillDialogVisible = ref(false)
 const protectionRestoreDrillSubmitting = ref(false)
 const protectionRestoreDrillFormRef = ref<FormInstance>()
+const protectionRestoreDrillAdvancedOpen = ref<string[]>([])
 const protectionRestoreDrillProfile = ref<DatabaseProtectionProfileResult>()
 const protectionRestoreDrillResult = ref<DatabaseProtectionRestoreDrillResult>()
 const protectionProfiles = ref<DatabaseProtectionProfileResult[]>([])
@@ -8627,6 +8963,10 @@ const protectionRiskQuery = reactive({
   riskLevel: '',
   issueType: '',
   productionOnly: ''
+})
+
+const enableProtectionForm = reactive({
+  instanceId: undefined as number | undefined
 })
 
 const protectionWizardForm = reactive<DatabaseMySQLPITRWizardPayload>({
@@ -9467,6 +9807,16 @@ const isRedisMetadataInstance = computed(() =>
   currentMetadataInstance.value?.dbType === 'redis'
 )
 
+const relationSummary = computed(() => tableRelationGraph.value?.summary)
+
+const incomingTableRelations = computed(() =>
+  tableRelations.value.filter(item => item.direction === 'incoming')
+)
+
+const outgoingTableRelations = computed(() =>
+  tableRelations.value.filter(item => item.direction === 'outgoing')
+)
+
 const isRedisQueryInstance = computed(() =>
   currentQueryInstance.value?.dbType === 'redis'
 )
@@ -9605,6 +9955,30 @@ const pitrBackupInstances = computed(() =>
   instanceOptions.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
+const enableProtectionSelectedInstance = computed(() =>
+  pitrBackupInstances.value.find(item => item.id === enableProtectionForm.instanceId)
+)
+
+const enableProtectionRecommendation = computed(() => {
+  const instance = enableProtectionSelectedInstance.value
+  if (!instance) {
+    return {
+      title: '选择实例后生成推荐',
+      description: '支持 MySQL、MariaDB 和 PostgreSQL。'
+    }
+  }
+  if (instance.dbType === 'postgresql') {
+    return {
+      title: 'PostgreSQL Barman PITR',
+      description: '推荐通过 SSH Runner 管理 Barman Server、catalog 和 WAL 状态。'
+    }
+  }
+  return {
+    title: '物理备份 + binlog PITR',
+    description: '推荐立即全量、每日增量、binlog 连续归档，并按恢复证明保护旧链。'
+  }
+})
+
 const mysqlPhysicalBackupPolicyInstances = computed(() =>
   instanceOptions.value.filter(item => ['mysql', 'mariadb'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
@@ -9636,9 +10010,33 @@ const defaultProtectionWizardBackupEngine = () => {
   return 'xtrabackup_8_0'
 }
 
+const mysqlProtectionTemplateSummary = computed(() => {
+  const rpoMinutes = Math.max(Math.round((protectionWizardForm.binlogRpoTargetSeconds || 300) / 60), 1)
+  return `立即全量 ${protectionWizardForm.runInitialFullNow ? '开启' : '关闭'}，增量 ${protectionWizardForm.incrementalSchedule || '仅手动'}，RPO ${rpoMinutes} 分钟，日志保留 ${protectionWizardForm.binlogRetentionDays || 45} 天`
+})
+
+const protectionWizardBinlogStreamOptions = computed(() =>
+  logArchiveStreams.value
+    .filter(item => item.archiveType === 'binlog' && (!protectionWizardForm.instanceId || item.instanceId === protectionWizardForm.instanceId))
+    .map(item => ({
+      id: item.id,
+      label: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveEngine || item.archiveMode || 'binlog'} / ${item.statusText || item.status || '-'}`
+    }))
+)
+
 const postgresqlBackupInstances = computed(() =>
   instanceOptions.value.filter(item => item.dbType === 'postgresql' && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
+
+const postgresBarmanTemplateSummary = computed(() => {
+  const checks = [
+    postgresBarmanWizardForm.runCheckNow !== false ? 'check' : '',
+    postgresBarmanWizardForm.syncCatalogNow !== false ? 'catalog' : '',
+    postgresBarmanWizardForm.syncWalNow !== false ? 'WAL' : '',
+    postgresBarmanWizardForm.runInitialBackupNow === true ? '首次备份' : ''
+  ].filter(Boolean).join(' / ')
+  return `${postgresBarmanWizardForm.retentionPolicy || 'RECOVERY WINDOW OF 30 DAYS'}；启用后下发：${checks || '仅保存配置'}`
+})
 
 const restorePlanSourceInstance = computed(() =>
   instanceOptions.value.find(item => item.id === restorePlanForm.sourceInstanceId)
@@ -10685,6 +11083,8 @@ const resetMetadataSelection = () => {
   tables.value = []
   columns.value = []
   indexes.value = []
+  tableRelations.value = []
+  tableRelationGraph.value = undefined
   selectedSchema.value = ''
   selectedTable.value = undefined
   currentDDL.value = undefined
@@ -10703,6 +11103,8 @@ const loadSchemas = async () => {
     selectedTable.value = undefined
     columns.value = []
     indexes.value = []
+    tableRelations.value = []
+    tableRelationGraph.value = undefined
     if (selectedSchema.value) {
       await loadTables(selectedSchema.value)
     } else {
@@ -10724,6 +11126,8 @@ const loadTables = async (schemaName: string) => {
     } else {
       columns.value = []
       indexes.value = []
+      tableRelations.value = []
+      tableRelationGraph.value = undefined
     }
   } finally {
     tablesLoading.value = false
@@ -10738,12 +11142,20 @@ const loadTableDetails = async (table: any) => {
       schemaName: table.schemaName,
       tableName: table.tableName
     }
-    const [columnRes, indexRes] = await Promise.all([
+    const [columnRes, indexRes, relationRes] = await Promise.all([
       listDatabaseColumns(metadataInstanceId.value, params),
-      listDatabaseIndexes(metadataInstanceId.value, params)
+      listDatabaseIndexes(metadataInstanceId.value, params),
+      listDatabaseTableRelations(metadataInstanceId.value, {
+        ...params,
+        direction: 'all',
+        source: relationSourceFilter.value,
+        includeInferred: includeInferredRelations.value
+      })
     ])
     columns.value = columnRes as any[]
     indexes.value = indexRes as any[]
+    tableRelationGraph.value = relationRes as DatabaseTableRelationGraphResult
+    tableRelations.value = tableRelationGraph.value?.relations || []
   } finally {
     detailsLoading.value = false
   }
@@ -11858,6 +12270,7 @@ const resetProtectionWizardForm = () => {
   protectionWizardForm.retentionNeverDeleteWithoutProof = true
   protectionWizardForm.archiveConfigJson = ''
   protectionWizardPreview.value = undefined
+  protectionWizardAdvancedOpen.value = []
   protectionWizardFormRef.value?.clearValidate()
 }
 
@@ -11887,6 +12300,7 @@ const resetPostgresBarmanWizardForm = () => {
   postgresBarmanWizardForm.syncWalNow = true
   postgresBarmanWizardForm.runInitialBackupNow = false
   postgresBarmanWizardPreview.value = undefined
+  postgresBarmanWizardAdvancedOpen.value = []
   postgresBarmanWizardFormRef.value?.clearValidate()
 }
 
@@ -11909,6 +12323,7 @@ const resetProtectionRestoreDrillForm = () => {
   protectionRestoreDrillForm.targetAction = 'pause'
   protectionRestoreDrillForm.barmanGetWal = true
   protectionRestoreDrillForm.confirmIsolated = false
+  protectionRestoreDrillAdvancedOpen.value = []
   protectionRestoreDrillFormRef.value?.clearValidate()
 }
 
@@ -14156,7 +14571,7 @@ const handleSync = async (row?: any) => {
       )
     } else {
       ElMessage.success(
-        `${res.message || '同步成功'}：${res.schemasCount || 0} 个库，${res.tablesCount || 0} 张表，${res.columnsCount || 0} 个字段`
+        `${res.message || '同步成功'}：${res.schemasCount || 0} 个库，${res.tablesCount || 0} 张表，${res.columnsCount || 0} 个字段，${res.relationsCount || 0} 个关系`
       )
     }
     await Promise.all([loadInstances(), loadInstanceOptions()])
@@ -14179,6 +14594,8 @@ const handleSchemaClick = async (data: any) => {
   selectedTable.value = undefined
   columns.value = []
   indexes.value = []
+  tableRelations.value = []
+  tableRelationGraph.value = undefined
   await loadTables(data.schemaName)
 }
 
@@ -14323,6 +14740,89 @@ const handleExportDictionary = async () => {
     )
   } finally {
     dictionaryExporting.value = false
+  }
+}
+
+const relationDirectionText = (direction: string) => {
+  if (direction === 'incoming') return '被引用'
+  if (direction === 'outgoing') return '引用外部'
+  return '相关'
+}
+
+const relationDirectionTagType = (direction: string) => {
+  if (direction === 'incoming') return 'success'
+  if (direction === 'outgoing') return 'primary'
+  return 'info'
+}
+
+const relationTypeTagType = (relationType: string) =>
+  relationType === 'foreign_key' ? 'success' : 'warning'
+
+const relationConfidenceTagType = (confidence: number) => {
+  if (confidence >= 90) return 'success'
+  if (confidence >= 80) return 'primary'
+  if (confidence >= 70) return 'warning'
+  return 'danger'
+}
+
+const relationEndpointLabel = (schemaName: string, tableName: string, columnName?: string) => {
+  const table = schemaName ? `${schemaName}.${tableName}` : tableName
+  return columnName ? `${table}.${columnName}` : table
+}
+
+const relationJumpEndpoint = (row: DatabaseTableRelationResult) => {
+  if (row.direction === 'incoming') {
+    return {
+      schemaName: row.schemaName,
+      tableName: row.tableName
+    }
+  }
+  return {
+    schemaName: row.referencedSchemaName,
+    tableName: row.referencedTableName
+  }
+}
+
+const handleRelationFilterChange = async () => {
+  if (selectedTable.value) {
+    await loadTableDetails(selectedTable.value)
+  }
+}
+
+const handleOpenRelationTable = async (row: DatabaseTableRelationResult) => {
+  const target = relationJumpEndpoint(row)
+  if (!target.tableName) return
+  selectedSchema.value = target.schemaName || ''
+  await loadTables(selectedSchema.value)
+  const nextTable = tables.value.find(item =>
+    item.schemaName === target.schemaName && item.tableName === target.tableName
+  )
+  if (!nextTable) {
+    ElMessage.warning('目标表未在当前元数据中找到，请重新同步元数据')
+    return
+  }
+  selectedTable.value = nextTable
+  currentDDL.value = undefined
+  detailTab.value = 'relations'
+  await loadTableDetails(nextTable)
+}
+
+const handleCopyRelationJoin = async (row: DatabaseTableRelationResult) => {
+  const text = row.joinSql || ''
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('JOIN 片段已复制')
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    ElMessage.success('JOIN 片段已复制')
   }
 }
 
@@ -15692,12 +16192,76 @@ const handleValidateBackupPolicyChain = async (row: DatabaseBackupPolicyResult) 
   }
 }
 
-const handleEnableProtectionCommand = async (command: string) => {
-  if (command === 'postgresql') {
-    await openPostgresBarmanWizardDialog()
+const resetEnableProtectionForm = () => {
+  enableProtectionForm.instanceId = undefined
+}
+
+const protectionProfileFromInstanceOption = (instance: any): DatabaseProtectionProfileResult => ({
+  profileId: `database-${instance.id}`,
+  instanceId: instance.id,
+  instanceName: instance.name,
+  engine: instance.dbType,
+  engineText: instance.dbTypeText || instance.dbType,
+  version: instance.version || '',
+  endpoint: instance.endpoint || (instance.host ? `${instance.host}:${instance.port || ''}` : ''),
+  environment: instance.environment || '',
+  businessSystem: instance.businessSystem || '',
+  owner: instance.owner || '',
+  protectionMode: 'none',
+  protectionModeText: '未保护',
+  protectionLevel: 'none',
+  protectionLevelText: '未保护',
+  healthStatus: '',
+  healthStatusText: '',
+  riskLevel: 'critical',
+  riskLevelText: '严重',
+  riskMessages: ['尚未启用备份保护'],
+  recoverableFrom: '',
+  recoverableUntil: '',
+  rpoLagSeconds: -1,
+  lastFullAt: '',
+  lastIncrementalAt: '',
+  lastSyntheticAt: '',
+  lastLogArchiveAt: '',
+  lastRestoreDrillAt: '',
+  restoreDrillStatus: '',
+  restoreDrillStatusText: '',
+  runnerStatus: '',
+  runnerStatusText: '',
+  storageStatus: '',
+  storageStatusText: '',
+  backupChainStatus: '',
+  backupChainStatusText: '',
+  logChainStatus: '',
+  logChainStatusText: '',
+  replicaProtectionStatus: '',
+  replicaProtectionText: '',
+  recommendedActions: [],
+  validatedAt: ''
+})
+
+const openEnableProtectionDialog = async () => {
+  if (!pitrBackupInstances.value.length) {
+    ElMessage.warning('暂无可启用 PITR 保护的 MySQL、MariaDB 或 PostgreSQL 实例')
     return
   }
-  await openProtectionWizardDialog()
+  enableProtectionForm.instanceId = protectionProfileQuery.instanceId || pitrBackupInstances.value[0]?.id
+  enableProtectionDialogVisible.value = true
+}
+
+const continueEnableProtection = async () => {
+  const instance = enableProtectionSelectedInstance.value
+  if (!instance) {
+    ElMessage.warning('请选择数据库实例')
+    return
+  }
+  const profile = protectionProfiles.value.find(item => item.instanceId === instance.id) || protectionProfileFromInstanceOption(instance)
+  enableProtectionDialogVisible.value = false
+  if (instance.dbType === 'postgresql') {
+    await openPostgresBarmanWizardDialog(profile)
+    return
+  }
+  await openProtectionWizardDialog(profile)
 }
 
 const protectionProfileNeedsRepair = (row: DatabaseProtectionProfileResult) =>
@@ -17269,6 +17833,94 @@ onBeforeUnmount(() => {
   font-size: 16px;
 }
 
+.relation-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.relation-summary,
+.relation-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.relation-filter-select {
+  width: 130px;
+}
+
+.relation-mini-graph {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 170px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 118px;
+  margin-bottom: 12px;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.relation-graph-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.relation-graph-title {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.relation-node {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relation-node-related {
+  cursor: pointer;
+}
+
+.relation-node-related:hover {
+  border-color: #60a5fa;
+  color: #2563eb;
+}
+
+.relation-node-current {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #ecfdf5;
+  border-color: #86efac;
+}
+
+.relation-node-current span {
+  overflow: hidden;
+  color: #6b7280;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.relation-table {
+  margin-top: 2px;
+}
+
 .query-console {
   display: flex;
   flex-direction: column;
@@ -18078,6 +18730,61 @@ onBeforeUnmount(() => {
 .backup-dialog-alert.compact-alert {
   margin-top: 8px;
   margin-bottom: 0;
+}
+
+.enable-protection-recommendation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 32px;
+  color: #4b5563;
+  line-height: 1.5;
+}
+
+.wizard-primary-section {
+  padding: 14px 14px 2px;
+  margin-bottom: 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.wizard-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.wizard-section-heading span {
+  color: #111827;
+  font-weight: 600;
+}
+
+.wizard-section-heading small {
+  max-width: 70%;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: right;
+}
+
+.wizard-advanced-collapse {
+  margin-bottom: 14px;
+  border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.wizard-advanced-collapse :deep(.el-collapse-item__header) {
+  color: #4b5563;
+  font-weight: 500;
+}
+
+.wizard-advanced-collapse :deep(.el-collapse-item__content) {
+  padding-top: 14px;
+  padding-bottom: 4px;
 }
 
 .backup-task-dialog :deep(.el-dialog__body) {

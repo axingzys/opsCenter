@@ -77,8 +77,12 @@ type IndexRepo interface {
 	List(ctx context.Context, instanceID uint, schemaName, tableName string) ([]*DatabaseIndex, error)
 }
 
+type TableRelationRepo interface {
+	List(ctx context.Context, req *DatabaseTableRelationListRequest) ([]*DatabaseTableRelation, error)
+}
+
 type MetadataRepo interface {
-	ReplaceAll(ctx context.Context, instanceID uint, schemas []*DatabaseSchema, tables []*DatabaseTable, columns []*DatabaseColumn, indexes []*DatabaseIndex) error
+	ReplaceAll(ctx context.Context, instanceID uint, schemas []*DatabaseSchema, tables []*DatabaseTable, columns []*DatabaseColumn, indexes []*DatabaseIndex, relations []*DatabaseTableRelation) error
 }
 
 type RedisMetadataRepo interface {

@@ -28,41 +28,45 @@ func testPostgreSQLConnection(ctx context.Context, item *DatabaseInstance, crede
 	return readPostgreSQLCompatibleVersion(testCtx, db, item.DBType)
 }
 
-func collectPostgreSQLMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, error) {
+func collectPostgreSQLMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, []*DatabaseTableRelation, error) {
 	db, err := openPostgreSQLDB(item, credential)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	defer db.Close()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if err := db.PingContext(queryCtx); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
 
 	version, err := readPostgreSQLCompatibleVersion(queryCtx, db, item.DBType)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 
 	schemas, err := collectPostgreSQLSchemas(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	tables, err := collectPostgreSQLTables(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	columns, err := collectPostgreSQLColumns(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	indexes, err := collectPostgreSQLIndexes(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
-	return version, schemas, tables, columns, indexes, nil
+	relations, err := collectPostgreSQLRelations(queryCtx, db)
+	if err != nil {
+		return "", nil, nil, nil, nil, nil, err
+	}
+	return version, schemas, tables, columns, indexes, relations, nil
 }
 
 func executePostgreSQLQuery(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlType, sqlText string, limit, timeoutSeconds int) (*DatabaseQueryResultVO, error) {
@@ -359,6 +363,79 @@ ORDER BY ns.nspname, tbl.relname, idx.relname`)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历索引元数据失败: %w", err)
+	}
+	return items, nil
+}
+
+func collectPostgreSQLRelations(ctx context.Context, db *sql.DB) ([]*DatabaseTableRelation, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT
+	src_ns.nspname,
+	src_tbl.relname,
+	src_att.attname,
+	ref_ns.nspname,
+	ref_tbl.relname,
+	ref_att.attname,
+	con.conname,
+	CASE con.confupdtype
+		WHEN 'a' THEN 'NO ACTION'
+		WHEN 'r' THEN 'RESTRICT'
+		WHEN 'c' THEN 'CASCADE'
+		WHEN 'n' THEN 'SET NULL'
+		WHEN 'd' THEN 'SET DEFAULT'
+		ELSE ''
+	END,
+	CASE con.confdeltype
+		WHEN 'a' THEN 'NO ACTION'
+		WHEN 'r' THEN 'RESTRICT'
+		WHEN 'c' THEN 'CASCADE'
+		WHEN 'n' THEN 'SET NULL'
+		WHEN 'd' THEN 'SET DEFAULT'
+		ELSE ''
+	END
+FROM pg_constraint con
+JOIN pg_class src_tbl ON src_tbl.oid = con.conrelid
+JOIN pg_namespace src_ns ON src_ns.oid = src_tbl.relnamespace
+JOIN pg_class ref_tbl ON ref_tbl.oid = con.confrelid
+JOIN pg_namespace ref_ns ON ref_ns.oid = ref_tbl.relnamespace
+JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS fk_cols(attnum, ord) ON true
+JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS ref_cols(attnum, ord) ON ref_cols.ord = fk_cols.ord
+JOIN pg_attribute src_att ON src_att.attrelid = src_tbl.oid AND src_att.attnum = fk_cols.attnum
+JOIN pg_attribute ref_att ON ref_att.attrelid = ref_tbl.oid AND ref_att.attnum = ref_cols.attnum
+WHERE con.contype = 'f'
+	AND src_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+	AND src_ns.nspname NOT LIKE 'pg_toast%'
+ORDER BY src_ns.nspname, src_tbl.relname, con.conname, fk_cols.ord`)
+	if err != nil {
+		return nil, fmt.Errorf("读取表关系元数据失败: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]*DatabaseTableRelation, 0)
+	for rows.Next() {
+		var item DatabaseTableRelation
+		if err := rows.Scan(
+			&item.SchemaName,
+			&item.Table,
+			&item.ColumnName,
+			&item.ReferencedSchemaName,
+			&item.ReferencedTableName,
+			&item.ReferencedColumnName,
+			&item.ConstraintName,
+			&item.OnUpdate,
+			&item.OnDelete,
+		); err != nil {
+			return nil, fmt.Errorf("解析表关系元数据失败: %w", err)
+		}
+		item.RelationType = DatabaseTableRelationTypeForeignKey
+		item.RelationSource = DatabaseTableRelationSourceConstraint
+		item.Confidence = 100
+		item.Cardinality = DatabaseTableRelationCardinalityManyToOne
+		item.Comment = "数据库外键约束"
+		items = append(items, &item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历表关系元数据失败: %w", err)
 	}
 	return items, nil
 }

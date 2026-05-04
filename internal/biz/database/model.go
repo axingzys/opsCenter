@@ -313,6 +313,17 @@ const (
 	DatabaseReplicaApplyActionPause  = "pause_apply"
 	DatabaseReplicaApplyActionResume = "resume_apply"
 
+	DatabaseTableRelationTypeForeignKey = "foreign_key"
+	DatabaseTableRelationTypeInferred   = "inferred"
+
+	DatabaseTableRelationSourceConstraint  = "database_constraint"
+	DatabaseTableRelationSourceNamingRule  = "naming_rule"
+	DatabaseTableRelationSourceUniqueIndex = "unique_index"
+
+	DatabaseTableRelationCardinalityManyToOne = "many_to_one"
+	DatabaseTableRelationCardinalityOneToOne  = "one_to_one"
+	DatabaseTableRelationCardinalityUnknown   = "unknown"
+
 	DatabasePermissionView           uint = 1 << 0
 	DatabasePermissionQuery          uint = 1 << 1
 	DatabasePermissionExport         uint = 1 << 2
@@ -567,6 +578,27 @@ type DatabaseIndex struct {
 
 func (DatabaseIndex) TableName() string {
 	return "database_indexes"
+}
+
+// DatabaseTableRelation 保存表与表之间的外键或推断关系元数据。
+type DatabaseTableRelation struct {
+	gorm.Model
+	InstanceID           uint       `gorm:"column:instance_id;not null;index:idx_database_table_relation,unique;comment:实例ID" json:"instanceId"`
+	SchemaName           string     `gorm:"column:schema_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:来源Schema" json:"schemaName"`
+	Table                string     `gorm:"column:table_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:来源表" json:"tableName"`
+	ColumnName           string     `gorm:"column:column_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:来源字段" json:"columnName"`
+	ReferencedSchemaName string     `gorm:"column:referenced_schema_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:目标Schema" json:"referencedSchemaName"`
+	ReferencedTableName  string     `gorm:"column:referenced_table_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:目标表" json:"referencedTableName"`
+	ReferencedColumnName string     `gorm:"column:referenced_column_name;type:varchar(150);not null;index:idx_database_table_relation,unique;comment:目标字段" json:"referencedColumnName"`
+	ConstraintName       string     `gorm:"column:constraint_name;type:varchar(150);comment:外键约束名或推断名称" json:"constraintName"`
+	RelationType         string     `gorm:"column:relation_type;type:varchar(30);not null;index:idx_database_table_relation,unique;comment:foreign_key/inferred" json:"relationType"`
+	RelationSource       string     `gorm:"column:relation_source;type:varchar(50);not null;index:idx_database_table_relation,unique;comment:database_constraint/naming_rule/unique_index" json:"relationSource"`
+	Confidence           int        `gorm:"column:confidence;type:int;default:0;comment:可信度" json:"confidence"`
+	OnUpdate             string     `gorm:"column:on_update;type:varchar(50);comment:ON UPDATE行为" json:"onUpdate"`
+	OnDelete             string     `gorm:"column:on_delete;type:varchar(50);comment:ON DELETE行为" json:"onDelete"`
+	Cardinality          string     `gorm:"column:cardinality;type:varchar(30);default:'unknown';comment:many_to_one/one_to_one/unknown" json:"cardinality"`
+	Comment              string     `gorm:"type:varchar(500);comment:关系说明" json:"comment"`
+	LastSyncAt           *time.Time `gorm:"column:last_sync_at;comment:最近同步时间" json:"lastSyncAt,omitempty"`
 }
 
 // DatabaseRedisKeyspace Redis 逻辑 DB 摘要

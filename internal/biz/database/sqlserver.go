@@ -32,41 +32,45 @@ func testSQLServerConnection(ctx context.Context, item *DatabaseInstance, creden
 	return version, nil
 }
 
-func collectSQLServerMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, error) {
+func collectSQLServerMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, []*DatabaseTableRelation, error) {
 	db, err := openSQLServerDB(item, credential, "")
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	defer db.Close()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if err := db.PingContext(queryCtx); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
 
 	var version string
 	if err := db.QueryRowContext(queryCtx, "SELECT @@VERSION").Scan(&version); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("读取数据库版本失败: %w", err)
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("读取数据库版本失败: %w", err)
 	}
 
 	schemas, err := collectSQLServerSchemas(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	tables, err := collectSQLServerTables(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	columns, err := collectSQLServerColumns(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	indexes, err := collectSQLServerIndexes(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
-	return version, schemas, tables, columns, indexes, nil
+	relations, err := collectSQLServerRelations(queryCtx, db)
+	if err != nil {
+		return "", nil, nil, nil, nil, nil, err
+	}
+	return version, schemas, tables, columns, indexes, relations, nil
 }
 
 func executeSQLServerQuery(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlType, sqlText string, limit, timeoutSeconds int) (*DatabaseQueryResultVO, error) {
@@ -403,6 +407,62 @@ ORDER BY s.name, t.name, i.name`)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历索引元数据失败: %w", err)
+	}
+	return items, nil
+}
+
+func collectSQLServerRelations(ctx context.Context, db *sql.DB) ([]*DatabaseTableRelation, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT
+	src_schema.name,
+	src_table.name,
+	src_col.name,
+	ref_schema.name,
+	ref_table.name,
+	ref_col.name,
+	fk.name,
+	fk.update_referential_action_desc,
+	fk.delete_referential_action_desc
+FROM sys.foreign_keys fk
+JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+JOIN sys.tables src_table ON src_table.object_id = fk.parent_object_id
+JOIN sys.schemas src_schema ON src_schema.schema_id = src_table.schema_id
+JOIN sys.columns src_col ON src_col.object_id = src_table.object_id AND src_col.column_id = fkc.parent_column_id
+JOIN sys.tables ref_table ON ref_table.object_id = fk.referenced_object_id
+JOIN sys.schemas ref_schema ON ref_schema.schema_id = ref_table.schema_id
+JOIN sys.columns ref_col ON ref_col.object_id = ref_table.object_id AND ref_col.column_id = fkc.referenced_column_id
+WHERE src_schema.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+ORDER BY src_schema.name, src_table.name, fk.name, fkc.constraint_column_id`)
+	if err != nil {
+		return nil, fmt.Errorf("读取表关系元数据失败: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]*DatabaseTableRelation, 0)
+	for rows.Next() {
+		var item DatabaseTableRelation
+		if err := rows.Scan(
+			&item.SchemaName,
+			&item.Table,
+			&item.ColumnName,
+			&item.ReferencedSchemaName,
+			&item.ReferencedTableName,
+			&item.ReferencedColumnName,
+			&item.ConstraintName,
+			&item.OnUpdate,
+			&item.OnDelete,
+		); err != nil {
+			return nil, fmt.Errorf("解析表关系元数据失败: %w", err)
+		}
+		item.RelationType = DatabaseTableRelationTypeForeignKey
+		item.RelationSource = DatabaseTableRelationSourceConstraint
+		item.Confidence = 100
+		item.Cardinality = DatabaseTableRelationCardinalityManyToOne
+		item.Comment = "数据库外键约束"
+		items = append(items, &item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历表关系元数据失败: %w", err)
 	}
 	return items, nil
 }

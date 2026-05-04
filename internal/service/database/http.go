@@ -3030,6 +3030,44 @@ func (s *Service) ListIndexes(c *gin.Context) {
 	response.Success(c, data)
 }
 
+// ListTableRelations 获取表关系列表
+// @Summary 获取表关系列表
+// @Tags 数据库管理
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param id path int true "实例ID"
+// @Param schemaName query string false "Schema名称"
+// @Param tableName query string false "表名"
+// @Param direction query string false "关系方向"
+// @Param source query string false "关系来源"
+// @Param includeInferred query bool false "是否包含推断关系"
+// @Success 200 {object} response.Response "获取成功"
+// @Router /api/v1/databases/instances/{id}/table-relations [get]
+func (s *Service) ListTableRelations(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "实例ID")
+	if !ok {
+		return
+	}
+	if !s.ensureInstancePermission(c, id, dbbiz.DatabasePermissionView) {
+		return
+	}
+	req := &dbbiz.DatabaseTableRelationListRequest{
+		InstanceID:      id,
+		SchemaName:      c.Query("schemaName"),
+		TableName:       c.Query("tableName"),
+		Direction:       c.Query("direction"),
+		Source:          c.Query("source"),
+		IncludeInferred: c.Query("includeInferred") != "false",
+	}
+	data, err := s.useCase.ListTableRelations(c.Request.Context(), req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, data)
+}
+
 // GetTableDDL 获取表 DDL 预览
 // @Summary 获取表 DDL 预览
 // @Description 基于已同步元数据生成表结构 DDL 预览

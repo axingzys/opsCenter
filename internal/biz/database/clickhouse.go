@@ -32,41 +32,41 @@ func testClickHouseConnection(ctx context.Context, item *DatabaseInstance, crede
 	return version, nil
 }
 
-func collectClickHouseMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, error) {
+func collectClickHouseMetadata(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, []*DatabaseSchema, []*DatabaseTable, []*DatabaseColumn, []*DatabaseIndex, []*DatabaseTableRelation, error) {
 	db, err := openClickHouseDB(item, credential, "")
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	defer db.Close()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if err := db.PingContext(queryCtx); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("连接数据库失败: %w", err)
 	}
 
 	var version string
 	if err := db.QueryRowContext(queryCtx, "SELECT version()").Scan(&version); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("读取数据库版本失败: %w", err)
+		return "", nil, nil, nil, nil, nil, fmt.Errorf("读取数据库版本失败: %w", err)
 	}
 
 	schemas, err := collectClickHouseSchemas(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	tables, err := collectClickHouseTables(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	columns, err := collectClickHouseColumns(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
 	indexes, err := collectClickHouseIndexes(queryCtx, db)
 	if err != nil {
-		return "", nil, nil, nil, nil, err
+		return "", nil, nil, nil, nil, nil, err
 	}
-	return version, schemas, tables, columns, indexes, nil
+	return version, schemas, tables, columns, indexes, []*DatabaseTableRelation{}, nil
 }
 
 func executeClickHouseQuery(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, schemaName, sqlType, sqlText string, limit, timeoutSeconds int) (*DatabaseQueryResultVO, error) {

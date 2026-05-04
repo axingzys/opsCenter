@@ -1826,6 +1826,69 @@ export interface DatabaseTopologyResult {
   message: string
 }
 
+export interface DatabaseTableRelationResult {
+  id: number
+  instanceId: number
+  schemaName: string
+  tableName: string
+  columnName: string
+  referencedSchemaName: string
+  referencedTableName: string
+  referencedColumnName: string
+  constraintName: string
+  relationType: string
+  relationTypeText: string
+  relationSource: string
+  relationSourceText: string
+  confidence: number
+  onUpdate: string
+  onDelete: string
+  cardinality: string
+  cardinalityText: string
+  comment: string
+  direction: string
+  joinSql: string
+  lastSyncAt?: string
+}
+
+export interface DatabaseTableRelationNode {
+  id: string
+  schemaName: string
+  tableName: string
+  label: string
+  current: boolean
+  incoming: number
+  outgoing: number
+  relationType: string
+}
+
+export interface DatabaseTableRelationLink {
+  id: string
+  source: string
+  target: string
+  sourceLabel: string
+  targetLabel: string
+  label: string
+  relationType: string
+  confidence: number
+}
+
+export interface DatabaseTableRelationSummary {
+  total: number
+  foreignKeys: number
+  inferred: number
+  incoming: number
+  outgoing: number
+  lowConfidence: number
+}
+
+export interface DatabaseTableRelationGraphResult {
+  relations: DatabaseTableRelationResult[]
+  nodes: DatabaseTableRelationNode[]
+  links: DatabaseTableRelationLink[]
+  summary: DatabaseTableRelationSummary
+}
+
 export interface DatabaseTableDDLPayload {
   schemaName?: string
   tableName: string
@@ -2362,6 +2425,14 @@ export const listDatabaseColumns = (id: number, params: { schemaName?: string; t
 
 export const listDatabaseIndexes = (id: number, params: { schemaName?: string; tableName: string }) =>
   request.get(`/api/v1/databases/instances/${id}/indexes`, { params })
+
+export const listDatabaseTableRelations = (id: number, params?: {
+  schemaName?: string
+  tableName?: string
+  direction?: string
+  source?: string
+  includeInferred?: boolean
+}) => request.get(`/api/v1/databases/instances/${id}/table-relations`, { params })
 
 export const getDatabaseTableDDL = (id: number, params: DatabaseTableDDLPayload) =>
   request.get(`/api/v1/databases/instances/${id}/ddl`, { params })

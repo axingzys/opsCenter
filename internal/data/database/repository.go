@@ -188,6 +188,65 @@ func (r *indexRepo) List(ctx context.Context, instanceID uint, schemaName, table
 	return items, nil
 }
 
+type tableRelationRepo struct {
+	db *gorm.DB
+}
+
+func NewTableRelationRepo(db *gorm.DB) dbbiz.TableRelationRepo {
+	return &tableRelationRepo{db: db}
+}
+
+func (r *tableRelationRepo) List(ctx context.Context, req *dbbiz.DatabaseTableRelationListRequest) ([]*dbbiz.DatabaseTableRelation, error) {
+	var items []*dbbiz.DatabaseTableRelation
+	if req == nil {
+		return items, nil
+	}
+
+	schemaName := strings.TrimSpace(req.SchemaName)
+	tableName := strings.TrimSpace(req.TableName)
+	direction := strings.TrimSpace(req.Direction)
+	source := strings.TrimSpace(req.Source)
+
+	query := r.db.WithContext(ctx).Where("instance_id = ?", req.InstanceID)
+	if tableName != "" {
+		switch direction {
+		case "outgoing":
+			query = query.Where("schema_name = ? AND table_name = ?", schemaName, tableName)
+		case "incoming":
+			query = query.Where("referenced_schema_name = ? AND referenced_table_name = ?", schemaName, tableName)
+		default:
+			query = query.Where(
+				"(schema_name = ? AND table_name = ?) OR (referenced_schema_name = ? AND referenced_table_name = ?)",
+				schemaName,
+				tableName,
+				schemaName,
+				tableName,
+			)
+		}
+	} else if schemaName != "" {
+		query = query.Where("schema_name = ? OR referenced_schema_name = ?", schemaName, schemaName)
+	}
+
+	if !req.IncludeInferred {
+		query = query.Where("relation_type <> ?", dbbiz.DatabaseTableRelationTypeInferred)
+	}
+	switch source {
+	case dbbiz.DatabaseTableRelationTypeForeignKey, dbbiz.DatabaseTableRelationTypeInferred:
+		query = query.Where("relation_type = ?", source)
+	case dbbiz.DatabaseTableRelationSourceConstraint,
+		dbbiz.DatabaseTableRelationSourceNamingRule,
+		dbbiz.DatabaseTableRelationSourceUniqueIndex:
+		query = query.Where("relation_source = ?", source)
+	}
+
+	if err := query.
+		Order("relation_type ASC, schema_name ASC, table_name ASC, column_name ASC, referenced_schema_name ASC, referenced_table_name ASC").
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 type metadataRepo struct {
 	db *gorm.DB
 }
@@ -196,8 +255,11 @@ func NewMetadataRepo(db *gorm.DB) dbbiz.MetadataRepo {
 	return &metadataRepo{db: db}
 }
 
-func (r *metadataRepo) ReplaceAll(ctx context.Context, instanceID uint, schemas []*dbbiz.DatabaseSchema, tables []*dbbiz.DatabaseTable, columns []*dbbiz.DatabaseColumn, indexes []*dbbiz.DatabaseIndex) error {
+func (r *metadataRepo) ReplaceAll(ctx context.Context, instanceID uint, schemas []*dbbiz.DatabaseSchema, tables []*dbbiz.DatabaseTable, columns []*dbbiz.DatabaseColumn, indexes []*dbbiz.DatabaseIndex, relations []*dbbiz.DatabaseTableRelation) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Unscoped().Where("instance_id = ?", instanceID).Delete(&dbbiz.DatabaseTableRelation{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Unscoped().Where("instance_id = ?", instanceID).Delete(&dbbiz.DatabaseIndex{}).Error; err != nil {
 			return err
 		}
@@ -228,6 +290,11 @@ func (r *metadataRepo) ReplaceAll(ctx context.Context, instanceID uint, schemas 
 		}
 		if len(indexes) > 0 {
 			if err := tx.CreateInBatches(indexes, 1000).Error; err != nil {
+				return err
+			}
+		}
+		if len(relations) > 0 {
+			if err := tx.CreateInBatches(relations, 1000).Error; err != nil {
 				return err
 			}
 		}
