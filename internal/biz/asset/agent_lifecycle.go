@@ -146,7 +146,7 @@ func (uc *AgentUseCase) List(ctx context.Context, page, pageSize int, keyword, s
 		if agentModel.LastReportAt != nil {
 			item.LastReportAt = agentModel.LastReportAt.Format("2006-01-02 15:04:05")
 		}
-		applyAgentMonitorStatus(host, item, monitorSnapshot)
+		applyAgentMonitorStatus(host, agentModel, item, monitorSnapshot)
 		list = append(list, item)
 	}
 
@@ -252,7 +252,7 @@ func (uc *AgentUseCase) queryAgentPrometheusTargets(ctx context.Context) (map[ui
 	return targets, nil
 }
 
-func applyAgentMonitorStatus(host *Host, item *AgentListItemVO, snapshot agentMonitorSnapshot) {
+func applyAgentMonitorStatus(host *Host, agentModel *AssetAgent, item *AgentListItemVO, snapshot agentMonitorSnapshot) {
 	if host == nil || item == nil || !snapshot.Enabled {
 		return
 	}
@@ -263,14 +263,24 @@ func applyAgentMonitorStatus(host *Host, item *AgentListItemVO, snapshot agentMo
 		return
 	}
 
+	inGrace := isAgentPrometheusInGrace(agentModel)
 	if snapshot.QueryError != nil {
+		if inGrace {
+			return
+		}
 		markAgentMonitorError(item, fmt.Sprintf("Prometheus 查询失败: %v", snapshot.QueryError))
 		return
 	}
 
 	target, ok := snapshot.Targets[host.ID]
 	if !ok {
+		if inGrace {
+			return
+		}
 		markAgentMonitorError(item, "Prometheus 未发现该 Agent 抓取目标")
+		return
+	}
+	if isPendingPrometheusTarget(target) {
 		return
 	}
 	if !strings.EqualFold(target.Health, "up") {
@@ -281,6 +291,28 @@ func applyAgentMonitorStatus(host *Host, item *AgentListItemVO, snapshot agentMo
 		markAgentMonitorError(item, "Prometheus 抓取失败: "+message)
 		return
 	}
+}
+
+func isAgentPrometheusInGrace(agentModel *AssetAgent) bool {
+	if agentModel == nil {
+		return false
+	}
+	startedAt := agentModel.DeployedAt
+	if startedAt == nil {
+		startedAt = agentModel.LastHeartbeatAt
+	}
+	if startedAt == nil {
+		return false
+	}
+	return time.Since(*startedAt) <= agentPrometheusGrace
+}
+
+func isPendingPrometheusTarget(target agentPrometheusTargetHealth) bool {
+	health := strings.TrimSpace(target.Health)
+	if health != "" && !strings.EqualFold(health, "unknown") {
+		return false
+	}
+	return strings.TrimSpace(target.LastScrape) == "" && strings.TrimSpace(target.LastError) == ""
 }
 
 func markAgentMonitorError(item *AgentListItemVO, message string) {

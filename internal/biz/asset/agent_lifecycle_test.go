@@ -232,7 +232,7 @@ func TestApplyAgentMonitorStatusMarksRunningAgentErrorOnPrometheusDown(t *testin
 	host := &Host{OSType: OSTypeLinux}
 	host.ID = 1
 
-	applyAgentMonitorStatus(host, item, agentMonitorSnapshot{
+	applyAgentMonitorStatus(host, nil, item, agentMonitorSnapshot{
 		Enabled: true,
 		Targets: map[uint]agentPrometheusTargetHealth{
 			1: {
@@ -265,10 +265,93 @@ func TestApplyAgentMonitorStatusKeepsRunningAgentWhenPrometheusUp(t *testing.T) 
 	host := &Host{OSType: OSTypeLinux}
 	host.ID = 1
 
-	applyAgentMonitorStatus(host, item, agentMonitorSnapshot{
+	applyAgentMonitorStatus(host, nil, item, agentMonitorSnapshot{
 		Enabled: true,
 		Targets: map[uint]agentPrometheusTargetHealth{
 			1: {Health: "up"},
+		},
+	})
+
+	if item.Status != AgentStatusRunning {
+		t.Fatalf("status = %q, want %q", item.Status, AgentStatusRunning)
+	}
+	if item.LastError != "" {
+		t.Fatalf("last error = %q, want empty", item.LastError)
+	}
+}
+
+func TestApplyAgentMonitorStatusKeepsRecentlyDeployedAgentWhenPrometheusTargetMissing(t *testing.T) {
+	now := time.Now()
+	item := &AgentListItemVO{
+		HostID:       2,
+		Status:       AgentStatusRunning,
+		StatusText:   AgentStatusText(AgentStatusRunning),
+		HealthStatus: "healthy",
+		Version:      agentVersionMVP,
+	}
+
+	host := &Host{OSType: OSTypeWindows}
+	host.ID = 2
+	agentModel := &AssetAgent{DeployedAt: &now}
+
+	applyAgentMonitorStatus(host, agentModel, item, agentMonitorSnapshot{
+		Enabled: true,
+		Targets: map[uint]agentPrometheusTargetHealth{},
+	})
+
+	if item.Status != AgentStatusRunning {
+		t.Fatalf("status = %q, want %q", item.Status, AgentStatusRunning)
+	}
+	if item.LastError != "" {
+		t.Fatalf("last error = %q, want empty", item.LastError)
+	}
+}
+
+func TestApplyAgentMonitorStatusMarksOldAgentErrorWhenPrometheusTargetMissing(t *testing.T) {
+	old := time.Now().Add(-agentPrometheusGrace - time.Second)
+	item := &AgentListItemVO{
+		HostID:       2,
+		Status:       AgentStatusRunning,
+		StatusText:   AgentStatusText(AgentStatusRunning),
+		HealthStatus: "healthy",
+		Version:      agentVersionMVP,
+	}
+
+	host := &Host{OSType: OSTypeWindows}
+	host.ID = 2
+	agentModel := &AssetAgent{DeployedAt: &old}
+
+	applyAgentMonitorStatus(host, agentModel, item, agentMonitorSnapshot{
+		Enabled: true,
+		Targets: map[uint]agentPrometheusTargetHealth{},
+	})
+
+	if item.Status != AgentStatusError {
+		t.Fatalf("status = %q, want %q", item.Status, AgentStatusError)
+	}
+	if !strings.Contains(item.LastError, "未发现") {
+		t.Fatalf("last error = %q, want missing target", item.LastError)
+	}
+}
+
+func TestApplyAgentMonitorStatusKeepsPendingPrometheusTarget(t *testing.T) {
+	old := time.Now().Add(-agentPrometheusGrace - time.Second)
+	item := &AgentListItemVO{
+		HostID:       2,
+		Status:       AgentStatusRunning,
+		StatusText:   AgentStatusText(AgentStatusRunning),
+		HealthStatus: "healthy",
+		Version:      agentVersionMVP,
+	}
+
+	host := &Host{OSType: OSTypeWindows}
+	host.ID = 2
+	agentModel := &AssetAgent{DeployedAt: &old}
+
+	applyAgentMonitorStatus(host, agentModel, item, agentMonitorSnapshot{
+		Enabled: true,
+		Targets: map[uint]agentPrometheusTargetHealth{
+			2: {Health: "unknown"},
 		},
 	})
 

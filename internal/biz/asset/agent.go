@@ -22,6 +22,7 @@ const (
 	agentAccessTokenType   = "asset_agent_access"
 
 	agentHeartbeatTimeout = 3 * time.Minute
+	agentPrometheusGrace  = 2 * time.Minute
 	agentRegisterTokenTTL = 30 * time.Minute
 	agentAccessTokenTTL   = 365 * 24 * time.Hour
 	agentVersionMVP       = "opshub-agent/0.1.1"
@@ -291,6 +292,14 @@ func (uc *AgentUseCase) Register(ctx context.Context, baseURL string, req *Agent
 
 	if err := uc.saveAgentModel(ctx, agentModel, created); err != nil {
 		return nil, fmt.Errorf("保存 Agent 生命周期失败: %w", err)
+	}
+
+	if shouldSyncPrometheusTarget(host, agentModel.Version) {
+		if err := uc.syncPrometheusTarget(host); err != nil {
+			return nil, fmt.Errorf("刷新 Prometheus 目标失败: %w", err)
+		}
+	} else if err := uc.removePrometheusTarget(host.ID); err != nil {
+		return nil, fmt.Errorf("清理 Prometheus 目标失败: %w", err)
 	}
 
 	_ = uc.markLatestJobSuccess(ctx, host.ID, "Agent 注册成功")
