@@ -5727,7 +5727,9 @@
     <el-dialog
       v-model="postgresBarmanWizardDialogVisible"
       title="启用 PostgreSQL Barman PITR 保护"
-      width="900px"
+      width="min(1180px, calc(100vw - 48px))"
+      class="postgres-barman-wizard-dialog"
+      top="5vh"
       @close="resetPostgresBarmanWizardForm"
     >
       <el-alert
@@ -5737,7 +5739,7 @@
         :closable="false"
         class="backup-dialog-alert"
       />
-      <el-form ref="postgresBarmanWizardFormRef" :model="postgresBarmanWizardForm" :rules="postgresBarmanWizardRules" label-width="145px">
+      <el-form ref="postgresBarmanWizardFormRef" :model="postgresBarmanWizardForm" :rules="postgresBarmanWizardRules" label-width="130px">
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="PostgreSQL 实例" prop="instanceId">
@@ -5829,23 +5831,23 @@
             </el-form-item>
           </el-col>
         </el-row>
-        <el-row :gutter="16">
-          <el-col :span="6">
+        <el-row :gutter="16" class="postgres-barman-wizard-switch-row">
+          <el-col :span="12">
             <el-form-item label="Barman check">
               <el-switch v-model="postgresBarmanWizardForm.runCheckNow" active-text="下发" inactive-text="跳过" />
             </el-form-item>
           </el-col>
-          <el-col :span="6">
+          <el-col :span="12">
             <el-form-item label="Catalog sync">
               <el-switch v-model="postgresBarmanWizardForm.syncCatalogNow" active-text="下发" inactive-text="跳过" />
             </el-form-item>
           </el-col>
-          <el-col :span="6">
+          <el-col :span="12">
             <el-form-item label="WAL sync">
               <el-switch v-model="postgresBarmanWizardForm.syncWalNow" active-text="下发" inactive-text="跳过" />
             </el-form-item>
           </el-col>
-          <el-col :span="6">
+          <el-col :span="12">
             <el-form-item label="立即备份">
               <el-switch v-model="postgresBarmanWizardForm.runInitialBackupNow" active-text="下发" inactive-text="跳过" />
             </el-form-item>
@@ -16245,6 +16247,15 @@ onBeforeUnmount(() => {
 .backup-dialog-alert.compact-alert {
   margin-top: 8px;
   margin-bottom: 0;
+}
+
+.postgres-barman-wizard-dialog :deep(.el-dialog__body) {
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+}
+
+.postgres-barman-wizard-switch-row :deep(.el-form-item__content) {
+  min-width: 180px;
 }
 
 .backup-summary-descriptions,
