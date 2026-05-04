@@ -73,6 +73,17 @@ type DatabaseRunnerHostVO struct {
 	UpdatedAt         string `json:"updatedAt"`
 }
 
+type DatabaseRunnerHostDeleteBlockers struct {
+	BackupPolicies      int64
+	BarmanServers       int64
+	LogArchiveStreams   int64
+	RunningRunnerJobs   int64
+	RunningRestoreJobs  int64
+	ActiveRestorePlans  int64
+	BackupArtifacts     int64
+	LogArchiveArtifacts int64
+}
+
 type DatabaseRunnerJobVO struct {
 	ID               uint   `json:"id"`
 	JobType          string `json:"jobType"`
@@ -161,6 +172,29 @@ func (uc *UseCase) ListRunnerHosts(ctx context.Context, req *DatabaseRunnerHostL
 		list = append(list, toRunnerHostVO(item))
 	}
 	return list, total, nil
+}
+
+func (uc *UseCase) DeleteRunnerHost(ctx context.Context, id uint) error {
+	if uc.runnerHostRepo == nil {
+		return fmt.Errorf("Runner 主机仓库未配置")
+	}
+	if id == 0 {
+		return fmt.Errorf("Runner 主机ID不能为空")
+	}
+	if _, err := uc.runnerHostRepo.GetByID(ctx, id); err != nil {
+		return fmt.Errorf("Runner 主机不存在")
+	}
+	blockers, err := uc.runnerHostRepo.CountDeleteBlockers(ctx, id)
+	if err != nil {
+		return err
+	}
+	if reasons := runnerHostDeleteBlockerReasons(blockers); len(reasons) > 0 {
+		return fmt.Errorf("Runner 主机仍被使用，不能删除：%s", strings.Join(reasons, "；"))
+	}
+	if err := uc.runnerHostRepo.Delete(ctx, id); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (uc *UseCase) TestRunnerHost(ctx context.Context, id uint, operator QueryOperator) (*DatabaseRunnerJobVO, error) {
@@ -542,6 +576,38 @@ func normalizeRunnerTimeoutMinutes(value int) int {
 		return maxRunnerTimeoutMinutes
 	}
 	return value
+}
+
+func runnerHostDeleteBlockerReasons(blockers *DatabaseRunnerHostDeleteBlockers) []string {
+	if blockers == nil {
+		return nil
+	}
+	reasons := make([]string, 0, 8)
+	if blockers.BackupPolicies > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 个备份策略绑定该 Runner", blockers.BackupPolicies))
+	}
+	if blockers.BarmanServers > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 个 Barman Server 绑定该 Runner", blockers.BarmanServers))
+	}
+	if blockers.LogArchiveStreams > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 个日志归档流绑定该 Runner", blockers.LogArchiveStreams))
+	}
+	if blockers.RunningRunnerJobs > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 个 Runner 任务未结束", blockers.RunningRunnerJobs))
+	}
+	if blockers.RunningRestoreJobs > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 个恢复任务未结束", blockers.RunningRestoreJobs))
+	}
+	if blockers.ActiveRestorePlans > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 个恢复计划处于下发或执行中", blockers.ActiveRestorePlans))
+	}
+	if blockers.BackupArtifacts > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 条备份记录引用该 Runner 的本地 artifact", blockers.BackupArtifacts))
+	}
+	if blockers.LogArchiveArtifacts > 0 {
+		reasons = append(reasons, fmt.Sprintf("仍有 %d 条日志归档记录引用该 Runner 的本地 artifact", blockers.LogArchiveArtifacts))
+	}
+	return reasons
 }
 
 func toRunnerHostVO(item *DatabaseRunnerHost) *DatabaseRunnerHostVO {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func TestBuildRunnerHostFromRequestDefaults(t *testing.T) {
@@ -76,6 +78,87 @@ func TestBuildRunnerProbeCommandIsFixedAndQuoted(t *testing.T) {
 	if strings.Contains(command, "password") || strings.Contains(command, "secret") {
 		t.Fatalf("probe command should not contain sensitive tokens: %s", command)
 	}
+}
+
+func TestDeleteRunnerHostBlocksActiveReferences(t *testing.T) {
+	repo := &runnerHostRepoForDeleteTest{
+		host: &DatabaseRunnerHost{Model: gorm.Model{ID: 7}, Name: "runner-7"},
+		blockers: &DatabaseRunnerHostDeleteBlockers{
+			BackupPolicies:    1,
+			LogArchiveStreams: 2,
+			BackupArtifacts:   3,
+		},
+	}
+	uc := &UseCase{runnerHostRepo: repo}
+	err := uc.DeleteRunnerHost(context.Background(), 7)
+	if err == nil {
+		t.Fatalf("expected delete blocker error")
+	}
+	message := err.Error()
+	for _, want := range []string{"备份策略", "日志归档流", "本地 artifact"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("delete blocker message %q missing %q", message, want)
+		}
+	}
+	if repo.deletedID != 0 {
+		t.Fatalf("delete should not be called, deleted id = %d", repo.deletedID)
+	}
+}
+
+func TestDeleteRunnerHostDeletesWhenNoReferences(t *testing.T) {
+	repo := &runnerHostRepoForDeleteTest{
+		host:     &DatabaseRunnerHost{Model: gorm.Model{ID: 8}, Name: "runner-8"},
+		blockers: &DatabaseRunnerHostDeleteBlockers{},
+	}
+	uc := &UseCase{runnerHostRepo: repo}
+	if err := uc.DeleteRunnerHost(context.Background(), 8); err != nil {
+		t.Fatalf("DeleteRunnerHost error = %v", err)
+	}
+	if repo.deletedID != 8 {
+		t.Fatalf("deleted id = %d, want 8", repo.deletedID)
+	}
+}
+
+type runnerHostRepoForDeleteTest struct {
+	host      *DatabaseRunnerHost
+	blockers  *DatabaseRunnerHostDeleteBlockers
+	deletedID uint
+}
+
+func (r *runnerHostRepoForDeleteTest) Create(ctx context.Context, item *DatabaseRunnerHost) error {
+	r.host = item
+	return nil
+}
+
+func (r *runnerHostRepoForDeleteTest) Update(ctx context.Context, item *DatabaseRunnerHost) error {
+	r.host = item
+	return nil
+}
+
+func (r *runnerHostRepoForDeleteTest) Delete(ctx context.Context, id uint) error {
+	r.deletedID = id
+	return nil
+}
+
+func (r *runnerHostRepoForDeleteTest) GetByID(ctx context.Context, id uint) (*DatabaseRunnerHost, error) {
+	if r.host == nil || r.host.ID != id {
+		return nil, fmt.Errorf("not found")
+	}
+	return r.host, nil
+}
+
+func (r *runnerHostRepoForDeleteTest) List(ctx context.Context, req *DatabaseRunnerHostListRequest) ([]*DatabaseRunnerHost, int64, error) {
+	if r.host == nil {
+		return nil, 0, nil
+	}
+	return []*DatabaseRunnerHost{r.host}, 1, nil
+}
+
+func (r *runnerHostRepoForDeleteTest) CountDeleteBlockers(ctx context.Context, id uint) (*DatabaseRunnerHostDeleteBlockers, error) {
+	if r.blockers == nil {
+		return &DatabaseRunnerHostDeleteBlockers{}, nil
+	}
+	return r.blockers, nil
 }
 
 func TestRunnerRequestJSONDoesNotExposeCredential(t *testing.T) {

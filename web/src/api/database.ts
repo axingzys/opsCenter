@@ -2133,6 +2133,9 @@ export const createDatabaseRunnerHost = (data: DatabaseRunnerHostPayload) =>
 export const updateDatabaseRunnerHost = (id: number, data: DatabaseRunnerHostPayload) =>
   request.put(`/api/v1/databases/runner-hosts/${id}`, data)
 
+export const deleteDatabaseRunnerHost = (id: number) =>
+  request.delete(`/api/v1/databases/runner-hosts/${id}`)
+
 export const testDatabaseRunnerHost = (id: number) =>
   request.post(`/api/v1/databases/runner-hosts/${id}/test`)
 

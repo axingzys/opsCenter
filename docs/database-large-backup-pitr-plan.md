@@ -8305,6 +8305,35 @@ archive_lag_high
 3. 风险中心的“修复”入口只做跳转或打开向导，不自动执行高风险数据库命令。
 4. WAL gap 的精确恢复仍以恢复计划预校验为准；profile 中的 WAL gap 是面向日常巡检的快速风险提示。
 
+##### P5.7：高级资源 Runner 主机删除保护
+
+背景：
+
+Runner 主机是物理备份、binlog/WAL 归档、Barman、隔离恢复和工具安装的执行资源。它不是单纯的页面配置项，删除错误会导致后续备份链不可恢复、归档守护进程失去归属，或者历史 `runner://runner-host-<id>/...` artifact 无法定位。因此 Runner 主机删除必须采用“可删除性检查 + 软删除”的方式，而不是直接硬删。
+
+落地要求：
+
+1. 后端新增 `DELETE /api/v1/databases/runner-hosts/:id`，权限沿用 `database:backup:delete`。
+2. 删除前必须检查以下阻断项：
+   - `database_backup_policies.runner_host_id` 仍绑定该 Runner。
+   - `database_barman_servers.runner_host_id` 仍绑定该 Runner。
+   - `database_log_archive_streams.runner_host_id` 仍绑定该 Runner，且归档流处于 running/paused/degraded 或期望状态、守护状态尚未完全 stopped。
+   - `database_runner_jobs` 中仍有 queued/running 任务。
+   - `database_restore_jobs` 中仍有 pending/queued/running 任务。
+   - `database_restore_plans` 中仍有 queued/running 恢复计划。
+   - `database_backup_records.storage_uri/artifact_cache_uri` 仍引用 `runner://runner-host-<id>/...`。
+   - `database_log_archives.storage_uri` 仍引用 `runner://runner-host-<id>/...`。
+3. 只要存在阻断项，后端返回明确中文原因，指导用户先解绑、停止归档流、等待任务结束，或保留该 Runner 作为历史 artifact 读取入口。
+4. 无阻断项时对 `database_runner_hosts` 执行 GORM soft delete；同步软删除该 Runner 的工具画像 `database_runner_tool_profiles`，但不级联删除历史 Runner Job、归档事件和备份/恢复记录。
+5. 前端 Runner 主机表格增加“删除”操作，二次确认文案必须说明后端会做备份链和 artifact 引用检查。
+
+验收：
+
+1. 无依赖 Runner 可删除，列表刷新后不再展示。
+2. 有备份策略、Barman Server、日志归档流或 `runner://` artifact 引用时不能删除，并展示具体阻断原因。
+3. 删除不会清理历史备份记录、日志归档记录、Runner Job 或恢复证明。
+4. 删除接口受 `database:backup:delete` 权限保护。
+
 #### P5 对现有页面的具体调整
 
 当前 `PITR 链路与恢复计划` 工具条：

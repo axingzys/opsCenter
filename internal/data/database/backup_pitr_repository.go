@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -502,6 +503,15 @@ func (r *runnerHostRepo) Update(ctx context.Context, item *dbbiz.DatabaseRunnerH
 	return r.db.WithContext(ctx).Save(item).Error
 }
 
+func (r *runnerHostRepo) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("runner_host_id = ?", id).Delete(&dbbiz.DatabaseRunnerToolProfile{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&dbbiz.DatabaseRunnerHost{}, id).Error
+	})
+}
+
 func (r *runnerHostRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseRunnerHost, error) {
 	var item dbbiz.DatabaseRunnerHost
 	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
@@ -539,6 +549,58 @@ func (r *runnerHostRepo) List(ctx context.Context, req *dbbiz.DatabaseRunnerHost
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func (r *runnerHostRepo) CountDeleteBlockers(ctx context.Context, id uint) (*dbbiz.DatabaseRunnerHostDeleteBlockers, error) {
+	var blockers dbbiz.DatabaseRunnerHostDeleteBlockers
+	if id == 0 {
+		return &blockers, nil
+	}
+	count := func(table, where string, args ...any) (int64, error) {
+		var total int64
+		err := r.db.WithContext(ctx).Table(table).Where(where, args...).Count(&total).Error
+		return total, err
+	}
+	var err error
+	if blockers.BackupPolicies, err = count("database_backup_policies", "runner_host_id = ? AND deleted_at IS NULL", id); err != nil {
+		return nil, err
+	}
+	if blockers.BarmanServers, err = count("database_barman_servers", "runner_host_id = ? AND deleted_at IS NULL", id); err != nil {
+		return nil, err
+	}
+	activeLogStreamStatuses := []string{dbbiz.DatabaseLogArchiveStreamStatusRunning, dbbiz.DatabaseLogArchiveStreamStatusPaused, dbbiz.DatabaseLogArchiveStreamStatusDegraded}
+	if blockers.LogArchiveStreams, err = count(
+		"database_log_archive_streams",
+		"runner_host_id = ? AND deleted_at IS NULL AND (COALESCE(desired_state, ?) <> ? OR COALESCE(daemon_status, ?) <> ? OR status IN ?)",
+		id,
+		dbbiz.DatabaseLogArchiveDesiredStateStopped,
+		dbbiz.DatabaseLogArchiveDesiredStateStopped,
+		dbbiz.DatabaseLogArchiveDaemonStatusStopped,
+		dbbiz.DatabaseLogArchiveDaemonStatusStopped,
+		activeLogStreamStatuses,
+	); err != nil {
+		return nil, err
+	}
+	runningRunnerStatuses := []string{dbbiz.DatabaseRunnerJobStatusQueued, dbbiz.DatabaseRunnerJobStatusRunning}
+	if blockers.RunningRunnerJobs, err = count("database_runner_jobs", "runner_host_id = ? AND deleted_at IS NULL AND status IN ?", id, runningRunnerStatuses); err != nil {
+		return nil, err
+	}
+	runningRestoreStatuses := []string{dbbiz.DatabaseBackupStatusPending, dbbiz.DatabaseBackupStatusQueued, dbbiz.DatabaseBackupStatusRunning, dbbiz.DatabaseRestoreStatusPlanned, dbbiz.DatabaseRestoreStatusQueued, dbbiz.DatabaseRestoreStatusRunning}
+	if blockers.RunningRestoreJobs, err = count("database_restore_jobs", "runner_host_id = ? AND deleted_at IS NULL AND status IN ?", id, runningRestoreStatuses); err != nil {
+		return nil, err
+	}
+	activeRestorePlanStatuses := []string{dbbiz.DatabaseRestoreStatusQueued, dbbiz.DatabaseRestoreStatusRunning}
+	if blockers.ActiveRestorePlans, err = count("database_restore_plans", "runner_host_id = ? AND deleted_at IS NULL AND restore_status IN ?", id, activeRestorePlanStatuses); err != nil {
+		return nil, err
+	}
+	runnerStoragePrefix := fmt.Sprintf("runner://runner-host-%d/%%", id)
+	if blockers.BackupArtifacts, err = count("database_backup_records", "deleted_at IS NULL AND (storage_uri LIKE ? OR artifact_cache_uri LIKE ?)", runnerStoragePrefix, runnerStoragePrefix); err != nil {
+		return nil, err
+	}
+	if blockers.LogArchiveArtifacts, err = count("database_log_archives", "deleted_at IS NULL AND storage_uri LIKE ?", runnerStoragePrefix); err != nil {
+		return nil, err
+	}
+	return &blockers, nil
 }
 
 func NewRunnerToolProfileRepo(db *gorm.DB) dbbiz.RunnerToolProfileRepo {

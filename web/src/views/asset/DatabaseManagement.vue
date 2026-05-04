@@ -2876,7 +2876,7 @@
                   <el-table-column label="错误" min-width="220" show-overflow-tooltip>
                     <template #default="{ row }">{{ row.lastError || '-' }}</template>
                   </el-table-column>
-                  <el-table-column label="操作" width="380" align="center" fixed="right">
+                  <el-table-column label="操作" width="430" align="center" fixed="right">
                     <template #default="{ row }">
                       <el-button link type="primary" @click="openRunnerHostDialog(row)">编辑</el-button>
                       <el-button link type="primary" @click="openRunnerAgentConfigDialog(row)">配置</el-button>
@@ -2885,6 +2885,7 @@
                       <el-button link type="warning" :loading="runnerToolProbingId === row.id" @click="handleProbeRunnerTools(row)">巡检</el-button>
                       <el-button link type="info" @click="openRunnerToolProfileDialog(row)">画像</el-button>
                       <el-button link type="primary" @click="openRunnerToolInstallScriptDialog(row)">脚本</el-button>
+                      <el-button link type="danger" @click="handleDeleteRunnerHost(row)">删除</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -7673,6 +7674,7 @@ import {
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
   deleteDatabaseInstancePermission,
+  deleteDatabaseRunnerHost,
   disableDatabaseInstance,
   downloadDatabaseBackupRecord,
   downloadDatabaseRunnerToolOfflinePackage,
@@ -12756,6 +12758,21 @@ const handleTestRunnerHost = async (row: DatabaseRunnerHostResult) => {
   } finally {
     runnerHostTestingId.value = 0
   }
+}
+
+const handleDeleteRunnerHost = async (row: DatabaseRunnerHostResult) => {
+  await ElMessageBox.confirm(
+    `确认删除 Runner 主机「${row.name || row.host || row.id}」？删除前后端会检查备份策略、归档流、Barman Server、运行中任务和 runner:// 本地 artifact 引用；存在引用时会拒绝删除。`,
+    '删除 Runner 主机',
+    {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }
+  )
+  await deleteDatabaseRunnerHost(row.id)
+  ElMessage.success('Runner 主机已删除')
+  await Promise.all([loadRunnerHosts(), loadRunnerJobs()])
 }
 
 const openRunnerToolProfileDialog = async (row: DatabaseRunnerHostResult) => {

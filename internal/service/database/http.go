@@ -1440,6 +1440,18 @@ func (s *Service) UpdateRunnerHost(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) DeleteRunnerHost(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Runner 主机ID")
+	if !ok {
+		return
+	}
+	if err := s.useCase.DeleteRunnerHost(c.Request.Context(), id); err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{"id": id})
+}
+
 func (s *Service) TestRunnerHost(c *gin.Context) {
 	id, ok := parseUintParam(c, "id", "Runner 主机ID")
 	if !ok {

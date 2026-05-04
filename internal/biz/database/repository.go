@@ -203,8 +203,10 @@ type SecretProfileRepo interface {
 type RunnerHostRepo interface {
 	Create(ctx context.Context, item *DatabaseRunnerHost) error
 	Update(ctx context.Context, item *DatabaseRunnerHost) error
+	Delete(ctx context.Context, id uint) error
 	GetByID(ctx context.Context, id uint) (*DatabaseRunnerHost, error)
 	List(ctx context.Context, req *DatabaseRunnerHostListRequest) ([]*DatabaseRunnerHost, int64, error)
+	CountDeleteBlockers(ctx context.Context, id uint) (*DatabaseRunnerHostDeleteBlockers, error)
 }
 
 type RunnerToolProfileRepo interface {

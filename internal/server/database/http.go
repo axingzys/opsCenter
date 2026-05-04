@@ -361,6 +361,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.GET("/runner-hosts", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListRunnerHosts)
 		databases.POST("/runner-hosts", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateRunnerHost)
 		databases.PUT("/runner-hosts/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateRunnerHost)
+		databases.DELETE("/runner-hosts/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteRunnerHost)
 		databases.POST("/runner-hosts/:id/test", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.TestRunnerHost)
 		databases.GET("/runner-hosts/:id/tool-profile", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolView), s.service.GetRunnerToolProfile)
 		databases.POST("/runner-hosts/:id/tool-probe", s.authMiddleware.RequireMenuPermission(permDatabaseRunnerToolProbe), s.service.ProbeRunnerTools)
