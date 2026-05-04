@@ -340,9 +340,9 @@
                 :data="tables"
                 v-loading="tablesLoading"
                 stripe
-                height="520"
+                height="100%"
                 highlight-current-row
-                class="metadata-table"
+                class="metadata-table metadata-table-fill"
                 @row-click="handleTableClick"
                 @row-contextmenu="handleTableContextMenu"
               >
@@ -407,7 +407,7 @@
                 </div>
               </div>
               <el-empty v-if="!selectedTable" :description="isRedisMetadataInstance ? '请选择一个 Key 查看属性' : '请选择一张表查看字段和索引'" :image-size="72" />
-              <div v-else>
+              <div v-else class="detail-panel-body">
                 <div class="table-overview-cards">
                   <div class="table-overview-card">
                     <span class="summary-label">对象类型</span>
@@ -426,8 +426,8 @@
                     <strong>{{ isRedisMetadataInstance ? (selectedTable.encoding || selectedTable.nodeAddress || '-') : formatBytes(selectedTable.indexSizeBytes) }}</strong>
                   </div>
                 </div>
-                <div v-if="isRedisMetadataInstance">
-                  <el-table :data="columns" v-loading="detailsLoading" stripe height="470" class="metadata-table">
+                <div v-if="isRedisMetadataInstance" class="metadata-table-pane">
+                  <el-table :data="columns" v-loading="detailsLoading" stripe height="100%" class="metadata-table metadata-table-fill">
                     <el-table-column label="属性" prop="columnName" width="140" />
                     <el-table-column label="值" min-width="220" show-overflow-tooltip>
                       <template #default="{ row }">{{ row.defaultValue || '-' }}</template>
@@ -437,9 +437,9 @@
                     </el-table-column>
                   </el-table>
                 </div>
-                <el-tabs v-else v-model="detailTab" class="detail-tabs">
+                <el-tabs v-else v-model="detailTab" class="detail-tabs detail-tabs-fill">
                   <el-tab-pane label="字段" name="columns">
-                  <el-table :data="columns" v-loading="detailsLoading" stripe height="470" class="metadata-table">
+                  <el-table :data="columns" v-loading="detailsLoading" stripe height="100%" class="metadata-table metadata-table-fill">
                     <el-table-column label="#" prop="ordinalPosition" width="54" align="center" />
                     <el-table-column label="字段" min-width="150">
                       <template #default="{ row }">
@@ -465,7 +465,7 @@
                   </el-table>
                   </el-tab-pane>
                   <el-tab-pane label="索引" name="indexes">
-                  <el-table :data="indexes" v-loading="detailsLoading" stripe height="470" class="metadata-table">
+                  <el-table :data="indexes" v-loading="detailsLoading" stripe height="100%" class="metadata-table metadata-table-fill">
                     <el-table-column label="索引名" prop="indexName" min-width="150" />
                     <el-table-column label="字段" prop="columns" min-width="180" />
                     <el-table-column label="类型" width="110">
@@ -18305,11 +18305,17 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: 260px minmax(360px, 1fr) minmax(420px, 1.2fr);
   gap: 16px;
+  height: clamp(620px, calc(100vh - 300px), 820px);
+  min-height: 620px;
 }
 
 .schema-panel,
 .table-panel,
 .detail-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
   min-height: 600px;
   padding: 16px;
   background: #ffffff;
@@ -18336,7 +18342,9 @@ onBeforeUnmount(() => {
 }
 
 .schema-tree {
-  min-height: 120px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .schema-tree :deep(.el-tree-node__content) {
@@ -18368,6 +18376,11 @@ onBeforeUnmount(() => {
 
 .metadata-table :deep(.el-table__row) {
   cursor: pointer;
+}
+
+.metadata-table-fill {
+  flex: 1;
+  min-height: 0;
 }
 
 .metadata-context-menu {
@@ -18407,6 +18420,43 @@ onBeforeUnmount(() => {
 
 .detail-tabs {
   margin-top: -8px;
+}
+
+.detail-panel-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.detail-panel > .el-empty {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+}
+
+.metadata-table-pane {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.detail-tabs-fill {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.detail-tabs-fill :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+}
+
+.detail-tabs-fill :deep(.el-tab-pane) {
+  height: 100%;
+  min-height: 0;
 }
 
 .table-overview-cards {
@@ -19965,6 +20015,38 @@ onBeforeUnmount(() => {
 
   .metadata-content {
     grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
+  .schema-panel,
+  .table-panel,
+  .detail-panel {
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .schema-tree {
+    flex: none;
+    min-height: 120px;
+    max-height: 320px;
+  }
+
+  .detail-panel-body,
+  .metadata-table-pane,
+  .detail-tabs-fill {
+    flex: none;
+    min-height: 0;
+  }
+
+  .metadata-table-fill {
+    flex: none;
+    height: 420px !important;
+  }
+
+  .detail-tabs-fill :deep(.el-tabs__content),
+  .detail-tabs-fill :deep(.el-tab-pane) {
+    min-height: 420px;
   }
 
   .relation-mini-graph-wide {
