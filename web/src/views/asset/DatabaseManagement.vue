@@ -1803,12 +1803,21 @@
               <el-table-column label="最近错误" min-width="220" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.lastError || '-' }}</template>
               </el-table-column>
-              <el-table-column label="操作" width="170" fixed="right">
+              <el-table-column label="操作" width="240" fixed="right">
                 <template #default="{ row }">
                   <el-button link type="primary" :loading="replicationCheckingId === row.replicaInstanceId" @click="handleCheckReplication(row.replicaInstanceId)">采集</el-button>
                   <el-button link type="info" @click="handleViewReplicationStatus(row.replicaInstanceId)">详情</el-button>
                   <el-button v-if="uiPermissions.replicaPauseApply && !row.applyPaused" link type="danger" @click="handleOpenReplicaAction(row, 'pause')">暂停</el-button>
                   <el-button v-if="uiPermissions.replicaResumeApply && row.applyPaused" link type="success" @click="handleOpenReplicaAction(row, 'resume')">恢复</el-button>
+                  <el-button
+                    v-if="uiPermissions.replicaRecordDelete"
+                    link
+                    type="danger"
+                    :loading="replicationReplicaDeletingId === row.id"
+                    @click="handleDeleteReplicaRelation(row)"
+                  >
+                    删除记录
+                  </el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -1880,6 +1889,19 @@
               <el-table-column label="操作人" width="120" prop="operatorName" show-overflow-tooltip />
               <el-table-column label="时间" width="170">
                 <template #default="{ row }">{{ row.createdAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="100" fixed="right">
+                <template #default="{ row }">
+                  <el-button
+                    v-if="uiPermissions.replicaRecordDelete"
+                    link
+                    type="danger"
+                    :loading="replicaActionDeletingId === row.id"
+                    @click="handleDeleteReplicaAction(row)"
+                  >
+                    删除
+                  </el-button>
+                </template>
               </el-table-column>
             </el-table>
             <div class="pagination-wrapper">
@@ -7809,7 +7831,9 @@ import {
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
   deleteDatabaseInstancePermission,
+  deleteDatabaseReplicaAction,
   deleteDatabaseReplicaIncidentGuide,
+  deleteDatabaseReplicaRelation,
   deleteDatabaseRunnerHost,
   disableDatabaseInstance,
   downloadDatabaseBackupRecord,
@@ -8175,6 +8199,7 @@ const replicationLoading = ref(false)
 const replicationProtectionLoading = ref(false)
 const replicationCheckLoading = ref(false)
 const replicationCheckingId = ref(0)
+const replicationReplicaDeletingId = ref(0)
 const replicationProtections = ref<DatabaseReplicaProtectionResult[]>([])
 const replicationProtectionTotal = ref(0)
 const replicationReplicas = ref<DatabaseInstanceReplicaResult[]>([])
@@ -8198,6 +8223,7 @@ const replicaIncidentGuideDetailMarkdown = ref('')
 const replicaIncidentGuideFormRef = ref<FormInstance>()
 const replicaActionLoading = ref(false)
 const replicaActionSubmitting = ref(false)
+const replicaActionDeletingId = ref(0)
 const replicaActions = ref<DatabaseReplicaActionResult[]>([])
 const replicaActionTotal = ref(0)
 const replicaActionDialogVisible = ref(false)
@@ -10977,6 +11003,54 @@ const loadReplicaActions = async () => {
     if (res.pageSize) replicaActionQuery.pageSize = res.pageSize
   } finally {
     replicaActionLoading.value = false
+  }
+}
+
+const handleDeleteReplicaRelation = async (row: DatabaseInstanceReplicaResult) => {
+  await ElMessageBox.confirm(
+    `确定删除副本关系记录 #${row.id} 吗？该操作只清理 OpsHub 中的关系记录，不会停止复制，也不会删除真实数据库；如果该副本仍存在，后续采集可能重新生成。`,
+    '删除副本关系记录',
+    {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    }
+  )
+  const shouldBackPage = replicationReplicas.value.length <= 1 && replicationReplicaQuery.page > 1
+  replicationReplicaDeletingId.value = row.id
+  try {
+    await deleteDatabaseReplicaRelation(row.id)
+    ElMessage.success('副本关系记录已删除')
+    if (shouldBackPage) {
+      replicationReplicaQuery.page -= 1
+    }
+    await Promise.all([loadReplicationReplicas(), loadReplicationProtections()])
+  } finally {
+    replicationReplicaDeletingId.value = 0
+  }
+}
+
+const handleDeleteReplicaAction = async (row: DatabaseReplicaActionResult) => {
+  await ElMessageBox.confirm(
+    `确定删除 Apply 操作记录 #${row.id} 吗？该操作只清理 OpsHub 操作历史，不会执行暂停或恢复 apply/replay。`,
+    '删除 Apply 操作记录',
+    {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    }
+  )
+  const shouldBackPage = replicaActions.value.length <= 1 && replicaActionQuery.page > 1
+  replicaActionDeletingId.value = row.id
+  try {
+    await deleteDatabaseReplicaAction(row.id)
+    ElMessage.success('Apply 操作记录已删除')
+    if (shouldBackPage) {
+      replicaActionQuery.page -= 1
+    }
+    await loadReplicaActions()
+  } finally {
+    replicaActionDeletingId.value = 0
   }
 }
 

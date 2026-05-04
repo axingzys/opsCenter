@@ -558,12 +558,13 @@ func ensureDatabaseManagementMenu(db *gorm.DB) error {
 		{Name: "查看副本治理", Code: "database:replica:view", Type: 3, ParentID: menu.ID, Sort: 131, Visible: 0, Status: 1},
 		{Name: "采集副本状态", Code: "database:replica:check", Type: 3, ParentID: menu.ID, Sort: 132, Visible: 0, Status: 1},
 		{Name: "生成副本事故指引", Code: "database:replica:incident-guide", Type: 3, ParentID: menu.ID, Sort: 133, Visible: 0, Status: 1},
-		{Name: "暂停副本 Apply", Code: "database:replica:pause-apply", Type: 3, ParentID: menu.ID, Sort: 134, Visible: 0, Status: 1},
-		{Name: "恢复副本 Apply", Code: "database:replica:resume-apply", Type: 3, ParentID: menu.ID, Sort: 135, Visible: 0, Status: 1},
-		{Name: "查看 Runner 工具", Code: "database:runner-tool:view", Type: 3, ParentID: menu.ID, Sort: 136, Visible: 0, Status: 1},
-		{Name: "巡检 Runner 工具", Code: "database:runner-tool:probe", Type: 3, ParentID: menu.ID, Sort: 137, Visible: 0, Status: 1},
-		{Name: "生成 Runner 工具脚本", Code: "database:runner-tool:generate-script", Type: 3, ParentID: menu.ID, Sort: 138, Visible: 0, Status: 1},
-		{Name: "安装 Runner 工具", Code: "database:runner-tool:install", Type: 3, ParentID: menu.ID, Sort: 139, Visible: 0, Status: 1},
+		{Name: "删除副本治理记录", Code: "database:replica:delete-record", Type: 3, ParentID: menu.ID, Sort: 134, Visible: 0, Status: 1},
+		{Name: "暂停副本 Apply", Code: "database:replica:pause-apply", Type: 3, ParentID: menu.ID, Sort: 135, Visible: 0, Status: 1},
+		{Name: "恢复副本 Apply", Code: "database:replica:resume-apply", Type: 3, ParentID: menu.ID, Sort: 136, Visible: 0, Status: 1},
+		{Name: "查看 Runner 工具", Code: "database:runner-tool:view", Type: 3, ParentID: menu.ID, Sort: 137, Visible: 0, Status: 1},
+		{Name: "巡检 Runner 工具", Code: "database:runner-tool:probe", Type: 3, ParentID: menu.ID, Sort: 138, Visible: 0, Status: 1},
+		{Name: "生成 Runner 工具脚本", Code: "database:runner-tool:generate-script", Type: 3, ParentID: menu.ID, Sort: 139, Visible: 0, Status: 1},
+		{Name: "安装 Runner 工具", Code: "database:runner-tool:install", Type: 3, ParentID: menu.ID, Sort: 140, Visible: 0, Status: 1},
 	}
 	for _, item := range buttons {
 		var button rbacmodel.SysMenu

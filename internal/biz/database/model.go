@@ -63,6 +63,8 @@ const (
 	DatabaseAuditActionReplicaCheckRun    = "replica_check_run"
 	DatabaseAuditActionReplicaIncident    = "replica_incident_guide"
 	DatabaseAuditActionReplicaIncidentDel = "replica_incident_guide_delete"
+	DatabaseAuditActionReplicaRelationDel = "replica_relation_delete"
+	DatabaseAuditActionReplicaActionDel   = "replica_action_delete"
 	DatabaseAuditActionReplicaPauseApply  = "replica_pause_apply"
 	DatabaseAuditActionReplicaResumeApply = "replica_resume_apply"
 

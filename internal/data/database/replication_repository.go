@@ -24,6 +24,10 @@ func (r *instanceReplicaRepo) Update(ctx context.Context, item *dbbiz.DatabaseIn
 	return r.db.WithContext(ctx).Save(item).Error
 }
 
+func (r *instanceReplicaRepo) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Unscoped().Delete(&dbbiz.DatabaseInstanceReplica{}, id).Error
+}
+
 func (r *instanceReplicaRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseInstanceReplica, error) {
 	var item dbbiz.DatabaseInstanceReplica
 	if err := r.db.WithContext(ctx).First(&item, id).Error; err != nil {
@@ -268,6 +272,10 @@ func (r *replicaActionRepo) Create(ctx context.Context, item *dbbiz.DatabaseRepl
 
 func (r *replicaActionRepo) Update(ctx context.Context, item *dbbiz.DatabaseReplicaAction) error {
 	return r.db.WithContext(ctx).Save(item).Error
+}
+
+func (r *replicaActionRepo) Delete(ctx context.Context, id uint) error {
+	return r.db.WithContext(ctx).Delete(&dbbiz.DatabaseReplicaAction{}, id).Error
 }
 
 func (r *replicaActionRepo) GetByID(ctx context.Context, id uint) (*dbbiz.DatabaseReplicaAction, error) {

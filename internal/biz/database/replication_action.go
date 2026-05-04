@@ -43,6 +43,38 @@ func (uc *UseCase) ListReplicaActions(ctx context.Context, req *DatabaseReplicaA
 	return result, total, nil
 }
 
+func (uc *UseCase) GetReplicaAction(ctx context.Context, id uint) (*DatabaseReplicaActionVO, error) {
+	if id == 0 {
+		return nil, fmt.Errorf("请选择 Apply 操作记录")
+	}
+	if uc.replicaActionRepo == nil {
+		return nil, fmt.Errorf("副本 apply 操作仓储未配置")
+	}
+	item, err := uc.replicaActionRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("Apply 操作记录不存在")
+	}
+	return uc.toReplicaActionVO(ctx, item), nil
+}
+
+func (uc *UseCase) DeleteReplicaAction(ctx context.Context, id uint, operator QueryOperator) error {
+	if id == 0 {
+		return fmt.Errorf("请选择 Apply 操作记录")
+	}
+	if uc.replicaActionRepo == nil {
+		return fmt.Errorf("副本 apply 操作仓储未配置")
+	}
+	item, err := uc.replicaActionRepo.GetByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("Apply 操作记录不存在")
+	}
+	if err := uc.replicaActionRepo.Delete(ctx, id); err != nil {
+		return err
+	}
+	uc.recordReplicaActionDeleteAudit(ctx, item, operator)
+	return nil
+}
+
 func (uc *UseCase) PauseReplicaApply(ctx context.Context, replicaID uint, req *DatabaseReplicaActionRequest, operator QueryOperator) (*DatabaseReplicaActionVO, error) {
 	return uc.executeReplicaApplyAction(ctx, replicaID, DatabaseReplicaApplyActionPause, req, operator)
 }
@@ -404,6 +436,31 @@ func (uc *UseCase) recordReplicaApplyActionAudit(ctx context.Context, instance *
 		DurationMs:      action.DurationMs,
 		ErrorMessage:    trimText(action.ErrorMessage, 500),
 		ClientIP:        trimText(action.ClientIP, 64),
+	})
+}
+
+func (uc *UseCase) recordReplicaActionDeleteAudit(ctx context.Context, action *DatabaseReplicaAction, operator QueryOperator) {
+	if uc == nil || uc.auditRepo == nil || action == nil {
+		return
+	}
+	instanceID := action.ReplicaInstanceID
+	if instanceID == 0 {
+		instanceID = action.PrimaryInstanceID
+	}
+	auditText := fmt.Sprintf("delete replica apply action #%d replica_id=%d action=%s incident=%s", action.ID, action.ReplicaID, action.Action, action.IncidentNo)
+	_ = uc.auditRepo.Create(ctx, &DatabaseQueryAudit{
+		InstanceID:     instanceID,
+		OperatorID:     operator.ID,
+		OperatorName:   trimText(operator.Username, 100),
+		AuditAction:    DatabaseAuditActionReplicaActionDel,
+		SQLText:        trimText(auditText, 20000),
+		SQLFingerprint: sqlFingerprint(auditText),
+		SQLType:        "REPLICA_APPLY_ACTION_DELETE",
+		RiskLevel:      DatabaseQueryRiskMedium,
+		Status:         DatabaseQueryStatusSuccess,
+		RowsReturned:   1,
+		ErrorMessage:   trimText(fmt.Sprintf("command=%s status=%s", action.CommandTemplate, action.Status), 500),
+		ClientIP:       trimText(operator.ClientIP, 64),
 	})
 }
 

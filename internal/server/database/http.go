@@ -53,6 +53,7 @@ const (
 	permDatabaseReplicaView       = "database:replica:view"
 	permDatabaseReplicaCheck      = "database:replica:check"
 	permDatabaseReplicaIncident   = "database:replica:incident-guide"
+	permDatabaseReplicaDelete     = "database:replica:delete-record"
 	permDatabaseReplicaPause      = "database:replica:pause-apply"
 	permDatabaseReplicaResume     = "database:replica:resume-apply"
 	permDatabaseRunnerToolView    = "database:runner-tool:view"
@@ -87,6 +88,7 @@ var databaseUIPermissionCodes = map[string]string{
 	"replicaView":                permDatabaseReplicaView,
 	"replicaCheck":               permDatabaseReplicaCheck,
 	"replicaIncidentGuide":       permDatabaseReplicaIncident,
+	"replicaRecordDelete":        permDatabaseReplicaDelete,
 	"replicaPauseApply":          permDatabaseReplicaPause,
 	"replicaResumeApply":         permDatabaseReplicaResume,
 	"runnerToolView":             permDatabaseRunnerToolView,
@@ -393,7 +395,9 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.GET("/replica-incident-guides/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.GetReplicaIncidentGuide)
 		databases.DELETE("/replica-incident-guides/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaIncident), s.service.DeleteReplicaIncidentGuide)
 		databases.GET("/replica-actions", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicaActions)
+		databases.DELETE("/replica-actions/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaDelete), s.service.DeleteReplicaAction)
 		databases.GET("/replicas", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicas)
+		databases.DELETE("/replicas/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaDelete), s.service.DeleteReplicaRelation)
 		databases.POST("/replicas/:id/pause-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaPause), s.service.PauseReplicaApply)
 		databases.POST("/replicas/:id/resume-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaResume), s.service.ResumeReplicaApply)
 		databases.GET("/replication-checks", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicationChecks)

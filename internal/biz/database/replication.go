@@ -28,6 +28,24 @@ func (uc *UseCase) ListInstanceReplicas(ctx context.Context, req *DatabaseInstan
 	return uc.toInstanceReplicaVOList(ctx, list), total, nil
 }
 
+func (uc *UseCase) DeleteInstanceReplica(ctx context.Context, id uint, operator QueryOperator) error {
+	if id == 0 {
+		return fmt.Errorf("请选择副本关系")
+	}
+	if uc.instanceReplicaRepo == nil {
+		return fmt.Errorf("副本关系仓储未配置")
+	}
+	item, err := uc.instanceReplicaRepo.GetByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("副本关系不存在")
+	}
+	if err := uc.instanceReplicaRepo.Delete(ctx, id); err != nil {
+		return err
+	}
+	uc.recordReplicaRelationDeleteAudit(ctx, item, operator)
+	return nil
+}
+
 func (uc *UseCase) ListReplicationChecks(ctx context.Context, req *DatabaseReplicationCheckListRequest) ([]*DatabaseReplicationCheckVO, int64, error) {
 	if uc.replicationCheckRepo == nil {
 		return nil, 0, fmt.Errorf("副本状态仓储未配置")
@@ -658,6 +676,31 @@ func (uc *UseCase) recordReplicationAudit(ctx context.Context, item *DatabaseIns
 		ClientIP:       trimText(operator.ClientIP, 64),
 	}
 	_ = uc.auditRepo.Create(ctx, audit)
+}
+
+func (uc *UseCase) recordReplicaRelationDeleteAudit(ctx context.Context, relation *DatabaseInstanceReplica, operator QueryOperator) {
+	if uc == nil || uc.auditRepo == nil || relation == nil {
+		return
+	}
+	instanceID := relation.ReplicaInstanceID
+	if instanceID == 0 {
+		instanceID = relation.PrimaryInstanceID
+	}
+	auditText := fmt.Sprintf("delete replica relation #%d primary=%d replica=%d engine=%s role=%s", relation.ID, relation.PrimaryInstanceID, relation.ReplicaInstanceID, relation.Engine, relation.ReplicaRole)
+	_ = uc.auditRepo.Create(ctx, &DatabaseQueryAudit{
+		InstanceID:     instanceID,
+		OperatorID:     operator.ID,
+		OperatorName:   trimText(operator.Username, 100),
+		AuditAction:    DatabaseAuditActionReplicaRelationDel,
+		SQLText:        trimText(auditText, 20000),
+		SQLFingerprint: sqlFingerprint(auditText),
+		SQLType:        "REPLICA_RELATION_DELETE",
+		RiskLevel:      DatabaseQueryRiskMedium,
+		Status:         DatabaseQueryStatusSuccess,
+		RowsReturned:   1,
+		ErrorMessage:   trimText(fmt.Sprintf("source=%s:%d last_check=%d", relation.SourceHost, relation.SourcePort, relation.LastCheckID), 500),
+		ClientIP:       trimText(operator.ClientIP, 64),
+	})
 }
 
 func querySingleRowMap(ctx context.Context, db *sql.DB, query string) (map[string]string, bool, error) {

@@ -2264,6 +2264,9 @@ export const listDatabaseReplicas = (params?: {
   status?: string
 }) => request.get('/api/v1/databases/replicas', { params })
 
+export const deleteDatabaseReplicaRelation = (id: number) =>
+  request.delete(`/api/v1/databases/replicas/${id}`)
+
 export const listDatabaseReplicationChecks = (params?: {
   page?: number
   pageSize?: number
@@ -2314,6 +2317,9 @@ export const listDatabaseReplicaActions = (params?: {
   action?: string
   status?: string
 }) => request.get('/api/v1/databases/replica-actions', { params })
+
+export const deleteDatabaseReplicaAction = (id: number) =>
+  request.delete(`/api/v1/databases/replica-actions/${id}`)
 
 export const pauseDatabaseReplicaApply = (id: number, data: DatabaseReplicaActionPayload) =>
   request.post(`/api/v1/databases/replicas/${id}/pause-apply`, data)

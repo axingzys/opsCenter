@@ -60,6 +60,31 @@ func (s *Service) ListInstanceReplicas(c *gin.Context) {
 	})
 }
 
+func (s *Service) DeleteReplicaRelation(c *gin.Context) {
+	replicaID, ok := parseUintParam(c, "id", "副本关系ID")
+	if !ok {
+		return
+	}
+	target, err := s.useCase.GetInstanceReplica(c.Request.Context(), replicaID)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if target == nil || !s.ensureReplicaRecordPermission(c, target.PrimaryInstanceID, target.ReplicaInstanceID) {
+		return
+	}
+	err = s.useCase.DeleteInstanceReplica(c.Request.Context(), replicaID, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "副本关系记录已删除", gin.H{"id": replicaID})
+}
+
 func (s *Service) ListReplicationChecks(c *gin.Context) {
 	var req dbbiz.DatabaseReplicationCheckListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
@@ -218,6 +243,31 @@ func (s *Service) ListReplicaActions(c *gin.Context) {
 	})
 }
 
+func (s *Service) DeleteReplicaAction(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "Apply 操作记录ID")
+	if !ok {
+		return
+	}
+	target, err := s.useCase.GetReplicaAction(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if target == nil || !s.ensureReplicaRecordPermission(c, target.PrimaryInstanceID, target.ReplicaInstanceID) {
+		return
+	}
+	err = s.useCase.DeleteReplicaAction(c.Request.Context(), id, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "Apply 操作记录已删除", gin.H{"id": id})
+}
+
 func (s *Service) PauseReplicaApply(c *gin.Context) {
 	s.executeReplicaApplyAction(c, true)
 }
@@ -279,6 +329,27 @@ func (s *Service) executeReplicaApplyAction(c *gin.Context, pause bool) {
 		message = "已恢复 apply/replay"
 	}
 	response.SuccessWithMessage(c, message, result)
+}
+
+func (s *Service) ensureReplicaRecordPermission(c *gin.Context, primaryInstanceID, replicaInstanceID uint) bool {
+	if primaryInstanceID == 0 && replicaInstanceID == 0 {
+		response.ErrorCode(c, http.StatusBadRequest, "副本记录缺少关联实例")
+		return false
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionTopology)
+	if !ok {
+		return false
+	}
+	if !scope.enforced || scope.admin {
+		return true
+	}
+	for _, allowedID := range scope.allowedIDs {
+		if allowedID == primaryInstanceID || allowedID == replicaInstanceID {
+			return true
+		}
+	}
+	response.ErrorCode(c, http.StatusForbidden, "权限不足：无权操作该副本记录")
+	return false
 }
 
 func (s *Service) GetInstanceReplicationStatus(c *gin.Context) {

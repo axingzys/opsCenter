@@ -17,6 +17,7 @@ type InstanceRepo interface {
 type InstanceReplicaRepo interface {
 	Create(ctx context.Context, item *DatabaseInstanceReplica) error
 	Update(ctx context.Context, item *DatabaseInstanceReplica) error
+	Delete(ctx context.Context, id uint) error
 	GetByID(ctx context.Context, id uint) (*DatabaseInstanceReplica, error)
 	GetByReplicaInstanceID(ctx context.Context, replicaInstanceID uint) (*DatabaseInstanceReplica, error)
 	UpsertByReplicaInstance(ctx context.Context, item *DatabaseInstanceReplica) (*DatabaseInstanceReplica, error)
@@ -41,6 +42,7 @@ type ReplicaIncidentGuideRepo interface {
 type ReplicaActionRepo interface {
 	Create(ctx context.Context, item *DatabaseReplicaAction) error
 	Update(ctx context.Context, item *DatabaseReplicaAction) error
+	Delete(ctx context.Context, id uint) error
 	GetByID(ctx context.Context, id uint) (*DatabaseReplicaAction, error)
 	List(ctx context.Context, req *DatabaseReplicaActionListRequest) ([]*DatabaseReplicaAction, int64, error)
 }
