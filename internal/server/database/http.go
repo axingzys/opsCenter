@@ -426,6 +426,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.GET("/replica-actions", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicaActions)
 		databases.DELETE("/replica-actions/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaDelete), s.service.DeleteReplicaAction)
 		databases.GET("/replicas", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicas)
+		databases.POST("/replicas/mark", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaCheck), s.service.MarkReplicaRelation)
 		databases.DELETE("/replicas/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaDelete), s.service.DeleteReplicaRelation)
 		databases.POST("/replicas/:id/pause-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaPause), s.service.PauseReplicaApply)
 		databases.POST("/replicas/:id/resume-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaResume), s.service.ResumeReplicaApply)

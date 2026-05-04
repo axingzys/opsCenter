@@ -810,6 +810,9 @@ func candidateFromNoRecentSuccessProfile(rule *DatabaseBackupAlertRule, profile 
 	if profile == nil || profile.InstanceID == 0 || profile.ProtectionLevel == "none" {
 		return nil
 	}
+	if profile.BackupRequirement == DatabaseProtectionBackupRequirementInherited && profile.InheritedProtection {
+		return nil
+	}
 	lastFullAt := parseBackupAlertTime(profile.LastFullAt)
 	if !lastFullAt.IsZero() && now.Sub(lastFullAt) < time.Duration(threshold.NoSuccessBackupHours)*time.Hour {
 		return nil

@@ -17,6 +17,7 @@ const (
 	DatabaseProtectionModePostgresBarmanPITR       = "postgres_barman_pitr"
 	DatabaseProtectionModePostgresPgBaseBackupPITR = "postgres_pg_basebackup_pitr"
 	DatabaseProtectionModeExternalPITR             = "external_pitr"
+	DatabaseProtectionModeInherited                = "inherited"
 
 	DatabaseProtectionLevelNone              = "none"
 	DatabaseProtectionLevelBackupOnly        = "backup_only"
@@ -33,6 +34,10 @@ const (
 	DatabaseRestoreDrillStatusSuccess = "success"
 	DatabaseRestoreDrillStatusFailed  = "failed"
 	DatabaseRestoreDrillStatusStale   = "stale"
+
+	DatabaseProtectionBackupRequirementRequired  = "required"
+	DatabaseProtectionBackupRequirementInherited = "inherited"
+	DatabaseProtectionBackupRequirementOptional  = "optional"
 
 	protectionProfileIDPrefix       = "instance-"
 	protectionRestoreDrillFreshDays = 30
@@ -59,63 +64,81 @@ type DatabaseProtectionActionVO struct {
 }
 
 type DatabaseProtectionProfileVO struct {
-	ProfileID               string                       `json:"profileId"`
-	InstanceID              uint                         `json:"instanceId"`
-	InstanceName            string                       `json:"instanceName"`
-	Engine                  string                       `json:"engine"`
-	EngineText              string                       `json:"engineText"`
-	Version                 string                       `json:"version"`
-	Endpoint                string                       `json:"endpoint"`
-	Environment             string                       `json:"environment"`
-	BusinessSystem          string                       `json:"businessSystem"`
-	Owner                   string                       `json:"owner"`
-	ProtectionMode          string                       `json:"protectionMode"`
-	ProtectionModeText      string                       `json:"protectionModeText"`
-	ProtectionLevel         string                       `json:"protectionLevel"`
-	ProtectionLevelText     string                       `json:"protectionLevelText"`
-	HealthStatus            string                       `json:"healthStatus"`
-	HealthStatusText        string                       `json:"healthStatusText"`
-	RiskLevel               string                       `json:"riskLevel"`
-	RiskLevelText           string                       `json:"riskLevelText"`
-	RiskMessages            []string                     `json:"riskMessages"`
-	RecoverableFrom         string                       `json:"recoverableFrom"`
-	RecoverableUntil        string                       `json:"recoverableUntil"`
-	RPOLagSeconds           int                          `json:"rpoLagSeconds"`
-	LastFullAt              string                       `json:"lastFullAt"`
-	LastIncrementalAt       string                       `json:"lastIncrementalAt"`
-	LastSyntheticAt         string                       `json:"lastSyntheticAt"`
-	LastLogArchiveAt        string                       `json:"lastLogArchiveAt"`
-	LastRestoreDrillAt      string                       `json:"lastRestoreDrillAt"`
-	RestoreDrillStatus      string                       `json:"restoreDrillStatus"`
-	RestoreDrillStatusText  string                       `json:"restoreDrillStatusText"`
-	RunnerStatus            string                       `json:"runnerStatus"`
-	RunnerStatusText        string                       `json:"runnerStatusText"`
-	StorageStatus           string                       `json:"storageStatus"`
-	StorageStatusText       string                       `json:"storageStatusText"`
-	BackupChainStatus       string                       `json:"backupChainStatus"`
-	BackupChainStatusText   string                       `json:"backupChainStatusText"`
-	LogChainStatus          string                       `json:"logChainStatus"`
-	LogChainStatusText      string                       `json:"logChainStatusText"`
-	ReplicaProtectionStatus string                       `json:"replicaProtectionStatus"`
-	ReplicaProtectionText   string                       `json:"replicaProtectionText"`
-	PGSystemIdentifier      string                       `json:"pgSystemIdentifier"`
-	TimelineID              string                       `json:"timelineId"`
-	WALStart                string                       `json:"walStart"`
-	WALEnd                  string                       `json:"walEnd"`
-	WALGapCount             int                          `json:"walGapCount"`
-	TimelineMismatch        bool                         `json:"timelineMismatch"`
-	BackupPolicy            *DatabaseBackupPolicyVO      `json:"backupPolicy,omitempty"`
-	LogicalTask             *DatabaseBackupTaskVO        `json:"logicalTask,omitempty"`
-	LatestBackupRecord      *DatabaseBackupRecordVO      `json:"latestBackupRecord,omitempty"`
-	LatestLogArchive        *DatabaseLogArchiveVO        `json:"latestLogArchive,omitempty"`
-	LatestRestoreJob        *DatabaseRestoreJobVO        `json:"latestRestoreJob,omitempty"`
-	LogArchiveStream        *DatabaseLogArchiveStreamVO  `json:"logArchiveStream,omitempty"`
-	BarmanServer            *DatabaseBarmanServerVO      `json:"barmanServer,omitempty"`
-	RunnerHost              *DatabaseRunnerHostVO        `json:"runnerHost,omitempty"`
-	StorageProfile          *DatabaseStorageProfileVO    `json:"storageProfile,omitempty"`
-	ReplicaProtection       *DatabaseReplicaProtectionVO `json:"replicaProtection,omitempty"`
-	RecommendedActions      []DatabaseProtectionActionVO `json:"recommendedActions"`
-	ValidatedAt             string                       `json:"validatedAt"`
+	ProfileID                    string                       `json:"profileId"`
+	InstanceID                   uint                         `json:"instanceId"`
+	InstanceName                 string                       `json:"instanceName"`
+	Engine                       string                       `json:"engine"`
+	EngineText                   string                       `json:"engineText"`
+	Version                      string                       `json:"version"`
+	Endpoint                     string                       `json:"endpoint"`
+	Environment                  string                       `json:"environment"`
+	BusinessSystem               string                       `json:"businessSystem"`
+	Owner                        string                       `json:"owner"`
+	ProtectionMode               string                       `json:"protectionMode"`
+	ProtectionModeText           string                       `json:"protectionModeText"`
+	ProtectionLevel              string                       `json:"protectionLevel"`
+	ProtectionLevelText          string                       `json:"protectionLevelText"`
+	HealthStatus                 string                       `json:"healthStatus"`
+	HealthStatusText             string                       `json:"healthStatusText"`
+	RiskLevel                    string                       `json:"riskLevel"`
+	RiskLevelText                string                       `json:"riskLevelText"`
+	RiskMessages                 []string                     `json:"riskMessages"`
+	InstanceRole                 string                       `json:"instanceRole"`
+	InstanceRoleText             string                       `json:"instanceRoleText"`
+	ReplicaRole                  string                       `json:"replicaRole"`
+	ReplicaRoleText              string                       `json:"replicaRoleText"`
+	PrimaryInstanceID            uint                         `json:"primaryInstanceId"`
+	PrimaryInstanceName          string                       `json:"primaryInstanceName"`
+	PrimaryEndpoint              string                       `json:"primaryEndpoint"`
+	RoleDiscoverySource          string                       `json:"roleDiscoverySource"`
+	RoleDiscoverySourceText      string                       `json:"roleDiscoverySourceText"`
+	ConfiguredDelaySeconds       int                          `json:"configuredDelaySeconds"`
+	RemainingDelaySeconds        int                          `json:"remainingDelaySeconds"`
+	BackupRequirement            string                       `json:"backupRequirement"`
+	BackupRequirementText        string                       `json:"backupRequirementText"`
+	InheritedProtection          bool                         `json:"inheritedProtection"`
+	InheritedProtectionText      string                       `json:"inheritedProtectionText"`
+	InheritedProtectionMode      string                       `json:"inheritedProtectionMode"`
+	InheritedProtectionLevel     string                       `json:"inheritedProtectionLevel"`
+	InheritedProtectionRiskLevel string                       `json:"inheritedProtectionRiskLevel"`
+	RecoverableFrom              string                       `json:"recoverableFrom"`
+	RecoverableUntil             string                       `json:"recoverableUntil"`
+	RPOLagSeconds                int                          `json:"rpoLagSeconds"`
+	LastFullAt                   string                       `json:"lastFullAt"`
+	LastIncrementalAt            string                       `json:"lastIncrementalAt"`
+	LastSyntheticAt              string                       `json:"lastSyntheticAt"`
+	LastLogArchiveAt             string                       `json:"lastLogArchiveAt"`
+	LastRestoreDrillAt           string                       `json:"lastRestoreDrillAt"`
+	RestoreDrillStatus           string                       `json:"restoreDrillStatus"`
+	RestoreDrillStatusText       string                       `json:"restoreDrillStatusText"`
+	RunnerStatus                 string                       `json:"runnerStatus"`
+	RunnerStatusText             string                       `json:"runnerStatusText"`
+	StorageStatus                string                       `json:"storageStatus"`
+	StorageStatusText            string                       `json:"storageStatusText"`
+	BackupChainStatus            string                       `json:"backupChainStatus"`
+	BackupChainStatusText        string                       `json:"backupChainStatusText"`
+	LogChainStatus               string                       `json:"logChainStatus"`
+	LogChainStatusText           string                       `json:"logChainStatusText"`
+	ReplicaProtectionStatus      string                       `json:"replicaProtectionStatus"`
+	ReplicaProtectionText        string                       `json:"replicaProtectionText"`
+	PGSystemIdentifier           string                       `json:"pgSystemIdentifier"`
+	TimelineID                   string                       `json:"timelineId"`
+	WALStart                     string                       `json:"walStart"`
+	WALEnd                       string                       `json:"walEnd"`
+	WALGapCount                  int                          `json:"walGapCount"`
+	TimelineMismatch             bool                         `json:"timelineMismatch"`
+	BackupPolicy                 *DatabaseBackupPolicyVO      `json:"backupPolicy,omitempty"`
+	LogicalTask                  *DatabaseBackupTaskVO        `json:"logicalTask,omitempty"`
+	LatestBackupRecord           *DatabaseBackupRecordVO      `json:"latestBackupRecord,omitempty"`
+	LatestLogArchive             *DatabaseLogArchiveVO        `json:"latestLogArchive,omitempty"`
+	LatestRestoreJob             *DatabaseRestoreJobVO        `json:"latestRestoreJob,omitempty"`
+	LogArchiveStream             *DatabaseLogArchiveStreamVO  `json:"logArchiveStream,omitempty"`
+	BarmanServer                 *DatabaseBarmanServerVO      `json:"barmanServer,omitempty"`
+	RunnerHost                   *DatabaseRunnerHostVO        `json:"runnerHost,omitempty"`
+	StorageProfile               *DatabaseStorageProfileVO    `json:"storageProfile,omitempty"`
+	ReplicaProtection            *DatabaseReplicaProtectionVO `json:"replicaProtection,omitempty"`
+	RecommendedActions           []DatabaseProtectionActionVO `json:"recommendedActions"`
+	ValidatedAt                  string                       `json:"validatedAt"`
 }
 
 func (uc *UseCase) ListProtectionProfiles(ctx context.Context, req *DatabaseProtectionProfileListRequest) ([]*DatabaseProtectionProfileVO, int64, error) {
@@ -204,6 +227,10 @@ func (uc *UseCase) ValidateProtectionProfile(ctx context.Context, profileID stri
 	return uc.GetProtectionProfile(ctx, profileID)
 }
 
+func (uc *UseCase) buildProtectionProfile(ctx context.Context, instance *DatabaseInstance) *DatabaseProtectionProfileVO {
+	return uc.buildProtectionProfileWithVisited(ctx, instance, map[uint]bool{})
+}
+
 func ProtectionProfileInstanceID(profileID string) (uint, error) {
 	value := strings.TrimSpace(profileID)
 	if value == "" {
@@ -225,9 +252,13 @@ func ProtectionProfileInstanceID(profileID string) (uint, error) {
 	return uint(id), nil
 }
 
-func (uc *UseCase) buildProtectionProfile(ctx context.Context, instance *DatabaseInstance) *DatabaseProtectionProfileVO {
+func (uc *UseCase) buildProtectionProfileWithVisited(ctx context.Context, instance *DatabaseInstance, visited map[uint]bool) *DatabaseProtectionProfileVO {
 	now := time.Now()
 	engine := normalizeDBType(instance.DBType)
+	if visited == nil {
+		visited = map[uint]bool{}
+	}
+	visited[instance.ID] = true
 	profile := &DatabaseProtectionProfileVO{
 		ProfileID:               fmt.Sprintf("%s%d", protectionProfileIDPrefix, instance.ID),
 		InstanceID:              instance.ID,
@@ -250,6 +281,9 @@ func (uc *UseCase) buildProtectionProfile(ctx context.Context, instance *Databas
 		RunnerStatus:            DatabaseRunnerHostStatusPending,
 		StorageStatus:           "unknown",
 		ReplicaProtectionStatus: DatabaseReplicaProtectionUnknown,
+		InstanceRole:            DatabaseReplicationRoleUnknown,
+		BackupRequirement:       DatabaseProtectionBackupRequirementRequired,
+		RemainingDelaySeconds:   -1,
 		ValidatedAt:             now.Format("2006-01-02 15:04:05"),
 	}
 
@@ -381,8 +415,114 @@ func (uc *UseCase) buildProtectionProfile(ctx context.Context, instance *Databas
 		profile.ReplicaProtectionText = profile.ReplicaProtection.ProtectionStatusText
 	}
 
+	uc.applyProtectionReplicaResponsibility(ctx, profile, visited)
 	profile.applyProtectionAssessment(now)
 	return profile
+}
+
+func (uc *UseCase) applyProtectionReplicaResponsibility(ctx context.Context, profile *DatabaseProtectionProfileVO, visited map[uint]bool) {
+	if uc == nil || profile == nil {
+		return
+	}
+	role := DatabaseReplicationRolePrimary
+	profile.BackupRequirement = DatabaseProtectionBackupRequirementRequired
+
+	var relation *DatabaseInstanceReplica
+	if uc.instanceReplicaRepo != nil {
+		if item, err := uc.instanceReplicaRepo.GetByReplicaInstanceID(ctx, profile.InstanceID); err == nil && item != nil {
+			relation = item
+		}
+	}
+	if relation != nil {
+		role = protectionInstanceRoleFromReplicaRole(relation.ReplicaRole)
+		profile.ReplicaRole = relation.ReplicaRole
+		profile.ReplicaRoleText = ReplicaRoleText(relation.ReplicaRole)
+		profile.PrimaryInstanceID = relation.PrimaryInstanceID
+		profile.RoleDiscoverySource = relation.DiscoverySource
+		profile.RoleDiscoverySourceText = ReplicaDiscoverySourceText(relation.DiscoverySource)
+		profile.ConfiguredDelaySeconds = relation.ConfiguredDelaySeconds
+		profile.RemainingDelaySeconds = -1
+		if check := latestReplicationCheck(ctx, uc.replicationCheckRepo, profile.InstanceID); check != nil {
+			profile.RemainingDelaySeconds = check.RemainingDelaySeconds
+			if profile.ConfiguredDelaySeconds <= 0 {
+				profile.ConfiguredDelaySeconds = check.ConfiguredDelaySeconds
+			}
+		}
+		if relation.PrimaryInstanceID > 0 {
+			profile.PrimaryInstanceName, profile.PrimaryEndpoint = uc.instanceNameEndpoint(ctx, relation.PrimaryInstanceID)
+		}
+		if isReplicaProtectionRole(role) {
+			profile.BackupRequirement = DatabaseProtectionBackupRequirementInherited
+			uc.applyInheritedProtectionSummary(ctx, profile, visited)
+		}
+	} else if check := latestReplicationCheck(ctx, uc.replicationCheckRepo, profile.InstanceID); check != nil {
+		role = protectionInstanceRoleFromReplicationCheck(check)
+		profile.PrimaryInstanceID = check.SourceInstanceID
+		profile.ConfiguredDelaySeconds = check.ConfiguredDelaySeconds
+		profile.RemainingDelaySeconds = check.RemainingDelaySeconds
+		profile.RoleDiscoverySource = DatabaseReplicaDiscoveryReplicaStatus
+		profile.RoleDiscoverySourceText = ReplicaDiscoverySourceText(DatabaseReplicaDiscoveryReplicaStatus)
+		if check.SourceInstanceID > 0 {
+			profile.PrimaryInstanceName, profile.PrimaryEndpoint = uc.instanceNameEndpoint(ctx, check.SourceInstanceID)
+		}
+		if isReplicaProtectionRole(role) {
+			profile.BackupRequirement = DatabaseProtectionBackupRequirementInherited
+			if check.ConfiguredDelaySeconds > 0 {
+				profile.ReplicaRole = DatabaseReplicaRoleDelayed
+			} else if check.RoleDetected == DatabaseReplicationRoleStandby {
+				profile.ReplicaRole = DatabaseReplicaRoleStandby
+			} else {
+				profile.ReplicaRole = DatabaseReplicaRoleRealtime
+			}
+			profile.ReplicaRoleText = ReplicaRoleText(profile.ReplicaRole)
+			uc.applyInheritedProtectionSummary(ctx, profile, visited)
+		}
+	}
+
+	profile.InstanceRole = role
+	profile.InstanceRoleText = ProtectionInstanceRoleText(role)
+	if profile.RoleDiscoverySourceText == "" {
+		profile.RoleDiscoverySourceText = ReplicaDiscoverySourceText(profile.RoleDiscoverySource)
+	}
+}
+
+func (uc *UseCase) applyInheritedProtectionSummary(ctx context.Context, profile *DatabaseProtectionProfileVO, visited map[uint]bool) {
+	if uc == nil || profile == nil || profile.PrimaryInstanceID == 0 || uc.instanceRepo == nil {
+		return
+	}
+	if visited != nil && visited[profile.PrimaryInstanceID] {
+		return
+	}
+	primary, err := uc.instanceRepo.GetByID(ctx, profile.PrimaryInstanceID)
+	if err != nil || primary == nil {
+		return
+	}
+	nextVisited := make(map[uint]bool, len(visited)+1)
+	for k, v := range visited {
+		nextVisited[k] = v
+	}
+	primaryProfile := uc.buildProtectionProfileWithVisited(ctx, primary, nextVisited)
+	if primaryProfile == nil {
+		return
+	}
+	profile.InheritedProtectionMode = primaryProfile.ProtectionMode
+	profile.InheritedProtectionLevel = primaryProfile.ProtectionLevel
+	profile.InheritedProtectionRiskLevel = primaryProfile.RiskLevel
+	if primaryProfile.ProtectionLevel != "" && primaryProfile.ProtectionLevel != DatabaseProtectionLevelNone {
+		profile.InheritedProtection = true
+		profile.ProtectionMode = DatabaseProtectionModeInherited
+		profile.ProtectionLevel = primaryProfile.ProtectionLevel
+		profile.HealthStatus = primaryProfile.HealthStatus
+		profile.RiskLevel = primaryProfile.RiskLevel
+		profile.RecoverableFrom = firstNonEmpty(profile.RecoverableFrom, primaryProfile.RecoverableFrom)
+		profile.RecoverableUntil = firstNonEmpty(profile.RecoverableUntil, primaryProfile.RecoverableUntil)
+		profile.LastFullAt = firstNonEmpty(profile.LastFullAt, primaryProfile.LastFullAt)
+		profile.LastIncrementalAt = firstNonEmpty(profile.LastIncrementalAt, primaryProfile.LastIncrementalAt)
+		profile.LastSyntheticAt = firstNonEmpty(profile.LastSyntheticAt, primaryProfile.LastSyntheticAt)
+		profile.LastLogArchiveAt = firstNonEmpty(profile.LastLogArchiveAt, primaryProfile.LastLogArchiveAt)
+		profile.LogChainStatus = firstNonEmpty(profile.LogChainStatus, primaryProfile.LogChainStatus)
+		profile.LogChainStatusText = firstNonEmpty(profile.LogChainStatusText, primaryProfile.LogChainStatusText)
+	}
 }
 
 func (profile *DatabaseProtectionProfileVO) applyProtectionAssessment(now time.Time) {
@@ -392,11 +532,32 @@ func (profile *DatabaseProtectionProfileVO) applyProtectionAssessment(now time.T
 	high := false
 	medium := false
 	pitrCandidate := isPITRProtectionMode(profile.ProtectionMode)
+	inheritedBackup := profile.BackupRequirement == DatabaseProtectionBackupRequirementInherited
 
 	if profile.BackupPolicy == nil && profile.LogicalTask == nil && profile.LatestBackupRecord == nil {
-		critical = true
-		risks = append(risks, "当前实例没有启用备份策略或成功备份记录")
-		actions = append(actions, protectionAction(DatabaseQueryRiskCritical, "enable_protection", "请先启用数据库保护策略或创建备份任务", true))
+		if inheritedBackup && profile.InheritedProtection {
+			switch profile.InheritedProtectionRiskLevel {
+			case DatabaseQueryRiskCritical:
+				critical = true
+				risks = append(risks, "当前实例继承主库备份保护，但来源主库存在严重保护风险")
+				actions = append(actions, protectionAction(DatabaseQueryRiskCritical, "inspect_primary_protection", "先处理来源主库备份保护风险", true))
+			case DatabaseQueryRiskHigh:
+				high = true
+				risks = append(risks, "当前实例继承主库备份保护，但来源主库存在高风险")
+				actions = append(actions, protectionAction(DatabaseQueryRiskHigh, "inspect_primary_protection", "先处理来源主库备份保护风险", true))
+			case DatabaseQueryRiskMedium:
+				medium = true
+				risks = append(risks, "当前实例继承主库备份保护，来源主库仍有待处理风险")
+			}
+		} else if inheritedBackup {
+			critical = true
+			risks = append(risks, "当前实例是从库，但来源主库尚未启用可继承的备份保护")
+			actions = append(actions, protectionAction(DatabaseQueryRiskCritical, "inspect_primary_protection", "请先为来源主库启用备份保护", true))
+		} else {
+			critical = true
+			risks = append(risks, "当前实例没有启用备份策略或成功备份记录")
+			actions = append(actions, protectionAction(DatabaseQueryRiskCritical, "enable_protection", "请先启用数据库保护策略或创建备份任务", true))
+		}
 	}
 	if profile.BackupPolicy != nil {
 		if !profile.BackupPolicy.Enabled || profile.BackupPolicy.Status == DatabaseBackupPolicyStatusDisabled {
@@ -541,7 +702,7 @@ func (profile *DatabaseProtectionProfileVO) applyProtectionAssessment(now time.T
 			actions = append(actions, protectionAction(DatabaseQueryRiskMedium, "run_restore_drill", "刷新恢复演练 proof", false))
 		}
 	}
-	if profile.ReplicaProtection != nil && profile.ReplicaProtection.ProtectionStatus != DatabaseReplicaProtectionProtected {
+	if !inheritedBackup && profile.ReplicaProtection != nil && profile.ReplicaProtection.ProtectionStatus != DatabaseReplicaProtectionProtected {
 		medium = true
 		risks = append(risks, "延迟副本保护窗口不可用或降级")
 	}
@@ -578,6 +739,8 @@ func (profile *DatabaseProtectionProfileVO) applyProtectionAssessment(now time.T
 	if profile.ReplicaProtectionText == "" {
 		profile.ReplicaProtectionText = ReplicaProtectionStatusText(profile.ReplicaProtectionStatus)
 	}
+	profile.BackupRequirementText = BackupRequirementText(profile.BackupRequirement)
+	profile.InheritedProtectionText = inheritedProtectionText(profile)
 }
 
 func (profile *DatabaseProtectionProfileVO) ChainStatus() string {
@@ -588,7 +751,13 @@ func (profile *DatabaseProtectionProfileVO) ChainStatus() string {
 }
 
 func (profile *DatabaseProtectionProfileVO) deriveProtectionLevel() string {
-	if profile == nil || (profile.BackupPolicy == nil && profile.LogicalTask == nil && profile.LatestBackupRecord == nil) {
+	if profile == nil {
+		return DatabaseProtectionLevelNone
+	}
+	if profile.BackupRequirement == DatabaseProtectionBackupRequirementInherited && profile.InheritedProtection {
+		return firstNonEmpty(profile.InheritedProtectionLevel, DatabaseProtectionLevelBackupOnly)
+	}
+	if profile.BackupPolicy == nil && profile.LogicalTask == nil && profile.LatestBackupRecord == nil {
 		return DatabaseProtectionLevelNone
 	}
 	if !isPITRProtectionMode(profile.ProtectionMode) {
@@ -1102,6 +1271,50 @@ func isPITRProtectionMode(mode string) bool {
 	}
 }
 
+func protectionInstanceRoleFromReplicaRole(role string) string {
+	switch strings.TrimSpace(role) {
+	case DatabaseReplicaRoleDelayed:
+		return DatabaseReplicaRoleDelayed
+	case DatabaseReplicaRoleRealtime:
+		return DatabaseReplicaRoleRealtime
+	case DatabaseReplicaRoleStandby:
+		return DatabaseReplicaRoleStandby
+	default:
+		return DatabaseReplicationRoleUnknown
+	}
+}
+
+func protectionInstanceRoleFromReplicationCheck(check *DatabaseReplicationCheck) string {
+	if check == nil {
+		return DatabaseReplicationRoleUnknown
+	}
+	switch check.RoleDetected {
+	case DatabaseReplicationRolePrimary:
+		return DatabaseReplicationRolePrimary
+	case DatabaseReplicationRoleStandby:
+		if check.ConfiguredDelaySeconds > 0 {
+			return DatabaseReplicaRoleDelayed
+		}
+		return DatabaseReplicaRoleStandby
+	case DatabaseReplicationRoleReplica:
+		if check.ConfiguredDelaySeconds > 0 {
+			return DatabaseReplicaRoleDelayed
+		}
+		return DatabaseReplicaRoleRealtime
+	default:
+		return DatabaseReplicationRoleUnknown
+	}
+}
+
+func isReplicaProtectionRole(role string) bool {
+	switch strings.TrimSpace(role) {
+	case DatabaseReplicaRoleRealtime, DatabaseReplicaRoleDelayed, DatabaseReplicaRoleStandby:
+		return true
+	default:
+		return false
+	}
+}
+
 func betterProtectionTask(candidate, current *DatabaseBackupTask) bool {
 	if candidate == nil {
 		return false
@@ -1218,6 +1431,8 @@ func protectionLevelRank(value string) int {
 
 func ProtectionModeText(value string) string {
 	switch value {
+	case DatabaseProtectionModeInherited:
+		return "继承主库保护"
 	case DatabaseProtectionModeLogicalBackup:
 		return "逻辑备份"
 	case DatabaseProtectionModeMySQLPhysicalPITR:
@@ -1233,6 +1448,46 @@ func ProtectionModeText(value string) string {
 	default:
 		return "未保护"
 	}
+}
+
+func ProtectionInstanceRoleText(value string) string {
+	switch strings.TrimSpace(value) {
+	case DatabaseReplicationRolePrimary:
+		return "主库 / 独立实例"
+	case DatabaseReplicaRoleRealtime:
+		return "从库"
+	case DatabaseReplicaRoleDelayed:
+		return "延迟从库"
+	case DatabaseReplicaRoleStandby:
+		return "Standby"
+	default:
+		return "未知"
+	}
+}
+
+func BackupRequirementText(value string) string {
+	switch strings.TrimSpace(value) {
+	case DatabaseProtectionBackupRequirementInherited:
+		return "继承主库保护"
+	case DatabaseProtectionBackupRequirementOptional:
+		return "不强制单独备份"
+	default:
+		return "需单独保护"
+	}
+}
+
+func inheritedProtectionText(profile *DatabaseProtectionProfileVO) string {
+	if profile == nil || profile.BackupRequirement != DatabaseProtectionBackupRequirementInherited {
+		return ""
+	}
+	primary := firstNonEmpty(profile.PrimaryInstanceName, fmt.Sprintf("#%d", profile.PrimaryInstanceID))
+	if profile.PrimaryInstanceID == 0 {
+		primary = "来源主库"
+	}
+	if profile.InheritedProtection {
+		return fmt.Sprintf("继承 %s 的%s", primary, ProtectionLevelText(profile.InheritedProtectionLevel))
+	}
+	return fmt.Sprintf("等待 %s 启用备份保护", primary)
 }
 
 func ProtectionLevelText(value string) string {

@@ -340,6 +340,14 @@ type DatabaseReplicationCheckListRequest struct {
 	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
+type DatabaseInstanceReplicaMarkRequest struct {
+	PrimaryInstanceID      uint   `json:"primaryInstanceId" binding:"required"`
+	ReplicaInstanceID      uint   `json:"replicaInstanceId" binding:"required"`
+	ReplicaRole            string `json:"replicaRole" binding:"required,max=30"`
+	ConfiguredDelaySeconds int    `json:"configuredDelaySeconds" binding:"omitempty,min=0,max=2592000"`
+	Reason                 string `json:"reason" binding:"omitempty,max=1000"`
+}
+
 type DatabaseReplicaProtectionListRequest struct {
 	Page                         int    `form:"page"`
 	PageSize                     int    `form:"pageSize"`

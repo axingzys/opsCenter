@@ -69,16 +69,21 @@ func (r *instanceReplicaRepo) UpsertByReplicaInstance(ctx context.Context, item 
 		return item, nil
 	}
 
-	existing.PrimaryInstanceID = item.PrimaryInstanceID
-	existing.Engine = item.Engine
-	existing.ReplicaRole = item.ReplicaRole
-	existing.SourceHost = item.SourceHost
-	existing.SourcePort = item.SourcePort
-	existing.SourceServerUUID = item.SourceServerUUID
-	existing.PGSystemIdentifier = item.PGSystemIdentifier
-	existing.ApplicationName = item.ApplicationName
-	existing.ConfiguredDelaySeconds = item.ConfiguredDelaySeconds
-	existing.DiscoverySource = item.DiscoverySource
+	manualLocked := existing.DiscoverySource == dbbiz.DatabaseReplicaDiscoveryManual && item.DiscoverySource != dbbiz.DatabaseReplicaDiscoveryManual
+	if !manualLocked {
+		existing.PrimaryInstanceID = item.PrimaryInstanceID
+		existing.Engine = item.Engine
+		existing.ReplicaRole = item.ReplicaRole
+		existing.SourceHost = item.SourceHost
+		existing.SourcePort = item.SourcePort
+		existing.SourceServerUUID = item.SourceServerUUID
+		existing.PGSystemIdentifier = item.PGSystemIdentifier
+		existing.ApplicationName = item.ApplicationName
+		existing.ConfiguredDelaySeconds = item.ConfiguredDelaySeconds
+		existing.DiscoverySource = item.DiscoverySource
+	} else {
+		existing.Engine = item.Engine
+	}
 	existing.Status = item.Status
 	existing.LastCheckID = item.LastCheckID
 	existing.LastCheckedAt = item.LastCheckedAt

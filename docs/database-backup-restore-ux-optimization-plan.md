@@ -1974,3 +1974,151 @@ docker build -t opshub-api:latest -f Dockerfile .
 docker build -f Dockerfile.frontend -t opshub-web:latest .
 docker compose up -d --force-recreate frontend backend
 ```
+
+## 24. 第五轮落地记录：副本角色与继承保护
+
+本轮目标是解决“从库 / 延迟从库被保护概览误判为未备份严重风险”的问题，并给页面补一个明确的人工标记入口。用户看到的现象是 `mysql-delay-replica-2`、`opshub-mysql-replica` 这类实例在备份恢复页被提示“当前实例没有启用备份策略或成功备份记录”，但这些对象本质上是主库的副本，不一定应该独立承担备份基线责任。
+
+### 24.1 改动前复查范围
+
+本轮动手前复查了以下文档、代码和现有数据链路：
+
+- `docs/database-backup-restore-ux-optimization-plan.md`：确认前三轮已经把备份恢复默认入口收敛到保护概览，第四轮补了监控告警闭环；副本角色还没有进入保护概览的风险判断。
+- `internal/biz/database/model.go`：确认已有 `DatabaseInstanceReplica`、`DatabaseReplicationCheck`、副本角色、健康状态、发现来源和副本保护相关常量。
+- `internal/biz/database/replication.go`：确认已有副本采集、关系 upsert、延迟秒数、Apply 状态、事故向导和副本保护能力。
+- `internal/data/database/replication_repository.go`：确认已有 `UpsertByReplicaInstance`，但自动检测会覆盖同一 `replica_instance_id` 的关系信息，本轮需要保护人工标记。
+- `internal/biz/database/protection_profile.go`：确认保护概览只按实例自身的备份策略、逻辑任务、备份记录、日志归档、Runner、存储、Barman、恢复演练等判断保护级别，没有读取 `database_instance_replicas`。
+- `internal/biz/database/protection_risk.go`：确认风险中心来自保护概览拆解，因此保护概览误判会直接进入风险中心。
+- `internal/biz/database/backup_alert_rule.go`：确认第四轮告警扫描会从保护概览生成“长时间无成功备份”候选，因此从库误判会进一步触发告警。
+- `internal/service/database/replication.go`、`internal/server/database/http.go`：确认副本关系已有查询和删除接口，可以扩展人工标记接口并复用副本治理权限。
+- `web/src/api/database.ts`：确认前端已有副本关系列表、采集、保护和备份恢复 API 定义。
+- `web/src/views/asset/DatabaseManagement.vue`：确认保护概览、风险中心、保护详情抽屉、副本治理都集中在同一页面，本轮需要同时调整展示和操作入口。
+
+同时复查了当前库里的副本关系：`opshub-mysql-replica` 已有实时从库关系，`mysql-delay-replica-2` 已有延迟从库关系且配置延迟为 3600 秒；`mysql-tmp-test` 当前检测为主库 / 独立实例，因此仍应按普通实例检查是否有备份保护。
+
+### 24.2 改动前的问题判断
+
+原逻辑的问题不在备份引擎本身，而在“保护责任”没有建模：
+
+- 主库 / 独立实例：应该要求有自己的物理备份、逻辑备份或外部备份记录。
+- 实时从库：通常可以继承主库备份保护，不应默认要求单独备份。
+- 延迟从库：更偏向恢复缓冲和误操作保护，也可以继承主库备份保护；它自身需要展示延迟窗口和健康状态，而不是被简单标红为“没有备份”。
+- Standby：PostgreSQL 场景下也应按来源主库保护状态判断，而不是把 standby 当成普通主库。
+- 未识别角色：仍按普通实例处理，避免漏掉真正没有备份的生产库。
+
+因此本轮的核心不是隐藏风险，而是把风险指向正确责任方：从库继承主库保护时不再报“从库没有备份”；如果来源主库没有保护，则从库显示“等待来源主库启用备份保护”。
+
+### 24.3 后端已落地内容
+
+保护概览新增副本角色和备份责任字段：
+
+- `instanceRole` / `instanceRoleText`：主库、从库、延迟从库、Standby、未知。
+- `replicaRole` / `replicaRoleText`：副本关系中的具体角色。
+- `primaryInstanceId`、`primaryInstanceName`、`primaryEndpoint`：来源主库。
+- `roleDiscoverySource` / `roleDiscoverySourceText`：人工登记、副本状态、主库状态或推断。
+- `configuredDelaySeconds`、`remainingDelaySeconds`：延迟从库的配置延迟和剩余延迟。
+- `backupRequirement` / `backupRequirementText`：需单独保护、继承主库保护或不强制单独备份。
+- `inheritedProtection` / `inheritedProtectionText`：是否已从来源主库继承到有效保护。
+- `inheritedProtectionMode`、`inheritedProtectionLevel`、`inheritedProtectionRiskLevel`：来源主库的保护摘要。
+
+保护概览评估逻辑调整：
+
+- 构建每个实例保护概览时先读取 `database_instance_replicas`，没有关系时再参考最近一次副本检测。
+- 如果实例是实时从库、延迟从库或 Standby，则把备份责任设为 `inherited`。
+- 若来源主库已有保护级别，则从库继承主库保护级别、可恢复窗口和最近备份 / 日志时间。
+- 已继承保护的从库不再产生“当前实例没有启用备份策略或成功备份记录”的严重风险。
+- 若来源主库没有可继承保护，则产生“当前实例是从库，但来源主库尚未启用可继承的备份保护”的严重风险。
+- 延迟副本保护窗口风险只对需要自身保护的实例检查，避免和继承保护重复告警。
+
+风险中心同步扩展：
+
+- 风险项返回实例角色、来源主库、备份责任和继承保护文案。
+- 风险中心可以直接解释“这是从库继承主库保护”或“来源主库未保护”，而不是只展示一条孤立红色风险。
+
+告警扫描调整：
+
+- `no_recent_success_backup` 候选扫描会跳过“已继承主库保护”的从库。
+- 来源主库没有保护时仍会保留风险，告警应该指向保护主库，而不是要求每个从库单独建备份。
+
+人工标记能力：
+
+- 新增 `POST /api/v1/databases/replicas/mark`。
+- 支持选择来源主库、从库实例、副本角色和延迟秒数。
+- 支持实时从库、延迟从库和 Standby。
+- 复用副本治理权限，操作写入查询审计，审计动作是 `replica_relation_upsert`。
+- 主从实例必须存在、不能相同、数据库类型必须一致，且当前限制在 MySQL、MariaDB、PostgreSQL。
+
+人工标记保护：
+
+- `UpsertByReplicaInstance` 增加人工登记保护逻辑。
+- 当现有关系来源是 `manual` 时，后续自动采集只更新健康状态、最近检测、错误信息等运行态字段。
+- 自动采集不会覆盖人工登记的来源主库、副本角色、发现来源和延迟秒数。
+- 用户再次通过人工标记保存时，可以主动更新这些关系字段。
+
+### 24.4 前端已落地内容
+
+保护概览表：
+
+- 实例列增加角色标签：主库 / 独立实例、从库、延迟从库、Standby。
+- 从库行显示来源主库名称，降低“这个实例为什么不要求单独备份”的理解成本。
+- 保护模式列展示“继承主库保护”或“需单独保护”。
+- 恢复演练 / 副本列补充副本角色和延迟秒数。
+- 汇总卡从“已保护实例”调整为更接近责任口径的“保护对象”，把继承保护数量纳入说明。
+
+风险中心：
+
+- 风险实例列展示副本角色和继承保护文案。
+- 从库继承主库保护后不再把无自身备份显示为严重风险。
+- 来源主库未保护时，风险文案指向主库保护缺失。
+
+保护详情抽屉：
+
+- 新增“实例角色”和“备份责任”。
+- 恢复证明区域展示副本角色和配置延迟。
+- 新增“标记角色”按钮，便于从当前保护详情直接修正主从关系。
+
+人工标记弹窗：
+
+- 入口在保护概览更多操作和保护详情抽屉。
+- 支持选择从库实例、来源主库、副本角色和延迟秒数。
+- 延迟秒数字段只在选择“延迟从库”时显示。
+- 保存后刷新保护概览、风险中心、副本关系和副本保护。
+
+### 24.5 当前实例的预期效果
+
+按本轮逻辑，当前几个实例应按以下方式展示：
+
+- `opshub-mysql-replica`：展示为从库，备份责任为继承 `opshub-mysql` 的保护，不再因为自身没有备份策略被标为严重。
+- `mysql-delay-replica-2`：展示为延迟从库，显示配置延迟 3600 秒，备份责任为继承来源主库保护。
+- `mysql-tmp-test`：如果仍检测为主库 / 独立实例，继续要求自身启用备份保护；除非人工确认它实际是从库并完成标记。
+
+### 24.6 本轮不做的内容
+
+本轮先不做以下扩展：
+
+- 不新增“忽略备份保护”开关，避免用户误把真正的主库风险隐藏掉。
+- 不自动修改实例名称或标签，只在保护概览和风险中心展示运行角色。
+- 不把从库恢复演练自动转成主库恢复演练任务，恢复流程仍走现有演练入口。
+- 不做副本关系审批流；人工标记目前直接生效并写审计。
+- 不新增数据库表字段，人工标记复用现有 `database_instance_replicas.discovery_source=manual`。
+
+### 24.7 验收命令
+
+本轮已执行：
+
+```bash
+go test ./...
+npm run typecheck
+npm run build
+git diff --check
+```
+
+容器发布执行：
+
+```bash
+docker build -t opshub-api:latest -f Dockerfile .
+docker build -f Dockerfile.frontend -t opshub-web:latest .
+docker compose up -d --force-recreate frontend backend
+```
+
+说明：`npm run build` 仍有 Sass legacy JS API 和大 chunk 体积提示，这是项目现有打包提示，不影响本轮构建结果。

@@ -558,6 +558,24 @@ export interface DatabaseProtectionProfileResult {
   riskLevel: string
   riskLevelText: string
   riskMessages: string[]
+  instanceRole: string
+  instanceRoleText: string
+  replicaRole: string
+  replicaRoleText: string
+  primaryInstanceId: number
+  primaryInstanceName: string
+  primaryEndpoint: string
+  roleDiscoverySource: string
+  roleDiscoverySourceText: string
+  configuredDelaySeconds: number
+  remainingDelaySeconds: number
+  backupRequirement: string
+  backupRequirementText: string
+  inheritedProtection: boolean
+  inheritedProtectionText: string
+  inheritedProtectionMode: string
+  inheritedProtectionLevel: string
+  inheritedProtectionRiskLevel: string
   recoverableFrom: string
   recoverableUntil: string
   rpoLagSeconds: number
@@ -1487,6 +1505,14 @@ export interface DatabaseInstanceReplicaResult {
   lastError: string
   createdAt: string
   updatedAt: string
+}
+
+export interface DatabaseInstanceReplicaMarkPayload {
+  primaryInstanceId: number
+  replicaInstanceId: number
+  replicaRole: string
+  configuredDelaySeconds?: number
+  reason?: string
 }
 
 export interface DatabaseReplicationCheckResult {
@@ -2447,6 +2473,9 @@ export const listDatabaseReplicas = (params?: {
   replicaRole?: string
   status?: string
 }) => request.get('/api/v1/databases/replicas', { params })
+
+export const markDatabaseReplicaRelation = (data: DatabaseInstanceReplicaMarkPayload) =>
+  request.post('/api/v1/databases/replicas/mark', data)
 
 export const deleteDatabaseReplicaRelation = (id: number) =>
   request.delete(`/api/v1/databases/replicas/${id}`)

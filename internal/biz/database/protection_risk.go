@@ -34,32 +34,43 @@ type DatabaseProtectionRiskListRequest struct {
 }
 
 type DatabaseProtectionRiskVO struct {
-	ID                  string `json:"id"`
-	ProfileID           string `json:"profileId"`
-	InstanceID          uint   `json:"instanceId"`
-	InstanceName        string `json:"instanceName"`
-	Engine              string `json:"engine"`
-	EngineText          string `json:"engineText"`
-	Endpoint            string `json:"endpoint"`
-	Environment         string `json:"environment"`
-	BusinessSystem      string `json:"businessSystem"`
-	Owner               string `json:"owner"`
-	ProtectionMode      string `json:"protectionMode"`
-	ProtectionModeText  string `json:"protectionModeText"`
-	ProtectionLevel     string `json:"protectionLevel"`
-	ProtectionLevelText string `json:"protectionLevelText"`
-	RiskLevel           string `json:"riskLevel"`
-	RiskLevelText       string `json:"riskLevelText"`
-	IssueType           string `json:"issueType"`
-	IssueTypeText       string `json:"issueTypeText"`
-	Message             string `json:"message"`
-	Action              string `json:"action"`
-	ActionText          string `json:"actionText"`
-	Blocking            bool   `json:"blocking"`
-	RecoverableUntil    string `json:"recoverableUntil"`
-	LastFullAt          string `json:"lastFullAt"`
-	LastLogArchiveAt    string `json:"lastLogArchiveAt"`
-	CheckedAt           string `json:"checkedAt"`
+	ID                      string `json:"id"`
+	ProfileID               string `json:"profileId"`
+	InstanceID              uint   `json:"instanceId"`
+	InstanceName            string `json:"instanceName"`
+	Engine                  string `json:"engine"`
+	EngineText              string `json:"engineText"`
+	Endpoint                string `json:"endpoint"`
+	Environment             string `json:"environment"`
+	BusinessSystem          string `json:"businessSystem"`
+	Owner                   string `json:"owner"`
+	InstanceRole            string `json:"instanceRole"`
+	InstanceRoleText        string `json:"instanceRoleText"`
+	ReplicaRole             string `json:"replicaRole"`
+	ReplicaRoleText         string `json:"replicaRoleText"`
+	PrimaryInstanceID       uint   `json:"primaryInstanceId"`
+	PrimaryInstanceName     string `json:"primaryInstanceName"`
+	PrimaryEndpoint         string `json:"primaryEndpoint"`
+	BackupRequirement       string `json:"backupRequirement"`
+	BackupRequirementText   string `json:"backupRequirementText"`
+	InheritedProtection     bool   `json:"inheritedProtection"`
+	InheritedProtectionText string `json:"inheritedProtectionText"`
+	ProtectionMode          string `json:"protectionMode"`
+	ProtectionModeText      string `json:"protectionModeText"`
+	ProtectionLevel         string `json:"protectionLevel"`
+	ProtectionLevelText     string `json:"protectionLevelText"`
+	RiskLevel               string `json:"riskLevel"`
+	RiskLevelText           string `json:"riskLevelText"`
+	IssueType               string `json:"issueType"`
+	IssueTypeText           string `json:"issueTypeText"`
+	Message                 string `json:"message"`
+	Action                  string `json:"action"`
+	ActionText              string `json:"actionText"`
+	Blocking                bool   `json:"blocking"`
+	RecoverableUntil        string `json:"recoverableUntil"`
+	LastFullAt              string `json:"lastFullAt"`
+	LastLogArchiveAt        string `json:"lastLogArchiveAt"`
+	CheckedAt               string `json:"checkedAt"`
 }
 
 func (uc *UseCase) ListProtectionRisks(ctx context.Context, req *DatabaseProtectionRiskListRequest) ([]*DatabaseProtectionRiskVO, int64, error) {
@@ -136,32 +147,43 @@ func expandProtectionRisks(profile *DatabaseProtectionProfileVO, issueFilter str
 		}
 		level := firstNonEmpty(action.Level, profile.RiskLevel)
 		item := &DatabaseProtectionRiskVO{
-			ID:                  fmt.Sprintf("%s:%s:%d", profile.ProfileID, issueType, index),
-			ProfileID:           profile.ProfileID,
-			InstanceID:          profile.InstanceID,
-			InstanceName:        profile.InstanceName,
-			Engine:              profile.Engine,
-			EngineText:          profile.EngineText,
-			Endpoint:            profile.Endpoint,
-			Environment:         profile.Environment,
-			BusinessSystem:      profile.BusinessSystem,
-			Owner:               profile.Owner,
-			ProtectionMode:      profile.ProtectionMode,
-			ProtectionModeText:  profile.ProtectionModeText,
-			ProtectionLevel:     profile.ProtectionLevel,
-			ProtectionLevelText: profile.ProtectionLevelText,
-			RiskLevel:           level,
-			RiskLevelText:       RiskLevelText(level),
-			IssueType:           issueType,
-			IssueTypeText:       ProtectionIssueTypeText(issueType),
-			Message:             message,
-			Action:              action.Action,
-			ActionText:          action.Text,
-			Blocking:            action.Blocking,
-			RecoverableUntil:    profile.RecoverableUntil,
-			LastFullAt:          profile.LastFullAt,
-			LastLogArchiveAt:    profile.LastLogArchiveAt,
-			CheckedAt:           profile.ValidatedAt,
+			ID:                      fmt.Sprintf("%s:%s:%d", profile.ProfileID, issueType, index),
+			ProfileID:               profile.ProfileID,
+			InstanceID:              profile.InstanceID,
+			InstanceName:            profile.InstanceName,
+			Engine:                  profile.Engine,
+			EngineText:              profile.EngineText,
+			Endpoint:                profile.Endpoint,
+			Environment:             profile.Environment,
+			BusinessSystem:          profile.BusinessSystem,
+			Owner:                   profile.Owner,
+			InstanceRole:            profile.InstanceRole,
+			InstanceRoleText:        profile.InstanceRoleText,
+			ReplicaRole:             profile.ReplicaRole,
+			ReplicaRoleText:         profile.ReplicaRoleText,
+			PrimaryInstanceID:       profile.PrimaryInstanceID,
+			PrimaryInstanceName:     profile.PrimaryInstanceName,
+			PrimaryEndpoint:         profile.PrimaryEndpoint,
+			BackupRequirement:       profile.BackupRequirement,
+			BackupRequirementText:   profile.BackupRequirementText,
+			InheritedProtection:     profile.InheritedProtection,
+			InheritedProtectionText: profile.InheritedProtectionText,
+			ProtectionMode:          profile.ProtectionMode,
+			ProtectionModeText:      profile.ProtectionModeText,
+			ProtectionLevel:         profile.ProtectionLevel,
+			ProtectionLevelText:     profile.ProtectionLevelText,
+			RiskLevel:               level,
+			RiskLevelText:           RiskLevelText(level),
+			IssueType:               issueType,
+			IssueTypeText:           ProtectionIssueTypeText(issueType),
+			Message:                 message,
+			Action:                  action.Action,
+			ActionText:              action.Text,
+			Blocking:                action.Blocking,
+			RecoverableUntil:        profile.RecoverableUntil,
+			LastFullAt:              profile.LastFullAt,
+			LastLogArchiveAt:        profile.LastLogArchiveAt,
+			CheckedAt:               profile.ValidatedAt,
 		}
 		risks = append(risks, item)
 	}

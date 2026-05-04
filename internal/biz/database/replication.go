@@ -46,6 +46,75 @@ func (uc *UseCase) DeleteInstanceReplica(ctx context.Context, id uint, operator 
 	return nil
 }
 
+func (uc *UseCase) MarkInstanceReplica(ctx context.Context, req *DatabaseInstanceReplicaMarkRequest, operator QueryOperator) (*DatabaseInstanceReplicaVO, error) {
+	if req == nil {
+		return nil, fmt.Errorf("请提交副本标记信息")
+	}
+	if uc.instanceRepo == nil || uc.instanceReplicaRepo == nil {
+		return nil, fmt.Errorf("副本治理仓储未配置")
+	}
+	if req.PrimaryInstanceID == 0 || req.ReplicaInstanceID == 0 {
+		return nil, fmt.Errorf("请选择主库和从库实例")
+	}
+	if req.PrimaryInstanceID == req.ReplicaInstanceID {
+		return nil, fmt.Errorf("主库和从库不能是同一个实例")
+	}
+	role := normalizeManualReplicaRole(req.ReplicaRole)
+	if role == "" {
+		return nil, fmt.Errorf("副本角色仅支持实时从库、延迟从库或 Standby")
+	}
+	if role == DatabaseReplicaRoleDelayed && req.ConfiguredDelaySeconds <= 0 {
+		return nil, fmt.Errorf("延迟从库需要填写大于 0 的延迟秒数")
+	}
+	primary, err := uc.instanceRepo.GetByID(ctx, req.PrimaryInstanceID)
+	if err != nil || primary == nil {
+		return nil, fmt.Errorf("主库实例不存在")
+	}
+	replica, err := uc.instanceRepo.GetByID(ctx, req.ReplicaInstanceID)
+	if err != nil || replica == nil {
+		return nil, fmt.Errorf("从库实例不存在")
+	}
+	engine := normalizeDBType(replica.DBType)
+	if !isReplicaGovernanceEngine(engine) {
+		return nil, fmt.Errorf("当前仅支持 MySQL / MariaDB / PostgreSQL 副本标记")
+	}
+	if normalizeDBType(primary.DBType) != engine {
+		return nil, fmt.Errorf("主库和从库实例类型必须一致")
+	}
+	delay := req.ConfiguredDelaySeconds
+	if role != DatabaseReplicaRoleDelayed {
+		delay = 0
+	}
+	now := time.Now()
+	item := &DatabaseInstanceReplica{
+		PrimaryInstanceID:      primary.ID,
+		ReplicaInstanceID:      replica.ID,
+		Engine:                 engine,
+		ReplicaRole:            role,
+		SourceHost:             primary.Host,
+		SourcePort:             primary.Port,
+		ConfiguredDelaySeconds: delay,
+		DiscoverySource:        DatabaseReplicaDiscoveryManual,
+		Status:                 DatabaseReplicaHealthUnknown,
+		LastCheckedAt:          &now,
+		LastError:              trimText(strings.TrimSpace(req.Reason), 1000),
+	}
+	if check := latestReplicationCheck(ctx, uc.replicationCheckRepo, replica.ID); check != nil {
+		item.Status = firstNonEmpty(check.HealthStatus, DatabaseReplicaHealthUnknown)
+		item.LastCheckID = check.ID
+		item.LastCheckedAt = check.CheckedAt
+		if item.LastError == "" {
+			item.LastError = trimText(check.ErrorMessage, 1000)
+		}
+	}
+	saved, err := uc.instanceReplicaRepo.UpsertByReplicaInstance(ctx, item)
+	if err != nil {
+		return nil, err
+	}
+	uc.recordReplicaRelationSetAudit(ctx, saved, operator, req.Reason)
+	return uc.toInstanceReplicaVO(ctx, saved), nil
+}
+
 func (uc *UseCase) ListReplicationChecks(ctx context.Context, req *DatabaseReplicationCheckListRequest) ([]*DatabaseReplicationCheckVO, int64, error) {
 	if uc.replicationCheckRepo == nil {
 		return nil, 0, fmt.Errorf("副本状态仓储未配置")
@@ -701,6 +770,40 @@ func (uc *UseCase) recordReplicaRelationDeleteAudit(ctx context.Context, relatio
 		ErrorMessage:   trimText(fmt.Sprintf("source=%s:%d last_check=%d", relation.SourceHost, relation.SourcePort, relation.LastCheckID), 500),
 		ClientIP:       trimText(operator.ClientIP, 64),
 	})
+}
+
+func (uc *UseCase) recordReplicaRelationSetAudit(ctx context.Context, relation *DatabaseInstanceReplica, operator QueryOperator, reason string) {
+	if uc == nil || uc.auditRepo == nil || relation == nil {
+		return
+	}
+	auditText := fmt.Sprintf("mark replica relation primary=%d replica=%d engine=%s role=%s delay=%d", relation.PrimaryInstanceID, relation.ReplicaInstanceID, relation.Engine, relation.ReplicaRole, relation.ConfiguredDelaySeconds)
+	_ = uc.auditRepo.Create(ctx, &DatabaseQueryAudit{
+		InstanceID:     relation.ReplicaInstanceID,
+		OperatorID:     operator.ID,
+		OperatorName:   trimText(operator.Username, 100),
+		AuditAction:    DatabaseAuditActionReplicaRelationSet,
+		SQLText:        trimText(auditText, 20000),
+		SQLFingerprint: sqlFingerprint(auditText),
+		SQLType:        "REPLICA_RELATION_MARK",
+		RiskLevel:      DatabaseQueryRiskMedium,
+		Status:         DatabaseQueryStatusSuccess,
+		RowsReturned:   1,
+		ErrorMessage:   trimText(firstNonEmpty(reason, relation.LastError), 500),
+		ClientIP:       trimText(operator.ClientIP, 64),
+	})
+}
+
+func normalizeManualReplicaRole(value string) string {
+	switch strings.TrimSpace(value) {
+	case DatabaseReplicaRoleRealtime, DatabaseReplicationRoleReplica:
+		return DatabaseReplicaRoleRealtime
+	case DatabaseReplicaRoleDelayed:
+		return DatabaseReplicaRoleDelayed
+	case DatabaseReplicaRoleStandby:
+		return DatabaseReplicaRoleStandby
+	default:
+		return ""
+	}
 }
 
 func querySingleRowMap(ctx context.Context, db *sql.DB, query string) (map[string]string, bool, error) {

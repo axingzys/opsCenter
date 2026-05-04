@@ -1,6 +1,10 @@
 package database
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestProtectionProfileInstanceID(t *testing.T) {
 	tests := []struct {
@@ -59,4 +63,77 @@ func TestProtectionProfileDeriveLevel(t *testing.T) {
 	if got := profile.deriveProtectionLevel(); got != DatabaseProtectionLevelBackupOnly {
 		t.Fatalf("got %s, want %s", got, DatabaseProtectionLevelBackupOnly)
 	}
+}
+
+func TestProtectionProfileInheritedReplicaUsesPrimaryProtection(t *testing.T) {
+	profile := &DatabaseProtectionProfileVO{
+		BackupRequirement:            DatabaseProtectionBackupRequirementInherited,
+		InheritedProtection:          true,
+		InheritedProtectionLevel:     DatabaseProtectionLevelPITRCapable,
+		InheritedProtectionRiskLevel: DatabaseQueryRiskLow,
+		PrimaryInstanceID:            1,
+		PrimaryInstanceName:          "opshub-mysql",
+		ProtectionMode:               DatabaseProtectionModeInherited,
+		ReplicaRole:                  DatabaseReplicaRoleDelayed,
+		ReplicaRoleText:              ReplicaRoleText(DatabaseReplicaRoleDelayed),
+		ConfiguredDelaySeconds:       3600,
+		RecommendedActions:           []DatabaseProtectionActionVO{},
+		BackupChainStatus:            DatabaseBackupChainStatusUnsupported,
+		LogChainStatus:               DatabaseLogChainStatusUnsupported,
+		ReplicaProtectionStatus:      DatabaseReplicaProtectionUnknown,
+		RestoreDrillStatus:           DatabaseRestoreDrillStatusNone,
+		RemainingDelaySeconds:        -1,
+	}
+
+	profile.applyProtectionAssessment(time.Now())
+
+	if profile.RiskLevel != DatabaseQueryRiskLow {
+		t.Fatalf("got risk %s, want %s, messages=%v", profile.RiskLevel, DatabaseQueryRiskLow, profile.RiskMessages)
+	}
+	if profile.ProtectionLevel != DatabaseProtectionLevelPITRCapable {
+		t.Fatalf("got level %s, want %s", profile.ProtectionLevel, DatabaseProtectionLevelPITRCapable)
+	}
+	for _, message := range profile.RiskMessages {
+		if strings.Contains(message, "没有启用备份策略") {
+			t.Fatalf("inherited replica should not require own backup, got message %q", message)
+		}
+	}
+	if profile.InheritedProtectionText == "" || !strings.Contains(profile.InheritedProtectionText, "opshub-mysql") {
+		t.Fatalf("unexpected inherited text: %q", profile.InheritedProtectionText)
+	}
+}
+
+func TestProtectionProfileInheritedReplicaRequiresProtectedPrimary(t *testing.T) {
+	profile := &DatabaseProtectionProfileVO{
+		BackupRequirement:       DatabaseProtectionBackupRequirementInherited,
+		PrimaryInstanceID:       1,
+		PrimaryInstanceName:     "opshub-mysql",
+		ProtectionMode:          DatabaseProtectionModeInherited,
+		RecommendedActions:      []DatabaseProtectionActionVO{},
+		BackupChainStatus:       DatabaseBackupChainStatusUnsupported,
+		LogChainStatus:          DatabaseLogChainStatusUnsupported,
+		ReplicaProtectionStatus: DatabaseReplicaProtectionUnknown,
+		RestoreDrillStatus:      DatabaseRestoreDrillStatusNone,
+	}
+
+	profile.applyProtectionAssessment(time.Now())
+
+	if profile.RiskLevel != DatabaseQueryRiskCritical {
+		t.Fatalf("got risk %s, want %s", profile.RiskLevel, DatabaseQueryRiskCritical)
+	}
+	if !containsProtectionRiskMessage(profile.RiskMessages, "来源主库尚未启用") {
+		t.Fatalf("expected primary protection risk, got %v", profile.RiskMessages)
+	}
+	if profile.ProtectionLevel != DatabaseProtectionLevelNone {
+		t.Fatalf("got level %s, want %s", profile.ProtectionLevel, DatabaseProtectionLevelNone)
+	}
+}
+
+func containsProtectionRiskMessage(messages []string, want string) bool {
+	for _, message := range messages {
+		if strings.Contains(message, want) {
+			return true
+		}
+	}
+	return false
 }

@@ -2620,8 +2620,10 @@
                       <div class="backup-name-cell">
                         <span class="backup-name">{{ row.instanceName || `#${row.instanceId}` }}</span>
                         <el-tag size="small" :type="dbTypeTag(row.engine)">{{ row.engineText || row.engine || '-' }}</el-tag>
+                        <el-tag size="small" :type="replicationRoleTag(row.instanceRole)">{{ row.instanceRoleText || '未知角色' }}</el-tag>
                       </div>
                       <div class="muted-text">{{ row.endpoint || '-' }}</div>
+                      <div v-if="row.inheritedProtectionText" class="muted-text">{{ row.inheritedProtectionText }}</div>
                     </template>
                   </el-table-column>
                   <el-table-column label="风险" min-width="180">
@@ -2719,8 +2721,10 @@
                       <div class="backup-name-cell">
                         <span class="backup-name">{{ row.instanceName || `#${row.instanceId}` }}</span>
                         <el-tag size="small" :type="dbTypeTag(row.engine)">{{ row.engineText || row.engine || '-' }}</el-tag>
+                        <el-tag size="small" :type="replicationRoleTag(row.instanceRole)">{{ row.instanceRoleText || '未知角色' }}</el-tag>
                       </div>
                       <div class="muted-text">{{ row.endpoint || '-' }}<span v-if="row.version"> / {{ row.version }}</span></div>
+                      <div v-if="row.primaryInstanceId" class="muted-text">来源：{{ row.primaryInstanceName || `#${row.primaryInstanceId}` }}</div>
                     </template>
                   </el-table-column>
                   <el-table-column label="保护模式" min-width="190">
@@ -2728,6 +2732,7 @@
                       <div class="pitr-state-stack">
                         <el-tag size="small" :type="protectionModeTag(row.protectionMode)">{{ row.protectionModeText || row.protectionMode || '-' }}</el-tag>
                         <el-tag size="small" :type="protectionLevelTag(row.protectionLevel)">{{ row.protectionLevelText || row.protectionLevel || '-' }}</el-tag>
+                        <span class="muted-text">{{ row.inheritedProtectionText || row.backupRequirementText || '-' }}</span>
                       </div>
                     </template>
                   </el-table-column>
@@ -2766,6 +2771,9 @@
                         <span class="muted-text"> {{ row.lastRestoreDrillAt || '-' }}</span>
                       </div>
                       <div class="muted-text">副本：{{ row.replicaProtectionText || row.replicaProtectionStatus || '-' }}</div>
+                      <div v-if="row.replicaRole" class="muted-text">
+                        {{ row.replicaRoleText || row.replicaRole }} / 延迟 {{ replicationDelayText(row.configuredDelaySeconds) }}
+                      </div>
                     </template>
                   </el-table-column>
                   <el-table-column label="风险" min-width="260" show-overflow-tooltip>
@@ -2790,6 +2798,7 @@
                             <el-dropdown-item :command="{ action: 'incremental', row }" :disabled="!row.backupPolicy">运行增量备份</el-dropdown-item>
                             <el-dropdown-item :command="{ action: 'validate', row }" :disabled="!row.profileId">校验保护状态</el-dropdown-item>
                             <el-dropdown-item :command="{ action: 'resources', row }">查看高级资源</el-dropdown-item>
+                            <el-dropdown-item v-if="uiPermissions.replicaCheck" :command="{ action: 'markReplica', row }">标记副本角色</el-dropdown-item>
                             <el-dropdown-item :command="{ action: 'repair', row }">修复保护配置</el-dropdown-item>
                           </el-dropdown-menu>
                         </template>
@@ -4477,6 +4486,17 @@
                   </el-tag>
                 </el-descriptions-item>
                 <el-descriptions-item label="地址">{{ protectionProfileDetail.endpoint || '-' }}</el-descriptions-item>
+                <el-descriptions-item label="实例角色">
+                  <el-tag size="small" :type="replicationRoleTag(protectionProfileDetail.instanceRole)">
+                    {{ protectionProfileDetail.instanceRoleText || '-' }}
+                  </el-tag>
+                  <span v-if="protectionProfileDetail.primaryInstanceId" class="muted-text" style="margin-left: 8px;">
+                    来源 {{ protectionProfileDetail.primaryInstanceName || `#${protectionProfileDetail.primaryInstanceId}` }}
+                  </span>
+                </el-descriptions-item>
+                <el-descriptions-item label="备份责任">
+                  {{ protectionProfileDetail.inheritedProtectionText || protectionProfileDetail.backupRequirementText || '-' }}
+                </el-descriptions-item>
                 <el-descriptions-item label="保护等级">
                   <el-tag size="small" :type="protectionLevelTag(protectionProfileDetail.protectionLevel)">
                     {{ protectionProfileDetail.protectionLevelText || protectionProfileDetail.protectionLevel || '-' }}
@@ -4506,6 +4526,8 @@
                   <div><span>最近演练</span><strong>{{ protectionProfileDetail.lastRestoreDrillAt || '-' }}</strong></div>
                   <div><span>演练状态</span><strong>{{ protectionProfileDetail.restoreDrillStatusText || protectionProfileDetail.restoreDrillStatus || '-' }}</strong></div>
                   <div><span>副本保护</span><strong>{{ protectionProfileDetail.replicaProtectionText || protectionProfileDetail.replicaProtectionStatus || '-' }}</strong></div>
+                  <div><span>副本角色</span><strong>{{ protectionProfileDetail.replicaRoleText || protectionProfileDetail.instanceRoleText || '-' }}</strong></div>
+                  <div><span>配置延迟</span><strong>{{ replicationDelayText(protectionProfileDetail.configuredDelaySeconds) }}</strong></div>
                 </div>
               </div>
 
@@ -4542,9 +4564,59 @@
                 <el-button plain @click="openProtectionProfileResources(protectionProfileDetail)">
                   高级资源
                 </el-button>
+                <el-button v-if="uiPermissions.replicaCheck" plain @click="openReplicaMarkDialog(protectionProfileDetail)">
+                  标记角色
+                </el-button>
               </div>
             </template>
           </el-drawer>
+
+          <el-dialog
+            v-model="replicaMarkDialogVisible"
+            title="标记副本角色"
+            width="560px"
+            destroy-on-close
+          >
+            <el-form ref="replicaMarkFormRef" :model="replicaMarkForm" :rules="replicaMarkRules" label-width="120px">
+              <el-form-item label="从库实例" prop="replicaInstanceId">
+                <el-select v-model="replicaMarkForm.replicaInstanceId" placeholder="请选择从库或延迟从库" filterable style="width: 100%;">
+                  <el-option
+                    v-for="item in pitrBackupInstances"
+                    :key="item.id"
+                    :label="databaseInstanceOptionLabel(item)"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="来源主库" prop="primaryInstanceId">
+                <el-select v-model="replicaMarkForm.primaryInstanceId" placeholder="请选择来源主库" filterable style="width: 100%;">
+                  <el-option
+                    v-for="item in replicaMarkPrimaryOptions"
+                    :key="item.id"
+                    :label="databaseInstanceOptionLabel(item)"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="副本角色" prop="replicaRole">
+                <el-select v-model="replicaMarkForm.replicaRole" style="width: 100%;">
+                  <el-option label="实时从库" value="realtime_replica" />
+                  <el-option label="延迟从库" value="delayed_replica" />
+                  <el-option label="Standby" value="standby" />
+                </el-select>
+              </el-form-item>
+              <el-form-item v-if="replicaMarkForm.replicaRole === 'delayed_replica'" label="延迟秒数">
+                <el-input-number v-model="replicaMarkForm.configuredDelaySeconds" :min="1" :max="2592000" style="width: 100%;" />
+              </el-form-item>
+              <el-form-item label="备注">
+                <el-input v-model="replicaMarkForm.reason" type="textarea" :rows="3" maxlength="1000" show-word-limit />
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="replicaMarkDialogVisible = false">取消</el-button>
+              <el-button type="primary" :loading="replicaMarkSubmitting" @click="submitReplicaMark">保存标记</el-button>
+            </template>
+          </el-dialog>
 
           <div class="backup-card backup-support-card">
             <div class="panel-title">
@@ -8844,6 +8916,7 @@ import {
   listDatabaseSlowQueries,
   listDatabaseTables,
   listDatabaseReplicas,
+  markDatabaseReplicaRelation,
   listDatabaseReplicationChecks,
   listDatabaseReplicaProtections,
   listDatabaseReplicaIncidentGuides,
@@ -9252,6 +9325,9 @@ const protectionProfiles = ref<DatabaseProtectionProfileResult[]>([])
 const protectionProfileDetailVisible = ref(false)
 const protectionProfileDetail = ref<DatabaseProtectionProfileResult>()
 const protectionProfileTotal = ref(0)
+const replicaMarkDialogVisible = ref(false)
+const replicaMarkSubmitting = ref(false)
+const replicaMarkFormRef = ref<FormInstance>()
 const protectionRiskLoading = ref(false)
 const protectionRisks = ref<DatabaseProtectionRiskResult[]>([])
 const protectionRiskTotal = ref(0)
@@ -9875,6 +9951,14 @@ const replicaActionForm = reactive<DatabaseReplicaActionPayload>({
   maxCheckAgeSeconds: 60
 })
 
+const replicaMarkForm = reactive({
+  primaryInstanceId: undefined as number | undefined,
+  replicaInstanceId: undefined as number | undefined,
+  replicaRole: 'realtime_replica',
+  configuredDelaySeconds: 3600,
+  reason: ''
+})
+
 const replicaIncidentGuideRules: FormRules = {
   instanceId: [{ required: true, message: '请选择事故实例', trigger: 'change' }],
   incidentType: [{ required: true, message: '请选择事故类型', trigger: 'change' }],
@@ -9905,6 +9989,12 @@ const replicaActionRules: FormRules = {
       trigger: 'change'
     }
   ]
+}
+
+const replicaMarkRules: FormRules = {
+  primaryInstanceId: [{ required: true, message: '请选择来源主库', trigger: 'change' }],
+  replicaInstanceId: [{ required: true, message: '请选择从库实例', trigger: 'change' }],
+  replicaRole: [{ required: true, message: '请选择副本角色', trigger: 'change' }]
 }
 
 const runnerHostQuery = reactive({
@@ -10632,6 +10722,17 @@ const pitrBackupInstances = computed(() =>
   instanceOptions.value.filter(item => ['mysql', 'mariadb', 'postgresql'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
 
+const replicaMarkReplicaInstance = computed(() =>
+  pitrBackupInstances.value.find(item => item.id === replicaMarkForm.replicaInstanceId)
+)
+
+const replicaMarkPrimaryOptions = computed(() =>
+  pitrBackupInstances.value.filter(item =>
+    item.id !== replicaMarkForm.replicaInstanceId &&
+    (!replicaMarkReplicaInstance.value || item.dbType === replicaMarkReplicaInstance.value.dbType)
+  )
+)
+
 const enableProtectionSelectedInstance = computed(() =>
   pitrBackupInstances.value.find(item => item.id === enableProtectionForm.instanceId)
 )
@@ -10980,7 +11081,9 @@ const latestDateText = (values: Array<string | undefined>) => {
 }
 
 const backupOverviewSummaryCards = computed(() => {
-  const protectedCount = protectionProfiles.value.filter(item => item.protectionLevel && item.protectionLevel !== 'none').length
+  const inheritedCount = protectionProfiles.value.filter(item => item.backupRequirement === 'inherited' && item.inheritedProtection).length
+  const requiredProfiles = protectionProfiles.value.filter(item => item.backupRequirement !== 'inherited')
+  const protectedCount = requiredProfiles.filter(item => item.protectionLevel && item.protectionLevel !== 'none').length
   const pitrCount = protectionProfiles.value.filter(item => ['pitr_capable', 'pitr_verified', 'ha_and_pitr_verified'].includes(item.protectionLevel)).length
   const criticalRiskCount = protectionRisks.value.filter(item => ['critical', 'high'].includes(item.riskLevel)).length
   const latestBackupAt = latestDateText(protectionProfiles.value.flatMap(item => [
@@ -10999,9 +11102,9 @@ const backupOverviewSummaryCards = computed(() => {
   return [
     {
       key: 'protected',
-      label: '已保护实例',
-      value: `${protectedCount}/${protectionProfileTotal.value || protectionProfiles.value.length}`,
-      help: `PITR 可用 ${pitrCount} 个`,
+      label: '保护对象',
+      value: `${protectedCount}/${requiredProfiles.length || protectionProfileTotal.value || protectionProfiles.value.length}`,
+      help: `继承保护 ${inheritedCount} 个，PITR 可用 ${pitrCount} 个`,
       tone: protectedCount > 0 ? 'success' : 'neutral'
     },
     {
@@ -17481,6 +17584,24 @@ const protectionProfileFromInstanceOption = (instance: any): DatabaseProtectionP
   riskLevel: 'critical',
   riskLevelText: '严重',
   riskMessages: ['尚未启用备份保护'],
+  instanceRole: 'primary',
+  instanceRoleText: '主库 / 独立实例',
+  replicaRole: '',
+  replicaRoleText: '',
+  primaryInstanceId: 0,
+  primaryInstanceName: '',
+  primaryEndpoint: '',
+  roleDiscoverySource: '',
+  roleDiscoverySourceText: '',
+  configuredDelaySeconds: 0,
+  remainingDelaySeconds: -1,
+  backupRequirement: 'required',
+  backupRequirementText: '需单独保护',
+  inheritedProtection: false,
+  inheritedProtectionText: '',
+  inheritedProtectionMode: '',
+  inheritedProtectionLevel: '',
+  inheritedProtectionRiskLevel: '',
   recoverableFrom: '',
   recoverableUntil: '',
   rpoLagSeconds: -1,
@@ -17530,15 +17651,17 @@ const continueEnableProtection = async () => {
 }
 
 const protectionProfileNeedsRepair = (row: DatabaseProtectionProfileResult) =>
-  row.protectionLevel === 'none' || ['critical', 'high'].includes(row.riskLevel)
+  row.backupRequirement !== 'inherited' && (row.protectionLevel === 'none' || ['critical', 'high'].includes(row.riskLevel))
 
 const protectionProfilePrimaryActionText = (row: DatabaseProtectionProfileResult) => {
+  if (row.backupRequirement === 'inherited') return row.inheritedProtection ? '查看继承' : '处理主库'
   if (row.protectionLevel === 'none') return '启用保护'
   if (protectionProfileNeedsRepair(row)) return '修复风险'
   return '详情'
 }
 
 const protectionProfilePrimaryActionType = (row: DatabaseProtectionProfileResult) => {
+  if (row.backupRequirement === 'inherited') return row.inheritedProtection ? 'primary' : 'danger'
   if (row.protectionLevel === 'none') return 'primary'
   if (protectionProfileNeedsRepair(row)) return 'danger'
   return 'primary'
@@ -17550,6 +17673,10 @@ const openProtectionProfileDetail = (row: DatabaseProtectionProfileResult) => {
 }
 
 const handleProtectionProfilePrimaryAction = async (row: DatabaseProtectionProfileResult) => {
+  if (row.backupRequirement === 'inherited') {
+    openProtectionProfileDetail(row)
+    return
+  }
   if (protectionProfileNeedsRepair(row)) {
     await openProtectionWizardDialog(row)
     return
@@ -17569,11 +17696,47 @@ const handleProtectionProfileMoreCommand = async (command: { action: string; row
     case 'resources':
       await openProtectionProfileResources(row)
       return
+    case 'markReplica':
+      openReplicaMarkDialog(row)
+      return
     case 'repair':
       await openProtectionWizardDialog(row)
       return
     default:
       openProtectionProfileDetail(row)
+  }
+}
+
+const openReplicaMarkDialog = (row?: DatabaseProtectionProfileResult) => {
+  replicaMarkForm.replicaInstanceId = row?.instanceId || protectionProfileQuery.instanceId || undefined
+  replicaMarkForm.primaryInstanceId = row?.primaryInstanceId || undefined
+  replicaMarkForm.replicaRole = row?.replicaRole || (row?.instanceRole === 'delayed_replica' ? 'delayed_replica' : 'realtime_replica')
+  replicaMarkForm.configuredDelaySeconds = row?.configuredDelaySeconds && row.configuredDelaySeconds > 0 ? row.configuredDelaySeconds : 3600
+  replicaMarkForm.reason = row?.roleDiscoverySource === 'manual' ? '更新人工副本标记' : '人工确认副本角色'
+  replicaMarkDialogVisible.value = true
+  nextTick(() => replicaMarkFormRef.value?.clearValidate())
+}
+
+const submitReplicaMark = async () => {
+  await replicaMarkFormRef.value?.validate()
+  if (!replicaMarkForm.primaryInstanceId || !replicaMarkForm.replicaInstanceId) {
+    ElMessage.warning('请选择主库和从库实例')
+    return
+  }
+  replicaMarkSubmitting.value = true
+  try {
+    await markDatabaseReplicaRelation({
+      primaryInstanceId: replicaMarkForm.primaryInstanceId,
+      replicaInstanceId: replicaMarkForm.replicaInstanceId,
+      replicaRole: replicaMarkForm.replicaRole,
+      configuredDelaySeconds: replicaMarkForm.replicaRole === 'delayed_replica' ? Number(replicaMarkForm.configuredDelaySeconds || 0) : 0,
+      reason: replicaMarkForm.reason
+    })
+    ElMessage.success('副本角色已标记')
+    replicaMarkDialogVisible.value = false
+    await Promise.all([loadProtectionProfiles(), loadProtectionRisks(), loadReplicationReplicas(), loadReplicationProtections()])
+  } finally {
+    replicaMarkSubmitting.value = false
   }
 }
 
@@ -17941,6 +18104,12 @@ const defaultPort = (dbType: string) => {
 
 const isProductionEnvironment = (environment?: string) =>
   ['prod', 'production', 'prd', '生产', '生产环境'].includes((environment || '').trim().toLowerCase())
+
+const databaseInstanceOptionLabel = (item: any) => {
+  if (!item) return '-'
+  const endpoint = item.endpoint || `${item.host || '-'}:${item.port || '-'}`
+  return `${item.name}（${item.dbTypeText || item.dbType || '-'} / ${endpoint}）`
+}
 
 const isRestoreCompatibleType = (sourceType?: string, targetType?: string) => {
   const source = (sourceType || '').trim().toLowerCase()

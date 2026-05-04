@@ -65,6 +65,7 @@ const (
 	DatabaseAuditActionPermissionDelete   = "instance_permission_delete"
 	DatabaseAuditActionReplicaStatusView  = "replica_status_view"
 	DatabaseAuditActionReplicaCheckRun    = "replica_check_run"
+	DatabaseAuditActionReplicaRelationSet = "replica_relation_upsert"
 	DatabaseAuditActionReplicaIncident    = "replica_incident_guide"
 	DatabaseAuditActionReplicaIncidentDel = "replica_incident_guide_delete"
 	DatabaseAuditActionReplicaRelationDel = "replica_relation_delete"

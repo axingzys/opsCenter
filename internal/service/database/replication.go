@@ -85,6 +85,27 @@ func (s *Service) DeleteReplicaRelation(c *gin.Context) {
 	response.SuccessWithMessage(c, "副本关系记录已删除", gin.H{"id": replicaID})
 }
 
+func (s *Service) MarkReplicaRelation(c *gin.Context) {
+	var req dbbiz.DatabaseInstanceReplicaMarkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureReplicaRecordPermission(c, req.PrimaryInstanceID, req.ReplicaInstanceID) {
+		return
+	}
+	result, err := s.useCase.MarkInstanceReplica(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "标记失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "副本角色已标记", result)
+}
+
 func (s *Service) ListReplicationChecks(c *gin.Context) {
 	var req dbbiz.DatabaseReplicationCheckListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
