@@ -243,15 +243,9 @@ func replicaProtectionRiskMessages(replica *DatabaseInstanceReplica, check *Data
 	if check.ConfiguredDelaySeconds > 0 && vo.RemainingDelaySeconds < 0 {
 		messages = append(messages, "剩余保护窗口未知")
 	}
-	if check.ConfiguredDelaySeconds > 0 && check.RemainingDelaySeconds == 0 && check.Engine != DBTypePostgreSQL {
-		messages = append(messages, "延迟副本已追上，当前没有可截停窗口")
-	}
-	if vo.RemainingDelaySeconds >= 0 && vo.RemainingDelaySeconds < thresholds.remainingDelayWarningSeconds {
-		messages = append(messages, "剩余保护窗口偏小")
-	}
-	if check.SecondsBehindSource >= thresholds.lagCriticalSeconds {
+	if check.ConfiguredDelaySeconds <= 0 && check.SecondsBehindSource >= thresholds.lagCriticalSeconds {
 		messages = append(messages, "复制延迟达到严重阈值")
-	} else if check.SecondsBehindSource >= thresholds.lagWarningSeconds {
+	} else if check.ConfiguredDelaySeconds <= 0 && check.SecondsBehindSource >= thresholds.lagWarningSeconds {
 		messages = append(messages, "复制延迟超过告警阈值")
 	}
 	if thresholds.relayLogBacklogWarningBytes > 0 && check.RelayLogBytes >= thresholds.relayLogBacklogWarningBytes {

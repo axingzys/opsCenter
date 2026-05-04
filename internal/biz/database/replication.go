@@ -715,11 +715,11 @@ func mysqlReplicaRiskFlags(ioRunning, sqlRunning string, secondsBehind, configur
 	if strings.TrimSpace(sqlRunning) != "" && !strings.EqualFold(strings.TrimSpace(sqlRunning), "Yes") {
 		flags = append(flags, "SQL apply 线程异常")
 	}
-	if secondsBehind > 300 {
+	if configuredDelay <= 0 && secondsBehind > 300 {
 		flags = append(flags, "复制延迟过大")
 	}
-	if configuredDelay > 0 && remainingDelay == 0 {
-		flags = append(flags, "延迟副本已追上")
+	if configuredDelay > 0 && remainingDelay < 0 {
+		flags = append(flags, "剩余保护窗口未知")
 	}
 	if sourceInstanceID == 0 {
 		flags = append(flags, "来源主库未匹配")

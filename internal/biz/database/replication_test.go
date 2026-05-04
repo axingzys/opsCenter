@@ -27,14 +27,28 @@ func TestParsePostgreSQLDelaySeconds(t *testing.T) {
 }
 
 func TestMySQLReplicaRiskFlags(t *testing.T) {
-	flags := mysqlReplicaRiskFlags("Yes", "No", 601, 3600, 0, 0)
+	flags := mysqlReplicaRiskFlags("Yes", "No", 601, 0, -1, 0)
 	assertContainsFlag(t, flags, "SQL apply 线程异常")
 	assertContainsFlag(t, flags, "复制延迟过大")
-	assertContainsFlag(t, flags, "延迟副本已追上")
 	assertContainsFlag(t, flags, "来源主库未匹配")
 	if got := replicaHealthFromRiskFlags(flags); got != DatabaseReplicaHealthCritical {
 		t.Fatalf("replicaHealthFromRiskFlags() = %q, want %q", got, DatabaseReplicaHealthCritical)
 	}
+}
+
+func TestMySQLDelayedReplicaRiskFlagsDoNotTreatConfiguredDelayAsLag(t *testing.T) {
+	flags := mysqlReplicaRiskFlags("Yes", "Yes", 3603, 3600, 1, 1)
+	assertNotContainsFlag(t, flags, "复制延迟过大")
+	assertNotContainsFlag(t, flags, "延迟副本已追上")
+	if len(flags) != 0 {
+		t.Fatalf("flags = %v, want empty for healthy delayed replica", flags)
+	}
+}
+
+func TestMySQLDelayedReplicaRiskFlagsWarnUnknownRemainingDelay(t *testing.T) {
+	flags := mysqlReplicaRiskFlags("Yes", "Yes", 3603, 3600, -1, 1)
+	assertContainsFlag(t, flags, "剩余保护窗口未知")
+	assertNotContainsFlag(t, flags, "复制延迟过大")
 }
 
 func TestMySQLTopologyVariableRiskFlags(t *testing.T) {
@@ -75,12 +89,13 @@ func TestPostgreSQLWALReceiverStatusQueryUsesPortableLSNColumns(t *testing.T) {
 	}
 }
 
-func TestReplicaProtectionRiskMessagesForCaughtUpDelayedReplica(t *testing.T) {
+func TestReplicaProtectionRiskMessagesAcceptsSmallRemainingWindow(t *testing.T) {
 	replica := &DatabaseInstanceReplica{Status: DatabaseReplicaHealthHealthy}
 	check := &DatabaseReplicationCheck{
 		Engine:                 DBTypeMySQL,
 		HealthStatus:           DatabaseReplicaHealthHealthy,
 		ConfiguredDelaySeconds: 120,
+		SecondsBehindSource:    123,
 		RemainingDelaySeconds:  0,
 	}
 	vo := &DatabaseReplicaProtectionVO{RemainingDelaySeconds: 0}
@@ -90,10 +105,10 @@ func TestReplicaProtectionRiskMessagesForCaughtUpDelayedReplica(t *testing.T) {
 		remainingDelayWarningSeconds: 30,
 	}
 	messages := replicaProtectionRiskMessages(replica, check, vo, thresholds)
-	assertContainsFlag(t, messages, "延迟副本已追上，当前没有可截停窗口")
-	assertContainsFlag(t, messages, "剩余保护窗口偏小")
-	if got := replicaProtectionRiskLevel(messages, replica, check); got != DatabaseReplicaHealthWarning {
-		t.Fatalf("replicaProtectionRiskLevel() = %q, want %q", got, DatabaseReplicaHealthWarning)
+	assertNotContainsFlag(t, messages, "延迟副本已追上，当前没有可截停窗口")
+	assertNotContainsFlag(t, messages, "剩余保护窗口偏小")
+	if got := replicaProtectionRiskLevel(messages, replica, check); got != DatabaseReplicaHealthHealthy {
+		t.Fatalf("replicaProtectionRiskLevel() = %q, want %q", got, DatabaseReplicaHealthHealthy)
 	}
 }
 
@@ -117,4 +132,13 @@ func assertContainsFlag(t *testing.T, flags []string, want string) {
 		}
 	}
 	t.Fatalf("flags %v does not contain %q", flags, want)
+}
+
+func assertNotContainsFlag(t *testing.T, flags []string, want string) {
+	t.Helper()
+	for _, flag := range flags {
+		if flag == want {
+			t.Fatalf("flags %v should not contain %q", flags, want)
+		}
+	}
 }
