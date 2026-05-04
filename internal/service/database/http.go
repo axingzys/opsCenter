@@ -238,6 +238,9 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseBackupPolicyListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseProtectionProfileListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseRestoreJobListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
@@ -794,6 +797,66 @@ func (s *Service) ListBackupPolicies(c *gin.Context) {
 		"page":     req.Page,
 		"pageSize": req.PageSize,
 	})
+}
+
+func (s *Service) ListProtectionProfiles(c *gin.Context) {
+	var req dbbiz.DatabaseProtectionProfileListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListProtectionProfiles(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+func (s *Service) GetProtectionProfile(c *gin.Context) {
+	profileID := c.Param("id")
+	instanceID, err := dbbiz.ProtectionProfileInstanceID(profileID)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.GetProtectionProfile(c.Request.Context(), profileID)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ValidateProtectionProfile(c *gin.Context) {
+	profileID := c.Param("id")
+	instanceID, err := dbbiz.ProtectionProfileInstanceID(profileID)
+	if err != nil {
+		writeDatabaseError(c, "校验失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.ValidateProtectionProfile(c.Request.Context(), profileID)
+	if err != nil {
+		writeDatabaseError(c, "校验失败: ", err)
+		return
+	}
+	response.Success(c, item)
 }
 
 func (s *Service) CreateBackupPolicy(c *gin.Context) {

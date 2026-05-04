@@ -1702,7 +1702,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="备份任务" name="backup">
+      <el-tab-pane label="备份与恢复" name="backup">
         <div class="backup-panel">
           <el-alert
             title="P1 已支持外部物理备份、binlog/WAL 归档登记和 PITR 恢复计划预校验。定时备份执行仍以逻辑全量为主，大库生产主链路应改造为物理备份 + 日志连续归档。"
@@ -1726,7 +1726,7 @@
 
           <div class="backup-card">
             <div class="panel-title">
-              <span>备份任务</span>
+              <span>逻辑备份任务</span>
               <el-tag size="small" type="info">{{ backupTaskTotal }}</el-tag>
             </div>
             <div class="backup-toolbar">
@@ -2075,40 +2075,195 @@
 
           <div class="backup-card">
             <div class="panel-title">
-              <span>PITR 链路与恢复计划</span>
-              <el-tag size="small" type="success">P2</el-tag>
+              <span>备份与恢复</span>
+              <el-tag size="small" type="success">P5</el-tag>
             </div>
             <el-alert
-              title="P2.2 已增加 Runner 主机与 SSH 探测任务；当前仍只执行白名单探测脚本，长期连续 binlog 归档和隔离恢复 datadir 重建会继续放到后续 Runner 深化项。"
+              title="默认进入保护概览；底层备份策略、归档流、Runner、Barman、WAL 等资源已收敛到高级资源中。"
               type="info"
               show-icon
               :closable="false"
             />
             <div class="backup-toolbar">
               <div class="backup-toolbar-group">
-                <el-button type="primary" plain @click="openLogArchiveStreamDialog">
+                <el-button type="primary" plain @click="openBackupPolicyDialog()">
                   <el-icon style="margin-right: 4px;"><Plus /></el-icon>
-                  新增归档流
+                  启用数据库保护
                 </el-button>
-                <el-button type="success" plain @click="openLogArchiveDialog">
-                  <el-icon style="margin-right: 4px;"><Plus /></el-icon>
-                  登记日志归档
+                <el-button type="success" plain @click="openBackupPolicyDialog()">
+                  保护策略
                 </el-button>
                 <el-button type="warning" plain @click="openRestorePlanDialog">
-                  生成恢复计划
-                </el-button>
-                <el-button type="primary" plain @click="openBackupPolicyDialog()">
-                  新增备份策略
+                  恢复演练
                 </el-button>
               </div>
               <div class="backup-toolbar-group">
-                <el-button :loading="storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || backupPolicyLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
-                  刷新 PITR
+                <el-button :loading="protectionProfileLoading || storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || backupPolicyLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
+                  刷新保护状态
                 </el-button>
               </div>
             </div>
 
             <el-tabs v-model="backupPitrTab" class="pitr-tabs">
+              <el-tab-pane label="保护概览" name="protectionOverview">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="protectionProfileQuery.keyword"
+                      placeholder="搜索实例、主机、负责人"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadProtectionProfiles"
+                      @clear="loadProtectionProfiles"
+                    />
+                    <el-select v-model="protectionProfileQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadProtectionProfiles">
+                      <el-option
+                        v-for="item in pitrBackupInstances"
+                        :key="item.id"
+                        :label="`${item.name}（${item.dbTypeText || item.dbType}）`"
+                        :value="item.id"
+                      />
+                    </el-select>
+                    <el-select v-model="protectionProfileQuery.engine" placeholder="引擎" clearable class="audit-select" @change="loadProtectionProfiles">
+                      <el-option label="MySQL" value="mysql" />
+                      <el-option label="MariaDB" value="mariadb" />
+                      <el-option label="PostgreSQL" value="postgresql" />
+                    </el-select>
+                    <el-select v-model="protectionProfileQuery.protectionLevel" placeholder="保护等级" clearable class="audit-select" @change="loadProtectionProfiles">
+                      <el-option label="未保护" value="none" />
+                      <el-option label="仅备份" value="backup_only" />
+                      <el-option label="PITR 可用" value="pitr_capable" />
+                      <el-option label="PITR 已演练" value="pitr_verified" />
+                      <el-option label="HA + PITR 已演练" value="ha_and_pitr_verified" />
+                    </el-select>
+                    <el-select v-model="protectionProfileQuery.riskLevel" placeholder="风险" clearable class="audit-select" @change="loadProtectionProfiles">
+                      <el-option label="低" value="low" />
+                      <el-option label="中" value="medium" />
+                      <el-option label="高" value="high" />
+                      <el-option label="严重" value="critical" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetProtectionProfileQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="protectionProfileLoading" @click="loadProtectionProfiles">刷新</el-button>
+                  </div>
+                </div>
+
+                <el-table :data="protectionProfiles" v-loading="protectionProfileLoading" stripe class="modern-table">
+                  <el-table-column label="实例" min-width="230">
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.instanceName || `#${row.instanceId}` }}</span>
+                        <el-tag size="small" :type="dbTypeTag(row.engine)">{{ row.engineText || row.engine || '-' }}</el-tag>
+                      </div>
+                      <div class="muted-text">{{ row.endpoint || '-' }}<span v-if="row.version"> / {{ row.version }}</span></div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="保护模式" min-width="190">
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" :type="protectionModeTag(row.protectionMode)">{{ row.protectionModeText || row.protectionMode || '-' }}</el-tag>
+                        <el-tag size="small" :type="protectionLevelTag(row.protectionLevel)">{{ row.protectionLevelText || row.protectionLevel || '-' }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="可恢复窗口" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">{{ protectionRecoverableWindowText(row) }}</template>
+                  </el-table-column>
+                  <el-table-column label="最近备份" min-width="230" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>Full：{{ row.lastFullAt || '-' }}</div>
+                      <div class="muted-text">Inc：{{ row.lastIncrementalAt || '-' }}</div>
+                      <div class="muted-text">Synthetic：{{ row.lastSyntheticAt || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="日志归档" min-width="210" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>{{ row.lastLogArchiveAt || '-' }}</div>
+                      <div class="muted-text">RPO：{{ protectionRPOText(row) }} / {{ row.logChainStatusText || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="Runner / 存储" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>
+                        <el-tag size="small" :type="runnerStatusTag(row.runnerStatus)">{{ row.runnerStatusText || row.runnerStatus || '-' }}</el-tag>
+                        <span class="muted-text"> {{ row.runnerHost?.name || row.logArchiveStream?.runnerHostName || '-' }}</span>
+                      </div>
+                      <div class="muted-text">存储：{{ row.storageStatusText || row.storageStatus || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="恢复演练 / 副本" min-width="210" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>
+                        <el-tag size="small" :type="restoreDrillStatusTag(row.restoreDrillStatus)">{{ row.restoreDrillStatusText || '-' }}</el-tag>
+                        <span class="muted-text"> {{ row.lastRestoreDrillAt || '-' }}</span>
+                      </div>
+                      <div class="muted-text">副本：{{ row.replicaProtectionText || row.replicaProtectionStatus || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="风险" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" :type="riskLevelTag(row.riskLevel)">{{ row.riskLevelText || row.riskLevel || '-' }}</el-tag>
+                        <span class="muted-text">{{ (row.riskMessages || []).slice(0, 2).join('；') || '链路状态正常' }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="300" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button link type="warning" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'full')">立即Full</el-button>
+                      <el-button link type="success" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'incremental')">立即增量</el-button>
+                      <el-button link type="primary" @click="openProtectionProfileRestorePlan(row)">恢复计划</el-button>
+                      <el-button link type="info" :loading="validatingProtectionProfileId === row.profileId" @click="handleValidateProtectionProfile(row)">校验</el-button>
+                      <el-button link type="primary" @click="openProtectionProfileResources(row)">高级</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="protectionProfileQuery.page"
+                    v-model:page-size="protectionProfileQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="protectionProfileTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadProtectionProfiles"
+                    @current-change="loadProtectionProfiles"
+                  />
+                </div>
+              </el-tab-pane>
+
+              <el-tab-pane label="高级资源" name="advancedResources">
+                <el-alert
+                  title="这些是备份与恢复的底层资源。日常使用建议通过保护概览、保护策略向导和恢复演练入口操作。"
+                  type="info"
+                  show-icon
+                  :closable="false"
+                />
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-button type="primary" plain @click="openLogArchiveStreamDialog">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      新增归档流
+                    </el-button>
+                    <el-button type="success" plain @click="openLogArchiveDialog">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      登记日志归档
+                    </el-button>
+                    <el-button type="warning" plain @click="openRestorePlanDialog">
+                      生成恢复计划
+                    </el-button>
+                    <el-button type="primary" plain @click="openBackupPolicyDialog()">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      新增备份策略
+                    </el-button>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button :loading="storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || backupPolicyLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
+                      刷新高级资源
+                    </el-button>
+                  </div>
+                </div>
+                <el-tabs v-model="backupAdvancedTab" class="pitr-tabs">
               <el-tab-pane label="备份策略" name="backupPolicies">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
@@ -3225,6 +3380,8 @@
                     </el-table>
                   </div>
                 </div>
+              </el-tab-pane>
+            </el-tabs>
               </el-tab-pane>
             </el-tabs>
           </div>
@@ -6727,6 +6884,7 @@ import {
   formatDatabaseQuery,
   listDatabaseBackupRecords,
   listDatabaseBackupPolicies,
+  listDatabaseProtectionProfiles,
   listDatabaseBackupTasks,
   listDatabaseBarmanServers,
   listDatabaseDiagnosisSessions,
@@ -6789,6 +6947,7 @@ import {
   uploadDatabaseRunnerToolOfflinePackage,
   upsertDatabaseInstancePermission,
   validateDatabaseBackupPolicyChain,
+  validateDatabaseProtectionProfile,
   validateDatabaseDDLQuery,
   verifyDatabaseBackupRecord,
   type DatabaseBackupPolicyChainValidationResult,
@@ -6797,6 +6956,7 @@ import {
   type DatabaseBackupRecordResult,
   type DatabaseBackupPolicyPayload,
   type DatabaseBackupPolicyResult,
+  type DatabaseProtectionProfileResult,
   type DatabaseBackupRunResult,
   type DatabaseBackupTaskPayload,
   type DatabaseBackupTaskResult,
@@ -7055,6 +7215,10 @@ const runningBackupTaskId = ref(0)
 const backupTasks = ref<DatabaseBackupTaskResult[]>([])
 const backupTaskTotal = ref(0)
 const backupTaskFormRef = ref<FormInstance>()
+const protectionProfileLoading = ref(false)
+const validatingProtectionProfileId = ref('')
+const protectionProfiles = ref<DatabaseProtectionProfileResult[]>([])
+const protectionProfileTotal = ref(0)
 const backupPolicyLoading = ref(false)
 const backupPolicySubmitting = ref(false)
 const backupPolicyDialogVisible = ref(false)
@@ -7230,7 +7394,8 @@ const barmanCheckingId = ref(0)
 const barmanCatalogSyncingId = ref(0)
 const barmanWalSyncingId = ref(0)
 const barmanBackingUpId = ref(0)
-const backupPitrTab = ref('backupPolicies')
+const backupPitrTab = ref('protectionOverview')
+const backupAdvancedTab = ref('backupPolicies')
 const restoreJobLoading = ref(false)
 const restoreSubmitting = ref(false)
 const restoreDialogVisible = ref(false)
@@ -7322,6 +7487,16 @@ const backupTaskQuery = reactive({
   keyword: '',
   instanceId: undefined as number | undefined,
   enabled: ''
+})
+
+const protectionProfileQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  instanceId: undefined as number | undefined,
+  engine: '',
+  protectionLevel: '',
+  riskLevel: ''
 })
 
 const backupPolicyQuery = reactive({
@@ -8332,6 +8507,66 @@ const backupPolicySyntheticRuleText = (row: DatabaseBackupPolicyResult) => {
   return remain > 0
     ? `自动合成 ${count}/${rule.triggerAfterIncrementals} 条，还差 ${remain} 条`
     : `自动合成已达阈值 ${count}/${rule.triggerAfterIncrementals} 条`
+}
+
+const protectionModeTag = (mode?: string) => {
+  if (!mode || mode === 'none') return 'info'
+  if (mode === 'logical_backup') return 'warning'
+  if (mode.includes('pitr')) return 'success'
+  return 'primary'
+}
+
+const protectionLevelTag = (level?: string) => {
+  switch (level) {
+    case 'ha_and_pitr_verified':
+    case 'pitr_verified':
+      return 'success'
+    case 'pitr_capable':
+      return 'primary'
+    case 'backup_only':
+      return 'warning'
+    case 'none':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const protectionHealthTag = (status?: string) => {
+  switch (status) {
+    case 'healthy':
+      return 'success'
+    case 'warning':
+      return 'warning'
+    case 'critical':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const restoreDrillStatusTag = (status?: string) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'failed':
+      return 'danger'
+    case 'stale':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
+const protectionRecoverableWindowText = (row: DatabaseProtectionProfileResult) => {
+  if (!row.recoverableFrom && !row.recoverableUntil) return '-'
+  return `${row.recoverableFrom || '-'} -> ${row.recoverableUntil || '-'}`
+}
+
+const protectionRPOText = (row: DatabaseProtectionProfileResult) => {
+  if (row.rpoLagSeconds === undefined || row.rpoLagSeconds === null || row.rpoLagSeconds < 0) return '-'
+  if (row.rpoLagSeconds < 60) return `${row.rpoLagSeconds}s`
+  return `${Math.round(row.rpoLagSeconds / 60)}m`
 }
 
 const backupPolicyFormSyntheticRuleSummary = computed(() => parseBackupPolicySyntheticRule(backupPolicyForm.syntheticRuleJson))
@@ -9549,6 +9784,19 @@ const loadBackupTasks = async () => {
   }
 }
 
+const loadProtectionProfiles = async () => {
+  protectionProfileLoading.value = true
+  try {
+    const res: any = await listDatabaseProtectionProfiles(protectionProfileQuery)
+    protectionProfiles.value = res.list || []
+    protectionProfileTotal.value = res.total || 0
+    if (res.page) protectionProfileQuery.page = res.page
+    if (res.pageSize) protectionProfileQuery.pageSize = res.pageSize
+  } finally {
+    protectionProfileLoading.value = false
+  }
+}
+
 const loadBackupPolicies = async () => {
   backupPolicyLoading.value = true
   try {
@@ -9709,7 +9957,7 @@ const loadBarmanServers = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
+  await Promise.all([loadProtectionProfiles(), loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
 }
 
 const loadRestoreJobs = async () => {
@@ -10144,7 +10392,7 @@ const submitBackupPolicyForm = async () => {
       ElMessage.success('备份策略已创建')
     }
     backupPolicyDialogVisible.value = false
-    await loadBackupPolicies()
+    await Promise.all([loadProtectionProfiles(), loadBackupPolicies()])
   } finally {
     backupPolicySubmitting.value = false
   }
@@ -11455,7 +11703,8 @@ const copyText = async (value: string, label: string) => {
 }
 
 const openLogArchiveEventsForStream = async (row: DatabaseLogArchiveStreamResult) => {
-  backupPitrTab.value = 'events'
+  backupPitrTab.value = 'advancedResources'
+  backupAdvancedTab.value = 'events'
   logArchiveEventQuery.page = 1
   logArchiveEventQuery.streamId = row.id
   logArchiveEventQuery.instanceId = undefined
@@ -11464,7 +11713,8 @@ const openLogArchiveEventsForStream = async (row: DatabaseLogArchiveStreamResult
 }
 
 const openLogArchiveEventsForRunner = async (row: DatabaseRunnerHostResult) => {
-  backupPitrTab.value = 'events'
+  backupPitrTab.value = 'advancedResources'
+  backupAdvancedTab.value = 'events'
   logArchiveEventQuery.page = 1
   logArchiveEventQuery.streamId = undefined
   logArchiveEventQuery.instanceId = undefined
@@ -12371,6 +12621,17 @@ const resetBackupTaskQuery = () => {
   loadBackupTasks()
 }
 
+const resetProtectionProfileQuery = () => {
+  protectionProfileQuery.page = 1
+  protectionProfileQuery.pageSize = 10
+  protectionProfileQuery.keyword = ''
+  protectionProfileQuery.instanceId = undefined
+  protectionProfileQuery.engine = ''
+  protectionProfileQuery.protectionLevel = ''
+  protectionProfileQuery.riskLevel = ''
+  loadProtectionProfiles()
+}
+
 const resetBackupPolicyQuery = () => {
   backupPolicyQuery.page = 1
   backupPolicyQuery.pageSize = 10
@@ -12836,7 +13097,7 @@ const handleDeleteBackupPolicy = async (row: DatabaseBackupPolicyResult) => {
   })
   await deleteDatabaseBackupPolicy(row.id)
   ElMessage.success('备份策略已删除')
-  await loadBackupPolicies()
+  await Promise.all([loadProtectionProfiles(), loadBackupPolicies()])
 }
 
 const handleRunBackupPolicy = async (row: DatabaseBackupPolicyResult, level: 'full' | 'incremental') => {
@@ -12858,8 +13119,9 @@ const handleRunBackupPolicy = async (row: DatabaseBackupPolicyResult, level: 'fu
       ? await runDatabaseBackupPolicyFull(row.id, { reason })
       : await runDatabaseBackupPolicyIncremental(row.id, { reason })
     ElMessage.success(res?.message || `${actionText}已下发 Runner`)
-    await Promise.all([loadBackupPolicies(), loadBackupRecords(), loadRunnerJobs()])
+    await Promise.all([loadProtectionProfiles(), loadBackupPolicies(), loadBackupRecords(), loadRunnerJobs()])
     window.setTimeout(() => {
+      loadProtectionProfiles()
       loadBackupPolicies()
       loadBackupRecords()
       loadRunnerJobs()
@@ -12881,10 +13143,54 @@ const handleValidateBackupPolicyChain = async (row: DatabaseBackupPolicyResult) 
     } else {
       ElMessage.success(res.messages?.[0] || '备份链校验通过')
     }
-    await loadBackupPolicies()
+    await Promise.all([loadProtectionProfiles(), loadBackupPolicies()])
   } finally {
     validatingBackupPolicyId.value = 0
   }
+}
+
+const handleValidateProtectionProfile = async (row: DatabaseProtectionProfileResult) => {
+  if (!row.profileId) return
+  validatingProtectionProfileId.value = row.profileId
+  try {
+    const res = await validateDatabaseProtectionProfile(row.profileId) as DatabaseProtectionProfileResult
+    if (res.riskLevel === 'critical' || res.riskLevel === 'high') {
+      ElMessage.warning(res.riskMessages?.[0] || '保护状态存在风险')
+    } else {
+      ElMessage.success('保护状态校验完成')
+    }
+    await loadProtectionProfiles()
+  } finally {
+    validatingProtectionProfileId.value = ''
+  }
+}
+
+const handleRunProtectionProfileBackup = async (row: DatabaseProtectionProfileResult, level: 'full' | 'incremental') => {
+  if (!row.backupPolicy?.id) {
+    ElMessage.warning('当前保护策略没有可执行的物理备份策略，请先进入高级资源创建或修复策略')
+    return
+  }
+  await handleRunBackupPolicy(row.backupPolicy, level)
+}
+
+const openProtectionProfileResources = async (row: DatabaseProtectionProfileResult) => {
+  backupPitrTab.value = 'advancedResources'
+  backupAdvancedTab.value = row.backupPolicy ? 'backupPolicies' : 'streams'
+  backupPolicyQuery.instanceId = row.instanceId
+  logArchiveStreamQuery.instanceId = row.instanceId
+  logArchiveQuery.instanceId = row.instanceId
+  restorePlanQuery.sourceInstanceId = row.instanceId
+  await Promise.all([loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadRestorePlans()])
+}
+
+const openProtectionProfileRestorePlan = (row: DatabaseProtectionProfileResult) => {
+  resetRestorePlanForm()
+  restorePlanForm.sourceInstanceId = row.instanceId
+  restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== row.instanceId)?.id
+  restorePlanForm.restoreTargetType = 'time'
+  restorePlanForm.restoreTargetValue = row.recoverableUntil || formatDateTimeInput()
+  restorePlanForm.restoreMode = 'isolated_restore'
+  restorePlanDialogVisible.value = true
 }
 
 const openSyntheticFullPreview = async (row: DatabaseBackupPolicyResult) => {
@@ -13590,7 +13896,7 @@ const recoverableWindowText = (row: DatabaseBackupRecordResult) => {
   return `${row.recoverableFrom || '-'} 至 ${row.recoverableUntil || '-'}`
 }
 
-const riskLevelTag = (riskLevel: string) => {
+const riskLevelTag = (riskLevel?: string) => {
   switch (riskLevel) {
     case 'critical':
       return 'danger'
@@ -13801,6 +14107,7 @@ watch(activeTab, async (tab) => {
   }
   if (tab === 'backup') {
     await Promise.all([
+      loadProtectionProfiles(),
       loadBackupTasks(),
       loadBackupRecords(),
       loadStorageProfiles(),

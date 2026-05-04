@@ -452,6 +452,66 @@ export interface DatabaseBackupPolicyRunResult {
   triggeredAt: string
 }
 
+export interface DatabaseProtectionActionResult {
+  level: string
+  action: string
+  text: string
+  blocking: boolean
+}
+
+export interface DatabaseProtectionProfileResult {
+  profileId: string
+  instanceId: number
+  instanceName: string
+  engine: string
+  engineText: string
+  version: string
+  endpoint: string
+  environment: string
+  businessSystem: string
+  owner: string
+  protectionMode: string
+  protectionModeText: string
+  protectionLevel: string
+  protectionLevelText: string
+  healthStatus: string
+  healthStatusText: string
+  riskLevel: string
+  riskLevelText: string
+  riskMessages: string[]
+  recoverableFrom: string
+  recoverableUntil: string
+  rpoLagSeconds: number
+  lastFullAt: string
+  lastIncrementalAt: string
+  lastSyntheticAt: string
+  lastLogArchiveAt: string
+  lastRestoreDrillAt: string
+  restoreDrillStatus: string
+  restoreDrillStatusText: string
+  runnerStatus: string
+  runnerStatusText: string
+  storageStatus: string
+  storageStatusText: string
+  backupChainStatus: string
+  backupChainStatusText: string
+  logChainStatus: string
+  logChainStatusText: string
+  replicaProtectionStatus: string
+  replicaProtectionText: string
+  backupPolicy?: DatabaseBackupPolicyResult
+  logicalTask?: DatabaseBackupTaskResult
+  latestBackupRecord?: DatabaseBackupRecordResult
+  latestLogArchive?: DatabaseLogArchiveResult
+  latestRestoreJob?: DatabaseRestoreJobResult
+  logArchiveStream?: DatabaseLogArchiveStreamResult
+  runnerHost?: DatabaseRunnerHostResult
+  storageProfile?: DatabaseStorageProfileResult
+  replicaProtection?: DatabaseReplicaProtectionResult
+  recommendedActions: DatabaseProtectionActionResult[]
+  validatedAt: string
+}
+
 export interface DatabaseBackupRecordResult {
   id: number
   taskId: number
@@ -1661,6 +1721,23 @@ export const listDatabaseBackupPolicies = (params?: {
   status?: string
   enabled?: string
 }) => request.get('/api/v1/databases/backup-policies', { params })
+
+export const listDatabaseProtectionProfiles = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  instanceId?: number
+  engine?: string
+  protectionMode?: string
+  protectionLevel?: string
+  riskLevel?: string
+}) => request.get('/api/v1/databases/protection-profiles', { params })
+
+export const getDatabaseProtectionProfile = (id: string) =>
+  request.get(`/api/v1/databases/protection-profiles/${id}`)
+
+export const validateDatabaseProtectionProfile = (id: string) =>
+  request.post(`/api/v1/databases/protection-profiles/${id}/validate`)
 
 export const createDatabaseBackupPolicy = (data: DatabaseBackupPolicyPayload) =>
   request.post('/api/v1/databases/backup-policies', data)

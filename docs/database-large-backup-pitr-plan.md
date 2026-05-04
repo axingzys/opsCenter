@@ -1,6 +1,6 @@
 # OpsHub 大库备份与 PITR 长期改造方案
 
-更新日期：2026-04-29
+更新日期：2026-05-04
 
 ## 实施记录
 
@@ -7435,6 +7435,881 @@ P4.4 第一版落地边界：
    - 暂停 / 恢复按钮，仅在拥有对应菜单权限时显示。
    - 强制填写事故编号、执行原因、影响确认和二次确认的弹窗。
    - `Apply 操作记录` 表格，展示动作、目标副本、命令、状态、原因、错误和操作人。
+
+### P5：备份与恢复产品收敛和保护策略聚合层
+
+#### P5 背景和现状复核
+
+截至 2026-05-04，数据库管理模块的备份恢复能力已经从“定时备份任务”演进成完整的数据库保护体系。底层模型拆分是合理的，但前端信息架构仍把大量底层资源平铺在一个 `PITR 链路与恢复计划` 卡片里，导致日常使用成本偏高。
+
+当前代码和文档中的关键对象如下：
+
+| 能力 | 现有模型 / 代码入口 | 当前用途 | 使用复杂度来源 |
+| --- | --- | --- | --- |
+| 逻辑备份任务 | `database_backup_tasks`、`DatabaseBackupTask` | 小库逻辑备份、兼容老任务 | 与新物理策略并存，用户容易混淆“备份任务”和“备份策略” |
+| 物理备份策略 | `database_backup_policies`、`DatabaseBackupPolicyConfig` | MySQL/MariaDB full、incremental、Synthetic Full 调度 | 字段多，需理解 Runner、binlog stream、tool mode、synthetic rule、retention |
+| 备份记录 | `database_backup_records`、`DatabaseBackupRecord` | 保存逻辑、物理、外部、Barman、pg_basebackup 备份元数据 | 是恢复链输入，但用户通常不应直接按记录推导恢复能力 |
+| 备份链状态 | `database_backup_chain_states` | 当前 base、latest、增量数、可恢复状态 | 对排障有用，但不应成为普通创建备份的前置知识 |
+| 日志归档流 | `database_log_archive_streams` | MySQL binlog / PostgreSQL WAL 连续归档控制面 | 需要绑定 Runner、模式、租约、RPO、存储和 Agent |
+| 日志归档文件 | `database_log_archives` | 已归档 binlog/WAL 文件，PITR 日志链输入 | 用户只关心是否连续和覆盖窗口，不关心每个文件细节 |
+| 归档事件 | `database_log_archive_events`、`database_log_archive_event_rollups` | Agent 心跳、checkpoint、spool、上传、gap 等运行证明 | 对运维排障有价值，但日常主页面不应默认展示 |
+| 存储配置 | `database_storage_profiles` | S3/MinIO/NFS/local/external 位置和安全姿态 | 对象存储 posture 很重要，但应作为策略依赖而不是主流程第一步 |
+| Runner 主机 | `database_runner_hosts` | SSH/Agent 执行备份、归档、恢复、工具安装 | Runner 是执行资源，不是业务目标 |
+| Runner 工具画像 | `database_runner_tool_profiles` | OS、工具版本、Docker、Barman、XtraBackup 能力 | 应作为 readiness gate，而不是让用户手动判断 |
+| Runner 任务 | `database_runner_jobs` | 白名单命令执行历史 | 是作业历史和排障资源，不应干扰日常备份配置 |
+| Barman Server | `database_barman_servers` | PostgreSQL Barman 纳管 | 对 PostgreSQL 专家有用，但普通保护流程应向导化 |
+| 恢复计划 | `database_restore_plans` | PITR 计划、链路校验、proof 摘要 | 用户只应在恢复演练/事故恢复时创建，不应日常维护 |
+| 恢复任务 | `database_restore_jobs` | 隔离恢复执行、步骤、校验 SQL、proof | 应成为“恢复演练”页面核心，而不是散在底层任务中 |
+| 副本治理 | `database_instance_replicas`、`database_replication_checks`、`database_replica_incident_guides`、`database_replica_actions` | 实时副本、延迟副本、事故指引、pause/resume apply | 与备份互补，但应统一展示“误删保护”和“恢复兜底” |
+
+前端当前 `DatabaseManagement.vue` 的 `PITR 链路与恢复计划` 下已有这些子页签：
+
+```text
+备份策略
+存储配置
+Runner主机
+Runner任务
+Barman Server
+归档流
+日志归档
+Agent事件
+恢复计划
+Barman Catalog
+WAL 状态
+```
+
+这说明底层能力已经具备，但产品入口还停留在“资源清单”形态。用户日常真正需要的是：
+
+```text
+这个数据库是否受保护？
+当前能恢复到什么时间？
+最近全量、增量、binlog/WAL 是否成功？
+有没有恢复演练 proof？
+出了事故该从延迟副本、PITR 还是备份记录恢复？
+```
+
+#### P5 总原则
+
+P5 不推翻 P1-P4 的底层设计，也不删除现有高级页签。P5 的目标是在现有对象上新增一层“保护策略聚合视图”和“向导化操作”，让日常使用从底层资源操作转为按数据库实例的保护状态操作。
+
+原则：
+
+1. 保留现有底层表和 API，避免大迁移。
+2. 新增 facade API 聚合现有对象，先做视图和编排，不急于新增大量强状态表。
+3. 普通用户默认进入“保护概览”和“保护策略向导”。
+4. `Runner / 归档流 / Barman / WAL / Agent事件 / 日志归档` 移入“高级资源”。
+5. 所有可恢复结论必须来自已存在的链路校验、日志链、Runner 状态、恢复 proof，而不是前端推断。
+6. 高风险动作继续保持权限、二次确认和审计。
+
+#### P5 信息架构
+
+建议把当前数据库管理一级页签收敛为：
+
+```text
+数据库管理
+  ├─ 实例管理
+  ├─ 实例权限
+  ├─ 结构浏览
+  ├─ SQL 控制台
+  ├─ 备份与恢复
+  ├─ 副本治理
+  └─ 查询审计
+```
+
+其中 `备份与恢复` 内部改为：
+
+```text
+备份与恢复
+  ├─ 保护概览
+  ├─ 保护策略
+  ├─ 恢复演练
+  ├─ 作业历史
+  └─ 高级资源
+       ├─ 存储配置
+       ├─ Runner 主机
+       ├─ Runner 任务
+       ├─ Runner 工具
+       ├─ Runner Agent
+       ├─ Barman Server
+       ├─ 归档流
+       ├─ 日志归档
+       ├─ Agent 事件
+       ├─ 恢复计划
+       ├─ Barman Catalog
+       └─ WAL 状态
+```
+
+默认页从现在的“备份策略”改为“保护概览”。高级资源默认折叠，并提示：
+
+```text
+这些是备份与恢复的底层资源。日常使用建议通过“保护策略”和“恢复演练”操作。
+```
+
+#### P5 核心概念：Database Protection Profile
+
+新增产品层概念：
+
+```text
+Database Protection Profile
+数据库保护策略 / 数据库保护方案
+```
+
+第一版可以不新增数据库表，先作为后端聚合 VO 和向导编排结果存在。它把以下对象聚合成一个用户可理解的保护单元：
+
+```text
+实例
+  + 备份策略 database_backup_policies 或逻辑任务 database_backup_tasks
+  + 备份链状态 database_backup_chain_states
+  + 最新备份记录 database_backup_records
+  + 日志归档流 database_log_archive_streams
+  + 日志归档窗口 database_log_archives
+  + Runner 主机 database_runner_hosts
+  + Runner 工具画像 database_runner_tool_profiles
+  + 存储配置 database_storage_profiles
+  + 最近恢复计划 database_restore_plans
+  + 最近恢复任务 database_restore_jobs
+  + PostgreSQL Barman server/database_barman_servers
+  + 副本保护窗口 database_replica_protections 聚合结果
+```
+
+一个 Protection Profile 应回答：
+
+| 字段 | 说明 |
+| --- | --- |
+| `profile_id` | 聚合 ID，可用 `engine:instance_id:policy_id` 或后续独立表 ID |
+| `instance_id` / `instance_name` | 被保护实例 |
+| `engine` / `version` | 数据库类型和版本 |
+| `protection_mode` | `logical_backup / mysql_physical_pitr / mariadb_physical_pitr / postgres_barman_pitr / postgres_pg_basebackup_pitr / external_pitr / none` |
+| `protection_level` | `none / backup_only / pitr_capable / pitr_verified / ha_and_pitr_verified` |
+| `health_status` | `healthy / warning / critical / unknown` |
+| `risk_level` | `low / medium / high / critical` |
+| `recoverable_from` / `recoverable_until` | 理论可恢复窗口 |
+| `rpo_seconds` | 当前日志归档延迟或理论 RPO |
+| `last_full_at` | 最近全量成功时间 |
+| `last_incremental_at` | 最近增量成功时间 |
+| `last_log_archive_at` | 最近日志归档成功时间 |
+| `last_restore_drill_at` | 最近恢复演练成功时间 |
+| `restore_drill_status` | `none / success / failed / stale` |
+| `runner_status` | Runner 在线、工具就绪、Agent 心跳 |
+| `storage_status` | 存储可用性和安全姿态 |
+| `backup_chain_status` | 当前备份链状态 |
+| `log_chain_status` | 当前日志链状态 |
+| `replica_protection_status` | 延迟副本保护窗口状态 |
+| `recommended_actions` | 后端生成的下一步建议 |
+
+#### P5 保护概览页面
+
+`保护概览` 是日常入口，每个数据库实例一行。
+
+建议列：
+
+| 列 | 内容 |
+| --- | --- |
+| 实例 | 名称、引擎、版本、容量 |
+| 保护模式 | 逻辑备份 / MySQL 物理 PITR / PostgreSQL Barman PITR / 未保护 |
+| 保护等级 | 未保护 / 仅备份 / PITR 可用 / PITR 已演练 |
+| 可恢复窗口 | `recoverable_from` 到 `recoverable_until` |
+| 最近备份 | full、incremental、synthetic full 的最近成功时间 |
+| 日志归档 | binlog/WAL 最近归档时间、延迟、是否有 gap |
+| Runner / 存储 | Runner 在线、工具就绪、存储姿态 |
+| 恢复演练 | 最近 proof 时间和状态 |
+| 副本保护 | 是否有延迟副本、remaining delay |
+| 风险 | 风险等级和前 2 条原因 |
+| 操作 | 查看详情、立即全量、立即增量、生成恢复计划、执行恢复演练、修复向导 |
+
+示例：
+
+```text
+opshub-mysql
+  模式：MySQL 物理 PITR
+  等级：PITR 已演练
+  可恢复：2026-05-01 02:00:00 -> 2026-05-04 00:20:30
+  RPO：90 秒
+  最近：Full 05-01 02:00，Inc 05-04 03:00，Binlog 00:20
+  Runner：192.168.1.30 在线
+  恢复演练：05-03 成功
+  风险：低
+```
+
+#### P5 保护状态计算规则
+
+保护等级建议按后端统一计算，前端只展示。
+
+```text
+none:
+  没有启用逻辑任务、物理策略或外部保护记录。
+
+backup_only:
+  有成功备份，但不能证明有连续 binlog/WAL 日志链。
+
+pitr_capable:
+  有可用 base/full，增量链完整，日志归档覆盖目标窗口，但最近没有成功恢复演练。
+
+pitr_verified:
+  pitr_capable 且最近一次隔离恢复演练成功，proof 未过期。
+
+ha_and_pitr_verified:
+  pitr_verified 且存在健康实时副本或延迟副本保护窗口。
+```
+
+风险等级建议：
+
+| 风险 | 触发条件 |
+| --- | --- |
+| `critical` | 没有成功 full、备份链断、日志链断、Runner 离线且影响当前策略、最近备份失败 |
+| `high` | PITR 过期、binlog/WAL gap、对象存储姿态严重不符合、恢复演练失败 |
+| `medium` | 未做恢复演练、日志归档延迟超过 RPO、延迟副本不可用、Runner 工具画像过期 |
+| `low` | 链路完整，最近备份和归档正常 |
+
+`recommended_actions` 示例：
+
+```json
+[
+  {"level":"critical","action":"run_full_backup","text":"当前没有成功全量备份，请先执行一次 full"},
+  {"level":"high","action":"start_log_archive_stream","text":"binlog 归档流未启动，PITR 只能恢复到最近备份点"},
+  {"level":"medium","action":"run_restore_drill","text":"最近 30 天没有恢复演练，建议执行隔离恢复验证"}
+]
+```
+
+#### P5 后端 API 草案
+
+新增 facade API，不替代现有底层 API：
+
+```text
+GET  /api/v1/databases/protection-profiles
+GET  /api/v1/databases/protection-profiles/:id
+POST /api/v1/databases/protection-profiles/:id/validate
+POST /api/v1/databases/protection-profiles/:id/run-full
+POST /api/v1/databases/protection-profiles/:id/run-incremental
+POST /api/v1/databases/protection-profiles/:id/run-restore-drill
+POST /api/v1/databases/protection-profiles/:id/generate-restore-plan
+```
+
+向导 API：
+
+```text
+POST /api/v1/databases/protection-wizards/mysql-pitr/preview
+POST /api/v1/databases/protection-wizards/mysql-pitr/apply
+POST /api/v1/databases/protection-wizards/postgres-barman/preview
+POST /api/v1/databases/protection-wizards/postgres-barman/apply
+POST /api/v1/databases/protection-wizards/logical-backup/preview
+POST /api/v1/databases/protection-wizards/logical-backup/apply
+```
+
+`preview` 只做计划和 readiness gate，不创建对象。`apply` 才真正创建或更新底层资源。
+
+#### P5 MySQL/MariaDB PITR 向导
+
+目标：让用户不再手动创建 `备份策略 + binlog归档流 + Runner绑定 + Synthetic规则 + 保留策略`，而是通过一个向导完成。
+
+步骤 1：选择实例。
+
+系统读取：
+
+```text
+database_instances
+version
+capacity snapshots
+现有 backup policies
+现有 log archive streams
+现有 runner hosts 和 tool profiles
+```
+
+自动推荐：
+
+| 实例 | 推荐工具 |
+| --- | --- |
+| MySQL 8.0.x | XtraBackup 8.0 |
+| MySQL 8.4.x | XtraBackup 8.4 |
+| MariaDB | mariadb-backup |
+
+步骤 2：选择保护模板。
+
+模板：
+
+```text
+标准 PITR：
+  立即 full 一次
+  每天 03:00 incremental
+  binlog 连续归档，RPO 300 秒
+  每 5 条增量自动 Synthetic Full
+  Synthetic Full 成功 proof 后旧链再允许清理
+
+保守 PITR：
+  每周 full
+  每天 incremental
+  binlog 连续归档，RPO 300 秒
+  每 7 条增量人工 Synthetic Full
+
+小库逻辑：
+  每天逻辑 full
+  不启用 PITR
+```
+
+针对用户当前 `opshub-mysql` 的推荐模板：
+
+```json
+{
+  "protectionMode": "mysql_physical_pitr",
+  "runInitialFullNow": true,
+  "fullSchedule": "",
+  "incrementalSchedule": "0 3 * * *",
+  "binlogArchive": {
+    "enabled": true,
+    "mode": "polling",
+    "rpoSeconds": 300,
+    "retentionDays": 45
+  },
+  "syntheticFull": {
+    "enabled": true,
+    "mode": "rolling_synthetic_full",
+    "autoRun": true,
+    "triggerAfterIncrementals": 5,
+    "mergeOldestIncrementals": 5,
+    "requireRestoreProof": true,
+    "neverDeleteWithoutProof": true,
+    "markSupersededAfterProof": true,
+    "supersededKeepDaysAfterProof": 7
+  },
+  "retention": {
+    "fullKeepMonths": 6,
+    "incrementalKeepDays": 45,
+    "binlogKeepDays": 45,
+    "neverDeleteWithoutProof": true
+  }
+}
+```
+
+说明：
+
+1. `fullSchedule=""` 表示不再每月自动 full。当前诉求是先立即 full 一次，后续靠 daily incremental 和每 5 条增量合成新的 synthetic full 基线。
+2. 如果希望每月仍有一次原生 full，可把 `fullSchedule` 改为 `0 2 1 * *`。
+3. 第一版自动 Synthetic Full 要求 `triggerAfterIncrementals == mergeOldestIncrementals`，避免只合并部分增量导致旧父链无法安全清理。
+4. 自动 Synthetic Full 必须绑定 binlog 归档流，否则后端阻止自动执行。
+5. 清理旧链必须有恢复 proof，不能只因为 synthetic full 成功就删除旧链。
+
+步骤 3：选择 Runner 和工具执行模式。
+
+用户只选：
+
+```text
+Runner 主机
+工具执行模式：宿主机工具 / 容器化工具
+存储配置
+```
+
+系统自动检查：
+
+```text
+Runner 在线
+Runner 工具画像是否存在
+Docker 是否可用
+XtraBackup/mariadb-backup 版本是否匹配
+mysqlbinlog/mariadb-binlog 是否可用
+datadir 挂载是否存在
+workdir 是否可写
+对象存储是否可写
+```
+
+步骤 4：预览将创建或复用的底层资源。
+
+示例：
+
+```text
+将创建：
+  database_backup_policies: opshub-mysql-physical-pitr
+  database_log_archive_streams: opshub-mysql-binlog
+
+将复用：
+  database_runner_hosts: 192.168.1.30
+  database_storage_profiles: runner local 或 MinIO
+
+将立即执行：
+  Runner tool readiness check
+  initial full backup
+
+将开启：
+  daily incremental scheduler
+  binlog archive desired_state=running
+  auto synthetic full after 5 incrementals
+```
+
+步骤 5：确认启用。
+
+后端执行：
+
+```text
+1. 创建或更新 binlog 归档流。
+2. 创建或更新物理备份策略。
+3. 写入 synthetic rule 和 retention rule。
+4. 启动归档流 desired_state=running。
+5. 如 runInitialFullNow=true，下发 full 备份 Runner Job。
+6. 返回 Protection Profile 汇总状态。
+```
+
+#### P5 PostgreSQL Barman PITR 向导
+
+PostgreSQL 场景第一版以 Barman 为主，不让用户先理解 Barman Catalog、WAL 状态和 Barman Server 三个页签。
+
+步骤：
+
+```text
+1. 选择 PostgreSQL 实例。
+2. 选择 Runner 主机。
+3. 选择或创建 Barman Server。
+4. 检查 barman check、WAL archive、streaming_archiver、system_identifier。
+5. 选择调度：Barman backup cron、WAL RPO、保留窗口。
+6. 预览将同步的 catalog 和 WAL 状态。
+7. 启用后触发 check + catalog sync。
+```
+
+PostgreSQL profile 必须明确：
+
+```text
+物理备份是 cluster 级，不是单 database/schema/table。
+timeline、system_identifier、WAL 连续性是恢复计划硬门禁。
+pgBackRest 仅 legacy external，不作为新建默认方案。
+WAL-G 第一版作为 external metadata registration，不深接。
+```
+
+#### P5 恢复演练入口收敛
+
+当前恢复计划和恢复任务能力已经存在，但入口偏底层。P5 建议新增“恢复演练”主入口。
+
+用户只填写：
+
+```text
+实例
+恢复目标：当前最新 / 指定时间 / 指定 LSN / 指定 GTID
+Runner
+隔离实例端口或自动分配
+校验 SQL 断言
+```
+
+后端自动：
+
+```text
+1. 生成 restore plan。
+2. 校验 backup chain。
+3. 校验 binlog/WAL chain。
+4. 校验 artifact readiness。
+5. 创建 restore job。
+6. 启动隔离恢复。
+7. 执行校验 SQL expectedRows / expectedContains / expectedScalar。
+8. 写入 proof。
+9. 回填 Protection Profile 的 last_restore_drill_at 和 restore_drill_status。
+```
+
+恢复演练页面展示：
+
+```text
+恢复任务
+步骤时间线
+使用的 base / incremental / binlog 或 WAL
+Runner 和隔离容器
+校验 SQL 断言结果
+proof JSON
+日志路径
+清理状态
+```
+
+#### P5 高级资源归类
+
+高级资源不是删除，而是分组和降噪。
+
+建议分组：
+
+```text
+执行资源：
+  Runner 主机
+  Runner 工具画像
+  Runner 工具离线包
+  Runner Agent
+  Runner 任务
+
+日志链：
+  归档流
+  日志归档
+  Agent 事件
+  Event Rollup
+
+PostgreSQL：
+  Barman Server
+  Barman Catalog
+  WAL 状态
+
+恢复底层：
+  恢复计划
+  恢复任务
+  Proof
+
+存储：
+  存储配置
+  存储安全姿态
+```
+
+每个高级页签顶部都应显示“被哪些保护策略引用”，避免用户不知道它与业务实例的关系。
+
+#### P5 数据模型建议
+
+第一阶段不新增持久表，只新增 VO：
+
+```go
+type DatabaseProtectionProfileVO struct {
+    ProfileID string
+    InstanceID uint
+    InstanceName string
+    Engine string
+    Version string
+    ProtectionMode string
+    ProtectionLevel string
+    HealthStatus string
+    RiskLevel string
+    RiskMessages []string
+    RecoverableFrom string
+    RecoverableUntil string
+    RPOLagSeconds int
+    LastFullAt string
+    LastIncrementalAt string
+    LastSyntheticAt string
+    LastLogArchiveAt string
+    LastRestoreDrillAt string
+    RestoreDrillStatus string
+    BackupPolicy *DatabaseBackupPolicyVO
+    LogicalTask *DatabaseBackupTaskVO
+    LogArchiveStream *DatabaseLogArchiveStreamVO
+    RunnerHost *DatabaseRunnerHostVO
+    StorageProfile *DatabaseStorageProfileVO
+    ReplicaProtection *DatabaseReplicaProtectionVO
+    RecommendedActions []DatabaseProtectionActionVO
+}
+```
+
+第二阶段如需要保存用户命名、模板、启用历史，再新增轻量表：
+
+```text
+database_protection_profiles
+```
+
+字段建议：
+
+| 字段 | 说明 |
+| --- | --- |
+| `instance_id` | 被保护实例 |
+| `name` | 用户可读名称 |
+| `protection_mode` | 保护模式 |
+| `backup_policy_id` | MySQL/MariaDB 物理策略 |
+| `backup_task_id` | 逻辑备份任务 |
+| `log_archive_stream_id` | binlog/WAL 归档流 |
+| `barman_server_id` | PostgreSQL Barman server |
+| `runner_host_id` | 默认 Runner |
+| `storage_profile_id` | 默认存储 |
+| `template_key` | 使用的模板 |
+| `template_json` | 模板参数 |
+| `enabled` | 是否启用 |
+| `status` | 聚合状态 |
+| `last_validated_at` | 最近聚合校验 |
+| `last_error` | 最近错误 |
+
+但 P5.1-P5.3 不建议马上新增此表，先用现有对象聚合即可。
+
+#### P5 权限
+
+建议新增产品层权限，底层权限继续保留：
+
+```text
+database:protection:view
+database:protection:create
+database:protection:update
+database:protection:run-backup
+database:protection:run-restore-drill
+database:protection:advanced
+```
+
+映射关系：
+
+| 产品层权限 | 可调用底层能力 |
+| --- | --- |
+| `view` | 查看 profile、备份状态、恢复窗口 |
+| `create/update` | 创建或修改 backup policy、log archive stream、Barman server 引用 |
+| `run-backup` | 跑 full、incremental、synthetic preview |
+| `run-restore-drill` | 生成 restore plan、创建 restore job |
+| `advanced` | 查看和操作高级资源 |
+
+#### P5 分期实施
+
+##### P5.1：信息架构收敛
+
+目标：
+
+1. 把当前 `备份任务` 页面文案调整为 `备份与恢复`。
+2. 新增 `保护概览` 子页签并设为默认。
+3. 把现有 11 个 PITR 子页签移入 `高级资源` 分组。
+4. 保持所有原有按钮和 API 不变。
+
+验收：
+
+1. 用户进入备份与恢复时首先看到实例保护概览，而不是底层资源页签。
+2. 高级资源仍能访问所有现有功能。
+3. 不影响现有备份策略、归档流、Runner、Barman、WAL 状态操作。
+
+##### P5.2：Protection Profile 聚合 API
+
+目标：
+
+1. 后端新增 `ListProtectionProfiles` 和 `GetProtectionProfile`。
+2. 聚合现有 backup policy、chain state、log stream、log archives、runner、storage、restore job、replica protection。
+3. 后端统一计算 protection level、recoverable window、risk level 和 recommended actions。
+
+验收：
+
+1. `opshub-mysql` 能显示当前保护模式、备份链、binlog 归档和最近恢复演练。
+2. 未绑定 binlog stream 的物理策略显示 `backup_only` 或风险。
+3. Runner 离线、日志链 gap、没有 full、没有 proof 都能在 profile 风险里体现。
+
+落地记录（2026-05-04）：
+
+1. 后端已新增只读聚合 facade：
+   - `GET /api/v1/databases/protection-profiles`
+   - `GET /api/v1/databases/protection-profiles/:id`
+   - `POST /api/v1/databases/protection-profiles/:id/validate`
+2. 当前 profile 第一版采用 `instance-<instance_id>` 作为聚合 ID，不新增持久表。
+3. 聚合输入来自现有对象：
+   - `database_instances`
+   - `database_backup_policies`
+   - `database_backup_chain_states`
+   - `database_backup_tasks`
+   - `database_backup_records`
+   - `database_log_archive_streams`
+   - `database_log_archives`
+   - `database_runner_hosts`
+   - `database_storage_profiles`
+   - `database_restore_jobs`
+   - `database_replica_protections`
+4. 后端统一计算：
+   - `protection_mode`
+   - `protection_level`
+   - `health_status`
+   - `risk_level`
+   - `recoverable_from / recoverable_until`
+   - `rpo_lag_seconds`
+   - `backup_chain_status`
+   - `log_chain_status`
+   - `restore_drill_status`
+   - `recommended_actions`
+5. 前端 `备份任务` 一级页签已改为 `备份与恢复`。
+6. `PITR 链路与恢复计划` 卡片已改为 `备份与恢复`，默认子页签改为 `保护概览`。
+7. 原有底层资源页签已收敛到 `高级资源`：
+   - 备份策略
+   - 存储配置
+   - Runner 主机
+   - Runner 任务
+   - Barman Server
+   - 归档流
+   - 日志归档
+   - Agent 事件
+   - 恢复计划
+   - Barman Catalog
+   - WAL 状态
+8. 保护概览支持：
+   - 按实例、引擎、保护等级、风险过滤。
+   - 展示保护模式、保护等级、可恢复窗口、最近 full/incremental/synthetic、日志归档、Runner/存储、恢复演练和副本保护。
+   - 从 profile 直接触发 full/incremental、生成恢复计划、校验保护状态、跳转高级资源。
+9. P5.1/P5.2 暂不新增 `database_protection_profiles` 表，后续 P5.3/P5.5 向导如需要保存用户命名、模板和启用历史时再补轻量持久表。
+
+##### P5.3：MySQL/MariaDB PITR 向导
+
+目标：
+
+1. 新增 MySQL PITR 向导 `preview/apply`。
+2. 支持当前推荐模板：
+   - 立即 full 一次。
+   - 每天 03:00 incremental。
+   - binlog 连续归档。
+   - 每 5 条增量自动 Synthetic Full。
+3. 自动创建或复用 binlog 归档流。
+4. 自动创建或更新 backup policy。
+5. 自动启动归档流 desired state。
+
+验收：
+
+1. 用户不需要先手动进入 `归档流` 创建 binlog stream。
+2. 用户不需要手写 Synthetic JSON，选择模板即可。
+3. preview 能展示将创建、复用和阻断的资源。
+4. apply 后保护概览能看到新 profile。
+5. 初始 full 下发后能在作业历史中查看。
+
+##### P5.4：恢复演练入口收敛
+
+目标：
+
+1. 从 protection profile 直接发起恢复演练。
+2. 自动生成 restore plan。
+3. 自动创建 restore job。
+4. 展示步骤时间线和 proof。
+
+验收：
+
+1. 用户无需先进入 `恢复计划` 子页签。
+2. 恢复失败时能在 profile 风险里显示最近 proof 失败。
+3. 恢复成功后 profile 升级为 `pitr_verified`。
+
+##### P5.5：PostgreSQL Barman PITR 向导
+
+目标：
+
+1. 把 Barman Server、Catalog、WAL 状态聚合成 PostgreSQL 保护向导。
+2. 支持 Barman check、catalog sync、WAL sync 的 preview/apply。
+3. 在 profile 中展示 PostgreSQL timeline、system_identifier 和 WAL gap 风险。
+
+验收：
+
+1. PostgreSQL 用户无需先理解所有 Barman 子页签。
+2. timeline mismatch 和 WAL gap 能在 profile 直接显示。
+3. Barman 恢复演练成功后 profile 显示 `pitr_verified`。
+
+##### P5.6：风险中心
+
+目标：
+
+1. 新增按风险聚合的保护问题列表。
+2. 支持按实例、风险级别、问题类型过滤。
+3. 每条风险给出一键跳转修复入口。
+
+问题类型：
+
+```text
+missing_full_backup
+incremental_chain_broken
+log_chain_gap
+runner_offline
+runner_tool_missing
+storage_posture_failed
+restore_drill_missing
+restore_drill_failed
+replica_delay_unavailable
+archive_lag_high
+```
+
+验收：
+
+1. 能一眼看到所有未受保护或保护降级的生产库。
+2. 每个风险能跳到对应底层资源或向导修复。
+
+#### P5 对现有页面的具体调整
+
+当前 `PITR 链路与恢复计划` 工具条：
+
+```text
+新增归档流
+登记日志归档
+生成恢复计划
+新增备份策略
+刷新 PITR
+```
+
+P5 后默认工具条建议改为：
+
+```text
+启用数据库保护
+立即备份
+恢复演练
+刷新保护状态
+高级资源
+```
+
+在 `高级资源` 内保留原按钮：
+
+```text
+新增归档流
+登记日志归档
+生成恢复计划
+新增备份策略
+新增存储
+新增 Runner
+新增 Barman Server
+```
+
+备份策略表格操作列当前包含：
+
+```text
+跑Full
+跑增量
+校验链
+合成预览
+合成Full
+清理预览
+清理旧链
+编辑
+删除
+```
+
+P5 后在保护概览中只展示：
+
+```text
+立即备份
+恢复演练
+查看详情
+修复风险
+```
+
+底层操作仍在高级资源的备份策略表格中保留。
+
+#### P5 与当前 `opshub-mysql` 使用场景
+
+用户当前想要的策略：
+
+```text
+现在 full 一次
+后续每天 incremental
+每 5 条 incremental 后自动合成新的 synthetic full
+binlog 连续归档用于 PITR
+旧链必须有 proof 后再清理
+```
+
+P5 向导应把它表达成业务语言：
+
+```text
+保护模板：MySQL 物理 PITR - 滚动合成全量
+初始动作：立即全量
+日常动作：每天 03:00 增量
+日志归档：开启 binlog 连续归档，目标 RPO 5 分钟
+链路压缩：每 5 条增量合成一个新全量基线
+安全门禁：合成后必须恢复演练成功，才允许标记旧链可清理
+```
+
+后端实际落地到：
+
+```text
+database_log_archive_streams:
+  instance_id = opshub-mysql
+  archive_type = binlog
+  archive_mode = polling 或 streaming
+  desired_state = running
+  runner_host_id = 选择的 Runner
+  rpo_target_seconds = 300
+
+database_backup_policies:
+  instance_id = opshub-mysql
+  backup_engine = xtrabackup_8_0 或 xtrabackup_8_4
+  runner_host_id = 选择的 Runner
+  binlog_stream_id = 上面的 stream
+  full_schedule = ""
+  incremental_schedule = "0 3 * * *"
+  synthetic_enabled = true
+  synthetic_rule_json = rolling_synthetic_full 模板
+  restore_drill_required = true
+  retention_json = 保留策略模板
+```
+
+#### P5 非目标
+
+1. 不删除现有底层页签。
+2. 不把 PITR 恢复直接切到生产库。
+3. 不绕过现有 Runner、权限、审计和 proof 门禁。
+4. 不让前端自行判断可恢复性。
+5. 不在 P5.1 就新增复杂持久表。
+6. 不把 Barman/WAL-G/pg_basebackup 三套 PostgreSQL 引擎重新混成一个黑盒。
 
 ## 迁移策略
 
