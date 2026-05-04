@@ -515,6 +515,10 @@ func (uc *HostUseCase) CollectHostInfo(ctx context.Context, hostID uint) error {
 	host.LastCollectAt = &now
 	host.CollectStatus = CollectStatusOnline
 	host.CollectError = ""
+	if mode == ManagementModeAgent {
+		host.AgentLastHeartbeatAt = &now
+		host.AgentLastError = ""
+	}
 
 	return uc.hostRepo.Update(ctx, host)
 }
@@ -574,7 +578,7 @@ func (uc *HostUseCase) inferCollectFailure(host *Host, err error) (string, int) 
 		if strings.Contains(errMsg, "Agent 未注册") || strings.Contains(errMsg, "尚未上报") {
 			return CollectStatusNotConfigured, -1
 		}
-		if strings.Contains(errMsg, "Agent 心跳超时") {
+		if strings.Contains(errMsg, "Agent 心跳超时") || strings.Contains(errMsg, "连接 Agent 实时采集接口失败") {
 			return CollectStatusOffline, 0
 		}
 		return CollectStatusUnknown, -1
@@ -595,6 +599,9 @@ func (uc *HostUseCase) persistCollectFailure(ctx context.Context, host *Host, co
 	host.CollectError = err.Error()
 	host.LastCollectAt = &now
 	host.Status = runtimeStatus
+	if uc.effectiveManagementMode(host) == ManagementModeAgent {
+		host.AgentLastError = err.Error()
+	}
 	_ = uc.hostRepo.Update(ctx, host)
 }
 

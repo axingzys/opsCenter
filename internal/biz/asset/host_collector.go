@@ -136,5 +136,5 @@ func (c *agentHostCollector) Collect(ctx context.Context, host *Host) (*collecto
 	if err := c.Test(ctx, host); err != nil {
 		return nil, err
 	}
-	return SystemInfoFromHost(host)
+	return c.useCase.collectAgentSnapshot(ctx, host)
 }

@@ -14,7 +14,6 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -594,34 +593,7 @@ func (uc *HostUseCase) deleteFileViaAgent(ctx context.Context, host *Host, remot
 }
 
 func (uc *HostUseCase) resolveAgentFileProxy(ctx context.Context, host *Host) (string, string, error) {
-	if uc.agentRepo == nil {
-		return "", "", fmt.Errorf("Agent 仓储未初始化")
-	}
-
-	agentModel, err := uc.agentRepo.GetByHostID(ctx, host.ID)
-	if err != nil {
-		return "", "", fmt.Errorf("获取 Agent 记录失败: %w", err)
-	}
-
-	token, err := decryptAgentSecret(uc.agentSecretKey, agentModel.AccessToken)
-	if err != nil {
-		return "", "", fmt.Errorf("解密 Agent 访问令牌失败: %w", err)
-	}
-	if strings.TrimSpace(token) == "" {
-		return "", "", fmt.Errorf("当前 Agent 缺少文件管理访问令牌，请重新部署 Agent")
-	}
-
-	targetHost := firstNonEmpty([]string{
-		strings.TrimSpace(host.PrimaryPrivateIP),
-		strings.TrimSpace(host.IP),
-		strings.TrimSpace(host.PrimaryPublicIP),
-	})
-	if targetHost == "" {
-		return "", "", fmt.Errorf("当前主机缺少可访问的 Agent 地址")
-	}
-
-	port := firstPositive(agentModel.ListenPort, host.AgentPort, 19100)
-	return fmt.Sprintf("http://%s", net.JoinHostPort(targetHost, strconv.Itoa(port))), token, nil
+	return uc.resolveAgentEndpoint(ctx, host)
 }
 
 func buildAgentFileURL(endpoint, routePath, filePath string) (string, error) {

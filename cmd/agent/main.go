@@ -446,6 +446,8 @@ func newAgentMetrics() *agentMetrics {
 func (a *agentApp) serveMetrics(ctx context.Context) (<-chan error, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/api/v1/snapshot", a.requireAgentAuth(a.handleSnapshot))
+	mux.HandleFunc("/snapshot", a.requireAgentAuth(a.handleSnapshot))
 	mux.HandleFunc("/files", a.requireAgentAuth(a.handleFiles))
 	mux.HandleFunc("/files/upload", a.requireAgentAuth(a.handleFileUpload))
 	mux.HandleFunc("/files/download", a.requireAgentAuth(a.handleFileDownload))
@@ -487,6 +489,25 @@ func (a *agentApp) requireAgentAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func (a *agentApp) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet, http.MethodPost:
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	payload, err := collectPayload(r.Context(), a.cfg, a.httpClient)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("collect snapshot failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	a.updateMetrics(payload)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func (a *agentApp) handleFiles(w http.ResponseWriter, r *http.Request) {
