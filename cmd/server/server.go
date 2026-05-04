@@ -232,6 +232,8 @@ func autoMigrate(db *gorm.DB) error {
 		&databasemodel.DatabaseBackupRecord{},
 		&databasemodel.DatabaseBackupPolicyConfig{},
 		&databasemodel.DatabaseBackupChainState{},
+		&databasemodel.DatabaseBackupAlertRule{},
+		&databasemodel.DatabaseBackupAlertState{},
 		&databasemodel.DatabaseBarmanServer{},
 		&databasemodel.DatabaseLogArchiveStream{},
 		&databasemodel.DatabaseLogArchive{},

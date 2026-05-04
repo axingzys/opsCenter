@@ -53,6 +53,10 @@ const (
 	DatabaseAuditActionBackupRun          = "backup_run"
 	DatabaseAuditActionBackupDownload     = "backup_download"
 	DatabaseAuditActionBackupVerify       = "backup_verify"
+	DatabaseAuditActionBackupAlertCreate  = "backup_alert_rule_create"
+	DatabaseAuditActionBackupAlertUpdate  = "backup_alert_rule_update"
+	DatabaseAuditActionBackupAlertDelete  = "backup_alert_rule_delete"
+	DatabaseAuditActionBackupAlertTest    = "backup_alert_rule_test"
 	DatabaseAuditActionTopologyView       = "topology_view"
 	DatabaseAuditActionRestoreDryRun      = "restore_dry_run"
 	DatabaseAuditActionCapacityView       = "capacity_view"
@@ -274,6 +278,20 @@ const (
 	DatabaseRestoreStatusVerified  = "verified"
 	DatabaseRestoreStatusFailed    = "failed"
 	DatabaseRestoreStatusCancelled = "cancelled"
+
+	DatabaseBackupAlertScopeAll            = "all"
+	DatabaseBackupAlertScopeProduction     = "production"
+	DatabaseBackupAlertScopeInstance       = "instance"
+	DatabaseBackupAlertScopeEngine         = "engine"
+	DatabaseBackupAlertScopeBusinessSystem = "business_system"
+	DatabaseBackupAlertScopeOwner          = "owner"
+
+	DatabaseBackupAlertStateFiring   = "firing"
+	DatabaseBackupAlertStateResolved = "resolved"
+
+	DatabaseBackupAlertIssueBackupFailed          = "backup_failed"
+	DatabaseBackupAlertIssueNoRecentSuccessBackup = "no_recent_success_backup"
+	DatabaseBackupAlertIssueRPOBreached           = "rpo_breached"
 
 	DatabaseCapacityObjectInstance = "instance"
 	DatabaseCapacityObjectSchema   = "schema"
@@ -879,6 +897,61 @@ type DatabaseBackupChainState struct {
 
 func (DatabaseBackupChainState) TableName() string {
 	return "database_backup_chain_states"
+}
+
+// DatabaseBackupAlertRule 数据库备份恢复告警规则。
+type DatabaseBackupAlertRule struct {
+	gorm.Model
+	Name           string `gorm:"type:varchar(120);not null;comment:规则名称" json:"name"`
+	Enabled        bool   `gorm:"default:true;index;comment:是否启用" json:"enabled"`
+	ScopeType      string `gorm:"column:scope_type;type:varchar(40);default:'all';index;comment:作用范围 all/production/instance/engine/business_system/owner" json:"scopeType"`
+	InstanceID     uint   `gorm:"column:instance_id;index;comment:指定实例ID" json:"instanceId"`
+	Engine         string `gorm:"type:varchar(30);index;comment:指定数据库引擎" json:"engine"`
+	BusinessSystem string `gorm:"column:business_system;type:varchar(120);index;comment:业务系统" json:"businessSystem"`
+	Owner          string `gorm:"type:varchar(120);index;comment:负责人" json:"owner"`
+	IssueTypesJSON string `gorm:"column:issue_types_json;type:text;comment:告警问题类型JSON" json:"issueTypesJson"`
+	Severity       string `gorm:"type:varchar(20);default:'warning';comment:告警级别" json:"severity"`
+	AlertInterval  int    `gorm:"column:alert_interval;type:int;default:1800;comment:静默间隔秒" json:"alertInterval"`
+	RecoveryNotify bool   `gorm:"column:recovery_notify;default:true;comment:是否发送恢复通知" json:"recoveryNotify"`
+	ChannelIDsJSON string `gorm:"column:channel_ids_json;type:text;comment:告警通道ID列表JSON" json:"channelIdsJson"`
+	ThresholdJSON  string `gorm:"column:threshold_json;type:text;comment:阈值配置JSON" json:"thresholdJson"`
+	Description    string `gorm:"type:varchar(500);comment:备注" json:"description"`
+
+	IssueTypes []string `gorm:"-" json:"issueTypes"`
+	ChannelIDs []uint   `gorm:"-" json:"channelIds"`
+}
+
+func (DatabaseBackupAlertRule) TableName() string {
+	return "database_backup_alert_rules"
+}
+
+// DatabaseBackupAlertState 数据库备份恢复告警当前状态。
+type DatabaseBackupAlertState struct {
+	gorm.Model
+	RuleID         uint       `gorm:"column:rule_id;index;comment:规则ID" json:"ruleId"`
+	Fingerprint    string     `gorm:"type:varchar(220);uniqueIndex;comment:告警指纹" json:"fingerprint"`
+	InstanceID     uint       `gorm:"column:instance_id;index;comment:实例ID" json:"instanceId"`
+	ResourceType   string     `gorm:"column:resource_type;type:varchar(60);index;comment:资源类型" json:"resourceType"`
+	ResourceID     uint       `gorm:"column:resource_id;index;comment:资源ID" json:"resourceId"`
+	ResourceName   string     `gorm:"column:resource_name;type:varchar(255);comment:资源名称" json:"resourceName"`
+	ResourceTarget string     `gorm:"column:resource_target;type:varchar(255);comment:资源目标" json:"resourceTarget"`
+	IssueType      string     `gorm:"column:issue_type;type:varchar(80);index;comment:问题类型" json:"issueType"`
+	AlertType      string     `gorm:"column:alert_type;type:varchar(80);index;comment:告警类型" json:"alertType"`
+	Metric         string     `gorm:"type:varchar(80);index;comment:告警指标" json:"metric"`
+	Severity       string     `gorm:"type:varchar(20);index;comment:告警级别" json:"severity"`
+	Status         string     `gorm:"type:varchar(20);default:'firing';index;comment:firing/resolved" json:"status"`
+	Message        string     `gorm:"type:text;comment:告警内容" json:"message"`
+	Suggestion     string     `gorm:"type:varchar(500);comment:建议动作" json:"suggestion"`
+	FirstFiredAt   time.Time  `gorm:"column:first_fired_at;index;comment:首次触发时间" json:"firstFiredAt"`
+	LastFiredAt    time.Time  `gorm:"column:last_fired_at;index;comment:最近触发时间" json:"lastFiredAt"`
+	LastNotifiedAt *time.Time `gorm:"column:last_notified_at;index;comment:最近通知时间" json:"lastNotifiedAt,omitempty"`
+	ResolvedAt     *time.Time `gorm:"column:resolved_at;index;comment:恢复时间" json:"resolvedAt,omitempty"`
+	NotifyCount    int        `gorm:"column:notify_count;type:int;default:0;comment:通知次数" json:"notifyCount"`
+	RawJSON        string     `gorm:"column:raw_json;type:text;comment:结构化上下文" json:"rawJson"`
+}
+
+func (DatabaseBackupAlertState) TableName() string {
+	return "database_backup_alert_states"
 }
 
 // DatabaseBarmanServer PostgreSQL Barman server 纳管配置。

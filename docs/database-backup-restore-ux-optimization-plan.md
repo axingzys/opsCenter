@@ -1190,3 +1190,787 @@ MySQL/MariaDB PITR、PostgreSQL Barman、备份策略、日志归档流等表单
 - 未拆分 `DatabaseManagement.vue`，高级资源仍在大 SFC 内实现。
 - 未新增风险历史、SLA 趋势、审批流和告警订阅。
 - 未把每个高级资源表的行操作全部收敛为 `主动作 + 详情 + 更多`，本轮只改资源入口和异常优先视图。
+
+## 22. 第四轮详细方案：备份恢复告警闭环
+
+方案时间：2026-05-05
+
+第四轮建议把重点从单纯拆分 `DatabaseManagement.vue` 调整为“备份恢复 + 监控告警闭环”。原因是前三轮已经解决了主路径可读性、启用保护表单复杂度和高级资源可理解性，当前最影响生产可用性的不是页面继续微调，而是备份恢复风险仍需要用户主动打开页面查看。
+
+第四轮目标是让备份失败、RPO 超时、恢复演练过期、Runner / Barman / 存储 / 日志归档异常自动进入监控告警体系，支持通知、去重、静默、恢复通知和历史留痕。
+
+### 22.1 改动前需要复查的文档和代码
+
+备份恢复侧：
+
+- `docs/database-backup-restore-ux-optimization-plan.md`
+  - 第 14.5 节已把备份失败告警、RPO 超时告警、恢复演练过期提醒、风险快照留存列为生产化增强。
+  - 第 19、20、21 节记录了一到三轮已落地内容。
+- `web/src/views/asset/DatabaseManagement.vue`
+  - 已有 `风险中心`、`保护概览`、`高级资源`、恢复演练、备份任务、备份记录。
+  - 第三轮已在前端聚合了高级资源异常，但这些异常还没有主动通知能力。
+- `web/src/api/database.ts`
+  - 已有 `listDatabaseProtectionProfiles`、`listDatabaseProtectionRisks`、备份记录、Runner、Barman、日志归档、恢复计划等接口类型。
+- `internal/biz/database/protection_risk.go`
+  - 已能输出结构化风险：缺少全量基线、增量链异常、日志链缺口、Runner 不可用、Runner 工具异常、存储姿态异常、缺少恢复演练、恢复演练失败、延迟副本不可用、归档延迟过高。
+- `internal/server/database/backup_alert.go`
+  - 已接入备份调度失败通知，但目前更接近“发送通知”，还没有完整告警规则、告警状态和告警日志闭环。
+- `internal/biz/database/backup_scheduler.go`
+  - 备份调度失败、保留清理失败已经有 `BackupSchedulerNotice`。
+
+监控告警侧：
+
+- `docs/plugins/monitor.md`
+  - 已定义告警通道、接收人、告警日志、告警防抖和恢复通知等监控概念。
+- `plugins/monitor/model/alert_config.go`
+  - 已有 `AlertChannel`、`AlertReceiver`、`AlertReceiverChannel`、`AlertLog`。
+- `plugins/monitor/service/alert_dispatcher.go`
+  - 已能加载启用通道并发送邮件、Webhook、企业微信、钉钉、飞书。
+- `plugins/monitor/service/alert_service.go`
+  - 已有统一 `AlertMessage`，但资源标题和指标文案主要覆盖域名、主机，数据库告警需要补充。
+- `plugins/monitor/service/host_alert_service.go`
+  - 已有主机告警规则、静默间隔和写入 `alert_logs` 的实现，可作为数据库告警规则的参考。
+- `web/src/plugins/monitor/components/AlertLogs.vue`
+  - 已能筛选域名和主机告警，还需要加入数据库告警类型、指标和资源展示。
+
+### 22.2 当前能力判断
+
+可以复用：
+
+- 复用 Monitor 的告警通道、接收人和发送器，不新增独立通知系统。
+- 复用 Monitor 的 `alert_logs` 作为统一告警历史。
+- 复用备份恢复已有的保护风险和高级资源状态作为告警输入。
+- 复用备份恢复页前三轮形成的风险中心和高级资源健康中心作为告警处理入口。
+
+需要新增：
+
+- 数据库备份恢复专用告警规则。
+- 数据库备份恢复专用告警状态，用于去重、静默和恢复通知。
+- 数据库告警扫描器。
+- 数据库告警日志写入逻辑。
+- 前端告警订阅页面。
+- Monitor 告警日志对数据库资源类型的展示支持。
+
+不建议新增：
+
+- 不建议新建第二套告警通道、接收人和通知配置。
+- 不建议前端每次刷新风险中心就触发告警。
+- 不建议只在备份调度失败时发消息，RPO、演练过期、资源异常也要纳入。
+- 不建议没有静默间隔，否则高频调度会造成告警刷屏。
+
+### 22.3 第四轮信息架构
+
+备份与恢复区域建议调整为：
+
+1. `风险中心`
+2. `保护概览`
+3. `告警订阅`
+4. `高级资源`
+
+其中：
+
+- `风险中心` 继续用于人工处理当前风险。
+- `保护概览` 继续用于看实例保护状态和恢复证明。
+- `告警订阅` 用于配置哪些风险需要主动通知谁。
+- `高级资源` 用于管理员排查 Runner、Barman、存储、日志归档和恢复计划。
+
+监控中心的 `告警日志` 也要支持数据库资源类型。这样用户既可以从备份恢复页面配置和处理，也可以从监控中心统一追踪发送历史。
+
+### 22.4 后端数据模型建议
+
+#### 22.4.1 数据库告警规则
+
+建议新增模型：`DatabaseBackupAlertRule`
+
+建议表名：`database_backup_alert_rules`
+
+核心字段：
+
+| 字段 | 类型 | 说明 |
+|:-----|:-----|:-----|
+| `id` | uint | 主键 |
+| `name` | varchar(100) | 规则名称 |
+| `enabled` | bool | 是否启用 |
+| `scope_type` | varchar(30) | 作用范围：all、production、instance、engine、business_system、owner |
+| `instance_id` | uint nullable | 指定实例 |
+| `engine` | varchar(30) | 指定引擎：mysql、mariadb、postgresql、redis |
+| `business_system` | varchar(100) | 指定业务系统 |
+| `owner` | varchar(100) | 指定负责人 |
+| `issue_types_json` | json/text | 告警问题类型列表 |
+| `severity` | varchar(20) | warning、critical |
+| `alert_interval` | int | 静默间隔，单位秒 |
+| `recovery_notify` | bool | 是否发送恢复通知 |
+| `channel_ids_json` | json/text | 指定告警通道；为空表示全部启用通道 |
+| `threshold_json` | json/text | 阈值配置 |
+| `description` | varchar(255) | 备注 |
+| `created_at` | time | 创建时间 |
+| `updated_at` | time | 更新时间 |
+
+`threshold_json` 示例：
+
+```json
+{
+  "noSuccessBackupHours": 24,
+  "restoreDrillStaleDays": 30,
+  "rpoLagGraceMinutes": 10,
+  "includeNonProduction": false,
+  "minRiskLevel": "high"
+}
+```
+
+#### 22.4.2 数据库告警状态
+
+建议新增模型：`DatabaseBackupAlertState`
+
+建议表名：`database_backup_alert_states`
+
+核心字段：
+
+| 字段 | 类型 | 说明 |
+|:-----|:-----|:-----|
+| `id` | uint | 主键 |
+| `rule_id` | uint | 规则 ID |
+| `fingerprint` | varchar(180) unique | 告警指纹 |
+| `resource_type` | varchar(50) | database_instance、database_backup_policy、database_runner、database_barman、database_storage、database_log_archive、database_restore |
+| `resource_id` | uint | 资源 ID |
+| `resource_name` | varchar(255) | 资源名称 |
+| `resource_target` | varchar(255) | 主机、端口或实例 endpoint |
+| `issue_type` | varchar(80) | 问题类型 |
+| `severity` | varchar(20) | 告警级别 |
+| `status` | varchar(20) | firing、resolved |
+| `message` | text | 最近告警内容 |
+| `suggestion` | varchar(255) | 建议动作 |
+| `first_fired_at` | time | 首次触发时间 |
+| `last_fired_at` | time | 最近触发时间 |
+| `last_notified_at` | time nullable | 最近通知时间 |
+| `resolved_at` | time nullable | 恢复时间 |
+| `notify_count` | int | 通知次数 |
+| `raw_json` | text | 结构化上下文 |
+
+告警指纹建议：
+
+```text
+database_backup_alert:{ruleId}:{resourceType}:{resourceId}:{issueType}
+```
+
+这样可以保证同一个问题在静默期内不会重复通知，同时不同规则或不同问题互不影响。
+
+### 22.5 告警类型建议
+
+建议先覆盖这些数据库备份恢复告警类型：
+
+| 告警类型 | issue type | 默认级别 | 说明 |
+|:-----|:-----|:-----|:-----|
+| `database_backup_failed` | `backup_failed` | critical | 定时备份、策略备份、物理备份或校验失败 |
+| `database_backup_no_recent_success` | `no_recent_success_backup` | critical | 生产库超过阈值没有成功备份 |
+| `database_backup_missing_full` | `missing_full_backup` | critical | 缺少全量基线，无法形成恢复链 |
+| `database_backup_chain_broken` | `incremental_chain_broken` | critical | 增量链、备份链、合成全量链异常 |
+| `database_backup_rpo_breached` | `rpo_breached` / `archive_lag_high` | critical | binlog/WAL 归档延迟超过 RPO |
+| `database_backup_log_gap` | `log_chain_gap` | critical | 日志链缺口，PITR 覆盖不完整 |
+| `database_restore_drill_stale` | `restore_drill_missing` | warning | 恢复演练超过周期未成功 |
+| `database_restore_drill_failed` | `restore_drill_failed` | warning | 最近恢复演练失败 |
+| `database_backup_runner_unavailable` | `runner_offline` | warning | Runner 不在线、禁用或失败 |
+| `database_backup_runner_tool_failed` | `runner_tool_missing` | warning | Runner 工具缺失或版本不兼容 |
+| `database_backup_storage_failed` | `storage_posture_failed` | warning | 存储姿态、权限、对象存在性或 checksum 异常 |
+| `database_backup_barman_failed` | `barman_failed` | warning | Barman check、catalog、WAL 同步异常 |
+
+第一版建议先做高价值类型：
+
+1. `database_backup_failed`
+2. `database_backup_no_recent_success`
+3. `database_backup_rpo_breached`
+4. `database_restore_drill_stale`
+5. `database_backup_runner_unavailable`
+6. `database_backup_barman_failed`
+7. `database_backup_storage_failed`
+
+### 22.6 后端调度设计
+
+建议新增调度器：`DatabaseBackupAlertScheduler`
+
+建议文件：
+
+- `internal/biz/database/backup_alert_rule.go`
+- `internal/biz/database/backup_alert_scheduler.go`
+- `internal/data/database/backup_alert_repository.go`
+- `internal/server/database/backup_alert.go`
+
+调度器职责：
+
+1. 每 1 分钟或 5 分钟读取启用的数据库备份告警规则。
+2. 按规则 scope 筛选实例和资源。
+3. 从保护风险、保护概览和高级资源状态中生成候选告警。
+4. 用 fingerprint 查找或创建告警状态。
+5. 如果是新告警，写状态并发送通知。
+6. 如果已有 firing 状态且超过静默间隔，再次发送通知并更新 `last_notified_at`。
+7. 如果候选告警消失，把状态改为 resolved。
+8. 如果规则启用恢复通知，发送恢复通知并写 `alert_logs`。
+
+调度周期建议：
+
+- 第一版默认 5 分钟，避免高频扫描带来数据库压力。
+- 备份调度失败这种事件型告警可以立即触发，不必等扫描器。
+
+伪流程：
+
+```text
+for each enabled rule:
+  candidates = evaluateRule(rule)
+  currentFingerprints = set(candidates)
+
+  for candidate in candidates:
+    state = findState(rule, candidate.fingerprint)
+    if state not exists:
+      create firing state
+      dispatch alert
+      write alert log
+    else if state.status == resolved:
+      reopen state
+      dispatch alert
+      write alert log
+    else if now - state.last_notified_at >= rule.alert_interval:
+      dispatch alert
+      write alert log
+    else:
+      only update last_fired_at/message/raw_json
+
+  for each firing state of rule not in currentFingerprints:
+    mark resolved
+    if rule.recovery_notify:
+      dispatch recovery notification
+      write alert log
+```
+
+### 22.7 告警输入来源
+
+#### 22.7.1 保护风险
+
+优先复用 `ListProtectionRisks` 的输出：
+
+- `riskLevel`
+- `issueType`
+- `message`
+- `actionText`
+- `blocking`
+- `instanceId`
+- `instanceName`
+- `endpoint`
+- `recoverableUntil`
+- `lastFullAt`
+- `lastLogArchiveAt`
+
+这样前端风险中心和后端告警看到的问题一致。
+
+#### 22.7.2 备份记录
+
+用于发现：
+
+- 最近失败备份。
+- 校验失败。
+- 运行超时或长时间 pending/running。
+- 成功备份间隔超过阈值。
+
+第一版可以按实例检查最近一条成功记录时间，超过 `noSuccessBackupHours` 触发。
+
+#### 22.7.3 保护概览
+
+用于发现：
+
+- 保护等级为 `none`。
+- 可恢复窗口为空。
+- `recoverableUntil` 落后当前时间过多。
+- 最近恢复演练状态为 stale 或 failed。
+
+#### 22.7.4 高级资源
+
+用于发现：
+
+- Runner 不在线。
+- Barman check / catalog / WAL 同步失败。
+- 存储姿态失败。
+- 日志归档流 failed / degraded。
+- 归档文件 missing / checksum_failed。
+- 恢复计划校验阻断。
+
+第三轮前端已经聚合过这些判断，第四轮应把核心判断沉到后端，避免只在前端可见。
+
+### 22.8 Monitor 集成改造
+
+#### 22.8.1 AlertMessage 文案
+
+`plugins/monitor/service/alert_service.go` 需要识别数据库资源：
+
+- `ResourceType = database` 或 `database_backup`
+- category title：`数据库备份恢复告警`
+- resource label：`数据库实例`
+- alert title：按 `AlertType` 返回中文标题
+- metric label：按 `Metric` 返回中文指标
+
+建议指标映射：
+
+| metric | 中文 |
+|:-----|:-----|
+| `backup_failed` | 备份失败 |
+| `backup_success_gap` | 成功备份间隔 |
+| `rpo_lag` | RPO 延迟 |
+| `restore_drill_stale` | 恢复演练过期 |
+| `runner_status` | Runner 状态 |
+| `barman_status` | Barman 状态 |
+| `storage_posture` | 存储姿态 |
+| `log_archive_status` | 日志归档状态 |
+
+#### 22.8.2 AlertLog 写入
+
+当前域名和主机告警已有写入逻辑。数据库告警也应统一写入 `alert_logs`：
+
+- 发送成功：`status = success`
+- 发送失败：`status = failed`
+- `channel_type` 记录通道摘要
+- `error_msg` 记录发送失败原因
+- `resource_type` 使用 `database` 或 `database_backup`
+- `resource_name` 使用实例名或资源名
+- `resource_target` 使用 endpoint
+- `domain_monitor_id` 置 0
+- `domain` 可填实例名或 endpoint，用于兼容旧字段非空约束
+
+#### 22.8.3 现有备份失败通知补齐
+
+`internal/server/database/backup_alert.go` 当前只调 dispatcher。第四轮应补齐：
+
+- 成功发送也写 `alert_logs`。
+- 发送失败也写 `alert_logs`。
+- `BackupSchedulerNotice` 映射为数据库告警类型。
+- 后续 `RunScheduledBackupPolicy` 失败也应调用同一套通知逻辑。
+
+### 22.9 后端 API 建议
+
+建议新增数据库备份告警规则 API：
+
+| 方法 | 路径 | 说明 |
+|:-----|:-----|:-----|
+| GET | `/api/v1/databases/backup-alert-rules` | 规则列表 |
+| POST | `/api/v1/databases/backup-alert-rules` | 创建规则 |
+| GET | `/api/v1/databases/backup-alert-rules/:id` | 规则详情 |
+| PUT | `/api/v1/databases/backup-alert-rules/:id` | 更新规则 |
+| DELETE | `/api/v1/databases/backup-alert-rules/:id` | 删除规则 |
+| POST | `/api/v1/databases/backup-alert-rules/:id/test` | 测试发送 |
+| GET | `/api/v1/databases/backup-alert-states` | 当前告警状态 |
+| POST | `/api/v1/databases/backup-alert-states/:id/resolve` | 手动标记已处理，可选 |
+| GET | `/api/v1/databases/backup-alert-summary` | 告警摘要 |
+
+第一版可以只做：
+
+- 规则 CRUD。
+- 当前状态列表。
+- 告警摘要。
+- 测试发送。
+
+手动 resolve 可以放第五轮，因为自动恢复更重要。
+
+### 22.10 前端页面方案
+
+#### 22.10.1 备份恢复页新增告警订阅
+
+位置：`web/src/views/asset/DatabaseManagement.vue`
+
+在 P5 工作区二级 Tab 中新增 `告警订阅`。
+
+顶部摘要卡：
+
+- `规则总数`
+- `已启用`
+- `当前告警`
+- `24h 通知`
+
+规则表字段：
+
+- 规则名称
+- 作用范围
+- 告警类型
+- 严重级别
+- 告警通道
+- 静默间隔
+- 恢复通知
+- 状态
+- 更新时间
+- 操作
+
+行操作：
+
+- 编辑
+- 测试发送
+- 启用 / 停用
+- 删除
+
+当前告警状态表：
+
+- 资源
+- 告警类型
+- 级别
+- 状态
+- 最近触发
+- 最近通知
+- 通知次数
+- 建议动作
+- 操作：查看风险、打开保护详情、打开高级资源
+
+#### 22.10.2 规则弹窗
+
+默认字段：
+
+- 规则名称
+- 作用范围
+- 告警类型
+- 严重级别
+- 告警通道
+- 静默间隔
+- 恢复通知
+
+高级设置折叠：
+
+- 无成功备份阈值，默认 24 小时。
+- 恢复演练过期天数，默认 30 天。
+- RPO 宽限分钟，默认 10 分钟。
+- 是否包含非生产实例，默认否。
+- 最小风险等级，默认 high。
+
+告警类型建议用 checkbox group，按业务语言展示：
+
+- 备份失败
+- 超过阈值无成功备份
+- RPO 超时
+- 缺少全量基线
+- 备份链异常
+- 日志归档异常
+- 恢复演练过期
+- 恢复演练失败
+- Runner 不可用
+- Barman 异常
+- 存储异常
+
+#### 22.10.3 Monitor 告警日志页面
+
+位置：`web/src/plugins/monitor/components/AlertLogs.vue`
+
+改动：
+
+- 资源类型筛选增加 `数据库`。
+- 告警类型下拉增加数据库备份恢复告警。
+- 指标翻译增加数据库指标。
+- 详情弹窗中资源标签根据 `resourceType` 显示：域名、主机、数据库实例。
+- 统计卡片可以暂时保持全局统计，不必第四轮拆分。
+
+### 22.11 默认规则建议
+
+第四轮可以在页面提供“创建推荐规则”按钮，或后端首次启动时不自动创建，只在前端给出模板。
+
+推荐规则：
+
+| 名称 | 范围 | 类型 | 级别 | 静默 | 恢复通知 |
+|:-----|:-----|:-----|:-----|:-----|:-----|
+| 生产库备份失败 | 生产实例 | 备份失败 | critical | 30 分钟 | 开启 |
+| 生产库 RPO 超时 | 生产实例 | RPO 超时、日志链缺口 | critical | 30 分钟 | 开启 |
+| 生产库缺少全量基线 | 生产实例 | 缺少全量基线 | critical | 6 小时 | 开启 |
+| 恢复演练过期提醒 | 生产实例 | 恢复演练过期 | warning | 24 小时 | 关闭 |
+| 执行资源异常 | 全部实例 | Runner 不可用、Barman 异常 | warning | 1 小时 | 开启 |
+| 存储和归档异常 | 全部实例 | 存储异常、日志归档异常 | warning | 6 小时 | 开启 |
+
+前端文案应说明：
+
+> 推荐规则不会替代恢复演练和备份链校验，只负责在风险出现时主动通知负责人。
+
+### 22.12 权限与审计
+
+建议新增或复用权限：
+
+- 查看规则：`database:backup:view`
+- 创建 / 更新规则：`database:backup:update`
+- 删除规则：`database:backup:delete`
+- 测试发送：`database:backup:update`
+- 查看告警状态：`database:backup:view`
+
+审计动作建议：
+
+- `database_backup_alert_rule_create`
+- `database_backup_alert_rule_update`
+- `database_backup_alert_rule_delete`
+- `database_backup_alert_rule_test`
+- `database_backup_alert_state_resolve`
+
+测试发送必须写审计，避免用户误用告警通道。
+
+### 22.13 第四轮分步落地建议
+
+#### 22.13.1 第一步：告警日志和发送器兼容数据库
+
+目标：
+
+- Monitor 能正确展示数据库告警。
+- 数据库备份调度失败写入 `alert_logs`。
+
+改动：
+
+- `plugins/monitor/service/alert_service.go`
+- `plugins/monitor/server/alert_handler.go`
+- `web/src/plugins/monitor/components/AlertLogs.vue`
+- `web/src/api/alert-config.ts`
+- `internal/server/database/backup_alert.go`
+
+验收：
+
+- 人工触发一次备份失败或测试告警，Monitor 告警日志能看到数据库资源。
+
+#### 22.13.2 第二步：规则和状态表
+
+目标：
+
+- 可以配置数据库备份告警规则。
+- 同一问题有持久化 firing/resolved 状态。
+
+改动：
+
+- `internal/biz/database/model.go`
+- `cmd/server/server.go`
+- `internal/biz/database/repository.go`
+- `internal/data/database/backup_alert_repository.go`
+- `internal/service/database/http.go`
+- `internal/server/database/http.go`
+- `web/src/api/database.ts`
+
+验收：
+
+- 规则 CRUD 正常。
+- 状态列表能返回当前 firing 告警。
+
+#### 22.13.3 第三步：后端扫描器
+
+目标：
+
+- 自动扫描保护风险和资源异常。
+- 支持静默间隔和恢复通知。
+
+改动：
+
+- `internal/biz/database/backup_alert_scheduler.go`
+- `internal/server/database/http.go`
+
+验收：
+
+- 构造一条风险，扫描器能产生 firing 状态。
+- 静默期内不重复通知。
+- 风险消失后状态变 resolved。
+
+#### 22.13.4 第四步：备份恢复页告警订阅
+
+目标：
+
+- 用户能在备份恢复页配置规则和查看当前告警。
+
+改动：
+
+- `web/src/views/asset/DatabaseManagement.vue`
+- 后续可拆到 `web/src/views/asset/database-backup/BackupAlertRules.vue`
+
+验收：
+
+- 能新增推荐规则。
+- 能编辑通道、范围、类型、静默间隔。
+- 能查看当前告警并跳转风险中心或保护详情。
+
+### 22.14 测试计划
+
+后端测试：
+
+- `go test ./internal/biz/database -run BackupAlert`
+- `go test ./plugins/monitor/...`
+- `go test ./...`
+
+重点用例：
+
+- 规则 scope 匹配：全部、生产、指定实例、指定引擎。
+- issue type 匹配：只触发规则选择的问题类型。
+- fingerprint 稳定：同一问题不产生重复状态。
+- 静默间隔：静默期不重复通知，过期后可再次通知。
+- 恢复通知：firing 变 resolved 时按配置通知。
+- alert log：成功和失败都写入。
+- channel IDs：指定通道和默认全部通道都可用。
+
+前端测试：
+
+- `npm run typecheck`
+- `npm run build`
+
+手工验证：
+
+- 在备份恢复页创建规则。
+- 触发测试发送。
+- 在 Monitor 告警日志筛选数据库。
+- 停用规则后不再产生新通知。
+- 删除规则后状态处理符合预期。
+
+### 22.15 验收标准
+
+第四轮完成后，应满足：
+
+- 数据库备份失败能进入 Monitor 告警日志。
+- Monitor 告警日志可筛选 `数据库` 资源。
+- 备份恢复页可配置数据库备份恢复告警规则。
+- RPO 超时、恢复演练过期、Runner / Barman / 存储异常至少能自动扫描并产生告警状态。
+- 同一问题在静默期内不重复发通知。
+- 问题恢复后状态可以自动变为 resolved。
+- 开启恢复通知时，可以发送恢复消息。
+- 所有告警发送成功和失败都有 `alert_logs` 记录。
+- `go test ./...`、`npm run typecheck`、`npm run build` 通过。
+
+### 22.16 第四轮不做的内容
+
+第四轮先不做：
+
+- 生产恢复审批流。
+- 删除备份审批流。
+- SLA 日历。
+- 风险历史趋势图。
+- 大规模组件拆分。
+- 告警升级策略和值班排班。
+- WebSocket 实时告警推送。
+
+这些建议放到第五轮或第六轮。第四轮先把“风险能主动通知、能留痕、能去重、能恢复闭环”做扎实。
+
+### 22.17 第四轮建议提交范围
+
+建议实际提交包含：
+
+1. 数据库备份告警规则模型和状态模型。
+2. 数据库告警规则 CRUD API。
+3. 数据库告警扫描器。
+4. 备份调度失败通知补齐 alert log。
+5. Monitor 告警日志支持数据库资源。
+6. 备份恢复页新增告警订阅入口。
+7. 本文档第四轮落地记录。
+
+如果需要进一步控制风险，可以拆成两个提交：
+
+1. 后端告警闭环：模型、API、扫描器、Monitor 日志兼容。
+2. 前端配置入口：备份恢复页告警订阅和 Monitor 日志筛选。
+
+## 23. 第四轮落地记录：监控告警闭环
+
+### 23.1 改动前复查范围
+
+第四轮动手前复查了以下代码和文档：
+
+- `docs/database-backup-restore-ux-optimization-plan.md`：确认第四轮目标是“主动通知、状态去重、恢复闭环、Monitor 留痕”。
+- `internal/server/database/backup_alert.go`：原有备份调度失败只发送 Monitor 通知，未稳定写入 `alert_logs`，也没有规则、状态和静默间隔。
+- `plugins/monitor/service/alert_dispatcher.go`、`plugins/monitor/service/alert_service.go`：确认 Monitor 已有通道加载、指定通道发送、邮件/飞书/钉钉/企业微信/Webhook 发送能力，可复用。
+- `plugins/monitor/model` 和告警日志页面：确认 `alert_logs` 已支持 `resource_type`、`resource_name`、`resource_target`、`metric`、`alert_rule_id`，第四轮只需要补数据库资源语义。
+- `internal/biz/database/protection_profile.go`、`internal/biz/database/protection_risk.go`：确认风险中心已有缺少全量基线、增量链异常、日志链缺口、Runner、存储、恢复演练、归档延迟等风险来源。
+- `internal/biz/database/backup.go`、`backup_policy*.go`、`restore*.go`、`barman.go`：确认备份记录、物理策略、Barman、恢复演练已有状态数据，可以作为告警扫描输入。
+- `internal/service/database/http.go`、`internal/server/database/http.go`：确认数据库管理接口统一走实例权限和菜单权限。
+- `web/src/views/asset/DatabaseManagement.vue`：确认备份恢复页已拆出风险中心、保护概览、高级资源，第四轮入口适合放在“保护概览”和“高级资源”之间。
+- `web/src/api/database.ts`、`web/src/api/alert-config.ts`：确认前端已有数据库 API 和告警通道 API，可直接扩展。
+
+### 23.2 后端已落地内容
+
+新增数据库备份恢复告警规则和状态模型：
+
+- `DatabaseBackupAlertRule`
+- `DatabaseBackupAlertState`
+
+新增表：
+
+- `database_backup_alert_rules`
+- `database_backup_alert_states`
+
+自动迁移已加入 `cmd/server/server.go`，服务启动时会创建表结构。
+
+规则能力：
+
+- 支持启用/停用。
+- 支持范围：全部实例、生产实例、指定实例、指定引擎、业务系统、负责人。
+- 支持问题类型过滤。
+- 支持级别、静默间隔、恢复通知、指定告警通道。
+- 支持阈值 JSON：无成功备份小时数、恢复演练过期天数、RPO 宽限分钟、最低风险等级、是否纳入非生产。
+
+状态能力：
+
+- 使用 fingerprint 去重同一规则、同一资源、同一问题。
+- 支持 `firing` 和 `resolved`。
+- 记录首次触发、最近触发、最近通知、通知次数。
+- 静默期内不重复通知。
+- 风险消失后自动恢复为 `resolved`。
+- 规则开启恢复通知时发送恢复消息。
+
+扫描器：
+
+- 新增 `BackupAlertScheduler`，默认 5 分钟扫描一次。
+- 服务后台启动和停止生命周期已接入 `internal/server/database/http.go`。
+- 扫描来源包含保护风险、保护概览和近期失败备份记录。
+
+Monitor 留痕：
+
+- 备份调度失败现在使用 `resource_type=database_backup` 写入 `alert_logs`。
+- 新规则产生的告警发送成功或失败都会写入 `alert_logs`。
+- 支持指定通道发送；未指定通道时使用全部启用通道。
+- Monitor 消息标题、分类、资源标签、指标翻译已支持数据库备份恢复。
+
+审计：
+
+- 规则创建、更新、删除、测试发送会写入数据库查询审计。
+- 新增审计动作：`backup_alert_rule_create`、`backup_alert_rule_update`、`backup_alert_rule_delete`、`backup_alert_rule_test`。
+
+### 23.3 前端已落地内容
+
+备份恢复页新增二级页签：
+
+- `告警订阅`
+
+入口位置：
+
+- `备份与恢复 -> 保护概览工作台 -> 告警订阅`
+- 位于“保护概览”和“高级资源”之间，避免普通用户直接陷入底层 Runner、Barman、WAL 配置。
+
+告警订阅页包含：
+
+- 汇总指标：启用规则、当前告警、严重/高危、24 小时通知。
+- 规则列表：规则、范围、问题、级别/静默、通道、阈值、操作。
+- 当前告警状态列表：实例/对象、问题/级别、消息、建议、首次/最近、通知次数。
+- 规则弹窗：名称、启用、范围、问题类型、级别、静默间隔、恢复通知、告警通道、关键阈值、备注。
+
+Monitor 告警日志页面增强：
+
+- 资源类型筛选增加“数据库备份”。
+- 告警类型增加数据库备份恢复告警。
+- 指标翻译增加备份失败、成功备份间隔、RPO 延迟、恢复演练、Runner 状态、存储姿态、日志归档状态。
+- 详情弹窗资源标签可显示“数据库备份”。
+
+### 23.4 本轮实际未做内容
+
+第四轮没有做以下内容，建议后续轮次处理：
+
+- 告警升级策略和值班排班。
+- 告警状态手动确认、认领、关闭。
+- 告警历史趋势图。
+- WebSocket 实时推送。
+- 默认规则自动初始化。
+- 从告警状态一键跳转到具体风险修复动作。
+
+当前先保证规则、扫描、发送、去重、恢复、日志和审计闭环。
+
+### 23.5 验收命令
+
+已执行：
+
+```bash
+go test ./...
+npm run typecheck
+```
+
+后续完整发布前继续执行：
+
+```bash
+npm run build
+git diff --check
+docker build -t opshub-api:latest -f Dockerfile .
+docker build -f Dockerfile.frontend -t opshub-web:latest .
+docker compose up -d --force-recreate frontend backend
+```

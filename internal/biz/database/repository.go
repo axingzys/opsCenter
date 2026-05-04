@@ -140,6 +140,24 @@ type BackupChainStateRepo interface {
 	GetByPolicyID(ctx context.Context, policyID uint) (*DatabaseBackupChainState, error)
 }
 
+type BackupAlertRuleRepo interface {
+	Create(ctx context.Context, item *DatabaseBackupAlertRule) error
+	Update(ctx context.Context, item *DatabaseBackupAlertRule) error
+	Delete(ctx context.Context, id uint) error
+	GetByID(ctx context.Context, id uint) (*DatabaseBackupAlertRule, error)
+	List(ctx context.Context, req *DatabaseBackupAlertRuleListRequest) ([]*DatabaseBackupAlertRule, int64, error)
+	ListEnabled(ctx context.Context) ([]*DatabaseBackupAlertRule, error)
+}
+
+type BackupAlertStateRepo interface {
+	Create(ctx context.Context, item *DatabaseBackupAlertState) error
+	Update(ctx context.Context, item *DatabaseBackupAlertState) error
+	GetByID(ctx context.Context, id uint) (*DatabaseBackupAlertState, error)
+	GetByFingerprint(ctx context.Context, fingerprint string) (*DatabaseBackupAlertState, error)
+	List(ctx context.Context, req *DatabaseBackupAlertStateListRequest) ([]*DatabaseBackupAlertState, int64, error)
+	ListFiringByRuleID(ctx context.Context, ruleID uint) ([]*DatabaseBackupAlertState, error)
+}
+
 type RestoreJobRepo interface {
 	Create(ctx context.Context, item *DatabaseRestoreJob) error
 	Update(ctx context.Context, item *DatabaseRestoreJob) error

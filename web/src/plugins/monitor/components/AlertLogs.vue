@@ -8,7 +8,7 @@
         </div>
         <div>
           <h2 class="page-title">告警日志</h2>
-          <p class="page-subtitle">查看域名监控和主机监控告警的发送历史与状态</p>
+          <p class="page-subtitle">查看域名、主机和数据库备份恢复告警的发送历史与状态</p>
         </div>
       </div>
       <div class="header-actions">
@@ -83,6 +83,7 @@
         >
           <el-option label="域名监控" value="domain" />
           <el-option label="主机监控" value="host" />
+          <el-option label="数据库备份" value="database_backup" />
         </el-select>
 
         <el-select
@@ -101,6 +102,12 @@
           <el-option label="内存使用率过高" value="high_memory_usage" />
           <el-option label="磁盘使用率过高" value="high_disk_usage" />
           <el-option label="Agent离线" value="agent_offline" />
+          <el-option label="数据库备份失败" value="database_backup_failed" />
+          <el-option label="无近期成功备份" value="database_backup_no_recent_success" />
+          <el-option label="RPO 超时" value="database_backup_rpo_breached" />
+          <el-option label="备份链异常" value="database_backup_chain_broken" />
+          <el-option label="恢复演练过期" value="database_restore_drill_stale" />
+          <el-option label="Runner 不可用" value="database_backup_runner_unavailable" />
         </el-select>
 
         <el-select
@@ -136,7 +143,7 @@
             <div class="resource-cell">
               <div class="resource-name">{{ getResourceName(row) }}</div>
               <div class="resource-meta">
-                <span>{{ row.resourceType === 'host' ? '主机' : '域名' }}</span>
+                <span>{{ getResourceTypeName(row.resourceType) }}</span>
                 <span v-if="getResourceTarget(row)">· {{ getResourceTarget(row) }}</span>
               </div>
             </div>
@@ -217,7 +224,7 @@
       <div v-if="currentLog" class="detail-content">
         <div class="detail-info">
           <div class="info-item">
-            <span class="info-label">{{ currentLog.resourceType === 'host' ? '主机' : '域名' }}:</span>
+            <span class="info-label">{{ getResourceTypeName(currentLog.resourceType) }}:</span>
             <span class="info-value">{{ getResourceName(currentLog) }}</span>
           </div>
           <div class="info-item">
@@ -342,7 +349,21 @@ const getAlertTypeColor = (type: string) => {
     high_cpu_usage: 'warning',
     high_memory_usage: 'warning',
     high_disk_usage: 'danger',
-    agent_offline: 'danger'
+    agent_offline: 'danger',
+    database_backup_schedule_failed: 'danger',
+    database_backup_cleanup_failed: 'warning',
+    database_backup_failed: 'danger',
+    database_backup_no_recent_success: 'danger',
+    database_backup_missing_full: 'danger',
+    database_backup_chain_broken: 'danger',
+    database_backup_rpo_breached: 'danger',
+    database_backup_log_gap: 'danger',
+    database_restore_drill_stale: 'warning',
+    database_restore_drill_failed: 'danger',
+    database_backup_runner_unavailable: 'danger',
+    database_backup_runner_tool_failed: 'warning',
+    database_backup_storage_failed: 'warning',
+    database_backup_alert_test: 'success'
   }
   return colorMap[type] || ''
 }
@@ -358,7 +379,21 @@ const getAlertTypeName = (type: string) => {
     high_cpu_usage: 'CPU使用率过高',
     high_memory_usage: '内存使用率过高',
     high_disk_usage: '磁盘使用率过高',
-    agent_offline: 'Agent离线'
+    agent_offline: 'Agent离线',
+    database_backup_schedule_failed: '备份调度失败',
+    database_backup_cleanup_failed: '备份清理失败',
+    database_backup_failed: '数据库备份失败',
+    database_backup_no_recent_success: '无近期成功备份',
+    database_backup_missing_full: '缺少全量基线',
+    database_backup_chain_broken: '备份链异常',
+    database_backup_rpo_breached: 'RPO 超时',
+    database_backup_log_gap: '日志链缺口',
+    database_restore_drill_stale: '恢复演练过期',
+    database_restore_drill_failed: '恢复演练失败',
+    database_backup_runner_unavailable: 'Runner 不可用',
+    database_backup_runner_tool_failed: 'Runner 工具异常',
+    database_backup_storage_failed: '存储姿态异常',
+    database_backup_alert_test: '告警通道测试'
   }
   return nameMap[type] || type
 }
@@ -371,7 +406,17 @@ const getMetricName = (metric?: string) => {
     cpu_usage: 'CPU使用率',
     memory_usage: '内存使用率',
     disk_usage: '磁盘使用率',
-    agent_offline: 'Agent离线'
+    agent_offline: 'Agent离线',
+    backup_failed: '备份失败',
+    backup_success_gap: '成功备份间隔',
+    rpo_lag: 'RPO 延迟',
+    restore_drill_stale: '恢复演练',
+    runner_status: 'Runner 状态',
+    barman_status: 'Barman 状态',
+    storage_posture: '存储姿态',
+    log_archive_status: '日志归档状态',
+    backup_alert_test: '告警通道测试',
+    backup_risk: '备份链路风险'
   }
   if (!metric) return '-'
   return nameMap[metric] || metric
@@ -387,6 +432,15 @@ const getChannelTypeName = (type: string) => {
     feishu: '飞书'
   }
   return nameMap[type] || type
+}
+
+const getResourceTypeName = (type?: string) => {
+  const nameMap: Record<string, string> = {
+    domain: '域名',
+    host: '主机',
+    database_backup: '数据库备份'
+  }
+  return nameMap[type || ''] || type || '-'
 }
 
 // 格式化时间

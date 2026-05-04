@@ -244,6 +244,9 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseProtectionRiskListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseBackupAlertStateListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseRestoreJobListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
@@ -677,6 +680,14 @@ func (s *Service) CreateBackupTask(c *gin.Context) {
 		writeDatabaseError(c, "创建失败: ", err)
 		return
 	}
+	if err := s.useCase.RecordBackupAlertRuleAudit(c.Request.Context(), dbbiz.DatabaseAuditActionBackupAlertCreate, item.ID, item, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	}); err != nil {
+		writeDatabaseError(c, "创建成功但记录审计失败: ", err)
+		return
+	}
 	response.Success(c, item)
 }
 
@@ -712,6 +723,14 @@ func (s *Service) UpdateBackupTask(c *gin.Context) {
 	item, err := s.useCase.UpdateBackupTask(c.Request.Context(), id, &req)
 	if err != nil {
 		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	if err := s.useCase.RecordBackupAlertRuleAudit(c.Request.Context(), dbbiz.DatabaseAuditActionBackupAlertUpdate, item.ID, item, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	}); err != nil {
+		writeDatabaseError(c, "更新成功但记录审计失败: ", err)
 		return
 	}
 	response.Success(c, item)
@@ -848,6 +867,178 @@ func (s *Service) ListProtectionRisks(c *gin.Context) {
 		"page":     req.Page,
 		"pageSize": req.PageSize,
 	})
+}
+
+func (s *Service) ListBackupAlertRules(c *gin.Context) {
+	var req dbbiz.DatabaseBackupAlertRuleListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if _, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup); !ok {
+		return
+	}
+	list, total, err := s.useCase.ListBackupAlertRules(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+func (s *Service) GetBackupAlertRule(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "规则ID")
+	if !ok {
+		return
+	}
+	if _, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup); !ok {
+		return
+	}
+	item, err := s.useCase.GetBackupAlertRule(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) CreateBackupAlertRule(c *gin.Context) {
+	var req dbbiz.DatabaseBackupAlertRuleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureBackupAlertRulePermission(c, &req) {
+		return
+	}
+	item, err := s.useCase.CreateBackupAlertRule(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "创建失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) UpdateBackupAlertRule(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "规则ID")
+	if !ok {
+		return
+	}
+	var req dbbiz.DatabaseBackupAlertRuleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureBackupAlertRulePermission(c, &req) {
+		return
+	}
+	item, err := s.useCase.UpdateBackupAlertRule(c.Request.Context(), id, &req)
+	if err != nil {
+		writeDatabaseError(c, "更新失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) DeleteBackupAlertRule(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "规则ID")
+	if !ok {
+		return
+	}
+	if _, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup); !ok {
+		return
+	}
+	existing, err := s.useCase.GetBackupAlertRule(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	if err := s.useCase.DeleteBackupAlertRule(c.Request.Context(), id); err != nil {
+		writeDatabaseError(c, "删除失败: ", err)
+		return
+	}
+	if err := s.useCase.RecordBackupAlertRuleAudit(c.Request.Context(), dbbiz.DatabaseAuditActionBackupAlertDelete, id, existing, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	}); err != nil {
+		writeDatabaseError(c, "删除成功但记录审计失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "删除成功", nil)
+}
+
+func (s *Service) TestBackupAlertRule(c *gin.Context) {
+	id, ok := parseUintParam(c, "id", "规则ID")
+	if !ok {
+		return
+	}
+	if _, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup); !ok {
+		return
+	}
+	item, err := s.useCase.TestBackupAlertRule(c.Request.Context(), id)
+	if err != nil {
+		writeDatabaseError(c, "测试失败: ", err)
+		return
+	}
+	if err := s.useCase.RecordBackupAlertRuleAudit(c.Request.Context(), dbbiz.DatabaseAuditActionBackupAlertTest, id, item, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	}); err != nil {
+		writeDatabaseError(c, "测试完成但记录审计失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ListBackupAlertStates(c *gin.Context) {
+	var req dbbiz.DatabaseBackupAlertStateListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListBackupAlertStates(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
+func (s *Service) GetBackupAlertSummary(c *gin.Context) {
+	if _, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup); !ok {
+		return
+	}
+	item, err := s.useCase.GetBackupAlertSummary(c.Request.Context())
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ensureBackupAlertRulePermission(c *gin.Context, req *dbbiz.DatabaseBackupAlertRuleRequest) bool {
+	if req != nil && req.ScopeType == dbbiz.DatabaseBackupAlertScopeInstance && req.InstanceID > 0 {
+		return s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup)
+	}
+	_, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	return ok
 }
 
 func (s *Service) GetProtectionProfile(c *gin.Context) {

@@ -2810,6 +2810,200 @@
                 </div>
               </el-tab-pane>
 
+              <el-tab-pane label="告警订阅" name="backupAlerts">
+                <div class="backup-overview-summary">
+                  <div
+                    v-for="item in backupAlertSummaryCards"
+                    :key="item.label"
+                    :class="['backup-summary-metric', `is-${item.tone}`]"
+                  >
+                    <span class="backup-summary-label">{{ item.label }}</span>
+                    <strong>{{ item.value }}</strong>
+                    <span class="backup-summary-help">{{ item.help }}</span>
+                  </div>
+                </div>
+
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="backupAlertRuleQuery.keyword"
+                      placeholder="搜索规则名称、负责人"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadBackupAlertRules"
+                      @clear="loadBackupAlertRules"
+                    />
+                    <el-select v-model="backupAlertRuleQuery.enabled" placeholder="启用状态" clearable class="audit-select" @change="loadBackupAlertRules">
+                      <el-option label="启用" value="enabled" />
+                      <el-option label="禁用" value="disabled" />
+                    </el-select>
+                    <el-select v-model="backupAlertRuleQuery.scopeType" placeholder="范围" clearable class="audit-select" @change="loadBackupAlertRules">
+                      <el-option v-for="item in backupAlertScopeOptions" :key="item.value" :label="item.label" :value="item.value" />
+                    </el-select>
+                    <el-select v-model="backupAlertRuleQuery.issueType" placeholder="问题类型" clearable class="audit-search-input" @change="loadBackupAlertRules">
+                      <el-option v-for="item in backupAlertIssueOptions" :key="item.value" :label="item.label" :value="item.value" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetBackupAlertRuleQuery">重置</el-button>
+                    <el-button :loading="backupAlertRuleLoading || backupAlertStateLoading" @click="refreshBackupAlerts">刷新</el-button>
+                    <el-button type="primary" plain @click="openBackupAlertRuleDialog()">
+                      <el-icon style="margin-right: 4px;"><Plus /></el-icon>
+                      新增规则
+                    </el-button>
+                  </div>
+                </div>
+
+                <el-table :data="backupAlertRules" v-loading="backupAlertRuleLoading" stripe class="modern-table">
+                  <el-table-column label="规则" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.name }}</span>
+                        <el-switch
+                          v-model="row.enabled"
+                          size="small"
+                          inline-prompt
+                          active-text="启"
+                          inactive-text="停"
+                          @change="handleToggleBackupAlertRule(row)"
+                        />
+                      </div>
+                      <div class="muted-text">{{ row.description || '无备注' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="范围" min-width="180" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>{{ backupAlertScopeText(row) }}</div>
+                      <div class="muted-text">
+                        {{ row.scopeType === 'instance' ? `#${row.instanceId}` : row.engine || row.businessSystem || row.owner || '自动匹配' }}
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="问题" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="backup-inline-tags">
+                        <el-tag v-for="item in (row.issueTypes || []).slice(0, 3)" :key="item" size="small" type="warning">
+                          {{ backupAlertIssueText(item) }}
+                        </el-tag>
+                        <span v-if="(row.issueTypes || []).length > 3" class="muted-text">+{{ row.issueTypes.length - 3 }}</span>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="级别 / 静默" width="150" align="center">
+                    <template #default="{ row }">
+                      <el-tag size="small" :type="backupAlertSeverityTag(row.severity)">{{ row.severityText || row.severity || '-' }}</el-tag>
+                      <div class="muted-text">{{ Math.round((row.alertInterval || 0) / 60) }} 分钟</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="通道" min-width="190" show-overflow-tooltip>
+                    <template #default="{ row }">{{ alertChannelNames(row.channelIds) }}</template>
+                  </el-table-column>
+                  <el-table-column label="阈值" min-width="210" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>无成功备份：{{ row.threshold?.noSuccessBackupHours || 24 }}h</div>
+                      <div class="muted-text">演练过期：{{ row.threshold?.restoreDrillStaleDays || 30 }}d / RPO：{{ row.threshold?.rpoLagGraceMinutes || 10 }}m</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="170" fixed="right" align="center">
+                    <template #default="{ row }">
+                      <el-button link type="primary" @click="openBackupAlertRuleDialog(row)">编辑</el-button>
+                      <el-button link type="warning" :loading="backupAlertRuleTestingId === row.id" @click="handleTestBackupAlertRule(row)">测试</el-button>
+                      <el-button link type="danger" @click="handleDeleteBackupAlertRule(row)">删除</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="backupAlertRuleQuery.page"
+                    v-model:page-size="backupAlertRuleQuery.pageSize"
+                    :page-sizes="[10, 20, 50]"
+                    :total="backupAlertRuleTotal"
+                    layout="total, sizes, prev, pager, next"
+                    @size-change="loadBackupAlertRules"
+                    @current-change="loadBackupAlertRules"
+                  />
+                </div>
+
+                <div class="backup-toolbar pitr-sub-toolbar backup-alert-state-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="backupAlertStateQuery.keyword"
+                      placeholder="搜索实例、消息、建议"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadBackupAlertStates"
+                      @clear="loadBackupAlertStates"
+                    />
+                    <el-select v-model="backupAlertStateQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadBackupAlertStates">
+                      <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="item.name" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="backupAlertStateQuery.status" placeholder="状态" clearable class="audit-select" @change="loadBackupAlertStates">
+                      <el-option label="告警中" value="firing" />
+                      <el-option label="已恢复" value="resolved" />
+                    </el-select>
+                    <el-select v-model="backupAlertStateQuery.severity" placeholder="级别" clearable class="audit-select" @change="loadBackupAlertStates">
+                      <el-option label="严重" value="critical" />
+                      <el-option label="高" value="high" />
+                      <el-option label="中" value="medium" />
+                      <el-option label="低" value="low" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetBackupAlertStateQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="backupAlertStateLoading" @click="loadBackupAlertStates">刷新状态</el-button>
+                  </div>
+                </div>
+
+                <el-table :data="backupAlertStates" v-loading="backupAlertStateLoading" stripe class="modern-table">
+                  <el-table-column label="实例 / 对象" min-width="230" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.resourceName || `#${row.resourceId}` }}</span>
+                        <el-tag size="small" :type="backupAlertStatusTag(row.status)">{{ row.statusText || row.status || '-' }}</el-tag>
+                      </div>
+                      <div class="muted-text">{{ row.resourceTarget || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="问题 / 级别" min-width="180">
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" type="warning">{{ row.issueTypeText || backupAlertIssueText(row.issueType) }}</el-tag>
+                        <el-tag size="small" :type="backupAlertSeverityTag(row.severity)">{{ row.severityText || row.severity || '-' }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="消息" min-width="320" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.message || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="建议" min-width="240" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.suggestion || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="首次 / 最近" min-width="260" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>{{ row.firstFiredAt || '-' }}</div>
+                      <div class="muted-text">{{ row.lastFiredAt || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="通知" width="150" align="center">
+                    <template #default="{ row }">
+                      <div>{{ row.notifyCount || 0 }} 次</div>
+                      <div class="muted-text">{{ row.lastNotifiedAt || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="backupAlertStateQuery.page"
+                    v-model:page-size="backupAlertStateQuery.pageSize"
+                    :page-sizes="[10, 20, 50]"
+                    :total="backupAlertStateTotal"
+                    layout="total, sizes, prev, pager, next"
+                    @size-change="loadBackupAlertStates"
+                    @current-change="loadBackupAlertStates"
+                  />
+                </div>
+              </el-tab-pane>
+
               <el-tab-pane label="高级资源" name="advancedResources">
                 <el-alert
                   title="高级资源用于管理员排障和维护底层链路。普通备份、启用保护和恢复演练建议从保护概览发起。"
@@ -4080,6 +4274,147 @@
               </div>
             </template>
           </el-drawer>
+
+          <el-dialog
+            v-model="backupAlertRuleDialogVisible"
+            :title="backupAlertRuleEditingId ? '编辑备份恢复告警规则' : '新增备份恢复告警规则'"
+            width="760px"
+            @close="resetBackupAlertRuleForm"
+          >
+            <el-alert
+              title="推荐先用生产实例范围覆盖备份失败、缺少基线、RPO 超时和恢复演练过期；实例、引擎范围用于专项订阅。"
+              type="info"
+              show-icon
+              :closable="false"
+              class="backup-dialog-alert"
+            />
+            <el-form ref="backupAlertRuleFormRef" :model="backupAlertRuleForm" label-width="120px">
+              <el-row :gutter="16">
+                <el-col :span="16">
+                  <el-form-item label="规则名称" required>
+                    <el-input v-model="backupAlertRuleForm.name" maxlength="120" placeholder="例如：生产库备份恢复核心告警" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="启用">
+                    <el-switch v-model="backupAlertRuleForm.enabled" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="16">
+                <el-col :span="8">
+                  <el-form-item label="订阅范围">
+                    <el-select v-model="backupAlertRuleForm.scopeType" class="w-full">
+                      <el-option v-for="item in backupAlertScopeOptions" :key="item.value" :label="item.label" :value="item.value" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col v-if="backupAlertRuleForm.scopeType === 'instance'" :span="16">
+                  <el-form-item label="实例" required>
+                    <el-select v-model="backupAlertRuleForm.instanceId" filterable class="w-full" placeholder="选择数据库实例">
+                      <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="`${item.name}（${item.dbTypeText || item.dbType}）`" :value="item.id" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col v-if="backupAlertRuleForm.scopeType === 'engine'" :span="16">
+                  <el-form-item label="引擎" required>
+                    <el-select v-model="backupAlertRuleForm.engine" class="w-full" placeholder="选择数据库引擎">
+                      <el-option label="MySQL" value="mysql" />
+                      <el-option label="MariaDB" value="mariadb" />
+                      <el-option label="PostgreSQL" value="postgresql" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-form-item label="问题类型" required>
+                <el-checkbox-group v-model="backupAlertRuleForm.issueTypes" class="permission-checkbox-grid">
+                  <el-checkbox v-for="item in backupAlertIssueOptions" :key="item.value" :label="item.value">
+                    {{ item.label }}
+                  </el-checkbox>
+                </el-checkbox-group>
+              </el-form-item>
+              <el-row :gutter="16">
+                <el-col :span="8">
+                  <el-form-item label="告警级别">
+                    <el-select v-model="backupAlertRuleForm.severity" class="w-full">
+                      <el-option label="严重" value="critical" />
+                      <el-option label="高" value="high" />
+                      <el-option label="中" value="medium" />
+                      <el-option label="低" value="low" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="静默间隔">
+                    <el-input-number v-model="backupAlertRuleForm.alertInterval" :min="60" :step="300" controls-position="right" class="w-full" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="恢复通知">
+                    <el-switch v-model="backupAlertRuleForm.recoveryNotify" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-form-item label="告警通道">
+                <el-select
+                  v-model="backupAlertRuleForm.channelIds"
+                  multiple
+                  filterable
+                  clearable
+                  class="w-full"
+                  placeholder="不选则发送到全部启用通道"
+                >
+                  <el-option
+                    v-for="item in alertChannelOptions"
+                    :key="item.id"
+                    :label="`${item.name}（${item.channelType}）`"
+                    :value="item.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-row :gutter="16">
+                <el-col :span="8">
+                  <el-form-item label="无成功备份(h)">
+                    <el-input-number v-model="backupAlertRuleForm.threshold.noSuccessBackupHours" :min="1" :max="168" controls-position="right" class="w-full" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="演练过期(d)">
+                    <el-input-number v-model="backupAlertRuleForm.threshold.restoreDrillStaleDays" :min="1" :max="365" controls-position="right" class="w-full" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="8">
+                  <el-form-item label="RPO宽限(m)">
+                    <el-input-number v-model="backupAlertRuleForm.threshold.rpoLagGraceMinutes" :min="1" :max="1440" controls-position="right" class="w-full" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="16">
+                <el-col :span="12">
+                  <el-form-item label="最低风险">
+                    <el-select v-model="backupAlertRuleForm.threshold.minRiskLevel" class="w-full">
+                      <el-option label="低" value="low" />
+                      <el-option label="中" value="medium" />
+                      <el-option label="高" value="high" />
+                      <el-option label="严重" value="critical" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="非生产纳入">
+                    <el-switch v-model="backupAlertRuleForm.threshold.includeNonProduction" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-form-item label="备注">
+                <el-input v-model="backupAlertRuleForm.description" type="textarea" :rows="3" maxlength="500" show-word-limit />
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="backupAlertRuleDialogVisible = false">取消</el-button>
+              <el-button type="primary" :loading="backupAlertRuleSubmitting" @click="submitBackupAlertRule">保存</el-button>
+            </template>
+          </el-dialog>
 
           <el-dialog
             v-model="enableProtectionDialogVisible"
@@ -8423,6 +8758,7 @@ import {
   checkDatabaseStorageProfilePosture,
   cleanupDatabaseRestoreJob,
   createDatabaseBarmanServer,
+  createDatabaseBackupAlertRule,
   createDatabaseBackupPolicy,
   createDatabaseLogArchiveStream,
   createDatabaseReplicaIncidentGuide,
@@ -8433,6 +8769,7 @@ import {
   createDatabaseInstance,
   collectDatabaseCapacitySnapshot,
   deleteDatabaseBarmanServer,
+  deleteDatabaseBackupAlertRule,
   deleteDatabaseBackupPolicy,
   deleteDatabaseBackupTask,
   deleteDatabaseInstance,
@@ -8462,6 +8799,7 @@ import {
   previewDatabaseMySQLPITRWizard,
   previewDatabasePostgresBarmanPITRWizard,
   getDatabaseCapacityTrend,
+  getDatabaseBackupAlertSummary,
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
   getDatabaseReplicationStatus,
@@ -8475,6 +8813,8 @@ import {
   exportDatabaseTableDictionary,
   formatDatabaseQuery,
   listDatabaseBackupRecords,
+  listDatabaseBackupAlertRules,
+  listDatabaseBackupAlertStates,
   listDatabaseBackupPolicies,
   listDatabaseProtectionProfiles,
   listDatabaseProtectionRisks,
@@ -8532,7 +8872,9 @@ import {
   syncDatabaseBarmanWAL,
   syncDatabaseMetadata,
   testDatabaseInstance,
+  testDatabaseBackupAlertRule,
   testDatabaseRunnerHost,
+  updateDatabaseBackupAlertRule,
   updateDatabaseBackupPolicy,
   updateDatabaseBackupTask,
   updateDatabaseBarmanServer,
@@ -8546,6 +8888,10 @@ import {
   validateDatabaseDDLQuery,
   verifyDatabaseBackupRecord,
   type DatabaseBackupPolicyChainValidationResult,
+  type DatabaseBackupAlertRulePayload,
+  type DatabaseBackupAlertRuleResult,
+  type DatabaseBackupAlertStateResult,
+  type DatabaseBackupAlertSummaryResult,
   type DatabaseBackupPolicyPurgePreviewResult,
   type DatabaseBackupPolicyPurgeRunResult,
   type DatabaseBackupRecordResult,
@@ -8620,6 +8966,7 @@ import {
   type DatabaseWriteValidateResult,
   validateDatabaseWriteQuery
 } from '@/api/database'
+import { getAlertChannels, type AlertChannel } from '@/api/alert-config'
 import {
   getDatabaseConfig as getSystemDatabaseConfig,
   saveDatabaseConfig as saveSystemDatabaseConfig,
@@ -8908,6 +9255,26 @@ const protectionProfileTotal = ref(0)
 const protectionRiskLoading = ref(false)
 const protectionRisks = ref<DatabaseProtectionRiskResult[]>([])
 const protectionRiskTotal = ref(0)
+const backupAlertRuleLoading = ref(false)
+const backupAlertRuleSubmitting = ref(false)
+const backupAlertRuleDialogVisible = ref(false)
+const backupAlertRuleEditingId = ref(0)
+const backupAlertRuleTestingId = ref(0)
+const backupAlertRuleFormRef = ref<FormInstance>()
+const backupAlertRules = ref<DatabaseBackupAlertRuleResult[]>([])
+const backupAlertRuleTotal = ref(0)
+const backupAlertStateLoading = ref(false)
+const backupAlertStates = ref<DatabaseBackupAlertStateResult[]>([])
+const backupAlertStateTotal = ref(0)
+const backupAlertSummary = ref<DatabaseBackupAlertSummaryResult>({
+  ruleTotal: 0,
+  ruleEnabled: 0,
+  firingTotal: 0,
+  criticalFiring: 0,
+  warningFiring: 0,
+  notified24h: 0
+})
+const alertChannelOptions = ref<AlertChannel[]>([])
 const backupPolicyLoading = ref(false)
 const backupPolicySubmitting = ref(false)
 const backupPolicyDialogVisible = ref(false)
@@ -9117,6 +9484,10 @@ const auditActions = [
   { label: '逻辑备份执行', value: 'backup_run' },
   { label: '备份文件下载', value: 'backup_download' },
   { label: '备份文件校验', value: 'backup_verify' },
+  { label: '备份告警规则创建', value: 'backup_alert_rule_create' },
+  { label: '备份告警规则更新', value: 'backup_alert_rule_update' },
+  { label: '备份告警规则删除', value: 'backup_alert_rule_delete' },
+  { label: '备份告警测试发送', value: 'backup_alert_rule_test' },
   { label: '拓扑查看', value: 'topology_view' },
   { label: '恢复演练', value: 'restore_dry_run' },
   { label: '容量趋势查看', value: 'capacity_view' },
@@ -9200,6 +9571,76 @@ const protectionRiskQuery = reactive({
   issueType: '',
   productionOnly: ''
 })
+
+const backupAlertRuleQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  enabled: '',
+  scopeType: '',
+  issueType: ''
+})
+
+const backupAlertStateQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  instanceId: undefined as number | undefined,
+  status: 'firing',
+  severity: '',
+  issueType: ''
+})
+
+const backupAlertRuleForm = reactive<DatabaseBackupAlertRulePayload>({
+  name: '',
+  enabled: true,
+  scopeType: 'production',
+  instanceId: undefined,
+  engine: '',
+  businessSystem: '',
+  owner: '',
+  issueTypes: ['backup_failed', 'missing_full_backup', 'incremental_chain_broken', 'rpo_breached', 'restore_drill_missing'],
+  severity: 'high',
+  alertInterval: 1800,
+  recoveryNotify: true,
+  channelIds: [],
+  threshold: {
+    noSuccessBackupHours: 24,
+    restoreDrillStaleDays: 30,
+    rpoLagGraceMinutes: 10,
+    includeNonProduction: false,
+    minRiskLevel: 'medium'
+  },
+  description: ''
+})
+
+const backupAlertIssueOptions = [
+  { label: '备份失败', value: 'backup_failed' },
+  { label: '无近期成功备份', value: 'no_recent_success_backup' },
+  { label: '缺少全量基线', value: 'missing_full_backup' },
+  { label: '增量链异常', value: 'incremental_chain_broken' },
+  { label: 'RPO 超时', value: 'rpo_breached' },
+  { label: '日志链缺口', value: 'log_chain_gap' },
+  { label: 'Runner 不可用', value: 'runner_offline' },
+  { label: 'Runner 工具异常', value: 'runner_tool_missing' },
+  { label: '存储姿态异常', value: 'storage_posture_failed' },
+  { label: '恢复演练缺失', value: 'restore_drill_missing' },
+  { label: '恢复演练失败', value: 'restore_drill_failed' }
+]
+
+const backupAlertScopeOptions = [
+  { label: '生产实例', value: 'production' },
+  { label: '全部实例', value: 'all' },
+  { label: '指定实例', value: 'instance' },
+  { label: '指定引擎', value: 'engine' }
+]
+
+const backupAlertSummaryCards = computed(() => [
+  { label: '启用规则', value: `${backupAlertSummary.value.ruleEnabled}/${backupAlertSummary.value.ruleTotal}`, help: '规则总数', tone: 'neutral' },
+  { label: '当前告警', value: backupAlertSummary.value.firingTotal, help: '未恢复状态', tone: backupAlertSummary.value.firingTotal ? 'danger' : 'success' },
+  { label: '严重/高危', value: backupAlertSummary.value.criticalFiring, help: '需优先处理', tone: backupAlertSummary.value.criticalFiring ? 'danger' : 'success' },
+  { label: '24h 通知', value: backupAlertSummary.value.notified24h, help: '最近发送次数', tone: 'neutral' }
+])
 
 const enableProtectionForm = reactive({
   instanceId: undefined as number | undefined
@@ -12379,6 +12820,53 @@ const loadProtectionRisks = async () => {
   }
 }
 
+const loadBackupAlertSummary = async () => {
+  const res = await getDatabaseBackupAlertSummary() as DatabaseBackupAlertSummaryResult
+  backupAlertSummary.value = res || {
+    ruleTotal: 0,
+    ruleEnabled: 0,
+    firingTotal: 0,
+    criticalFiring: 0,
+    warningFiring: 0,
+    notified24h: 0
+  }
+}
+
+const loadBackupAlertRules = async () => {
+  backupAlertRuleLoading.value = true
+  try {
+    const res: any = await listDatabaseBackupAlertRules(backupAlertRuleQuery)
+    backupAlertRules.value = res.list || []
+    backupAlertRuleTotal.value = res.total || 0
+    if (res.page) backupAlertRuleQuery.page = res.page
+    if (res.pageSize) backupAlertRuleQuery.pageSize = res.pageSize
+  } finally {
+    backupAlertRuleLoading.value = false
+  }
+}
+
+const loadBackupAlertStates = async () => {
+  backupAlertStateLoading.value = true
+  try {
+    const res: any = await listDatabaseBackupAlertStates(backupAlertStateQuery)
+    backupAlertStates.value = res.list || []
+    backupAlertStateTotal.value = res.total || 0
+    if (res.page) backupAlertStateQuery.page = res.page
+    if (res.pageSize) backupAlertStateQuery.pageSize = res.pageSize
+  } finally {
+    backupAlertStateLoading.value = false
+  }
+}
+
+const loadAlertChannels = async () => {
+  const res: any = await getAlertChannels()
+  alertChannelOptions.value = (res?.list || res || []).filter((item: AlertChannel) => item.enabled !== false)
+}
+
+const refreshBackupAlerts = async () => {
+  await Promise.all([loadBackupAlertSummary(), loadBackupAlertRules(), loadBackupAlertStates(), loadAlertChannels()])
+}
+
 const loadBackupPolicies = async () => {
   backupPolicyLoading.value = true
   try {
@@ -12539,7 +13027,7 @@ const loadBarmanServers = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadProtectionProfiles(), loadProtectionRisks(), loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
+  await Promise.all([loadProtectionProfiles(), loadProtectionRisks(), loadBackupAlertSummary(), loadBackupAlertRules(), loadBackupAlertStates(), loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
 }
 
 const loadRestoreJobs = async () => {
@@ -15902,6 +16390,207 @@ const resetProtectionRiskQuery = () => {
   loadProtectionRisks()
 }
 
+const resetBackupAlertRuleQuery = () => {
+  backupAlertRuleQuery.page = 1
+  backupAlertRuleQuery.pageSize = 10
+  backupAlertRuleQuery.keyword = ''
+  backupAlertRuleQuery.enabled = ''
+  backupAlertRuleQuery.scopeType = ''
+  backupAlertRuleQuery.issueType = ''
+  loadBackupAlertRules()
+}
+
+const resetBackupAlertStateQuery = () => {
+  backupAlertStateQuery.page = 1
+  backupAlertStateQuery.pageSize = 10
+  backupAlertStateQuery.keyword = ''
+  backupAlertStateQuery.instanceId = undefined
+  backupAlertStateQuery.status = 'firing'
+  backupAlertStateQuery.severity = ''
+  backupAlertStateQuery.issueType = ''
+  loadBackupAlertStates()
+}
+
+const resetBackupAlertRuleForm = () => {
+  backupAlertRuleEditingId.value = 0
+  backupAlertRuleForm.name = ''
+  backupAlertRuleForm.enabled = true
+  backupAlertRuleForm.scopeType = 'production'
+  backupAlertRuleForm.instanceId = undefined
+  backupAlertRuleForm.engine = ''
+  backupAlertRuleForm.businessSystem = ''
+  backupAlertRuleForm.owner = ''
+  backupAlertRuleForm.issueTypes = ['backup_failed', 'missing_full_backup', 'incremental_chain_broken', 'rpo_breached', 'restore_drill_missing']
+  backupAlertRuleForm.severity = 'high'
+  backupAlertRuleForm.alertInterval = 1800
+  backupAlertRuleForm.recoveryNotify = true
+  backupAlertRuleForm.channelIds = []
+  backupAlertRuleForm.threshold = {
+    noSuccessBackupHours: 24,
+    restoreDrillStaleDays: 30,
+    rpoLagGraceMinutes: 10,
+    includeNonProduction: false,
+    minRiskLevel: 'medium'
+  }
+  backupAlertRuleForm.description = ''
+  backupAlertRuleFormRef.value?.clearValidate()
+}
+
+const openBackupAlertRuleDialog = async (row?: DatabaseBackupAlertRuleResult) => {
+  resetBackupAlertRuleForm()
+  if (!alertChannelOptions.value.length) {
+    await loadAlertChannels()
+  }
+  if (row) {
+    backupAlertRuleEditingId.value = row.id
+    backupAlertRuleForm.name = row.name
+    backupAlertRuleForm.enabled = row.enabled
+    backupAlertRuleForm.scopeType = row.scopeType || 'all'
+    backupAlertRuleForm.instanceId = row.instanceId || undefined
+    backupAlertRuleForm.engine = row.engine || ''
+    backupAlertRuleForm.businessSystem = row.businessSystem || ''
+    backupAlertRuleForm.owner = row.owner || ''
+    backupAlertRuleForm.issueTypes = [...(row.issueTypes || [])]
+    backupAlertRuleForm.severity = row.severity || 'high'
+    backupAlertRuleForm.alertInterval = row.alertInterval || 1800
+    backupAlertRuleForm.recoveryNotify = row.recoveryNotify !== false
+    backupAlertRuleForm.channelIds = [...(row.channelIds || [])]
+    backupAlertRuleForm.threshold = {
+      noSuccessBackupHours: row.threshold?.noSuccessBackupHours || 24,
+      restoreDrillStaleDays: row.threshold?.restoreDrillStaleDays || 30,
+      rpoLagGraceMinutes: row.threshold?.rpoLagGraceMinutes || 10,
+      includeNonProduction: row.threshold?.includeNonProduction === true,
+      minRiskLevel: row.threshold?.minRiskLevel || 'medium'
+    }
+    backupAlertRuleForm.description = row.description || ''
+  }
+  backupAlertRuleDialogVisible.value = true
+}
+
+const buildBackupAlertRulePayload = (): DatabaseBackupAlertRulePayload => ({
+  name: backupAlertRuleForm.name.trim(),
+  enabled: backupAlertRuleForm.enabled,
+  scopeType: backupAlertRuleForm.scopeType || 'all',
+  instanceId: backupAlertRuleForm.scopeType === 'instance' ? backupAlertRuleForm.instanceId : undefined,
+  engine: backupAlertRuleForm.scopeType === 'engine' ? backupAlertRuleForm.engine : undefined,
+  businessSystem: backupAlertRuleForm.scopeType === 'business_system' ? backupAlertRuleForm.businessSystem : undefined,
+  owner: backupAlertRuleForm.scopeType === 'owner' ? backupAlertRuleForm.owner : undefined,
+  issueTypes: backupAlertRuleForm.issueTypes || [],
+  severity: backupAlertRuleForm.severity || 'high',
+  alertInterval: Number(backupAlertRuleForm.alertInterval) || 1800,
+  recoveryNotify: backupAlertRuleForm.recoveryNotify !== false,
+  channelIds: backupAlertRuleForm.channelIds || [],
+  threshold: {
+    noSuccessBackupHours: Number(backupAlertRuleForm.threshold?.noSuccessBackupHours) || 24,
+    restoreDrillStaleDays: Number(backupAlertRuleForm.threshold?.restoreDrillStaleDays) || 30,
+    rpoLagGraceMinutes: Number(backupAlertRuleForm.threshold?.rpoLagGraceMinutes) || 10,
+    includeNonProduction: backupAlertRuleForm.threshold?.includeNonProduction === true,
+    minRiskLevel: backupAlertRuleForm.threshold?.minRiskLevel || 'medium'
+  },
+  description: backupAlertRuleForm.description?.trim()
+})
+
+const submitBackupAlertRule = async () => {
+  const payload = buildBackupAlertRulePayload()
+  if (!payload.name) {
+    ElMessage.warning('请填写规则名称')
+    return
+  }
+  if (payload.scopeType === 'instance' && !payload.instanceId) {
+    ElMessage.warning('请选择告警实例')
+    return
+  }
+  if (payload.scopeType === 'engine' && !payload.engine) {
+    ElMessage.warning('请选择数据库引擎')
+    return
+  }
+  if (!payload.issueTypes.length) {
+    ElMessage.warning('请选择至少一个告警问题')
+    return
+  }
+  backupAlertRuleSubmitting.value = true
+  try {
+    if (backupAlertRuleEditingId.value) {
+      await updateDatabaseBackupAlertRule(backupAlertRuleEditingId.value, payload)
+      ElMessage.success('告警规则已更新')
+    } else {
+      await createDatabaseBackupAlertRule(payload)
+      ElMessage.success('告警规则已创建')
+    }
+    backupAlertRuleDialogVisible.value = false
+    await refreshBackupAlerts()
+  } finally {
+    backupAlertRuleSubmitting.value = false
+  }
+}
+
+const handleDeleteBackupAlertRule = async (row: DatabaseBackupAlertRuleResult) => {
+  await ElMessageBox.confirm(`确认删除告警规则「${row.name}」？`, '删除告警规则', {
+    type: 'warning',
+    confirmButtonText: '删除',
+    cancelButtonText: '取消'
+  })
+  await deleteDatabaseBackupAlertRule(row.id)
+  ElMessage.success('告警规则已删除')
+  await refreshBackupAlerts()
+}
+
+const handleToggleBackupAlertRule = async (row: DatabaseBackupAlertRuleResult) => {
+  await updateDatabaseBackupAlertRule(row.id, {
+    ...row,
+    enabled: row.enabled,
+    channelIds: row.channelIds || [],
+    issueTypes: row.issueTypes || []
+  })
+  await Promise.all([loadBackupAlertRules(), loadBackupAlertSummary()])
+}
+
+const handleTestBackupAlertRule = async (row: DatabaseBackupAlertRuleResult) => {
+  backupAlertRuleTestingId.value = row.id
+  try {
+    const res = await testDatabaseBackupAlertRule(row.id) as any
+    if (res?.status === 'success') {
+      ElMessage.success(res.message || '测试发送成功')
+    } else {
+      ElMessage.warning(res?.error || res?.message || '测试发送未成功')
+    }
+  } finally {
+    backupAlertRuleTestingId.value = 0
+  }
+}
+
+const backupAlertIssueText = (value: string) =>
+  backupAlertIssueOptions.find(item => item.value === value)?.label || value || '-'
+
+const backupAlertScopeText = (row: DatabaseBackupAlertRuleResult) => {
+  if (row.scopeTypeText) return row.scopeTypeText
+  return backupAlertScopeOptions.find(item => item.value === row.scopeType)?.label || row.scopeType || '-'
+}
+
+const backupAlertSeverityTag = (value?: string) => {
+  switch (value) {
+    case 'critical':
+    case 'high':
+      return 'danger'
+    case 'medium':
+      return 'warning'
+    case 'low':
+      return 'success'
+    default:
+      return 'info'
+  }
+}
+
+const backupAlertStatusTag = (value?: string) => value === 'resolved' ? 'success' : 'danger'
+
+const alertChannelNames = (ids?: number[]) => {
+  if (!ids?.length) return '全部启用通道'
+  const names = ids
+    .map(id => alertChannelOptions.value.find(item => item.id === id)?.name)
+    .filter(Boolean)
+  return names.join('、') || `${ids.length} 个通道`
+}
+
 const resetBackupPolicyQuery = () => {
   backupPolicyQuery.page = 1
   backupPolicyQuery.pageSize = 10
@@ -17992,6 +18681,10 @@ watch(activeTab, async (tab) => {
   if (tab === 'backup') {
     await Promise.all([
       loadProtectionProfiles(),
+      loadBackupAlertSummary(),
+      loadBackupAlertRules(),
+      loadBackupAlertStates(),
+      loadAlertChannels(),
       loadBackupTasks(),
       loadBackupRecords(),
       loadStorageProfiles(),

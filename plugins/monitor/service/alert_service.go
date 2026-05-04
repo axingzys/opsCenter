@@ -561,7 +561,38 @@ func (m AlertMessage) getAlertTitle() string {
 		return "磁盘使用率过高"
 	case "agent_offline":
 		return "Agent离线"
+	case "database_backup_schedule_failed":
+		return "数据库备份调度失败"
+	case "database_backup_cleanup_failed":
+		return "数据库备份清理失败"
+	case "database_backup_failed":
+		return "数据库备份失败"
+	case "database_backup_no_recent_success":
+		return "无近期成功备份"
+	case "database_backup_missing_full":
+		return "缺少全量基线"
+	case "database_backup_chain_broken":
+		return "备份链异常"
+	case "database_backup_rpo_breached":
+		return "RPO 超时"
+	case "database_backup_log_gap":
+		return "日志链缺口"
+	case "database_restore_drill_stale":
+		return "恢复演练过期"
+	case "database_restore_drill_failed":
+		return "恢复演练失败"
+	case "database_backup_runner_unavailable":
+		return "Runner 不可用"
+	case "database_backup_runner_tool_failed":
+		return "Runner 工具异常"
+	case "database_backup_storage_failed":
+		return "存储姿态异常"
+	case "database_backup_alert_test":
+		return "数据库告警测试"
 	default:
+		if m.ResourceType == "database_backup" {
+			return "数据库备份恢复告警"
+		}
 		if m.ResourceType == "host" {
 			return "主机监控告警"
 		}
@@ -581,6 +612,14 @@ func (m AlertMessage) getStatusText() string {
 		return "严重"
 	case "offline":
 		return "离线"
+	case "failed":
+		return "失败"
+	case "success":
+		return "成功"
+	case "resolved":
+		return "已恢复"
+	case "firing":
+		return "告警中"
 	default:
 		if m.Status != "" {
 			return m.Status
@@ -610,6 +649,9 @@ func (s *AlertService) getDetailInfo(message AlertMessage) string {
 }
 
 func (m AlertMessage) getCategoryTitle() string {
+	if m.ResourceType == "database_backup" {
+		return "数据库备份恢复告警"
+	}
 	if m.ResourceType == "host" {
 		return "主机监控告警"
 	}
@@ -617,6 +659,9 @@ func (m AlertMessage) getCategoryTitle() string {
 }
 
 func (m AlertMessage) getResourceLabel() string {
+	if m.ResourceType == "database_backup" {
+		return "数据库实例"
+	}
 	if m.ResourceType == "host" {
 		return "主机"
 	}
@@ -653,6 +698,26 @@ func (m AlertMessage) getMetricLabel() string {
 		return "磁盘使用率"
 	case "agent_offline":
 		return "Agent上报时延"
+	case "backup_failed":
+		return "备份失败"
+	case "backup_success_gap":
+		return "成功备份间隔"
+	case "rpo_lag":
+		return "RPO 延迟"
+	case "restore_drill_stale":
+		return "恢复演练"
+	case "runner_status":
+		return "Runner 状态"
+	case "barman_status":
+		return "Barman 状态"
+	case "storage_posture":
+		return "存储姿态"
+	case "log_archive_status":
+		return "日志归档状态"
+	case "backup_alert_test":
+		return "告警通道测试"
+	case "backup_risk":
+		return "备份链路风险"
 	default:
 		if m.Metric != "" {
 			return m.Metric

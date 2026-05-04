@@ -8,31 +8,31 @@ import (
 
 	dbbiz "github.com/ydcloud-dy/opshub/internal/biz/database"
 	appLogger "github.com/ydcloud-dy/opshub/pkg/logger"
+	monitormodel "github.com/ydcloud-dy/opshub/plugins/monitor/model"
 	monitorservice "github.com/ydcloud-dy/opshub/plugins/monitor/service"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-func dispatchBackupSchedulerAlert(_ context.Context, db *gorm.DB, notice *dbbiz.BackupSchedulerNotice) error {
+func dispatchBackupSchedulerAlert(ctx context.Context, db *gorm.DB, notice *dbbiz.BackupSchedulerNotice) error {
 	if db == nil || notice == nil || notice.Error == nil {
 		return nil
 	}
 
-	dispatcher := monitorservice.NewAlertDispatcher(db)
 	message := monitorservice.AlertMessage{
 		AlertType:      mapBackupAlertType(notice.Operation),
-		ResourceType:   "database_backup_task",
+		ResourceType:   "database_backup",
 		ResourceID:     backupTaskID(notice),
 		ResourceName:   backupTaskName(notice),
 		ResourceTarget: backupResourceTarget(notice),
-		Metric:         "backup",
+		Metric:         "backup_failed",
 		Severity:       mapBackupAlertSeverity(notice.Operation),
 		Status:         "failed",
 		Message:        buildBackupAlertMessage(notice),
 		Timestamp:      time.Now().Format("2006-01-02 15:04:05"),
 	}
 
-	channelSummary, err := dispatcher.Dispatch(message)
+	channelSummary, err := dispatchDatabaseAlertMessage(ctx, db, message)
 	if err != nil {
 		return err
 	}
@@ -43,6 +43,89 @@ func dispatchBackupSchedulerAlert(_ context.Context, db *gorm.DB, notice *dbbiz.
 		zap.Uint("taskID", backupTaskID(notice)),
 	)
 	return nil
+}
+
+func dispatchDatabaseBackupAlertNotice(ctx context.Context, db *gorm.DB, notice *dbbiz.DatabaseBackupAlertNotice) (string, error) {
+	if db == nil || notice == nil || notice.Candidate == nil {
+		return "", nil
+	}
+	candidate := notice.Candidate
+	status := candidate.Severity
+	messageText := candidate.Message
+	if notice.Resolved {
+		status = "normal"
+		if !strings.HasPrefix(messageText, "已恢复") {
+			messageText = "已恢复：" + messageText
+		}
+	}
+	var ruleID *uint
+	var channelIDs []uint
+	if notice.Rule != nil {
+		id := notice.Rule.ID
+		ruleID = &id
+		channelIDs = notice.Rule.ChannelIDs
+	}
+	message := monitorservice.AlertMessage{
+		AlertType:      candidate.AlertType,
+		ResourceType:   "database_backup",
+		ResourceID:     candidate.ResourceID,
+		ResourceName:   candidate.ResourceName,
+		ResourceTarget: candidate.ResourceTarget,
+		Metric:         candidate.Metric,
+		Severity:       candidate.Severity,
+		Status:         status,
+		Message:        messageText,
+		AlertRuleID:    ruleID,
+		Timestamp:      time.Now().Format("2006-01-02 15:04:05"),
+	}
+	return dispatchDatabaseAlertMessage(ctx, db, message, channelIDs...)
+}
+
+func dispatchDatabaseAlertMessage(ctx context.Context, db *gorm.DB, message monitorservice.AlertMessage, channelIDs ...uint) (string, error) {
+	if db == nil {
+		return "", nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	dispatcher := monitorservice.NewAlertDispatcher(db)
+	channelSummary, err := dispatcher.Dispatch(message, channelIDs...)
+	status := "success"
+	errorMsg := ""
+	if err != nil {
+		status = "failed"
+		errorMsg = err.Error()
+	}
+	writeDatabaseAlertLog(ctx, db, message, status, channelSummary, errorMsg)
+	return channelSummary, err
+}
+
+func writeDatabaseAlertLog(ctx context.Context, db *gorm.DB, message monitorservice.AlertMessage, status, channel, errorMsg string) {
+	if db == nil {
+		return
+	}
+	resourceName := firstNonEmptyString(message.ResourceName, message.Domain, "database")
+	resourceTarget := firstNonEmptyString(message.ResourceTarget, message.Domain, resourceName)
+	alertLog := &monitormodel.AlertLog{
+		AlertType:       message.AlertType,
+		ResourceType:    "database_backup",
+		ResourceID:      message.ResourceID,
+		ResourceName:    resourceName,
+		ResourceTarget:  resourceTarget,
+		Metric:          message.Metric,
+		Severity:        message.Severity,
+		CurrentValue:    message.CurrentValue,
+		ThresholdValue:  message.ThresholdValue,
+		AlertRuleID:     message.AlertRuleID,
+		DomainMonitorID: 0,
+		Domain:          resourceTarget,
+		Status:          status,
+		Message:         message.Message,
+		ChannelType:     channel,
+		ErrorMsg:        errorMsg,
+		SentAt:          time.Now(),
+	}
+	_ = db.WithContext(ctx).Create(alertLog).Error
 }
 
 func mapBackupAlertType(operation string) string {
@@ -105,4 +188,13 @@ func backupResourceTarget(notice *dbbiz.BackupSchedulerNotice) string {
 		return fmt.Sprintf("%s (%s:%d)", strings.TrimSpace(notice.Instance.Name), strings.TrimSpace(notice.Instance.Host), notice.Instance.Port)
 	}
 	return fmt.Sprintf("%s:%d", strings.TrimSpace(notice.Instance.Host), notice.Instance.Port)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

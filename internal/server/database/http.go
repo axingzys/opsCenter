@@ -101,10 +101,11 @@ var databaseUIPermissionCodes = map[string]string{
 }
 
 type HTTPServer struct {
-	service           *dbservice.Service
-	backupScheduler   *dbbiz.BackupScheduler
-	capacityScheduler *dbbiz.CapacityScheduler
-	authMiddleware    *rbacservice.AuthMiddleware
+	service              *dbservice.Service
+	backupScheduler      *dbbiz.BackupScheduler
+	backupAlertScheduler *dbbiz.BackupAlertScheduler
+	capacityScheduler    *dbbiz.CapacityScheduler
+	authMiddleware       *rbacservice.AuthMiddleware
 }
 
 func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTTPServer {
@@ -123,6 +124,8 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	backupRecordRepo := dbdata.NewBackupRecordRepo(db)
 	backupPolicyConfigRepo := dbdata.NewBackupPolicyConfigRepo(db)
 	backupChainStateRepo := dbdata.NewBackupChainStateRepo(db)
+	backupAlertRuleRepo := dbdata.NewBackupAlertRuleRepo(db)
+	backupAlertStateRepo := dbdata.NewBackupAlertStateRepo(db)
 	restoreJobRepo := dbdata.NewRestoreJobRepo(db)
 	capacitySnapshotRepo := dbdata.NewCapacitySnapshotRepo(db)
 	inspectionReportRepo := dbdata.NewInspectionReportRepo(db)
@@ -221,6 +224,10 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	)
 	useCase.SetRunnerToolRepos(runnerToolProfileRepo, runnerToolOfflinePackageRepo)
 	useCase.SetReplicaGovernanceRepos(instanceReplicaRepo, replicationCheckRepo, replicaIncidentGuideRepo, replicaActionRepo)
+	useCase.SetBackupAlertRepos(backupAlertRuleRepo, backupAlertStateRepo)
+	useCase.SetBackupAlertNotifier(func(ctx context.Context, notice *dbbiz.DatabaseBackupAlertNotice) (string, error) {
+		return dispatchDatabaseBackupAlertNotice(ctx, db, notice)
+	})
 
 	backupScheduler := dbbiz.NewBackupScheduler(useCase, dbbiz.BackupSchedulerOptions{
 		Interval:        time.Minute,
@@ -232,6 +239,9 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	capacityScheduler := dbbiz.NewCapacityScheduler(useCase, dbbiz.CapacitySchedulerOptions{
 		Interval: 6 * time.Hour,
 	})
+	backupAlertScheduler := dbbiz.NewBackupAlertScheduler(useCase, dbbiz.BackupAlertSchedulerOptions{
+		Interval: 5 * time.Minute,
+	})
 
 	return &HTTPServer{
 		service: dbservice.NewService(useCase, permissionRepo, func(ctx context.Context) (string, error) {
@@ -241,9 +251,10 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 			}
 			return cfg.InstancePermissionMode, nil
 		}),
-		backupScheduler:   backupScheduler,
-		capacityScheduler: capacityScheduler,
-		authMiddleware:    authMiddleware,
+		backupScheduler:      backupScheduler,
+		backupAlertScheduler: backupAlertScheduler,
+		capacityScheduler:    capacityScheduler,
+		authMiddleware:       authMiddleware,
 	}
 }
 
@@ -253,6 +264,9 @@ func (s *HTTPServer) StartBackground(ctx context.Context) {
 	}
 	if s.backupScheduler != nil {
 		s.backupScheduler.Start(ctx)
+	}
+	if s.backupAlertScheduler != nil {
+		s.backupAlertScheduler.Start(ctx)
 	}
 	if s.capacityScheduler != nil {
 		s.capacityScheduler.Start(ctx)
@@ -265,6 +279,11 @@ func (s *HTTPServer) StopBackground(ctx context.Context) error {
 	}
 	if s.backupScheduler != nil {
 		if err := s.backupScheduler.Stop(ctx); err != nil {
+			return err
+		}
+	}
+	if s.backupAlertScheduler != nil {
+		if err := s.backupAlertScheduler.Stop(ctx); err != nil {
 			return err
 		}
 	}
@@ -310,6 +329,14 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.PUT("/backup-tasks/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateBackupTask)
 		databases.DELETE("/backup-tasks/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBackupTask)
 		databases.POST("/backup-tasks/:id/run", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.RunBackupTask)
+		databases.GET("/backup-alert-summary", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.GetBackupAlertSummary)
+		databases.GET("/backup-alert-rules", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupAlertRules)
+		databases.POST("/backup-alert-rules", s.authMiddleware.RequireMenuPermission(permDatabaseBackupCreate), s.service.CreateBackupAlertRule)
+		databases.GET("/backup-alert-rules/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.GetBackupAlertRule)
+		databases.PUT("/backup-alert-rules/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupUpdate), s.service.UpdateBackupAlertRule)
+		databases.DELETE("/backup-alert-rules/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupDelete), s.service.DeleteBackupAlertRule)
+		databases.POST("/backup-alert-rules/:id/test", s.authMiddleware.RequireMenuPermission(permDatabaseBackupRun), s.service.TestBackupAlertRule)
+		databases.GET("/backup-alert-states", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListBackupAlertStates)
 		databases.GET("/protection-profiles", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListProtectionProfiles)
 		databases.GET("/protection-risks", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.ListProtectionRisks)
 		databases.GET("/protection-profiles/:id", s.authMiddleware.RequireMenuPermission(permDatabaseBackupView), s.service.GetProtectionProfile)

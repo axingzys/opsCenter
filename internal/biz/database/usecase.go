@@ -55,6 +55,8 @@ type UseCase struct {
 	backupRecordRepo       BackupRecordRepo
 	backupPolicyConfigRepo BackupPolicyConfigRepo
 	backupChainStateRepo   BackupChainStateRepo
+	backupAlertRuleRepo    BackupAlertRuleRepo
+	backupAlertStateRepo   BackupAlertStateRepo
 	restoreJobRepo         RestoreJobRepo
 	capacitySnapshotRepo   CapacitySnapshotRepo
 	inspectionReportRepo   InspectionReportRepo
@@ -77,6 +79,7 @@ type UseCase struct {
 	credentialResolver     func(ctx context.Context, id uint) (*ConnectionCredential, error)
 	writePolicyResolver    func(ctx context.Context) (*DatabaseWritePolicy, error)
 	backupPolicyResolver   func(ctx context.Context) (*DatabaseBackupPolicy, error)
+	backupAlertNotifier    DatabaseBackupAlertNotifier
 	backupRunMu            sync.Mutex
 	backupRunningTasks     map[uint]struct{}
 	backupRunningPolicies  map[uint]struct{}
@@ -162,6 +165,21 @@ func (uc *UseCase) SetBackupGovernanceRepos(
 	uc.barmanServerRepo = barmanServerRepo
 	uc.backupPolicyConfigRepo = backupPolicyConfigRepo
 	uc.backupChainStateRepo = backupChainStateRepo
+}
+
+func (uc *UseCase) SetBackupAlertRepos(ruleRepo BackupAlertRuleRepo, stateRepo BackupAlertStateRepo) {
+	if uc == nil {
+		return
+	}
+	uc.backupAlertRuleRepo = ruleRepo
+	uc.backupAlertStateRepo = stateRepo
+}
+
+func (uc *UseCase) SetBackupAlertNotifier(notifier DatabaseBackupAlertNotifier) {
+	if uc == nil {
+		return
+	}
+	uc.backupAlertNotifier = notifier
 }
 
 func (uc *UseCase) SetRunnerToolProfileRepo(runnerToolProfileRepo RunnerToolProfileRepo) {
@@ -1756,6 +1774,57 @@ func (uc *UseCase) RecordInstancePermissionAudit(ctx context.Context, action str
 	})
 }
 
+func (uc *UseCase) RecordBackupAlertRuleAudit(ctx context.Context, action string, ruleID uint, payload any, operator QueryOperator) error {
+	if uc == nil || uc.auditRepo == nil {
+		return nil
+	}
+	action = normalizeAuditAction(action)
+	sqlText := buildBackupAlertRuleAuditSQL(action, ruleID, payload)
+	instanceID := backupAlertRuleAuditInstanceID(payload)
+	return uc.auditRepo.Create(ctx, &DatabaseQueryAudit{
+		InstanceID:     instanceID,
+		OperatorID:     operator.ID,
+		OperatorName:   trimText(operator.Username, 100),
+		AuditAction:    action,
+		SQLText:        trimText(sqlText, 20000),
+		SQLFingerprint: sqlFingerprint(sqlText),
+		SQLType:        "BACKUP_ALERT",
+		RiskLevel:      DatabaseQueryRiskMedium,
+		Status:         DatabaseQueryStatusSuccess,
+		ClientIP:       trimText(operator.ClientIP, 64),
+	})
+}
+
+func buildBackupAlertRuleAuditSQL(action string, ruleID uint, payload any) string {
+	data, err := json.Marshal(map[string]any{
+		"action":  normalizeAuditAction(action),
+		"ruleId":  ruleID,
+		"payload": payload,
+	})
+	if err != nil {
+		return fmt.Sprintf(`{"action":"%s","ruleId":%d}`, normalizeAuditAction(action), ruleID)
+	}
+	return string(data)
+}
+
+func backupAlertRuleAuditInstanceID(payload any) uint {
+	switch item := payload.(type) {
+	case *DatabaseBackupAlertRuleRequest:
+		if item != nil && item.ScopeType == DatabaseBackupAlertScopeInstance {
+			return item.InstanceID
+		}
+	case *DatabaseBackupAlertRuleVO:
+		if item != nil && item.ScopeType == DatabaseBackupAlertScopeInstance {
+			return item.InstanceID
+		}
+	case map[string]any:
+		if value, ok := item["instanceId"].(uint); ok {
+			return value
+		}
+	}
+	return 0
+}
+
 func buildInstancePermissionAuditSQL(action string, req *DatabaseInstancePermissionAuditRequest) string {
 	if req == nil {
 		return "{}"
@@ -2718,6 +2787,14 @@ func QueryAuditActionText(action string) string {
 		return "备份文件下载"
 	case DatabaseAuditActionBackupVerify:
 		return "备份文件校验"
+	case DatabaseAuditActionBackupAlertCreate:
+		return "备份告警规则创建"
+	case DatabaseAuditActionBackupAlertUpdate:
+		return "备份告警规则更新"
+	case DatabaseAuditActionBackupAlertDelete:
+		return "备份告警规则删除"
+	case DatabaseAuditActionBackupAlertTest:
+		return "备份告警测试发送"
 	case DatabaseAuditActionTopologyView:
 		return "拓扑查看"
 	case DatabaseAuditActionRestoreDryRun:
@@ -2779,6 +2856,14 @@ func normalizeAuditAction(action string) string {
 		return DatabaseAuditActionBackupDownload
 	case DatabaseAuditActionBackupVerify:
 		return DatabaseAuditActionBackupVerify
+	case DatabaseAuditActionBackupAlertCreate:
+		return DatabaseAuditActionBackupAlertCreate
+	case DatabaseAuditActionBackupAlertUpdate:
+		return DatabaseAuditActionBackupAlertUpdate
+	case DatabaseAuditActionBackupAlertDelete:
+		return DatabaseAuditActionBackupAlertDelete
+	case DatabaseAuditActionBackupAlertTest:
+		return DatabaseAuditActionBackupAlertTest
 	case DatabaseAuditActionTopologyView:
 		return DatabaseAuditActionTopologyView
 	case DatabaseAuditActionRestoreDryRun:

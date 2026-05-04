@@ -221,6 +221,85 @@ export interface DatabaseBackupTaskResult {
   updatedAt: string
 }
 
+export interface DatabaseBackupAlertThreshold {
+  noSuccessBackupHours: number
+  restoreDrillStaleDays: number
+  rpoLagGraceMinutes: number
+  includeNonProduction: boolean
+  minRiskLevel: string
+}
+
+export interface DatabaseBackupAlertRulePayload {
+  name: string
+  enabled: boolean
+  scopeType?: string
+  instanceId?: number
+  engine?: string
+  businessSystem?: string
+  owner?: string
+  issueTypes: string[]
+  severity?: string
+  alertInterval: number
+  recoveryNotify: boolean
+  channelIds: number[]
+  threshold: DatabaseBackupAlertThreshold
+  description?: string
+}
+
+export interface DatabaseBackupAlertRuleResult extends DatabaseBackupAlertRulePayload {
+  id: number
+  scopeTypeText: string
+  issueTypeTexts: string[]
+  severityText: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseBackupAlertStateResult {
+  id: number
+  ruleId: number
+  fingerprint: string
+  instanceId: number
+  resourceType: string
+  resourceId: number
+  resourceName: string
+  resourceTarget: string
+  issueType: string
+  issueTypeText: string
+  alertType: string
+  metric: string
+  metricText: string
+  severity: string
+  severityText: string
+  status: string
+  statusText: string
+  message: string
+  suggestion: string
+  firstFiredAt: string
+  lastFiredAt: string
+  lastNotifiedAt?: string
+  resolvedAt?: string
+  notifyCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DatabaseBackupAlertSummaryResult {
+  ruleTotal: number
+  ruleEnabled: number
+  firingTotal: number
+  criticalFiring: number
+  warningFiring: number
+  notified24h: number
+}
+
+export interface DatabaseBackupAlertTestResult {
+  status: string
+  message: string
+  channel: string
+  error: string
+}
+
 export interface DatabaseBackupPolicyPayload {
   instanceId: number
   sourceInstanceId?: number
@@ -1981,6 +2060,43 @@ export const deleteDatabaseBackupTask = (id: number) =>
 
 export const runDatabaseBackupTask = (id: number) =>
   request.post(`/api/v1/databases/backup-tasks/${id}/run`)
+
+export const getDatabaseBackupAlertSummary = () =>
+  request.get('/api/v1/databases/backup-alert-summary')
+
+export const listDatabaseBackupAlertRules = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  enabled?: string
+  scopeType?: string
+  instanceId?: number
+  engine?: string
+  issueType?: string
+}) => request.get('/api/v1/databases/backup-alert-rules', { params })
+
+export const createDatabaseBackupAlertRule = (data: DatabaseBackupAlertRulePayload) =>
+  request.post('/api/v1/databases/backup-alert-rules', data)
+
+export const updateDatabaseBackupAlertRule = (id: number, data: DatabaseBackupAlertRulePayload) =>
+  request.put(`/api/v1/databases/backup-alert-rules/${id}`, data)
+
+export const deleteDatabaseBackupAlertRule = (id: number) =>
+  request.delete(`/api/v1/databases/backup-alert-rules/${id}`)
+
+export const testDatabaseBackupAlertRule = (id: number) =>
+  request.post(`/api/v1/databases/backup-alert-rules/${id}/test`)
+
+export const listDatabaseBackupAlertStates = (params?: {
+  page?: number
+  pageSize?: number
+  ruleId?: number
+  instanceId?: number
+  status?: string
+  severity?: string
+  issueType?: string
+  keyword?: string
+}) => request.get('/api/v1/databases/backup-alert-states', { params })
 
 export const listDatabaseBackupPolicies = (params?: {
   page?: number
