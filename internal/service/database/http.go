@@ -859,6 +859,79 @@ func (s *Service) ValidateProtectionProfile(c *gin.Context) {
 	response.Success(c, item)
 }
 
+func (s *Service) PreviewMySQLPITRWizard(c *gin.Context) {
+	var req dbbiz.DatabaseMySQLPITRWizardRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if req.SourceInstanceID > 0 && req.SourceInstanceID != req.InstanceID && !s.ensureInstancePermission(c, req.SourceInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.PreviewMySQLPITRWizard(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "预览失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ApplyMySQLPITRWizard(c *gin.Context) {
+	var req dbbiz.DatabaseMySQLPITRWizardRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	if req.SourceInstanceID > 0 && req.SourceInstanceID != req.InstanceID && !s.ensureInstancePermission(c, req.SourceInstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.ApplyMySQLPITRWizard(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "启用失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) RunProtectionProfileRestoreDrill(c *gin.Context) {
+	profileID := c.Param("id")
+	instanceID, err := dbbiz.ProtectionProfileInstanceID(profileID)
+	if err != nil {
+		writeDatabaseError(c, "恢复演练失败: ", err)
+		return
+	}
+	if !s.ensureInstancePermission(c, instanceID, dbbiz.DatabasePermissionRestore) {
+		return
+	}
+	var req dbbiz.DatabaseProtectionRestoreDrillRequest
+	if c.Request.Body != nil && c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+			return
+		}
+	}
+	item, err := s.useCase.RunProtectionProfileRestoreDrill(c.Request.Context(), profileID, &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "恢复演练失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
 func (s *Service) CreateBackupPolicy(c *gin.Context) {
 	var req dbbiz.DatabaseBackupPolicyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

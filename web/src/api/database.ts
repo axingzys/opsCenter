@@ -512,6 +512,110 @@ export interface DatabaseProtectionProfileResult {
   validatedAt: string
 }
 
+export interface DatabaseMySQLPITRWizardPayload {
+  instanceId: number
+  sourceInstanceId?: number
+  sourceRole?: string
+  runnerHostId: number
+  storageProfileId?: number
+  secretProfileId?: number
+  templateKey?: string
+  policyName?: string
+  backupEngine?: string
+  toolExecutionMode?: string
+  toolImage?: string
+  toolImageDigest?: string
+  containerDatadirPath?: string
+  containerWorkdirPath?: string
+  containerNetworkMode?: string
+  containerDatadirRo?: boolean
+  reuseLogArchiveStreamId?: number
+  reuseBackupPolicyId?: number
+  fullSchedule?: string
+  incrementalSchedule?: string
+  runInitialFullNow?: boolean
+  binlogArchiveMode?: string
+  binlogRpoTargetSeconds?: number
+  binlogRetentionDays?: number
+  syntheticEnabled?: boolean
+  syntheticAutoRun?: boolean
+  syntheticTriggerAfterIncrementals?: number
+  syntheticMergeOldestIncrementals?: number
+  syntheticRequireRestoreProof?: boolean
+  syntheticNeverDeleteWithoutProof?: boolean
+  syntheticMarkSupersededAfterProof?: boolean
+  syntheticSupersededKeepDays?: number
+  restoreDrillRequired?: boolean
+  retentionFullKeepMonths?: number
+  retentionIncrementalKeepDays?: number
+  retentionBinlogKeepDays?: number
+  retentionNeverDeleteWithoutProof?: boolean
+  archiveConfigJson?: string
+}
+
+export interface DatabaseProtectionWizardActionResult {
+  action: string
+  resourceType: string
+  resourceId?: number
+  name: string
+  status: string
+  message: string
+  blocking: boolean
+}
+
+export interface DatabaseMySQLPITRWizardResult {
+  templateKey: string
+  templateName: string
+  instanceId: number
+  instanceName: string
+  engine: string
+  engineText: string
+  version: string
+  runnerHostId: number
+  runnerHostName: string
+  backupEngine: string
+  fullSchedule: string
+  incrementalSchedule: string
+  runInitialFullNow: boolean
+  syntheticRuleJson: string
+  retentionJson: string
+  canApply: boolean
+  blockingReasons: string[]
+  warnings: string[]
+  messages: string[]
+  actions: DatabaseProtectionWizardActionResult[]
+  logArchiveStream?: DatabaseLogArchiveStreamResult
+  backupPolicy?: DatabaseBackupPolicyResult
+  initialFullRun?: DatabaseBackupPolicyRunResult
+  profile?: DatabaseProtectionProfileResult
+}
+
+export interface DatabaseProtectionRestoreDrillPayload {
+  restoreTargetType?: string
+  restoreTargetValue?: string
+  targetTimelineId?: string
+  restoreTargetInclusive?: boolean
+  runnerHostId?: number
+  containerImage?: string
+  listenPort?: number
+  expiresInHours?: number
+  validationSql?: string[]
+  validationAssertions?: DatabaseRestoreValidationAssertionPayload[]
+  cleanupOnFailure?: boolean
+  postgresStartInstance?: boolean
+  targetAction?: string
+  barmanGetWal?: boolean
+}
+
+export interface DatabaseProtectionRestoreDrillResult {
+  profileId: string
+  plan?: DatabaseRestorePlanResult
+  job?: DatabaseRestoreJobResult
+  profile?: DatabaseProtectionProfileResult
+  status: string
+  message: string
+}
+
 export interface DatabaseBackupRecordResult {
   id: number
   taskId: number
@@ -1738,6 +1842,15 @@ export const getDatabaseProtectionProfile = (id: string) =>
 
 export const validateDatabaseProtectionProfile = (id: string) =>
   request.post(`/api/v1/databases/protection-profiles/${id}/validate`)
+
+export const previewDatabaseMySQLPITRWizard = (data: DatabaseMySQLPITRWizardPayload) =>
+  request.post('/api/v1/databases/protection-wizards/mysql-pitr/preview', data)
+
+export const applyDatabaseMySQLPITRWizard = (data: DatabaseMySQLPITRWizardPayload) =>
+  request.post('/api/v1/databases/protection-wizards/mysql-pitr/apply', data)
+
+export const runDatabaseProtectionRestoreDrill = (id: string, data: DatabaseProtectionRestoreDrillPayload) =>
+  request.post(`/api/v1/databases/protection-profiles/${id}/run-restore-drill`, data)
 
 export const createDatabaseBackupPolicy = (data: DatabaseBackupPolicyPayload) =>
   request.post('/api/v1/databases/backup-policies', data)

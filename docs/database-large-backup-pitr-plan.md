@@ -8154,6 +8154,46 @@ database:protection:advanced
 2. 恢复失败时能在 profile 风险里显示最近 proof 失败。
 3. 恢复成功后 profile 升级为 `pitr_verified`。
 
+##### P5.3 / P5.4 落地记录（2026-05-04）
+
+已落地：
+
+1. 后端新增 MySQL/MariaDB PITR 保护向导接口：
+   - `POST /api/v1/databases/protection-wizards/mysql-pitr/preview`
+   - `POST /api/v1/databases/protection-wizards/mysql-pitr/apply`
+2. `preview` 会统一完成这些预检：
+   - 目标实例必须是 MySQL / MariaDB。
+   - Runner 主机必须存在且可用于归档/备份。
+   - 物理备份工具和数据库版本需要匹配，例如 MySQL 8.0 使用 XtraBackup 8.0，MySQL 8.4 使用 XtraBackup 8.4，MariaDB 使用 `mariadb-backup`。
+   - Full / Incremental Cron 必须符合系统现有 5 段 Cron 校验。
+   - Synthetic Full 规则和 retention 规则由向导生成 JSON，避免用户手写造成不可恢复链路。
+3. `apply` 会执行向导计划：
+   - 创建或复用 binlog 归档流。
+   - 将归档流 `desired_state` 设置为 `running`，等待 Runner Agent 接管。
+   - 创建或更新 MySQL/MariaDB 物理备份策略。
+   - 写入推荐的 Synthetic Full 规则：默认每 5 条增量合成一次新全量基线，要求恢复证明，旧链只在证明通过后允许淘汰。
+   - 可选立即下发一次 Full 备份，用于建立第一条物理基线。
+4. 前端保护概览新增“保护向导”入口：
+   - 默认模板为“物理 PITR - 滚动合成全量”。
+   - 默认配置为立即 Full 一次、每天 03:00 增量、binlog 归档 RPO 300 秒、binlog 保留 45 天。
+   - 用户只需要选择实例、Runner、备份工具和可选存储配置，不再需要先手工创建归档流或手写 Synthetic JSON。
+5. 后端新增 profile 级恢复演练接口：
+   - `POST /api/v1/databases/protection-profiles/:id/run-restore-drill`
+   - 接口会从保护概览直接生成恢复计划，预检通过后继续下发隔离恢复 Runner Job。
+6. 前端保护概览新增“恢复演练”入口：
+   - 默认恢复到 `recoverable_until`，没有窗口时使用当前时间。
+   - 默认选择 profile 关联 Runner 或当前可用 Runner。
+   - 支持额外只读校验 SQL。
+   - 支持断言校验：`expectedRows`、`expectedScalar`、`expectedContains`。
+   - 恢复演练只面向隔离 Runner 环境，不覆盖生产库。
+
+仍保留的边界：
+
+1. P5.3 是 MySQL/MariaDB 专用向导；PostgreSQL 统一入口放入 P5.5。
+2. 向导不会自动安装 Runner 工具；工具安装仍通过 P2.14-P2.19 的 Runner 工具能力完成。
+3. 对象存储密钥、数据库密码、SSH 私钥仍必须走凭据/密钥配置，向导配置 JSON 只保存非敏感摘要。
+4. profile 恢复演练是否最终升级为 `pitr_verified` 仍以 Runner Job 完成后的 proof 和 profile 聚合结果为准。
+
 ##### P5.5：PostgreSQL Barman PITR 向导
 
 目标：

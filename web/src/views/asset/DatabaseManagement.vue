@@ -2086,12 +2086,12 @@
             />
             <div class="backup-toolbar">
               <div class="backup-toolbar-group">
-                <el-button type="primary" plain @click="openBackupPolicyDialog()">
+                <el-button type="primary" plain @click="openProtectionWizardDialog()">
                   <el-icon style="margin-right: 4px;"><Plus /></el-icon>
                   启用数据库保护
                 </el-button>
-                <el-button type="success" plain @click="openBackupPolicyDialog()">
-                  保护策略
+                <el-button type="success" plain @click="openProtectionWizardDialog()">
+                  保护向导
                 </el-button>
                 <el-button type="warning" plain @click="openRestorePlanDialog">
                   恢复演练
@@ -2211,11 +2211,12 @@
                   </el-table-column>
                   <el-table-column label="操作" width="300" align="center" fixed="right">
                     <template #default="{ row }">
-                      <el-button link type="warning" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'full')">立即Full</el-button>
-                      <el-button link type="success" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'incremental')">立即增量</el-button>
-                      <el-button link type="primary" @click="openProtectionProfileRestorePlan(row)">恢复计划</el-button>
+                      <el-button link type="warning" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'full')">立即备份</el-button>
+                      <el-button link type="success" :disabled="!row.backupPolicy" @click="handleRunProtectionProfileBackup(row, 'incremental')">增量</el-button>
+                      <el-button link type="primary" @click="openProtectionRestoreDrillDialog(row)">恢复演练</el-button>
                       <el-button link type="info" :loading="validatingProtectionProfileId === row.profileId" @click="handleValidateProtectionProfile(row)">校验</el-button>
-                      <el-button link type="primary" @click="openProtectionProfileResources(row)">高级</el-button>
+                      <el-button link type="primary" @click="openProtectionProfileResources(row)">详情</el-button>
+                      <el-button link type="danger" @click="openProtectionWizardDialog(row)">修复</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -5436,6 +5437,321 @@
     </el-dialog>
 
     <el-dialog
+      v-model="protectionWizardDialogVisible"
+      title="启用 MySQL/MariaDB 物理 PITR 保护"
+      width="920px"
+      @close="resetProtectionWizardForm"
+    >
+      <el-alert
+        title="向导会自动创建或复用 binlog 归档流和物理备份策略，默认立即 Full 一次、每天 03:00 增量、每 5 条增量自动合成新全量基线。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="protectionWizardFormRef" :model="protectionWizardForm" :rules="protectionWizardRules" label-width="130px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="数据库实例" prop="instanceId">
+              <el-select v-model="protectionWizardForm.instanceId" placeholder="请选择 MySQL/MariaDB 实例" filterable style="width: 100%;" @change="handleProtectionWizardInstanceChange">
+                <el-option
+                  v-for="item in mysqlPhysicalBackupPolicyInstances"
+                  :key="item.id"
+                  :label="`${item.name}（${item.dbTypeText || item.dbType}${item.version ? ` / ${item.version}` : ''}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="保护模板">
+              <el-select v-model="protectionWizardForm.templateKey" style="width: 100%;">
+                <el-option label="物理 PITR - 滚动合成全量" value="rolling_synthetic_full" />
+                <el-option label="物理 PITR - 保守策略" value="conservative_pitr" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Runner 主机" prop="runnerHostId">
+              <el-select v-model="protectionWizardForm.runnerHostId" placeholder="请选择 Runner" filterable style="width: 100%;">
+                <el-option
+                  v-for="item in runnerHosts.filter(host => host.enabled !== false)"
+                  :key="item.id"
+                  :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="存储配置">
+              <el-select v-model="protectionWizardForm.storageProfileId" placeholder="可选；默认 runner:// 本地" clearable filterable style="width: 100%;">
+                <el-option v-for="item in storageProfiles" :key="item.id" :label="`${item.name}（${item.storageTypeText || item.storageType}）`" :value="item.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="备份工具" prop="backupEngine">
+              <el-select v-model="protectionWizardForm.backupEngine" style="width: 100%;">
+                <el-option v-for="item in protectionWizardBackupEngineOptions" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="工具模式">
+              <el-select v-model="protectionWizardForm.toolExecutionMode" style="width: 100%;">
+                <el-option label="宿主机工具" value="host_tools" />
+                <el-option label="容器化工具" value="container_tools" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row v-if="protectionWizardForm.toolExecutionMode === 'container_tools'" :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="工具镜像">
+              <el-input v-model="protectionWizardForm.toolImage" placeholder="如 opshub-runner-tools:mysql80" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="datadir 挂载">
+              <el-input v-model="protectionWizardForm.containerDatadirPath" placeholder="/var/lib/mysql" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="网络模式">
+              <el-input v-model="protectionWizardForm.containerNetworkMode" placeholder="host" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="立即 Full">
+              <el-switch v-model="protectionWizardForm.runInitialFullNow" active-text="启用后执行" inactive-text="只保存策略" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="Full Cron">
+              <el-input v-model="protectionWizardForm.fullSchedule" placeholder="留空表示不定期原生 Full" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="增量 Cron" prop="incrementalSchedule">
+              <el-input v-model="protectionWizardForm.incrementalSchedule" placeholder="0 3 * * *" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="归档模式">
+              <el-select v-model="protectionWizardForm.binlogArchiveMode" style="width: 100%;">
+                <el-option label="polling" value="polling" />
+                <el-option label="streaming" value="streaming" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="RPO 秒">
+              <el-input-number v-model="protectionWizardForm.binlogRpoTargetSeconds" :min="30" :max="86400" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="binlog 保留">
+              <el-input-number v-model="protectionWizardForm.binlogRetentionDays" :min="1" :max="3650" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="自动合成">
+              <el-switch v-model="protectionWizardForm.syntheticEnabled" active-text="启用" inactive-text="关闭" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="触发增量数">
+              <el-input-number v-model="protectionWizardForm.syntheticTriggerAfterIncrementals" :min="1" :max="365" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="合并增量数">
+              <el-input-number v-model="protectionWizardForm.syntheticMergeOldestIncrementals" :min="1" :max="365" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+      </el-form>
+      <div v-if="protectionWizardPreview" class="wizard-preview">
+        <el-alert
+          v-if="protectionWizardPreview.blockingReasons?.length"
+          :title="protectionWizardPreview.blockingReasons.join('；')"
+          type="error"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
+        <el-alert
+          v-else-if="protectionWizardPreview.warnings?.length"
+          :title="protectionWizardPreview.warnings.join('；')"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
+        <el-table :data="protectionWizardPreview.actions || []" size="small" stripe>
+          <el-table-column label="动作" width="100">
+            <template #default="{ row }">{{ row.action }}</template>
+          </el-table-column>
+          <el-table-column label="资源" min-width="160">
+            <template #default="{ row }">{{ row.resourceType }}<span v-if="row.resourceId"> #{{ row.resourceId }}</span></template>
+          </el-table-column>
+          <el-table-column label="名称" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.name || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="260" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.message || '-' }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="protectionWizardDialogVisible = false">取消</el-button>
+        <el-button :loading="protectionWizardPreviewing" @click="previewProtectionWizard">预览</el-button>
+        <el-button type="primary" :disabled="!!protectionWizardPreview && !protectionWizardPreview.canApply" :loading="protectionWizardSubmitting" @click="applyProtectionWizard">确认启用</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="protectionRestoreDrillDialogVisible"
+      :title="`恢复演练${protectionRestoreDrillProfile ? ` - ${protectionRestoreDrillProfile.instanceName}` : ''}`"
+      width="800px"
+      @close="resetProtectionRestoreDrillForm"
+    >
+      <el-alert
+        title="该入口会自动生成恢复计划并下发隔离恢复 Runner 任务；不会覆盖生产库，也不会切换业务连接。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="protectionRestoreDrillFormRef" :model="protectionRestoreDrillForm" :rules="protectionRestoreDrillRules" label-width="130px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="目标类型" prop="restoreTargetType">
+              <el-select v-model="protectionRestoreDrillForm.restoreTargetType" style="width: 100%;">
+                <el-option label="按时间点" value="time" />
+                <el-option v-if="protectionRestoreDrillProfile?.engine === 'postgresql'" label="按 LSN" value="lsn" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item :label="protectionRestoreDrillForm.restoreTargetType === 'lsn' ? '目标 LSN' : '目标时间'" prop="restoreTargetValue">
+              <el-date-picker
+                v-if="protectionRestoreDrillForm.restoreTargetType !== 'lsn'"
+                v-model="protectionRestoreDrillForm.restoreTargetValue"
+                type="datetime"
+                value-format="YYYY-MM-DD HH:mm:ss"
+                placeholder="选择恢复目标时间"
+                style="width: 100%;"
+              />
+              <el-input v-else v-model="protectionRestoreDrillForm.restoreTargetValue" placeholder="如：A/18000098" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Runner 主机" prop="runnerHostId">
+              <el-select v-model="protectionRestoreDrillForm.runnerHostId" placeholder="请选择 SSH Runner" filterable style="width: 100%;">
+                <el-option
+                  v-for="item in runnerHosts.filter(host => host.runnerType === 'ssh' && host.enabled !== false)"
+                  :key="item.id"
+                  :label="`${item.name}（${item.host || item.runnerType}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="容器镜像">
+              <el-input v-model="protectionRestoreDrillForm.containerImage" placeholder="留空使用默认 mysql/mariadb/postgres 镜像" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="监听端口">
+              <el-input-number v-model="protectionRestoreDrillForm.listenPort" :min="0" :max="65535" class="query-number" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="保留小时" prop="expiresInHours">
+              <el-input-number v-model="protectionRestoreDrillForm.expiresInHours" :min="1" :max="168" class="query-number" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="额外校验 SQL">
+          <el-input
+            v-model="protectionRestoreDrillForm.validationSqlText"
+            type="textarea"
+            :rows="4"
+            placeholder="每行一条只读 SQL；断言校验可在底层恢复任务详情继续查看 proof"
+          />
+        </el-form-item>
+        <el-form-item label="断言校验">
+          <div class="restore-assertions">
+            <div class="restore-assertions-header">
+              <span class="field-tip">expectedRows 校验行数；expectedScalar 校验首行首列；expectedContains 校验输出中包含固定文本。</span>
+              <el-button size="small" type="primary" plain @click="addProtectionRestoreDrillAssertion">添加断言</el-button>
+            </div>
+            <div v-if="!protectionRestoreDrillForm.validationAssertions?.length" class="restore-empty-tip">未配置断言时，只记录校验 SQL 输出和执行状态。</div>
+            <div
+              v-for="(item, index) in protectionRestoreDrillForm.validationAssertions"
+              :key="index"
+              class="restore-assertion-item"
+            >
+              <div class="restore-assertion-toolbar">
+                <span>断言 {{ index + 1 }}</span>
+                <el-button link type="danger" @click="removeProtectionRestoreDrillAssertion(index)">删除</el-button>
+              </div>
+              <el-input
+                v-model="item.sql"
+                type="textarea"
+                :rows="2"
+                placeholder="只允许只读 SQL，例如 SELECT COUNT(*) FROM orders"
+              />
+              <el-row :gutter="10" class="restore-assertion-fields">
+                <el-col :span="8">
+                  <el-input-number v-model="item.expectedRows" :min="0" :max="1000000000" placeholder="expectedRows" class="assertion-number" />
+                </el-col>
+                <el-col :span="8">
+                  <el-input v-model="item.expectedScalar" placeholder="expectedScalar" clearable />
+                </el-col>
+                <el-col :span="8">
+                  <el-input v-model="item.expectedContains" placeholder="expectedContains" clearable />
+                </el-col>
+              </el-row>
+            </div>
+          </div>
+        </el-form-item>
+        <el-form-item label="风险确认" prop="confirmIsolated">
+          <el-checkbox v-model="protectionRestoreDrillForm.confirmIsolated">我确认本次只恢复到 Runner 隔离环境，不覆盖生产数据。</el-checkbox>
+        </el-form-item>
+      </el-form>
+      <el-alert
+        v-if="protectionRestoreDrillResult"
+        :title="protectionRestoreDrillResult.message || protectionRestoreDrillResult.status"
+        :type="protectionRestoreDrillResult.job ? 'success' : protectionRestoreDrillResult.status === 'plan_failed' ? 'error' : 'warning'"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <template #footer>
+        <el-button @click="protectionRestoreDrillDialogVisible = false">取消</el-button>
+        <el-button type="warning" :loading="protectionRestoreDrillSubmitting" @click="submitProtectionRestoreDrill">生成并执行</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="restorePlanDialogVisible"
       title="生成 PITR 恢复计划"
       width="680px"
@@ -6832,6 +7148,7 @@ import {
 import { getCredentials } from '@/api/host'
 import {
   DATABASE_PERMISSION,
+  applyDatabaseMySQLPITRWizard,
   backupDatabaseBarmanServer,
   checkDatabaseBarmanServer,
   checkDatabaseReplication,
@@ -6869,6 +7186,7 @@ import {
 	  installDatabaseRunnerAgent,
   previewDatabaseBackupPolicyPurge,
   previewDatabaseBackupPolicySyntheticFull,
+  previewDatabaseMySQLPITRWizard,
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
@@ -6929,6 +7247,7 @@ import {
   runDatabaseBackupTask,
   runDatabaseLogArchiveCatchUp,
   runDatabaseLogArchiveOnce,
+  runDatabaseProtectionRestoreDrill,
   runDatabaseRestoreDryRun,
   runDatabaseRestorePlan,
   startDatabaseLogArchiveStream,
@@ -6956,7 +7275,11 @@ import {
   type DatabaseBackupRecordResult,
   type DatabaseBackupPolicyPayload,
   type DatabaseBackupPolicyResult,
+  type DatabaseMySQLPITRWizardPayload,
+  type DatabaseMySQLPITRWizardResult,
   type DatabaseProtectionProfileResult,
+  type DatabaseProtectionRestoreDrillPayload,
+  type DatabaseProtectionRestoreDrillResult,
   type DatabaseBackupRunResult,
   type DatabaseBackupTaskPayload,
   type DatabaseBackupTaskResult,
@@ -7217,6 +7540,16 @@ const backupTaskTotal = ref(0)
 const backupTaskFormRef = ref<FormInstance>()
 const protectionProfileLoading = ref(false)
 const validatingProtectionProfileId = ref('')
+const protectionWizardDialogVisible = ref(false)
+const protectionWizardSubmitting = ref(false)
+const protectionWizardPreviewing = ref(false)
+const protectionWizardPreview = ref<DatabaseMySQLPITRWizardResult>()
+const protectionWizardFormRef = ref<FormInstance>()
+const protectionRestoreDrillDialogVisible = ref(false)
+const protectionRestoreDrillSubmitting = ref(false)
+const protectionRestoreDrillFormRef = ref<FormInstance>()
+const protectionRestoreDrillProfile = ref<DatabaseProtectionProfileResult>()
+const protectionRestoreDrillResult = ref<DatabaseProtectionRestoreDrillResult>()
 const protectionProfiles = ref<DatabaseProtectionProfileResult[]>([])
 const protectionProfileTotal = ref(0)
 const backupPolicyLoading = ref(false)
@@ -7497,6 +7830,64 @@ const protectionProfileQuery = reactive({
   engine: '',
   protectionLevel: '',
   riskLevel: ''
+})
+
+const protectionWizardForm = reactive<DatabaseMySQLPITRWizardPayload>({
+  instanceId: 0,
+  sourceInstanceId: undefined,
+  sourceRole: 'primary',
+  runnerHostId: 0,
+  storageProfileId: undefined,
+  secretProfileId: undefined,
+  templateKey: 'rolling_synthetic_full',
+  policyName: '',
+  backupEngine: '',
+  toolExecutionMode: 'host_tools',
+  toolImage: '',
+  toolImageDigest: '',
+  containerDatadirPath: '',
+  containerWorkdirPath: '',
+  containerNetworkMode: 'host',
+  containerDatadirRo: true,
+  fullSchedule: '',
+  incrementalSchedule: '0 3 * * *',
+  runInitialFullNow: true,
+  binlogArchiveMode: 'polling',
+  binlogRpoTargetSeconds: 300,
+  binlogRetentionDays: 45,
+  syntheticEnabled: true,
+  syntheticAutoRun: true,
+  syntheticTriggerAfterIncrementals: 5,
+  syntheticMergeOldestIncrementals: 5,
+  syntheticRequireRestoreProof: true,
+  syntheticNeverDeleteWithoutProof: true,
+  syntheticMarkSupersededAfterProof: true,
+  syntheticSupersededKeepDays: 7,
+  restoreDrillRequired: true,
+  retentionFullKeepMonths: 6,
+  retentionIncrementalKeepDays: 45,
+  retentionBinlogKeepDays: 45,
+  retentionNeverDeleteWithoutProof: true,
+  archiveConfigJson: ''
+})
+
+const protectionRestoreDrillForm = reactive<DatabaseProtectionRestoreDrillPayload & { validationSqlText?: string; confirmIsolated?: boolean }>({
+  restoreTargetType: 'time',
+  restoreTargetValue: '',
+  targetTimelineId: '',
+  restoreTargetInclusive: true,
+  runnerHostId: undefined,
+  containerImage: '',
+  listenPort: undefined,
+  expiresInHours: 24,
+  validationSql: [],
+  validationAssertions: [],
+  validationSqlText: '',
+  cleanupOnFailure: false,
+  postgresStartInstance: true,
+  targetAction: 'pause',
+  barmanGetWal: true,
+  confirmIsolated: false
 })
 
 const backupPolicyQuery = reactive({
@@ -8035,6 +8426,30 @@ const backupPolicyRules: FormRules = {
   runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }]
 }
 
+const protectionWizardRules: FormRules = {
+  instanceId: [{ required: true, message: '请选择 MySQL/MariaDB 实例', trigger: 'change' }],
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
+  backupEngine: [{ required: true, message: '请选择物理备份工具', trigger: 'change' }],
+  incrementalSchedule: [{ required: true, message: '请输入增量 Cron', trigger: 'blur' }]
+}
+
+const protectionRestoreDrillRules: FormRules = {
+  restoreTargetType: [{ required: true, message: '请选择恢复目标类型', trigger: 'change' }],
+  restoreTargetValue: [{ required: true, message: '请选择恢复目标', trigger: 'change' }],
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
+  expiresInHours: [{ required: true, message: '请输入保留小时数', trigger: 'change' }],
+  confirmIsolated: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      if (!value) {
+        callback(new Error('请确认本次只恢复到隔离环境'))
+        return
+      }
+      callback()
+    },
+    trigger: 'change'
+  }]
+}
+
 const externalBackupRules: FormRules = {
   instanceId: [{ required: true, message: '请选择数据库实例', trigger: 'change' }],
   backupMethod: [{ required: true, message: '请选择备份方法', trigger: 'change' }],
@@ -8313,6 +8728,33 @@ const pitrBackupInstances = computed(() =>
 const mysqlPhysicalBackupPolicyInstances = computed(() =>
   instanceOptions.value.filter(item => ['mysql', 'mariadb'].includes(item.dbType) && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
 )
+
+const selectedProtectionWizardInstance = computed(() =>
+  instanceOptions.value.find(item => item.id === protectionWizardForm.instanceId)
+)
+
+const protectionWizardBackupEngineOptions = computed(() => {
+  if (selectedProtectionWizardInstance.value?.dbType === 'mariadb') {
+    return [{ label: 'mariadb-backup', value: 'mariadb_backup' }]
+  }
+  return [
+    { label: 'XtraBackup 8.0（MySQL 8.0.x）', value: 'xtrabackup_8_0' },
+    { label: 'XtraBackup 8.4（MySQL 8.4.x）', value: 'xtrabackup_8_4' },
+    { label: 'XtraBackup 2.4 legacy（MySQL 5.7）', value: 'xtrabackup_2_4' }
+  ]
+})
+
+const defaultProtectionWizardBackupEngine = () => {
+  const instance = selectedProtectionWizardInstance.value
+  if (instance?.dbType === 'mariadb') return 'mariadb_backup'
+  const version = String(instance?.version || '')
+  const match = version.match(/(\d+)\.(\d+)/)
+  const major = match ? Number(match[1]) : 0
+  const minor = match ? Number(match[2]) : 0
+  if (major === 5) return 'xtrabackup_2_4'
+  if (major === 8 && minor >= 4) return 'xtrabackup_8_4'
+  return 'xtrabackup_8_0'
+}
 
 const postgresqlBackupInstances = computed(() =>
   instanceOptions.value.filter(item => item.dbType === 'postgresql' && hasDatabasePermission(item, DATABASE_PERMISSION.BACKUP))
@@ -10191,6 +10633,76 @@ const resetRunLogArchiveCatchUpForm = () => {
   runLogArchiveCatchUpFormRef.value?.clearValidate()
 }
 
+const defaultEnabledRunnerHostId = () =>
+  runnerHosts.value.find(item => item.enabled && item.status === 'online')?.id ||
+  runnerHosts.value.find(item => item.enabled !== false)?.id ||
+  0
+
+const resetProtectionWizardForm = () => {
+  protectionWizardForm.instanceId = mysqlPhysicalBackupPolicyInstances.value[0]?.id || 0
+  protectionWizardForm.sourceInstanceId = undefined
+  protectionWizardForm.sourceRole = 'primary'
+  protectionWizardForm.runnerHostId = defaultEnabledRunnerHostId()
+  protectionWizardForm.storageProfileId = undefined
+  protectionWizardForm.secretProfileId = undefined
+  protectionWizardForm.templateKey = 'rolling_synthetic_full'
+  protectionWizardForm.policyName = selectedProtectionWizardInstance.value?.name ? `${selectedProtectionWizardInstance.value.name}-物理PITR保护` : ''
+  protectionWizardForm.backupEngine = defaultProtectionWizardBackupEngine()
+  protectionWizardForm.toolExecutionMode = 'host_tools'
+  protectionWizardForm.toolImage = ''
+  protectionWizardForm.toolImageDigest = ''
+  protectionWizardForm.containerDatadirPath = ''
+  protectionWizardForm.containerWorkdirPath = ''
+  protectionWizardForm.containerNetworkMode = 'host'
+  protectionWizardForm.containerDatadirRo = true
+  protectionWizardForm.reuseLogArchiveStreamId = undefined
+  protectionWizardForm.reuseBackupPolicyId = undefined
+  protectionWizardForm.fullSchedule = ''
+  protectionWizardForm.incrementalSchedule = '0 3 * * *'
+  protectionWizardForm.runInitialFullNow = true
+  protectionWizardForm.binlogArchiveMode = 'polling'
+  protectionWizardForm.binlogRpoTargetSeconds = 300
+  protectionWizardForm.binlogRetentionDays = 45
+  protectionWizardForm.syntheticEnabled = true
+  protectionWizardForm.syntheticAutoRun = true
+  protectionWizardForm.syntheticTriggerAfterIncrementals = 5
+  protectionWizardForm.syntheticMergeOldestIncrementals = 5
+  protectionWizardForm.syntheticRequireRestoreProof = true
+  protectionWizardForm.syntheticNeverDeleteWithoutProof = true
+  protectionWizardForm.syntheticMarkSupersededAfterProof = true
+  protectionWizardForm.syntheticSupersededKeepDays = 7
+  protectionWizardForm.restoreDrillRequired = true
+  protectionWizardForm.retentionFullKeepMonths = 6
+  protectionWizardForm.retentionIncrementalKeepDays = 45
+  protectionWizardForm.retentionBinlogKeepDays = 45
+  protectionWizardForm.retentionNeverDeleteWithoutProof = true
+  protectionWizardForm.archiveConfigJson = ''
+  protectionWizardPreview.value = undefined
+  protectionWizardFormRef.value?.clearValidate()
+}
+
+const resetProtectionRestoreDrillForm = () => {
+  protectionRestoreDrillProfile.value = undefined
+  protectionRestoreDrillResult.value = undefined
+  protectionRestoreDrillForm.restoreTargetType = 'time'
+  protectionRestoreDrillForm.restoreTargetValue = formatDateTimeInput()
+  protectionRestoreDrillForm.targetTimelineId = ''
+  protectionRestoreDrillForm.restoreTargetInclusive = true
+  protectionRestoreDrillForm.runnerHostId = defaultEnabledRunnerHostId() || undefined
+  protectionRestoreDrillForm.containerImage = ''
+  protectionRestoreDrillForm.listenPort = undefined
+  protectionRestoreDrillForm.expiresInHours = 24
+  protectionRestoreDrillForm.validationSql = []
+  protectionRestoreDrillForm.validationAssertions = []
+  protectionRestoreDrillForm.validationSqlText = ''
+  protectionRestoreDrillForm.cleanupOnFailure = false
+  protectionRestoreDrillForm.postgresStartInstance = true
+  protectionRestoreDrillForm.targetAction = 'pause'
+  protectionRestoreDrillForm.barmanGetWal = true
+  protectionRestoreDrillForm.confirmIsolated = false
+  protectionRestoreDrillFormRef.value?.clearValidate()
+}
+
 const resetRestorePlanForm = () => {
   restorePlanForm.sourceInstanceId = pitrBackupInstances.value[0]?.id || 0
   restorePlanForm.targetInstanceId = pitrRestoreTargetInstances.value.find(item => item.id !== restorePlanForm.sourceInstanceId)?.id
@@ -10725,6 +11237,275 @@ const submitRunLogArchiveCatchUp = async () => {
   }
 }
 
+const defaultRestoreImageForInstance = (instance?: { dbType?: string; version?: string }) => {
+  const version = String(instance?.version || '')
+  if (instance?.dbType === 'postgresql') {
+    const match = version.match(/(\d+)/)
+    return match ? `postgres:${match[1]}` : 'postgres:latest'
+  }
+  if (instance?.dbType === 'mariadb') {
+    const versionTag = version.split('-')[0]?.split(' ')[0] || ''
+    return versionTag ? `mariadb:${versionTag}` : 'mariadb:latest'
+  }
+  if (/8\.4/.test(version)) return 'mysql:8.4'
+  if (/5\.7/.test(version)) return 'mysql:5.7'
+  return 'mysql:8.0'
+}
+
+const parseProtectionWizardRule = (raw?: string) => {
+  if (!raw || !raw.trim()) return
+  try {
+    const parsed = JSON.parse(raw)
+    protectionWizardForm.syntheticAutoRun = parsed.autoRun !== false
+    protectionWizardForm.syntheticTriggerAfterIncrementals = Number(parsed.triggerAfterIncrementals || 5)
+    protectionWizardForm.syntheticMergeOldestIncrementals = Number(parsed.mergeOldestIncrementals || protectionWizardForm.syntheticTriggerAfterIncrementals || 5)
+    protectionWizardForm.syntheticRequireRestoreProof = parsed.requireRestoreProof !== false
+    protectionWizardForm.syntheticNeverDeleteWithoutProof = parsed.neverDeleteWithoutProof !== false
+    protectionWizardForm.syntheticMarkSupersededAfterProof = parsed.markSupersededAfterProof !== false
+    protectionWizardForm.syntheticSupersededKeepDays = Number(parsed.supersededKeepDaysAfterProof || parsed.supersededKeepDays || 7)
+  } catch (_err) {
+    // 保留向导默认值，后端预览会重新生成安全 JSON。
+  }
+}
+
+const parseProtectionWizardRetention = (raw?: string) => {
+  if (!raw || !raw.trim()) return
+  try {
+    const parsed = JSON.parse(raw)
+    protectionWizardForm.retentionFullKeepMonths = Number(parsed.fullKeepMonths || 6)
+    protectionWizardForm.retentionIncrementalKeepDays = Number(parsed.incrementalKeepDays || 45)
+    protectionWizardForm.retentionBinlogKeepDays = Number(parsed.binlogKeepDays || 45)
+    protectionWizardForm.retentionNeverDeleteWithoutProof = parsed.neverDeleteWithoutProof !== false
+  } catch (_err) {
+    // 保留向导默认值，后端预览会重新生成安全 JSON。
+  }
+}
+
+const handleProtectionWizardInstanceChange = () => {
+  protectionWizardForm.sourceInstanceId = undefined
+  protectionWizardForm.reuseLogArchiveStreamId = undefined
+  protectionWizardForm.reuseBackupPolicyId = undefined
+  protectionWizardForm.backupEngine = defaultProtectionWizardBackupEngine()
+  protectionWizardForm.policyName = selectedProtectionWizardInstance.value?.name ? `${selectedProtectionWizardInstance.value.name}-物理PITR保护` : ''
+  protectionWizardPreview.value = undefined
+}
+
+const openProtectionWizardDialog = async (row?: DatabaseProtectionProfileResult) => {
+  if (!runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  if (!storageProfiles.value.length) {
+    await loadStorageProfiles()
+  }
+  if (!logArchiveStreams.value.length) {
+    await loadLogArchiveStreams()
+  }
+  resetProtectionWizardForm()
+  if (row?.instanceId) {
+    const policy = row.backupPolicy
+    const stream = row.logArchiveStream
+    protectionWizardForm.instanceId = row.instanceId
+    protectionWizardForm.sourceInstanceId = policy?.sourceInstanceId || stream?.sourceInstanceId || undefined
+    protectionWizardForm.sourceRole = policy?.sourceRole || 'primary'
+    protectionWizardForm.runnerHostId = policy?.runnerHostId || stream?.runnerHostId || row.runnerHost?.id || defaultEnabledRunnerHostId()
+    protectionWizardForm.storageProfileId = policy?.storageProfileId || stream?.storageProfileId || row.storageProfile?.id || undefined
+    protectionWizardForm.secretProfileId = policy?.secretProfileId || stream?.secretProfileId || undefined
+    protectionWizardForm.policyName = policy?.name || `${row.instanceName}-物理PITR保护`
+    protectionWizardForm.backupEngine = policy?.backupEngine || defaultProtectionWizardBackupEngine()
+    protectionWizardForm.toolExecutionMode = policy?.toolExecutionMode || 'host_tools'
+    protectionWizardForm.toolImage = policy?.toolImage || ''
+    protectionWizardForm.toolImageDigest = policy?.toolImageDigest || ''
+    protectionWizardForm.containerDatadirPath = policy?.containerDatadirPath || ''
+    protectionWizardForm.containerWorkdirPath = policy?.containerWorkdirPath || ''
+    protectionWizardForm.containerNetworkMode = policy?.containerNetworkMode || 'host'
+    protectionWizardForm.containerDatadirRo = policy?.containerDatadirRo !== false
+    protectionWizardForm.reuseLogArchiveStreamId = stream?.id || policy?.binlogStreamId || undefined
+    protectionWizardForm.reuseBackupPolicyId = policy?.id || undefined
+    protectionWizardForm.fullSchedule = policy?.fullSchedule || ''
+    protectionWizardForm.incrementalSchedule = policy?.incrementalSchedule || '0 3 * * *'
+    protectionWizardForm.binlogArchiveMode = stream?.archiveMode && stream.archiveMode !== 'external' ? stream.archiveMode : 'polling'
+    protectionWizardForm.binlogRpoTargetSeconds = stream?.rpoTargetSeconds || 300
+    protectionWizardForm.binlogRetentionDays = stream?.retentionDays || 45
+    protectionWizardForm.syntheticEnabled = policy?.syntheticEnabled !== false
+    protectionWizardForm.restoreDrillRequired = policy?.restoreDrillRequired !== false
+    parseProtectionWizardRule(policy?.syntheticRuleJson)
+    parseProtectionWizardRetention(policy?.retentionJson)
+  }
+  protectionWizardDialogVisible.value = true
+}
+
+const buildProtectionWizardPayload = (): DatabaseMySQLPITRWizardPayload => ({
+  instanceId: protectionWizardForm.instanceId,
+  sourceInstanceId: protectionWizardForm.sourceInstanceId || undefined,
+  sourceRole: protectionWizardForm.sourceRole || 'primary',
+  runnerHostId: protectionWizardForm.runnerHostId,
+  storageProfileId: protectionWizardForm.storageProfileId || undefined,
+  secretProfileId: protectionWizardForm.secretProfileId || undefined,
+  templateKey: protectionWizardForm.templateKey || 'rolling_synthetic_full',
+  policyName: protectionWizardForm.policyName?.trim() || undefined,
+  backupEngine: protectionWizardForm.backupEngine || defaultProtectionWizardBackupEngine(),
+  toolExecutionMode: protectionWizardForm.toolExecutionMode || 'host_tools',
+  toolImage: protectionWizardForm.toolImage?.trim() || undefined,
+  toolImageDigest: protectionWizardForm.toolImageDigest?.trim() || undefined,
+  containerDatadirPath: protectionWizardForm.containerDatadirPath?.trim() || undefined,
+  containerWorkdirPath: protectionWizardForm.containerWorkdirPath?.trim() || undefined,
+  containerNetworkMode: protectionWizardForm.containerNetworkMode?.trim() || undefined,
+  containerDatadirRo: protectionWizardForm.containerDatadirRo !== false,
+  reuseLogArchiveStreamId: protectionWizardForm.reuseLogArchiveStreamId || undefined,
+  reuseBackupPolicyId: protectionWizardForm.reuseBackupPolicyId || undefined,
+  fullSchedule: protectionWizardForm.fullSchedule?.trim() || '',
+  incrementalSchedule: protectionWizardForm.incrementalSchedule?.trim() || '0 3 * * *',
+  runInitialFullNow: protectionWizardForm.runInitialFullNow === true,
+  binlogArchiveMode: protectionWizardForm.binlogArchiveMode || 'polling',
+  binlogRpoTargetSeconds: protectionWizardForm.binlogRpoTargetSeconds || 300,
+  binlogRetentionDays: protectionWizardForm.binlogRetentionDays || 45,
+  syntheticEnabled: protectionWizardForm.syntheticEnabled === true,
+  syntheticAutoRun: protectionWizardForm.syntheticAutoRun !== false,
+  syntheticTriggerAfterIncrementals: protectionWizardForm.syntheticTriggerAfterIncrementals || 5,
+  syntheticMergeOldestIncrementals: protectionWizardForm.syntheticMergeOldestIncrementals || 5,
+  syntheticRequireRestoreProof: protectionWizardForm.syntheticRequireRestoreProof !== false,
+  syntheticNeverDeleteWithoutProof: protectionWizardForm.syntheticNeverDeleteWithoutProof !== false,
+  syntheticMarkSupersededAfterProof: protectionWizardForm.syntheticMarkSupersededAfterProof !== false,
+  syntheticSupersededKeepDays: protectionWizardForm.syntheticSupersededKeepDays || 7,
+  restoreDrillRequired: protectionWizardForm.restoreDrillRequired !== false,
+  retentionFullKeepMonths: protectionWizardForm.retentionFullKeepMonths || 6,
+  retentionIncrementalKeepDays: protectionWizardForm.retentionIncrementalKeepDays || 45,
+  retentionBinlogKeepDays: protectionWizardForm.retentionBinlogKeepDays || 45,
+  retentionNeverDeleteWithoutProof: protectionWizardForm.retentionNeverDeleteWithoutProof !== false,
+  archiveConfigJson: protectionWizardForm.archiveConfigJson?.trim() || undefined
+})
+
+const previewProtectionWizard = async () => {
+  if (!protectionWizardFormRef.value) return
+  await protectionWizardFormRef.value.validate()
+  protectionWizardPreviewing.value = true
+  try {
+    const res = await previewDatabaseMySQLPITRWizard(buildProtectionWizardPayload()) as DatabaseMySQLPITRWizardResult
+    protectionWizardPreview.value = res
+    if (res.blockingReasons?.length) {
+      ElMessage.error(res.blockingReasons[0] || '保护向导预检未通过')
+    } else if (res.warnings?.length) {
+      ElMessage.warning(res.warnings[0] || '保护向导预检有提醒')
+    } else {
+      ElMessage.success('保护向导预检通过')
+    }
+  } finally {
+    protectionWizardPreviewing.value = false
+  }
+}
+
+const applyProtectionWizard = async () => {
+  if (!protectionWizardFormRef.value) return
+  await protectionWizardFormRef.value.validate()
+  if (protectionWizardPreview.value && !protectionWizardPreview.value.canApply) {
+    ElMessage.error(protectionWizardPreview.value.blockingReasons?.[0] || '保护向导预检未通过')
+    return
+  }
+  protectionWizardSubmitting.value = true
+  try {
+    const res = await applyDatabaseMySQLPITRWizard(buildProtectionWizardPayload()) as DatabaseMySQLPITRWizardResult
+    protectionWizardPreview.value = res
+    const fullText = res.initialFullRun?.runnerJobId ? `，初始 Full 已下发 Runner Job #${res.initialFullRun.runnerJobId}` : ''
+    if (res.warnings?.length) {
+      ElMessage.warning(`${res.warnings[0]}${fullText}`)
+    } else {
+      ElMessage.success(`MySQL/MariaDB PITR 保护已启用${fullText}`)
+    }
+    protectionWizardDialogVisible.value = false
+    await Promise.all([loadProtectionProfiles(), loadBackupPolicies(), loadLogArchiveStreams(), loadRunnerJobs()])
+  } finally {
+    protectionWizardSubmitting.value = false
+  }
+}
+
+const defaultRestoreImageForProfile = (row?: DatabaseProtectionProfileResult) => {
+  const instance = instanceOptions.value.find(item => item.id === row?.instanceId)
+  return defaultRestoreImageForInstance(instance || { dbType: row?.engine, version: row?.version })
+}
+
+const openProtectionRestoreDrillDialog = async (row: DatabaseProtectionProfileResult) => {
+  if (!runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  resetProtectionRestoreDrillForm()
+  protectionRestoreDrillProfile.value = row
+  protectionRestoreDrillForm.restoreTargetType = 'time'
+  protectionRestoreDrillForm.restoreTargetValue = row.recoverableUntil || formatDateTimeInput()
+  protectionRestoreDrillForm.runnerHostId = row.runnerHost?.id || row.backupPolicy?.runnerHostId || defaultEnabledRunnerHostId() || undefined
+  protectionRestoreDrillForm.containerImage = defaultRestoreImageForProfile(row)
+  protectionRestoreDrillForm.postgresStartInstance = row.engine === 'postgresql' ? true : undefined
+  protectionRestoreDrillForm.targetAction = row.engine === 'postgresql' ? 'pause' : undefined
+  protectionRestoreDrillForm.barmanGetWal = row.engine === 'postgresql' ? true : undefined
+  protectionRestoreDrillDialogVisible.value = true
+}
+
+const addProtectionRestoreDrillAssertion = () => {
+  if (!protectionRestoreDrillForm.validationAssertions) protectionRestoreDrillForm.validationAssertions = []
+  protectionRestoreDrillForm.validationAssertions.push({
+    sql: '',
+    expectedRows: undefined,
+    expectedContains: '',
+    expectedScalar: ''
+  })
+}
+
+const removeProtectionRestoreDrillAssertion = (index: number) => {
+  protectionRestoreDrillForm.validationAssertions?.splice(index, 1)
+}
+
+const submitProtectionRestoreDrill = async () => {
+  if (!protectionRestoreDrillFormRef.value || !protectionRestoreDrillProfile.value?.profileId) return
+  await protectionRestoreDrillFormRef.value.validate()
+  protectionRestoreDrillSubmitting.value = true
+  try {
+    const validationSql = String(protectionRestoreDrillForm.validationSqlText || '')
+      .split('\n')
+      .map(item => item.trim())
+      .filter(Boolean)
+    const validationAssertions = (protectionRestoreDrillForm.validationAssertions || [])
+      .map((item): DatabaseRestoreValidationAssertionPayload => ({
+        sql: String(item.sql || '').trim(),
+        expectedRows: typeof item.expectedRows === 'number' ? item.expectedRows : undefined,
+        expectedContains: String(item.expectedContains || '').trim() || undefined,
+        expectedScalar: String(item.expectedScalar || '').trim() || undefined
+      }))
+      .filter(item => Boolean(item.sql) && (
+        typeof item.expectedRows === 'number' ||
+        Boolean(item.expectedContains) ||
+        item.expectedScalar !== undefined
+      ))
+    const isPostgreSQL = protectionRestoreDrillProfile.value.engine === 'postgresql'
+    const payload: DatabaseProtectionRestoreDrillPayload = {
+      restoreTargetType: protectionRestoreDrillForm.restoreTargetType || 'time',
+      restoreTargetValue: protectionRestoreDrillForm.restoreTargetValue,
+      targetTimelineId: protectionRestoreDrillForm.targetTimelineId?.trim() || undefined,
+      restoreTargetInclusive: protectionRestoreDrillForm.restoreTargetInclusive !== false,
+      runnerHostId: protectionRestoreDrillForm.runnerHostId || undefined,
+      containerImage: protectionRestoreDrillForm.containerImage?.trim() || undefined,
+      listenPort: protectionRestoreDrillForm.listenPort || undefined,
+      expiresInHours: protectionRestoreDrillForm.expiresInHours || 24,
+      validationSql,
+      validationAssertions,
+      cleanupOnFailure: protectionRestoreDrillForm.cleanupOnFailure === true,
+      postgresStartInstance: isPostgreSQL ? protectionRestoreDrillForm.postgresStartInstance !== false : undefined,
+      targetAction: isPostgreSQL ? (protectionRestoreDrillForm.targetAction || 'pause') : undefined,
+      barmanGetWal: isPostgreSQL ? protectionRestoreDrillForm.barmanGetWal !== false : undefined
+    }
+    const res = await runDatabaseProtectionRestoreDrill(protectionRestoreDrillProfile.value.profileId, payload) as DatabaseProtectionRestoreDrillResult
+    protectionRestoreDrillResult.value = res
+    if (res.job) {
+      ElMessage.success(`恢复演练任务已下发 Runner Job #${res.job.id}`)
+    } else if (res.status === 'plan_failed' || res.status === 'run_failed') {
+      ElMessage.error(res.message || '恢复演练预检失败')
+    } else {
+      ElMessage.warning(res.message || '恢复计划已生成，请补充 Runner 后执行')
+    }
+    await Promise.all([loadProtectionProfiles(), loadRestorePlans(), loadRestoreJobs(), loadRunnerJobs()])
+  } finally {
+    protectionRestoreDrillSubmitting.value = false
+  }
+}
+
 const openRestorePlanDialog = () => {
   resetRestorePlanForm()
   restorePlanDialogVisible.value = true
@@ -10782,19 +11563,7 @@ const submitRestorePlan = async () => {
 }
 
 const defaultRestoreImageForPlan = (row?: DatabaseRestorePlanResult) => {
-  const source = instanceOptions.value.find(item => item.id === row?.sourceInstanceId)
-  const version = String(source?.version || '')
-  if (source?.dbType === 'postgresql') {
-    const match = version.match(/(\d+)/)
-    return match ? `postgres:${match[1]}` : 'postgres:latest'
-  }
-  if (source?.dbType === 'mariadb') {
-    const versionTag = version.split('-')[0]?.split(' ')[0] || ''
-    return versionTag ? `mariadb:${versionTag}` : 'mariadb:latest'
-  }
-  if (/8\.4/.test(version)) return 'mysql:8.4'
-  if (/5\.7/.test(version)) return 'mysql:5.7'
-  return 'mysql:8.0'
+  return defaultRestoreImageForInstance(instanceOptions.value.find(item => item.id === row?.sourceInstanceId))
 }
 
 const restorePlanTargetTimeline = (row?: DatabaseRestorePlanResult) => {
