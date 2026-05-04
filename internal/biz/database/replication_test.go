@@ -3,6 +3,7 @@ package database
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParsePostgreSQLDelaySeconds(t *testing.T) {
@@ -86,6 +87,48 @@ func TestPostgreSQLWALReceiverStatusQueryUsesPortableLSNColumns(t *testing.T) {
 	}
 	if !strings.Contains(query, "flushed_lsn::text") {
 		t.Fatalf("expected query to expose flushed_lsn for standby receiver diagnostics")
+	}
+}
+
+func TestReplicationCheckTriggerSourceText(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+		text string
+	}{
+		{name: "empty defaults to manual", raw: "", want: DatabaseReplicationCheckTriggerManual, text: "手动采集"},
+		{name: "batch", raw: DatabaseReplicationCheckTriggerBatch, want: DatabaseReplicationCheckTriggerBatch, text: "批量采集"},
+		{name: "scheduler", raw: DatabaseReplicationCheckTriggerScheduler, want: DatabaseReplicationCheckTriggerScheduler, text: "自动调度"},
+		{name: "topology", raw: DatabaseReplicationCheckTriggerTopologyAutoRefresh, want: DatabaseReplicationCheckTriggerTopologyAutoRefresh, text: "拓扑自动补采"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeReplicationCheckTriggerSource(tc.raw); got != tc.want {
+				t.Fatalf("normalizeReplicationCheckTriggerSource(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+			if got := ReplicationCheckTriggerSourceText(tc.raw); got != tc.text {
+				t.Fatalf("ReplicationCheckTriggerSourceText(%q) = %q, want %q", tc.raw, got, tc.text)
+			}
+		})
+	}
+}
+
+func TestNewerTime(t *testing.T) {
+	base := time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC)
+	older := base.Add(-time.Minute)
+	newer := base.Add(time.Minute)
+	if newerTime(nil, &base) {
+		t.Fatalf("nil candidate should not be newer")
+	}
+	if newerTime(&older, &base) {
+		t.Fatalf("older candidate should not be newer")
+	}
+	if !newerTime(&newer, &base) {
+		t.Fatalf("newer candidate should be newer")
+	}
+	if !newerTime(&base, nil) {
+		t.Fatalf("candidate should be newer than nil current")
 	}
 }
 

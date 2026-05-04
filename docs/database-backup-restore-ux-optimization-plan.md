@@ -2122,3 +2122,574 @@ docker compose up -d --force-recreate frontend backend
 ```
 
 说明：`npm run build` 仍有 Sass legacy JS API 和大 chunk 体积提示，这是项目现有打包提示，不影响本轮构建结果。
+
+## 25. 第六轮详细方案：副本自动采集与拓扑新鲜度
+
+本轮建议解决“副本关系和拓扑必须手动点采集才变新鲜”的问题。当前用户在拓扑页看到“副本状态采集已过期”，需要先点 `采集相关实例` 或到副本治理里点 `全量采集`，再刷新拓扑，使用成本偏高，也容易让保护概览和拓扑状态长时间停留在旧数据。
+
+### 25.1 改动前复查结论
+
+本轮方案基于以下代码和文档复查：
+
+- `web/src/views/asset/DatabaseManagement.vue`
+  - 拓扑页目前有 `采集当前实例`、`采集相关实例`、`刷新拓扑` 三个按钮。
+  - `采集相关实例` 会从当前拓扑节点中提取实例 ID，再逐个调用 `checkDatabaseReplication`。
+  - 副本治理页的 `全量采集` 也是前端循环所有 MySQL / MariaDB / PostgreSQL 实例逐个调用采集接口。
+- `web/src/api/database.ts`
+  - 当前只有单实例采集 API：`POST /api/v1/databases/instances/{id}/replication-check`。
+  - 没有批量采集、只采过期实例、采集任务状态等后端接口。
+- `internal/biz/database/replication.go`
+  - `CheckInstanceReplication` 会真正采集并落库。
+  - 成功采集后会写入 `database_replication_checks`。
+  - 当检测到当前实例是 replica / standby 时，会更新 `database_instance_replicas`。
+  - 上一轮已经加了人工登记保护，自动采集不会覆盖 `discovery_source=manual` 的主从关系、角色和延迟秒数。
+- `internal/biz/database/topology.go`
+  - `GetTopology` 会实时采集当前选中实例，用于返回拓扑结果。
+  - 相关副本节点仍依赖最近一次已落库的 `database_replication_checks` 和 `database_instance_replicas.last_checked_at`。
+  - 新鲜度阈值当前写死为：
+    - 5 分钟内：`fresh`
+    - 30 分钟内：`warning`
+    - 超过 30 分钟：`stale`
+  - `stale` 会生成“副本状态采集已过期”的拓扑风险。
+- `internal/server/database/http.go`
+  - 当前后台调度器只有备份调度器、备份告警调度器、容量采样调度器。
+  - 没有副本状态自动采集调度器。
+- `docs/database-large-backup-pitr-plan.md`
+  - P4 副本治理原设计只要求“手动刷新单实例和全量刷新”。
+  - 没有补齐自动采集、批量采集和拓扑自动补采。
+
+因此，当前问题不是单个按钮文案问题，而是副本运行态数据没有后台保鲜机制。拓扑页实时采集当前实例，但不会把相关副本都补采并落库；副本关系表和保护概览依赖落库结果，所以用户必须手动采集。
+
+### 25.2 本轮目标
+
+第六轮目标：
+
+- 用户进入拓扑页、备份恢复页、保护概览时，不需要先理解“采集”和“刷新”的区别。
+- 系统后台自动保持 MySQL / MariaDB / PostgreSQL 副本状态新鲜。
+- 拓扑页刷新时自动补采过期节点。
+- 手动采集保留为排障动作，而不是主路径必选动作。
+- 自动采集必须受控，不能对所有数据库造成突发连接压力。
+- 自动采集不能破坏人工标记的副本关系。
+- 采集失败要可见、可审计、可用于告警，但不能影响其他实例采集。
+
+### 25.3 总体方案
+
+建议分三层落地：
+
+1. 后端新增 `ReplicationCheckScheduler`，定时自动采集副本状态。
+2. 后端新增批量采集接口，给拓扑页、副本治理页和后续告警扫描复用。
+3. 前端把拓扑页主流程改成“自动补采 + 刷新拓扑”，手动按钮降级为排障入口。
+
+这三层需要一起做。只做前端自动点按钮，仍然会把批量循环、失败聚合、并发控制留在浏览器里；只做后台调度，用户刚添加实例或刚修复链路时仍可能要等下一轮。因此推荐后台调度和页面触发补采都做。
+
+### 25.4 后端自动采集调度器
+
+新增文件建议：
+
+- `internal/biz/database/replication_check_scheduler.go`
+
+新增结构：
+
+```go
+type ReplicationCheckSchedulerOptions struct {
+    Interval              time.Duration
+    StaleAfter            time.Duration
+    MaxConcurrency        int
+    BatchSize             int
+    IncludePrimary        bool
+    IncludeNonProduction  bool
+}
+
+type ReplicationCheckScheduler struct {
+    useCase *UseCase
+    interval time.Duration
+    staleAfter time.Duration
+    maxConcurrency int
+    batchSize int
+}
+```
+
+推荐默认值：
+
+- `Interval`: 5 分钟。
+- `StaleAfter`: 5 分钟。
+- `MaxConcurrency`: 2。
+- `BatchSize`: 200。
+- `IncludePrimary`: true。
+- `IncludeNonProduction`: true，首版建议纳入所有启用实例，后续再配置化。
+
+调度器行为：
+
+1. 服务启动后先延迟 30 秒再跑第一轮，避免启动期和迁移、缓存预热抢资源。
+2. 每 5 分钟扫描一次启用中的 MySQL / MariaDB / PostgreSQL 实例。
+3. 只采集以下实例：
+   - 没有最近采集记录。
+   - 最近采集超过 `StaleAfter`。
+   - 当前已有 `database_instance_replicas` 关系且关系过期。
+   - 最近检测为 replica / standby 的实例。
+   - 已人工标记为 replica / delayed / standby 的实例。
+4. 每个实例独立超时，沿用现有 `replicationCheckTimeout=15s`。
+5. 单个实例采集失败不终止整轮。
+6. 自动采集写入审计时使用系统操作人，例如：
+   - `OperatorID=0`
+   - `OperatorName=system`
+   - `ClientIP=replication-scheduler`
+7. 日志里输出本轮汇总：
+   - 成功数量。
+   - 失败数量。
+   - 跳过数量。
+   - 耗时。
+
+需要拆出的 UseCase 内部方法：
+
+```go
+func (uc *UseCase) RunReplicationCheck(ctx context.Context, instanceID uint, operator QueryOperator) (*DatabaseReplicationCheck, error)
+```
+
+原因：现在 `CheckInstanceReplication` 直接返回 VO 给 HTTP 使用。调度器和批量接口都应该复用同一条“采集、落库、更新关系、审计”的业务链路，避免出现三套采集逻辑。
+
+### 25.5 后端批量采集接口
+
+新增 API：
+
+```text
+POST /api/v1/databases/replication-checks/batch
+```
+
+权限：
+
+- `database:replica:check`
+
+请求建议：
+
+```json
+{
+  "instanceIds": [1, 45, 46],
+  "onlyStale": true,
+  "staleSeconds": 300,
+  "includeRelated": true,
+  "maxConcurrency": 2
+}
+```
+
+字段说明：
+
+- `instanceIds`：指定采集实例。为空时可按权限范围采集全部支持实例。
+- `onlyStale`：只采集过期或无采集记录的实例。
+- `staleSeconds`：过期阈值，默认 300 秒。
+- `includeRelated`：自动扩展采集相关主库和副本。
+- `maxConcurrency`：本次请求并发上限，不能超过后端硬上限。
+
+返回建议：
+
+```json
+{
+  "success": 2,
+  "failed": 0,
+  "skipped": 1,
+  "items": [
+    {
+      "instanceId": 1,
+      "instanceName": "opshub-mysql",
+      "status": "success",
+      "checkedAt": "2026-05-05 03:20:00",
+      "message": "采集完成"
+    }
+  ]
+}
+```
+
+批量接口的价值：
+
+- 前端不再逐个循环请求。
+- 后端统一做权限过滤、并发限制、失败聚合。
+- 后续备份保护、告警扫描、拓扑刷新都可以复用。
+- 批量采集可以只采 stale 节点，减少数据库压力。
+
+### 25.6 拓扑页交互优化
+
+当前按钮：
+
+- `采集当前实例`
+- `采集相关实例`
+- `刷新拓扑`
+
+建议调整为：
+
+- 主按钮：`刷新拓扑`
+- 次按钮：`采集状态`
+- 更多菜单：
+  - `采集当前实例`
+  - `采集相关实例`
+  - `查看最近采集`
+
+主按钮 `刷新拓扑` 的内部流程：
+
+1. 调用 `GET /instances/{id}/topology`。
+2. 读取返回节点和边里的 `metrics.check_freshness`。
+3. 如果存在 `stale` 或 `unknown`，并且用户有 `replicaCheck` 权限：
+   - 调用批量采集接口。
+   - 采集对象包括当前实例、拓扑节点中的实例、边上的 replica instance。
+   - 只采过期节点。
+4. 采集成功后再次调用 `GET /instances/{id}/topology`。
+5. 页面显示最终拓扑。
+
+如果用户没有 `replicaCheck` 权限：
+
+- 仍允许刷新拓扑。
+- 不自动采集。
+- 风险提示文案改为：
+  - `副本状态已过期，需要副本采集权限才能刷新运行态。`
+
+加载体验：
+
+- 第一阶段 loading：`读取拓扑`
+- 第二阶段 loading：`补采过期副本状态`
+- 第三阶段 loading：`刷新拓扑`
+
+这样用户感知上仍然是一个按钮，而不是必须理解两个动作。
+
+### 25.7 副本治理页优化
+
+副本治理页建议保留手动能力，但定位改成“排障和立即验证”：
+
+- `全量采集` 改名为 `立即采集全部`。
+- 增加 `只采过期` 开关，默认开启。
+- 副本关系表增加自动采集状态：
+  - 最近自动采集时间。
+  - 最近采集来源：`manual / scheduler / topology_auto_refresh`。
+  - 采集新鲜度：`新鲜 / 即将过期 / 已过期 / 无记录`。
+- 最近采集表增加触发来源字段：
+  - `manual`
+  - `scheduler`
+  - `batch`
+  - `topology_auto_refresh`
+
+如果不想改表结构，可以先从审计和 `raw_status_json` 里弱表达；但推荐后续给 `database_replication_checks` 增加 `trigger_source` 字段，查询和排障更直接。
+
+### 25.8 数据模型建议
+
+首版可以不新增表，只复用：
+
+- `database_replication_checks`
+- `database_instance_replicas`
+
+但为了区分自动采集和手动采集，建议新增字段：
+
+在 `database_replication_checks` 增加：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `trigger_source` | varchar(40) | `manual / scheduler / batch / topology_auto_refresh` |
+| `operator_id` | uint | 手动触发时的用户 ID，系统触发为 0 |
+| `operator_name` | varchar(100) | 操作人，系统触发为 `system` |
+
+不建议新增“自动采集任务表”，除非后续要做长时间任务队列、任务取消、任务进度。如果第六轮只做轻量后台调度和批量接口，直接写入采集记录即可。
+
+### 25.9 配置建议
+
+自动副本采集需要配置化，但第六轮可以先后端默认开启，再把配置放到数据库管理系统配置中。
+
+建议配置项：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `replicationAutoCollectEnabled` | true | 是否启用自动副本采集 |
+| `replicationAutoCollectIntervalSeconds` | 300 | 自动采集间隔 |
+| `replicationStaleAfterSeconds` | 300 | 超过多久视为需要补采 |
+| `replicationTopologyStaleSeconds` | 1800 | 超过多久拓扑展示为过期 |
+| `replicationMaxConcurrency` | 2 | 自动采集最大并发 |
+| `replicationBatchSize` | 200 | 单轮最多扫描实例数 |
+| `replicationCollectTimeoutSeconds` | 15 | 单实例采集超时 |
+
+当前 `topologyCheckFreshSeconds` 和 `topologyCheckStaleSeconds` 是硬编码，建议第六轮先保留默认值，同时把文案和调度器阈值对齐；第七轮再做系统配置页面。
+
+### 25.10 告警和风险联动
+
+第四轮已经有备份恢复告警闭环。第六轮可先只做采集保鲜，不立即新增告警类型。但建议预留以下候选：
+
+- `replica_check_failed`：副本状态采集失败。
+- `replica_check_stale`：副本状态长时间未刷新。
+- `replica_lag_high`：复制延迟超过阈值。
+- `replica_apply_stopped`：MySQL SQL 线程停止或 PostgreSQL replay 暂停。
+- `replica_source_unmatched`：来源主库无法匹配。
+
+第六轮至少要做到：
+
+- 采集失败写入 `database_replication_checks.error_message`。
+- `database_instance_replicas.last_error` 更新为最近错误。
+- 拓扑风险和副本治理页能看到失败原因。
+
+第七轮再把这些接入 `BackupAlertScheduler` 或新增数据库副本告警规则。
+
+### 25.11 权限和安全
+
+自动采集本质上会连接数据库并执行只读状态查询，需要注意：
+
+- 调度器只能采集 OpsHub 已启用实例。
+- 仍然复用实例凭据，不新增数据库账号管理逻辑。
+- 自动采集执行的 SQL 必须保持只读：
+  - MySQL / MariaDB: `SHOW REPLICA STATUS`、`SHOW SLAVE STATUS`、必要变量读取。
+  - PostgreSQL: `pg_is_in_recovery()`、`pg_stat_replication`、`pg_stat_wal_receiver`、LSN 和 replay timestamp 查询。
+- 自动采集不执行：
+  - `STOP REPLICA`
+  - `START REPLICA`
+  - `pg_wal_replay_pause`
+  - promote / failover / switchover
+- 采集原始结果继续脱敏：
+  - password
+  - conninfo password
+  - token / secret 类字段
+
+人工触发批量采集时，仍然检查 `database:replica:check` 权限；自动调度器以系统身份执行，不受单个用户权限影响，但只扫描已纳管实例。
+
+### 25.12 失败处理
+
+自动采集失败策略：
+
+- 单实例失败：记录失败，不影响其他实例。
+- 某一轮失败数量过多：后端日志 warning。
+- 数据库连接超时：写入采集记录，健康状态 `unknown` 或 `warning`。
+- 凭据缺失：写入错误，提示修复凭据。
+- 不支持引擎：跳过，不写错误。
+- 实例禁用：跳过。
+- 手工标记关系存在但采集失败：保留人工关系，只更新 `last_error` 和健康状态。
+
+批量接口返回时要区分：
+
+- `success`
+- `failed`
+- `skipped`
+
+跳过不应该算失败，例如实例未过期、实例禁用、数据库类型不支持。
+
+### 25.13 前端文案建议
+
+拓扑风险文案调整：
+
+当前：
+
+- `副本状态采集已过期`
+- `点击采集相关实例刷新当前拓扑中的主库和副本状态。`
+
+建议：
+
+- 自动采集已开启但本节点过期：
+  - 标题：`副本状态等待自动刷新`
+  - 描述：`最近一次采集距今约 2h55m，系统会自动刷新；也可以立即采集。`
+  - 动作：`立即采集`
+- 自动采集失败：
+  - 标题：`副本状态自动采集失败`
+  - 描述：展示最近错误。
+  - 动作：`查看采集详情`
+- 用户无采集权限：
+  - 标题：`副本状态已过期`
+  - 描述：`当前账号没有副本采集权限，只能查看最近一次采集结果。`
+  - 动作：无。
+
+按钮文案：
+
+- `刷新拓扑`：主按钮，自动补采必要运行态。
+- `立即采集`：只在风险卡片或更多菜单里出现。
+- `查看最近采集`：跳转副本治理最近采集表。
+
+### 25.14 分阶段落地建议
+
+第六轮建议按 4 个小步走：
+
+1. 后端调度器
+   - 新增 `ReplicationCheckScheduler`。
+   - 接入 `HTTPServer.StartBackground` 和 `StopBackground`。
+   - 每 5 分钟采集过期实例。
+   - 补单测。
+
+2. 批量采集接口
+   - 新增 request / response。
+   - 后端统一并发、权限、失败聚合。
+   - 前端副本治理页 `全量采集` 改用批量接口。
+
+3. 拓扑自动补采
+   - `刷新拓扑` 自动识别 stale / unknown 节点。
+   - 有权限则调用批量接口补采。
+   - 补采后自动刷新拓扑。
+   - 手动采集按钮降级。
+
+4. 文案和状态优化
+   - 拓扑风险文案区分自动采集开启、失败、无权限。
+   - 副本治理表展示采集新鲜度。
+   - 文档补充运行说明和验收记录。
+
+### 25.15 验收标准
+
+功能验收：
+
+- 新启动服务后，不手动点击采集，副本关系的 `last_checked_at` 会自动刷新。
+- 拓扑页打开后，如果副本节点过期，系统自动补采并刷新拓扑。
+- `opshub-mysql-replica` 和 `mysql-delay-replica-2` 不再长期停留在 `2h55m` 这种过期状态。
+- 手工标记的延迟从库仍保持 `manual` 关系和 3600 秒延迟配置，不被自动采集覆盖。
+- 批量采集接口能返回成功、失败、跳过明细。
+- 单个实例凭据错误时，其他实例仍能采集成功。
+
+安全验收：
+
+- 自动采集不执行任何暂停、恢复、切换、提升命令。
+- 原始采集结果继续脱敏。
+- 批量接口必须校验 `database:replica:check` 权限。
+
+性能验收：
+
+- 默认并发不超过 2。
+- 采集 10 个实例时不会阻塞页面请求。
+- 后端日志可看到每轮自动采集汇总。
+
+回归验收：
+
+```bash
+go test ./...
+npm run typecheck
+npm run build
+git diff --check
+```
+
+发布验收：
+
+```bash
+docker build -t opshub-api:latest -f Dockerfile .
+docker build -f Dockerfile.frontend -t opshub-web:latest .
+docker compose up -d --force-recreate frontend backend
+docker compose ps backend frontend mysql redis
+```
+
+### 25.16 本轮不建议做的内容
+
+第六轮先不做：
+
+- 不做副本切换、提升、自动故障转移。
+- 不把采集任务做成长任务中心。
+- 不引入复杂 cron 表达式。
+- 不做每个实例独立采集计划。
+- 不接入值班升级和副本告警规则。
+- 不改数据库真实复制配置。
+
+第六轮重点是把“副本状态自动保鲜”和“拓扑刷新不需要手动采集”做扎实。
+
+## 26. 第六轮落地记录：副本自动采集与拓扑自动补采
+
+本轮按第 25 节方案落地，目标是解决“副本状态必须手动点采集”的体验问题，并把采集动作从前端循环请求下沉到后端统一控制。
+
+### 26.1 本轮改动前复查结论
+
+改动前相关入口和问题：
+
+- 拓扑页的 `采集当前实例`、`采集相关实例`、`刷新拓扑` 位于 `web/src/views/asset/DatabaseManagement.vue`。
+- `collectTopologyReplicationChecks` 由前端逐个调用 `checkDatabaseReplication(id)`，页面负责串行循环、失败计数和刷新。
+- 副本治理页的 `全量采集` 同样遍历 `replicationInstances`，逐个调用单实例采集接口。
+- 后端只有单实例接口 `POST /api/v1/databases/instances/:id/replication-check`，没有批量采集接口。
+- `internal/biz/database/replication.go` 的采集逻辑只在手动请求时运行，采集结果会写入 `database_replication_checks` 并更新副本关系。
+- `internal/biz/database/topology.go` 能判断 `check_freshness=normal/warning/stale/unknown`，但只是展示风险，不会主动触发补采。
+- `internal/server/database/http.go` 已有备份调度器、备份告警调度器和容量调度器，但没有副本采集调度器。
+
+因此，界面出现 `副本状态采集已过期` 时，用户必须再手动点 `采集相关实例`；如果忘记点击，拓扑和副本治理长期显示旧数据。
+
+### 26.2 后端落地内容
+
+新增能力：
+
+- 新增 `POST /api/v1/databases/replication-checks/batch` 批量采集接口。
+- 新增 `DatabaseReplicationCheckBatchRequest`、`DatabaseReplicationCheckBatchResultVO`、`DatabaseReplicationCheckBatchItemVO`。
+- 批量接口支持：
+  - 指定实例 ID 列表；
+  - 只采过期实例；
+  - 自动带上相关主库/从库；
+  - 后端并发控制，默认 2，最大 5；
+  - 成功、失败、跳过明细返回；
+  - 权限作用域过滤，沿用数据库实例权限。
+- 单实例采集逻辑抽到 `runReplicationCheck`，批量接口和原手动接口共用同一套采集、落库、关系更新、审计逻辑。
+- 新增 `ReplicationCheckScheduler`，服务启动后自动运行：
+  - 初始延迟 45 秒；
+  - 每 5 分钟扫描一次；
+  - 只采集超过 5 分钟新鲜窗口的实例；
+  - 只做只读状态采集，不执行 pause/resume/promote/failover。
+
+新增采集来源字段：
+
+- `manual`：手动采集。
+- `batch`：副本治理页批量采集。
+- `scheduler`：后台自动调度。
+- `topology_auto_refresh`：拓扑刷新时自动补采。
+
+数据库模型增加字段：
+
+- `database_replication_checks.trigger_source`
+- `database_replication_checks.operator_id`
+- `database_replication_checks.operator_name`
+
+这些字段用于区分一条采集记录到底来自人工、页面批量、拓扑自动补采还是后台调度。
+
+### 26.3 前端落地内容
+
+拓扑页：
+
+- `刷新拓扑` 现在会先读取拓扑。
+- 如果拓扑节点或链路的 `check_freshness` 是 `stale` 或 `unknown`，并且当前用户有 `database:replica:check` 权限，前端会自动调用批量采集接口。
+- 自动补采成功或失败后，拓扑会再刷新一次。
+- 原来的 `采集相关实例` 改为 `立即采集相关实例`，作为人工兜底按钮保留。
+- 自动补采不再由前端逐个请求实例，而是一次批量请求交给后端并发控制。
+
+副本治理页：
+
+- `重新采集`、`全量采集` 统一改为 `立即采集`。
+- 新增 `只采过期 / 采集全部` 开关，默认 `只采过期`，避免每次都打所有实例。
+- 最近采集表新增 `触发来源` 列，能看出记录是手动、批量、调度还是拓扑自动补采产生。
+- 全局采集不再前端串行循环，改用后端批量接口返回汇总。
+
+### 26.4 本轮涉及主要文件
+
+- `internal/biz/database/model.go`
+- `internal/biz/database/usecase.go`
+- `internal/biz/database/replication.go`
+- `internal/biz/database/replication_check_scheduler.go`
+- `internal/service/database/http.go`
+- `internal/service/database/replication.go`
+- `internal/server/database/http.go`
+- `web/src/api/database.ts`
+- `web/src/views/asset/DatabaseManagement.vue`
+
+### 26.5 已完成验证
+
+本轮代码验证命令：
+
+```bash
+go test ./...
+npm run typecheck
+npm run build
+git diff --check
+```
+
+验证结果：
+
+- Go 全量测试通过。
+- 前端类型检查通过。
+- 前端生产构建通过。
+- `git diff --check` 通过。
+- 前端构建仍有既有 Sass legacy JS API 提示和 chunk size 提示，不影响构建结果。
+
+### 26.6 预期效果
+
+上线后应该看到：
+
+- 不再必须手动点 `采集` 才能让副本状态更新。
+- 后台会周期性刷新过期副本状态。
+- 打开拓扑页时，过期节点会自动补采并刷新。
+- 副本治理的批量采集速度更稳定，失败不会中断其他实例。
+- 最近采集记录能追踪触发来源，排查“是谁触发的采集”更直接。
+
+### 26.7 后续可继续做的内容
+
+第六轮先把自动保鲜打通，后续如果继续优化，可以再做：
+
+- 在保护概览卡片里直接展示“自动采集运行中 / 最近自动采集时间”。
+- 给副本状态采集接入监控告警，把调度失败、长期 stale、延迟超阈值推到监控告警中心。
+- 增加批量采集历史页，专门查看每轮批量任务的明细。
+- 给调度间隔、新鲜窗口、并发数做系统配置项。
+- 拓扑页增加“本次自动补采了哪些实例”的轻量提示。

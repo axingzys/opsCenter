@@ -340,6 +340,17 @@ type DatabaseReplicationCheckListRequest struct {
 	AllowedInstanceIDs []uint `form:"-" json:"-"`
 }
 
+type DatabaseReplicationCheckBatchRequest struct {
+	InstanceIDs        []uint `json:"instanceIds"`
+	OnlyStale          bool   `json:"onlyStale"`
+	StaleSeconds       int    `json:"staleSeconds" binding:"omitempty,min=0,max=86400"`
+	IncludeRelated     bool   `json:"includeRelated"`
+	MaxConcurrency     int    `json:"maxConcurrency" binding:"omitempty,min=0,max=10"`
+	RestrictToAllowed  bool   `form:"-" json:"-"`
+	AllowedInstanceIDs []uint `form:"-" json:"-"`
+	TriggerSource      string `json:"triggerSource" binding:"omitempty,max=40"`
+}
+
 type DatabaseInstanceReplicaMarkRequest struct {
 	PrimaryInstanceID      uint   `json:"primaryInstanceId" binding:"required"`
 	ReplicaInstanceID      uint   `json:"replicaInstanceId" binding:"required"`
@@ -631,7 +642,31 @@ type DatabaseReplicationCheckVO struct {
 	RawStatusJSON             string `json:"rawStatusJson"`
 	CheckedAt                 string `json:"checkedAt"`
 	ErrorMessage              string `json:"errorMessage"`
+	TriggerSource             string `json:"triggerSource"`
+	TriggerSourceText         string `json:"triggerSourceText"`
+	OperatorID                uint   `json:"operatorId"`
+	OperatorName              string `json:"operatorName"`
 	CreatedAt                 string `json:"createdAt"`
+}
+
+type DatabaseReplicationCheckBatchItemVO struct {
+	InstanceID        uint   `json:"instanceId"`
+	InstanceName      string `json:"instanceName"`
+	Status            string `json:"status"`
+	StatusText        string `json:"statusText"`
+	CheckID           uint   `json:"checkId"`
+	CheckedAt         string `json:"checkedAt"`
+	Message           string `json:"message"`
+	ErrorMessage      string `json:"errorMessage"`
+	TriggerSource     string `json:"triggerSource"`
+	TriggerSourceText string `json:"triggerSourceText"`
+}
+
+type DatabaseReplicationCheckBatchResultVO struct {
+	Success int                                    `json:"success"`
+	Failed  int                                    `json:"failed"`
+	Skipped int                                    `json:"skipped"`
+	Items   []*DatabaseReplicationCheckBatchItemVO `json:"items"`
 }
 
 type DatabaseReplicationStatusVO struct {

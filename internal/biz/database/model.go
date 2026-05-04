@@ -325,6 +325,11 @@ const (
 	DatabaseReplicaDiscoveryManual        = "manual"
 	DatabaseReplicaDiscoveryInferred      = "inferred"
 
+	DatabaseReplicationCheckTriggerManual              = "manual"
+	DatabaseReplicationCheckTriggerBatch               = "batch"
+	DatabaseReplicationCheckTriggerScheduler           = "scheduler"
+	DatabaseReplicationCheckTriggerTopologyAutoRefresh = "topology_auto_refresh"
+
 	DatabaseReplicaApplyStateRunning = "running"
 	DatabaseReplicaApplyStatePaused  = "paused"
 	DatabaseReplicaApplyStateUnknown = "unknown"
@@ -445,6 +450,9 @@ type DatabaseReplicationCheck struct {
 	RawStatusJSON             string     `gorm:"column:raw_status_json;type:text;comment:脱敏原始采集结果JSON" json:"rawStatusJson"`
 	CheckedAt                 *time.Time `gorm:"column:checked_at;index;comment:检查时间" json:"checkedAt,omitempty"`
 	ErrorMessage              string     `gorm:"column:error_message;type:varchar(1000);comment:错误信息" json:"errorMessage"`
+	TriggerSource             string     `gorm:"column:trigger_source;type:varchar(40);index;default:'manual';comment:触发来源" json:"triggerSource"`
+	OperatorID                uint       `gorm:"column:operator_id;index;comment:操作人" json:"operatorId"`
+	OperatorName              string     `gorm:"column:operator_name;type:varchar(100);comment:操作人名称" json:"operatorName"`
 }
 
 func (DatabaseReplicationCheck) TableName() string {

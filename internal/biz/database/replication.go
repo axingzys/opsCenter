@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -172,6 +174,17 @@ func (uc *UseCase) GetInstanceReplicationStatus(ctx context.Context, instanceID 
 }
 
 func (uc *UseCase) CheckInstanceReplication(ctx context.Context, instanceID uint, operator QueryOperator) (*DatabaseReplicationCheckVO, error) {
+	check, err := uc.runReplicationCheck(ctx, instanceID, operator, DatabaseReplicationCheckTriggerManual)
+	if check == nil {
+		return nil, err
+	}
+	if err != nil {
+		return uc.toReplicationCheckVO(ctx, check), err
+	}
+	return uc.toReplicationCheckVO(ctx, check), nil
+}
+
+func (uc *UseCase) runReplicationCheck(ctx context.Context, instanceID uint, operator QueryOperator, triggerSource string) (*DatabaseReplicationCheck, error) {
 	if instanceID == 0 {
 		return nil, fmt.Errorf("请选择数据库实例")
 	}
@@ -182,9 +195,28 @@ func (uc *UseCase) CheckInstanceReplication(ctx context.Context, instanceID uint
 	if err != nil {
 		return nil, err
 	}
+	triggerSource = normalizeReplicationCheckTriggerSource(triggerSource)
 	credential, err := uc.credentialResolver(ctx, item.CredentialID)
 	if err != nil {
-		return nil, fmt.Errorf("凭据不存在")
+		now := time.Now()
+		check := &DatabaseReplicationCheck{
+			InstanceID:    item.ID,
+			Engine:        normalizeDBType(item.DBType),
+			RoleDetected:  DatabaseReplicationRoleUnknown,
+			HealthStatus:  DatabaseReplicaHealthUnknown,
+			CheckedAt:     &now,
+			ErrorMessage:  "凭据不存在",
+			RawStatusJSON: marshalReplicaJSON(map[string]any{"error": "凭据不存在"}),
+			TriggerSource: triggerSource,
+			OperatorID:    operator.ID,
+			OperatorName:  trimText(operator.Username, 100),
+		}
+		if saveErr := uc.replicationCheckRepo.Create(ctx, check); saveErr != nil {
+			return nil, saveErr
+		}
+		uc.updateReplicaRelationRuntimeFromCheck(ctx, check)
+		uc.recordReplicationAudit(ctx, item, check, operator, err)
+		return check, fmt.Errorf("凭据不存在")
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, replicationCheckTimeout)
 	defer cancel()
@@ -222,6 +254,9 @@ func (uc *UseCase) CheckInstanceReplication(ctx context.Context, instanceID uint
 	if check == nil {
 		return nil, fmt.Errorf("副本状态采集结果为空")
 	}
+	check.TriggerSource = triggerSource
+	check.OperatorID = operator.ID
+	check.OperatorName = trimText(operator.Username, 100)
 	if saveErr := uc.replicationCheckRepo.Create(ctx, check); saveErr != nil {
 		return nil, saveErr
 	}
@@ -240,11 +275,220 @@ func (uc *UseCase) CheckInstanceReplication(ctx context.Context, instanceID uint
 			}
 		}
 	}
+	if err != nil || !isReplicaDetected(check.RoleDetected) {
+		uc.updateReplicaRelationRuntimeFromCheck(ctx, check)
+	}
 	uc.recordReplicationAudit(ctx, item, check, operator, err)
 	if err != nil {
-		return uc.toReplicationCheckVO(ctx, check), err
+		return check, err
 	}
-	return uc.toReplicationCheckVO(ctx, check), nil
+	return check, nil
+}
+
+func (uc *UseCase) RunReplicationCheckBatch(ctx context.Context, req *DatabaseReplicationCheckBatchRequest, operator QueryOperator) (*DatabaseReplicationCheckBatchResultVO, error) {
+	if req == nil {
+		req = &DatabaseReplicationCheckBatchRequest{}
+	}
+	if uc.instanceRepo == nil || uc.replicationCheckRepo == nil || uc.instanceReplicaRepo == nil {
+		return nil, fmt.Errorf("副本治理仓储未配置")
+	}
+	triggerSource := normalizeReplicationCheckTriggerSource(req.TriggerSource)
+	staleAfter := time.Duration(req.StaleSeconds) * time.Second
+	if staleAfter <= 0 {
+		staleAfter = 5 * time.Minute
+	}
+	maxConcurrency := req.MaxConcurrency
+	if maxConcurrency <= 0 {
+		maxConcurrency = 2
+	}
+	if maxConcurrency > 5 {
+		maxConcurrency = 5
+	}
+
+	ids, err := uc.replicationBatchInstanceIDs(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	result := &DatabaseReplicationCheckBatchResultVO{Items: make([]*DatabaseReplicationCheckBatchItemVO, 0, len(ids))}
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	jobs := make(chan uint)
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	worker := func() {
+		defer wg.Done()
+		for instanceID := range jobs {
+			item := uc.runReplicationBatchItem(ctx, instanceID, operator, triggerSource, req.OnlyStale, staleAfter)
+			mu.Lock()
+			result.Items = append(result.Items, item)
+			switch item.Status {
+			case "success":
+				result.Success++
+			case "failed":
+				result.Failed++
+			default:
+				result.Skipped++
+			}
+			mu.Unlock()
+		}
+	}
+	for i := 0; i < maxConcurrency; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	for _, id := range ids {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return result, ctx.Err()
+		case jobs <- id:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	sort.SliceStable(result.Items, func(i, j int) bool {
+		return result.Items[i].InstanceID < result.Items[j].InstanceID
+	})
+	return result, nil
+}
+
+func (uc *UseCase) replicationBatchInstanceIDs(ctx context.Context, req *DatabaseReplicationCheckBatchRequest) ([]uint, error) {
+	seen := map[uint]struct{}{}
+	add := func(id uint) {
+		if id == 0 {
+			return
+		}
+		if req.RestrictToAllowed && !uintInList(id, req.AllowedInstanceIDs) {
+			return
+		}
+		seen[id] = struct{}{}
+	}
+	for _, id := range req.InstanceIDs {
+		add(id)
+	}
+	if len(seen) == 0 {
+		instances, err := uc.instanceRepo.ListEnabled(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range instances {
+			if item == nil || !isReplicaGovernanceEngine(normalizeDBType(item.DBType)) {
+				continue
+			}
+			add(item.ID)
+		}
+	}
+	if req.IncludeRelated && uc.instanceReplicaRepo != nil {
+		baseIDs := make([]uint, 0, len(seen))
+		for id := range seen {
+			baseIDs = append(baseIDs, id)
+		}
+		for _, id := range baseIDs {
+			replicas, _, err := uc.instanceReplicaRepo.List(ctx, &DatabaseInstanceReplicaListRequest{Page: 1, PageSize: 10000, InstanceID: id})
+			if err != nil {
+				continue
+			}
+			for _, replica := range replicas {
+				if replica == nil {
+					continue
+				}
+				add(replica.PrimaryInstanceID)
+				add(replica.ReplicaInstanceID)
+			}
+		}
+	}
+	ids := make([]uint, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
+func (uc *UseCase) runReplicationBatchItem(ctx context.Context, instanceID uint, operator QueryOperator, triggerSource string, onlyStale bool, staleAfter time.Duration) *DatabaseReplicationCheckBatchItemVO {
+	name, _ := uc.instanceNameEndpoint(ctx, instanceID)
+	item := &DatabaseReplicationCheckBatchItemVO{
+		InstanceID:        instanceID,
+		InstanceName:      name,
+		Status:            "skipped",
+		StatusText:        "跳过",
+		TriggerSource:     triggerSource,
+		TriggerSourceText: ReplicationCheckTriggerSourceText(triggerSource),
+	}
+	instance, err := uc.instanceRepo.GetByID(ctx, instanceID)
+	if err != nil || instance == nil {
+		item.Status = "failed"
+		item.StatusText = "失败"
+		item.ErrorMessage = "实例不存在"
+		return item
+	}
+	item.InstanceName = firstNonEmpty(item.InstanceName, instance.Name)
+	if instance.Status != DatabaseInstanceStatusEnabled {
+		item.Message = "实例未启用"
+		return item
+	}
+	if !isReplicaGovernanceEngine(normalizeDBType(instance.DBType)) {
+		item.Message = "数据库类型不支持副本采集"
+		return item
+	}
+	if onlyStale && !uc.replicationCheckNeeded(ctx, instanceID, staleAfter) {
+		item.Message = "副本状态仍在新鲜窗口内"
+		return item
+	}
+	check, err := uc.runReplicationCheck(ctx, instanceID, operator, triggerSource)
+	if check != nil {
+		item.CheckID = check.ID
+		item.CheckedAt = formatTime(check.CheckedAt)
+	}
+	if err != nil {
+		item.Status = "failed"
+		item.StatusText = "失败"
+		item.ErrorMessage = trimText(err.Error(), 1000)
+		return item
+	}
+	item.Status = "success"
+	item.StatusText = "成功"
+	item.Message = "采集完成"
+	return item
+}
+
+func (uc *UseCase) replicationCheckNeeded(ctx context.Context, instanceID uint, staleAfter time.Duration) bool {
+	if instanceID == 0 || staleAfter <= 0 {
+		return true
+	}
+	var last *time.Time
+	if check := latestReplicationCheck(ctx, uc.replicationCheckRepo, instanceID); check != nil {
+		last = check.CheckedAt
+	}
+	if uc.instanceReplicaRepo != nil {
+		if replica, err := uc.instanceReplicaRepo.GetByReplicaInstanceID(ctx, instanceID); err == nil && replica != nil && newerTime(replica.LastCheckedAt, last) {
+			last = replica.LastCheckedAt
+		}
+	}
+	if last == nil || last.IsZero() {
+		return true
+	}
+	return time.Since(*last) >= staleAfter
+}
+
+func (uc *UseCase) updateReplicaRelationRuntimeFromCheck(ctx context.Context, check *DatabaseReplicationCheck) {
+	if uc == nil || uc.instanceReplicaRepo == nil || check == nil || check.InstanceID == 0 {
+		return
+	}
+	replica, err := uc.instanceReplicaRepo.GetByReplicaInstanceID(ctx, check.InstanceID)
+	if err != nil || replica == nil {
+		return
+	}
+	replica.Status = firstNonEmpty(check.HealthStatus, DatabaseReplicaHealthUnknown)
+	replica.LastCheckID = check.ID
+	replica.LastCheckedAt = check.CheckedAt
+	replica.LastError = trimText(check.ErrorMessage, 1000)
+	_ = uc.instanceReplicaRepo.Update(ctx, replica)
 }
 
 func (uc *UseCase) collectMySQLReplicationStatus(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential, now time.Time) (*DatabaseReplicationCheck, error) {
@@ -703,6 +947,10 @@ func (uc *UseCase) toReplicationCheckVO(ctx context.Context, item *DatabaseRepli
 		RawStatusJSON:             item.RawStatusJSON,
 		CheckedAt:                 formatTime(item.CheckedAt),
 		ErrorMessage:              item.ErrorMessage,
+		TriggerSource:             item.TriggerSource,
+		TriggerSourceText:         ReplicationCheckTriggerSourceText(item.TriggerSource),
+		OperatorID:                item.OperatorID,
+		OperatorName:              item.OperatorName,
 		CreatedAt:                 formatTime(&item.CreatedAt),
 	}
 }
@@ -804,6 +1052,50 @@ func normalizeManualReplicaRole(value string) string {
 	default:
 		return ""
 	}
+}
+
+func normalizeReplicationCheckTriggerSource(value string) string {
+	switch strings.TrimSpace(value) {
+	case DatabaseReplicationCheckTriggerBatch:
+		return DatabaseReplicationCheckTriggerBatch
+	case DatabaseReplicationCheckTriggerScheduler:
+		return DatabaseReplicationCheckTriggerScheduler
+	case DatabaseReplicationCheckTriggerTopologyAutoRefresh:
+		return DatabaseReplicationCheckTriggerTopologyAutoRefresh
+	case DatabaseReplicationCheckTriggerManual:
+		return DatabaseReplicationCheckTriggerManual
+	default:
+		return DatabaseReplicationCheckTriggerManual
+	}
+}
+
+func ReplicationCheckTriggerSourceText(value string) string {
+	switch normalizeReplicationCheckTriggerSource(value) {
+	case DatabaseReplicationCheckTriggerBatch:
+		return "批量采集"
+	case DatabaseReplicationCheckTriggerScheduler:
+		return "自动调度"
+	case DatabaseReplicationCheckTriggerTopologyAutoRefresh:
+		return "拓扑自动补采"
+	default:
+		return "手动采集"
+	}
+}
+
+func uintInList(id uint, list []uint) bool {
+	for _, item := range list {
+		if item == id {
+			return true
+		}
+	}
+	return false
+}
+
+func newerTime(candidate, current *time.Time) bool {
+	if candidate == nil || candidate.IsZero() {
+		return false
+	}
+	return current == nil || current.IsZero() || candidate.After(*current)
 }
 
 func querySingleRowMap(ctx context.Context, db *sql.DB, query string) (map[string]string, bool, error) {

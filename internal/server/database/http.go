@@ -105,6 +105,7 @@ type HTTPServer struct {
 	backupScheduler      *dbbiz.BackupScheduler
 	backupAlertScheduler *dbbiz.BackupAlertScheduler
 	capacityScheduler    *dbbiz.CapacityScheduler
+	replicationScheduler *dbbiz.ReplicationCheckScheduler
 	authMiddleware       *rbacservice.AuthMiddleware
 }
 
@@ -242,6 +243,12 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 	backupAlertScheduler := dbbiz.NewBackupAlertScheduler(useCase, dbbiz.BackupAlertSchedulerOptions{
 		Interval: 5 * time.Minute,
 	})
+	replicationScheduler := dbbiz.NewReplicationCheckScheduler(useCase, dbbiz.ReplicationCheckSchedulerOptions{
+		Interval:       5 * time.Minute,
+		StaleAfter:     5 * time.Minute,
+		InitialDelay:   45 * time.Second,
+		MaxConcurrency: 2,
+	})
 
 	return &HTTPServer{
 		service: dbservice.NewService(useCase, permissionRepo, func(ctx context.Context) (string, error) {
@@ -254,6 +261,7 @@ func NewHTTPServer(db *gorm.DB, authMiddleware *rbacservice.AuthMiddleware) *HTT
 		backupScheduler:      backupScheduler,
 		backupAlertScheduler: backupAlertScheduler,
 		capacityScheduler:    capacityScheduler,
+		replicationScheduler: replicationScheduler,
 		authMiddleware:       authMiddleware,
 	}
 }
@@ -270,6 +278,9 @@ func (s *HTTPServer) StartBackground(ctx context.Context) {
 	}
 	if s.capacityScheduler != nil {
 		s.capacityScheduler.Start(ctx)
+	}
+	if s.replicationScheduler != nil {
+		s.replicationScheduler.Start(ctx)
 	}
 }
 
@@ -289,6 +300,11 @@ func (s *HTTPServer) StopBackground(ctx context.Context) error {
 	}
 	if s.capacityScheduler != nil {
 		if err := s.capacityScheduler.Stop(ctx); err != nil {
+			return err
+		}
+	}
+	if s.replicationScheduler != nil {
+		if err := s.replicationScheduler.Stop(ctx); err != nil {
 			return err
 		}
 	}
@@ -430,6 +446,7 @@ func (s *HTTPServer) RegisterRoutes(r *gin.RouterGroup) {
 		databases.DELETE("/replicas/:id", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaDelete), s.service.DeleteReplicaRelation)
 		databases.POST("/replicas/:id/pause-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaPause), s.service.PauseReplicaApply)
 		databases.POST("/replicas/:id/resume-apply", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaResume), s.service.ResumeReplicaApply)
+		databases.POST("/replication-checks/batch", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaCheck), s.service.RunReplicationCheckBatch)
 		databases.GET("/replication-checks", s.authMiddleware.RequireMenuPermission(permDatabaseReplicaView), s.service.ListReplicationChecks)
 
 		instances := databases.Group("/instances")

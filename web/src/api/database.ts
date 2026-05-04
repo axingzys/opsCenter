@@ -1545,7 +1545,40 @@ export interface DatabaseReplicationCheckResult {
   rawStatusJson: string
   checkedAt: string
   errorMessage: string
+  triggerSource: string
+  triggerSourceText: string
+  operatorId: number
+  operatorName: string
   createdAt: string
+}
+
+export interface DatabaseReplicationCheckBatchPayload {
+  instanceIds?: number[]
+  onlyStale?: boolean
+  staleSeconds?: number
+  includeRelated?: boolean
+  maxConcurrency?: number
+  triggerSource?: string
+}
+
+export interface DatabaseReplicationCheckBatchItemResult {
+  instanceId: number
+  instanceName: string
+  status: string
+  statusText: string
+  checkId: number
+  checkedAt: string
+  message: string
+  errorMessage: string
+  triggerSource: string
+  triggerSourceText: string
+}
+
+export interface DatabaseReplicationCheckBatchResult {
+  success: number
+  failed: number
+  skipped: number
+  items: DatabaseReplicationCheckBatchItemResult[]
 }
 
 export interface DatabaseReplicationStatusResult {
@@ -2617,6 +2650,9 @@ export const getDatabaseReplicationStatus = (id: number) =>
 
 export const checkDatabaseReplication = (id: number) =>
   request.post(`/api/v1/databases/instances/${id}/replication-check`)
+
+export const checkDatabaseReplicationBatch = (data: DatabaseReplicationCheckBatchPayload) =>
+  request.post('/api/v1/databases/replication-checks/batch', data)
 
 export const getDatabaseCapacityTrend = (id: number, params?: { range?: string; topLimit?: number }) =>
   request.get(`/api/v1/databases/instances/${id}/capacity-trend`, { params })

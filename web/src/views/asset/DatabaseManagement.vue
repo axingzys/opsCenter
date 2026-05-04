@@ -1470,9 +1470,9 @@
                 :loading="topologyCollectingAll"
                 @click="handleCheckTopologyRelated"
               >
-                采集相关实例
+                立即采集相关实例
               </el-button>
-              <el-button type="primary" :disabled="!topologyInstanceId" :loading="topologyLoading" @click="loadTopology">
+              <el-button type="primary" :disabled="!topologyInstanceId" :loading="topologyLoading || topologyAutoRefreshing" @click="loadTopology">
                 刷新拓扑
               </el-button>
             </div>
@@ -1481,7 +1481,7 @@
           <div v-if="!topologyInstanceId" class="metadata-empty">
             <el-empty description="请选择已开通拓扑权限和拓扑能力的数据库实例" :image-size="82" />
           </div>
-          <div v-else class="topology-content" v-loading="topologyLoading">
+          <div v-else class="topology-content" v-loading="topologyLoading || topologyAutoRefreshing">
             <el-empty v-if="!topologyResult" description="点击刷新拓扑后查看结果" :image-size="82" />
             <template v-else>
               <div class="table-overview-cards diagnosis-cards">
@@ -1678,7 +1678,8 @@
               </div>
               <div class="backup-toolbar-group">
                 <el-button type="primary" plain :loading="replicationProtectionLoading" @click="loadReplicationProtections">刷新保护窗口</el-button>
-                <el-button type="warning" :loading="replicationCheckLoading" @click="handleCheckAllReplication">重新采集</el-button>
+                <el-switch v-model="replicationBatchOnlyStale" active-text="只采过期" inactive-text="采集全部" />
+                <el-button type="warning" :loading="replicationCheckLoading" @click="handleCheckAllReplication">立即采集</el-button>
               </div>
             </div>
 
@@ -1877,7 +1878,8 @@
               </div>
               <div class="backup-toolbar-group">
                 <el-button type="primary" plain :loading="replicationLoading" @click="loadReplicationReplicas">刷新关系</el-button>
-                <el-button type="warning" :loading="replicationCheckLoading" @click="handleCheckAllReplication">全量采集</el-button>
+                <el-switch v-model="replicationBatchOnlyStale" active-text="只采过期" inactive-text="采集全部" />
+                <el-button type="warning" :loading="replicationCheckLoading" @click="handleCheckAllReplication">立即采集</el-button>
               </div>
             </div>
 
@@ -2123,6 +2125,11 @@
               </el-table-column>
               <el-table-column label="检查时间" width="170">
                 <template #default="{ row }">{{ row.checkedAt || row.createdAt || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="触发来源" width="120">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain">{{ row.triggerSourceText || row.triggerSource || '-' }}</el-tag>
+                </template>
               </el-table-column>
               <el-table-column label="错误/风险" min-width="220" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.errorMessage || '-' }}</template>
@@ -8827,6 +8834,7 @@ import {
   backupDatabaseBarmanServer,
   checkDatabaseBarmanServer,
   checkDatabaseReplication,
+  checkDatabaseReplicationBatch,
   checkDatabaseStorageProfilePosture,
   cleanupDatabaseRestoreJob,
   createDatabaseBarmanServer,
@@ -9001,6 +9009,7 @@ import {
   type DatabaseReplicaActionPayload,
   type DatabaseReplicaActionResult,
   type DatabaseQueryPayload,
+  type DatabaseReplicationCheckBatchResult,
   type DatabaseReplicationCheckResult,
   type DatabaseReplicaProtectionResult,
   type DatabaseReplicaIncidentGuidePayload,
@@ -9252,6 +9261,7 @@ const capacityChartRef = ref<HTMLElement>()
 const topologyChartRef = ref<HTMLElement>()
 const topologyInstanceId = ref<number>()
 const topologyLoading = ref(false)
+const topologyAutoRefreshing = ref(false)
 const topologyResult = ref<DatabaseTopologyResult>()
 const topologyCollectingId = ref(0)
 const topologyCollectingAll = ref(false)
@@ -9262,6 +9272,7 @@ const replicationLoading = ref(false)
 const replicationProtectionLoading = ref(false)
 const replicationCheckLoading = ref(false)
 const replicationCheckingId = ref(0)
+const replicationBatchOnlyStale = ref(true)
 const replicationReplicaDeletingId = ref(0)
 const replicationProtections = ref<DatabaseReplicaProtectionResult[]>([])
 const replicationProtectionTotal = ref(0)
@@ -12436,7 +12447,27 @@ const loadTopology = async () => {
   }
   topologyLoading.value = true
   try {
-    topologyResult.value = await getDatabaseTopology(topologyInstanceId.value) as DatabaseTopologyResult
+    const result = await getDatabaseTopology(topologyInstanceId.value) as DatabaseTopologyResult
+    topologyResult.value = result
+    const staleIds = topologyStaleInstanceIds(result)
+    if (staleIds.length > 0 && uiPermissions.value.replicaCheck) {
+      topologyAutoRefreshing.value = true
+      try {
+        const batch = await checkDatabaseReplicationBatch({
+          instanceIds: staleIds,
+          onlyStale: true,
+          staleSeconds: 300,
+          includeRelated: true,
+          maxConcurrency: 2,
+          triggerSource: 'topology_auto_refresh'
+        }) as DatabaseReplicationCheckBatchResult
+        if ((batch.success || 0) > 0 || (batch.failed || 0) > 0) {
+          topologyResult.value = await getDatabaseTopology(topologyInstanceId.value) as DatabaseTopologyResult
+        }
+      } finally {
+        topologyAutoRefreshing.value = false
+      }
+    }
   } finally {
     topologyLoading.value = false
   }
@@ -12473,28 +12504,51 @@ const topologyRelatedInstanceIds = () => {
   return [...ids]
 }
 
+const topologyStaleInstanceIds = (result?: DatabaseTopologyResult) => {
+  const ids = new Set<number>()
+  const addIfCollectable = (id: number) => {
+    if (id > 0 && replicationInstances.value.some(item => item.id === id)) {
+      ids.add(id)
+    }
+  }
+  const isStale = (metrics?: Record<string, string>) => {
+    const freshness = String(metrics?.check_freshness || '').toLowerCase()
+    return freshness === 'stale' || freshness === 'unknown'
+  }
+  ;(result?.nodes || []).forEach((node) => {
+    if (isStale(node.metrics)) {
+      addIfCollectable(topologyNodeInstanceId(node))
+    }
+  })
+  ;(result?.links || []).forEach((link) => {
+    if (isStale(link.metrics)) {
+      addIfCollectable(topologyLinkInstanceId(link))
+    }
+  })
+  if (topologyInstanceId.value) {
+    addIfCollectable(topologyInstanceId.value)
+  }
+  return [...ids]
+}
+
 const collectTopologyReplicationChecks = async (ids: number[]) => {
   if (!ids.length) {
     ElMessage.warning('当前拓扑没有可采集的 MySQL / MariaDB / PostgreSQL 实例')
     return
   }
-  let success = 0
-  let failed = 0
   try {
-    for (const id of ids) {
-      topologyCollectingId.value = id
-      try {
-        await checkDatabaseReplication(id)
-        success += 1
-      } catch {
-        failed += 1
-      }
-    }
+    topologyCollectingId.value = ids.length === 1 ? ids[0] : 0
+    const result = await checkDatabaseReplicationBatch({
+      instanceIds: ids,
+      onlyStale: false,
+      includeRelated: true,
+      maxConcurrency: 2
+    }) as DatabaseReplicationCheckBatchResult
     await loadTopology()
-    if (failed > 0) {
-      ElMessage.warning(`拓扑相关实例采集完成：成功 ${success}，失败 ${failed}`)
+    if ((result.failed || 0) > 0) {
+      ElMessage.warning(`拓扑相关实例采集完成：成功 ${result.success || 0}，失败 ${result.failed || 0}`)
     } else {
-      ElMessage.success(`拓扑相关实例采集完成：成功 ${success}`)
+      ElMessage.success(`拓扑相关实例采集完成：成功 ${result.success || 0}，跳过 ${result.skipped || 0}`)
     }
   } finally {
     topologyCollectingId.value = 0
@@ -12721,23 +12775,19 @@ const handleCheckAllReplication = async () => {
     return
   }
   replicationCheckLoading.value = true
-  let success = 0
-  let failed = 0
   try {
-    for (const item of replicationInstances.value) {
-      try {
-        replicationCheckingId.value = item.id
-        await checkDatabaseReplication(item.id)
-        success += 1
-      } catch {
-        failed += 1
-      }
-    }
+    const result = await checkDatabaseReplicationBatch({
+      instanceIds: replicationInstances.value.map(item => item.id),
+      onlyStale: replicationBatchOnlyStale.value,
+      staleSeconds: 300,
+      includeRelated: true,
+      maxConcurrency: 2
+    }) as DatabaseReplicationCheckBatchResult
     await refreshReplicationState()
-    if (failed > 0) {
-      ElMessage.warning(`副本状态采集完成：成功 ${success}，失败 ${failed}`)
+    if ((result.failed || 0) > 0) {
+      ElMessage.warning(`副本状态采集完成：成功 ${result.success || 0}，失败 ${result.failed || 0}，跳过 ${result.skipped || 0}`)
     } else {
-      ElMessage.success(`副本状态采集完成：成功 ${success}`)
+      ElMessage.success(`副本状态采集完成：成功 ${result.success || 0}，跳过 ${result.skipped || 0}`)
     }
   } finally {
     replicationCheckingId.value = 0

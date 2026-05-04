@@ -130,6 +130,32 @@ func (s *Service) ListReplicationChecks(c *gin.Context) {
 	})
 }
 
+func (s *Service) RunReplicationCheckBatch(c *gin.Context) {
+	var req dbbiz.DatabaseReplicationCheckBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionTopology)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	if req.TriggerSource != dbbiz.DatabaseReplicationCheckTriggerTopologyAutoRefresh {
+		req.TriggerSource = dbbiz.DatabaseReplicationCheckTriggerBatch
+	}
+	result, err := s.useCase.RunReplicationCheckBatch(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "批量采集失败: ", err)
+		return
+	}
+	response.SuccessWithMessage(c, "副本状态批量采集完成", result)
+}
+
 func (s *Service) ListReplicaProtections(c *gin.Context) {
 	var req dbbiz.DatabaseReplicaProtectionListRequest
 	if err := c.ShouldBindQuery(&req); err != nil {
