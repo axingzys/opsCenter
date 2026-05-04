@@ -451,8 +451,12 @@ func buildReplicationTopologyLink(primaryNode, replicaNode *DatabaseTopologyNode
 	}
 	if check != nil {
 		metrics["health"] = check.HealthStatus
-		metrics["seconds_behind_source"] = strconv.Itoa(check.SecondsBehindSource)
-		metrics["remaining_delay_seconds"] = strconv.Itoa(check.RemainingDelaySeconds)
+		if secondsBehind, ok := replicationTopologySecondsBehindSource(check); ok {
+			metrics["seconds_behind_source"] = strconv.Itoa(secondsBehind)
+		}
+		if remainingDelay, ok := replicationTopologyRemainingDelaySeconds(check); ok {
+			metrics["remaining_delay_seconds"] = strconv.Itoa(remainingDelay)
+		}
 		if check.ReplicaIORunning != "" {
 			metrics["io"] = check.ReplicaIORunning
 		}
@@ -597,6 +601,7 @@ func topologyStateFromPostgreSQLReplicationRow(row map[string]any) string {
 func buildReplicationTopologyCards(item *DatabaseInstance, currentCheck *DatabaseReplicationCheck, nodes []*DatabaseTopologyNodeVO, links []*DatabaseTopologyLinkVO) []*DatabaseTopologyCardVO {
 	replicaCount := 0
 	maxLagMs := int64(0)
+	maxLagKnown := false
 	health := DatabaseReplicaHealthHealthy
 	remainingWindow := ""
 	for _, node := range nodes {
@@ -613,19 +618,27 @@ func buildReplicationTopologyCards(item *DatabaseInstance, currentCheck *Databas
 			continue
 		}
 		health = worseReplicaHealth(health, link.State)
-		if value := parseMetricInt64(link.Metrics, "pg_replay_lag_ms"); value > maxLagMs {
-			maxLagMs = value
+		if value, ok := parseMetricInt64OK(link.Metrics, "pg_replay_lag_ms"); ok && value >= 0 {
+			maxLagKnown = true
+			if value > maxLagMs {
+				maxLagMs = value
+			}
 		}
-		if value := parseMetricInt64(link.Metrics, "seconds_behind_source"); value*1000 > maxLagMs {
-			maxLagMs = value * 1000
+		if value, ok := parseMetricInt64OK(link.Metrics, "seconds_behind_source"); ok && value >= 0 {
+			maxLagKnown = true
+			if value*1000 > maxLagMs {
+				maxLagMs = value * 1000
+			}
 		}
 	}
-	if currentCheck != nil && currentCheck.ConfiguredDelaySeconds > 0 && currentCheck.RemainingDelaySeconds >= 0 {
-		remainingWindow = formatSeconds(int64(currentCheck.RemainingDelaySeconds))
+	if currentCheck != nil && currentCheck.ConfiguredDelaySeconds > 0 {
+		if remainingDelay, ok := replicationTopologyRemainingDelaySeconds(currentCheck); ok {
+			remainingWindow = formatSeconds(int64(remainingDelay))
+		}
 	}
 	maxLagText := "-"
-	if maxLagMs > 0 {
-		maxLagText = formatTopologyMillis(maxLagMs)
+	if maxLagKnown {
+		maxLagText = formatReplicationMaxLagMillis(maxLagMs)
 	}
 	return []*DatabaseTopologyCardVO{
 		{Key: "topology_type", Label: "拓扑类型", Value: replicationTopologyTypeText(normalizeDBType(item.DBType)), Description: "当前实例的复制拓扑类型"},
@@ -746,10 +759,47 @@ func replicationTopologyLagText(check *DatabaseReplicationCheck) string {
 		}
 		return ""
 	}
-	if check.SecondsBehindSource >= 0 {
-		return formatSeconds(int64(check.SecondsBehindSource))
+	if secondsBehind, ok := replicationTopologySecondsBehindSource(check); ok {
+		return formatSeconds(int64(secondsBehind))
 	}
 	return ""
+}
+
+func replicationTopologySecondsBehindSource(check *DatabaseReplicationCheck) (int, bool) {
+	if check == nil {
+		return 0, false
+	}
+	if check.SecondsBehindSource >= 0 {
+		return check.SecondsBehindSource, true
+	}
+	raw := decodeReplicaRawMap(check.RawStatusJSON)
+	return parseReplicaRawNonNegativeInt(raw, "Seconds_Behind_Source", "Seconds_Behind_Master")
+}
+
+func replicationTopologyRemainingDelaySeconds(check *DatabaseReplicationCheck) (int, bool) {
+	if check == nil {
+		return 0, false
+	}
+	if check.RemainingDelaySeconds >= 0 {
+		return check.RemainingDelaySeconds, true
+	}
+	raw := decodeReplicaRawMap(check.RawStatusJSON)
+	return parseReplicaRawNonNegativeInt(raw, "SQL_Remaining_Delay")
+}
+
+func parseReplicaRawNonNegativeInt(raw map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		value := strings.TrimSpace(toString(raw[key]))
+		if value == "" || strings.EqualFold(value, "NULL") {
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			continue
+		}
+		return parsed, true
+	}
+	return 0, false
 }
 
 func replicationTopologyMessage(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) string {
@@ -785,8 +835,12 @@ func replicationTopologyMetrics(check *DatabaseReplicationCheck, replica *Databa
 		metrics["check_id"] = strconv.FormatUint(uint64(check.ID), 10)
 		metrics["role_detected"] = check.RoleDetected
 		metrics["health_status"] = check.HealthStatus
-		metrics["seconds_behind_source"] = strconv.Itoa(check.SecondsBehindSource)
-		metrics["remaining_delay_seconds"] = strconv.Itoa(check.RemainingDelaySeconds)
+		if secondsBehind, ok := replicationTopologySecondsBehindSource(check); ok {
+			metrics["seconds_behind_source"] = strconv.Itoa(secondsBehind)
+		}
+		if remainingDelay, ok := replicationTopologyRemainingDelaySeconds(check); ok {
+			metrics["remaining_delay_seconds"] = strconv.Itoa(remainingDelay)
+		}
 		metrics["configured_delay_seconds"] = strconv.Itoa(check.ConfiguredDelaySeconds)
 		if check.ReplicaIORunning != "" {
 			metrics["replica_io_running"] = check.ReplicaIORunning
@@ -1037,12 +1091,26 @@ func worseReplicaHealth(left, right string) string {
 	return left
 }
 
-func parseMetricInt64(metrics map[string]string, key string) int64 {
+func parseMetricInt64OK(metrics map[string]string, key string) (int64, bool) {
 	if metrics == nil {
-		return 0
+		return 0, false
 	}
-	value, _ := strconv.ParseInt(strings.TrimSpace(metrics[key]), 10, 64)
-	return value
+	raw, ok := metrics[key]
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func formatReplicationMaxLagMillis(value int64) string {
+	if value <= 0 {
+		return "0s"
+	}
+	return formatTopologyMillis(value)
 }
 
 func formatTopologyMillis(value int64) string {

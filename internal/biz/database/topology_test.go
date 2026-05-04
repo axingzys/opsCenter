@@ -144,6 +144,66 @@ func TestBuildReplicationTopologyLinkForMySQLDelayedReplica(t *testing.T) {
 	}
 }
 
+func TestBuildReplicationTopologyLinkForMySQLZeroLag(t *testing.T) {
+	primary := &DatabaseTopologyNodeVO{ID: "instance:1", Name: "mysql-primary", Role: DatabaseReplicationRolePrimary, State: DatabaseReplicaHealthHealthy}
+	replicaNode := &DatabaseTopologyNodeVO{ID: "instance:2", Name: "mysql-replica", Role: DatabaseReplicationRoleReplica, State: DatabaseReplicaHealthHealthy}
+	check := &DatabaseReplicationCheck{
+		Engine:              DBTypeMySQL,
+		RoleDetected:        DatabaseReplicationRoleReplica,
+		HealthStatus:        DatabaseReplicaHealthHealthy,
+		ReplicaIORunning:    "Yes",
+		ReplicaSQLRunning:   "Yes",
+		SecondsBehindSource: 0,
+	}
+	link := buildReplicationTopologyLink(primary, replicaNode, nil, check)
+	if link.LagText != "0s" {
+		t.Fatalf("lag = %q, want 0s", link.LagText)
+	}
+	if link.Metrics["seconds_behind_source"] != "0" {
+		t.Fatalf("seconds_behind_source metric = %q, want 0", link.Metrics["seconds_behind_source"])
+	}
+	cards := buildReplicationTopologyCards(&DatabaseInstance{DBType: DBTypeMySQL}, nil, []*DatabaseTopologyNodeVO{primary, replicaNode}, []*DatabaseTopologyLinkVO{link})
+	if got := topologyCardValue(cards, "max_lag"); got != "0s" {
+		t.Fatalf("max_lag card = %q, want 0s", got)
+	}
+}
+
+func TestBuildReplicationTopologyUsesRawMySQLZeroLagForLegacyCheck(t *testing.T) {
+	check := &DatabaseReplicationCheck{
+		Engine:              DBTypeMySQL,
+		RoleDetected:        DatabaseReplicationRoleReplica,
+		HealthStatus:        DatabaseReplicaHealthHealthy,
+		SecondsBehindSource: -1,
+		RawStatusJSON: marshalReplicaJSON(map[string]string{
+			"Seconds_Behind_Source": "0",
+		}),
+	}
+	if got := replicationTopologyLagText(check); got != "0s" {
+		t.Fatalf("lag = %q, want 0s", got)
+	}
+	link := buildReplicationTopologyLink(&DatabaseTopologyNodeVO{ID: "instance:1"}, &DatabaseTopologyNodeVO{ID: "instance:2"}, nil, check)
+	if link.Metrics["seconds_behind_source"] != "0" {
+		t.Fatalf("seconds_behind_source metric = %q, want 0", link.Metrics["seconds_behind_source"])
+	}
+	cards := buildReplicationTopologyCards(&DatabaseInstance{DBType: DBTypeMySQL}, nil, nil, []*DatabaseTopologyLinkVO{link})
+	if got := topologyCardValue(cards, "max_lag"); got != "0s" {
+		t.Fatalf("max_lag card = %q, want 0s", got)
+	}
+}
+
+func TestBuildReplicationTopologyCardsKeepsUnknownLagEmpty(t *testing.T) {
+	link := &DatabaseTopologyLinkVO{
+		Source:  "instance:1",
+		Target:  "instance:2",
+		State:   DatabaseReplicaHealthHealthy,
+		Metrics: map[string]string{},
+	}
+	cards := buildReplicationTopologyCards(&DatabaseInstance{DBType: DBTypeMySQL}, nil, nil, []*DatabaseTopologyLinkVO{link})
+	if got := topologyCardValue(cards, "max_lag"); got != "-" {
+		t.Fatalf("max_lag card = %q, want -", got)
+	}
+}
+
 func TestAppendTopologyFindingsForCheck(t *testing.T) {
 	raw, _ := json.Marshal([]string{"SQL apply 线程异常", "来源主库未匹配"})
 	check := &DatabaseReplicationCheck{
@@ -161,6 +221,15 @@ func TestAppendTopologyFindingsForCheck(t *testing.T) {
 	if findings[1].Suggestion == "" {
 		t.Fatalf("expected suggestion for unmatched source")
 	}
+}
+
+func topologyCardValue(cards []*DatabaseTopologyCardVO, key string) string {
+	for _, card := range cards {
+		if card != nil && card.Key == key {
+			return card.Value
+		}
+	}
+	return ""
 }
 
 func TestAppendPostgreSQLPrimaryRuntimeTopology(t *testing.T) {

@@ -397,9 +397,9 @@ type DatabaseReplicationCheck struct {
 	SourceInstanceID          uint       `gorm:"column:source_instance_id;index;comment:推断来源实例ID" json:"sourceInstanceId"`
 	ReplicaIORunning          string     `gorm:"column:replica_io_running;type:varchar(30);comment:MySQL IO线程状态" json:"replicaIoRunning"`
 	ReplicaSQLRunning         string     `gorm:"column:replica_sql_running;type:varchar(30);comment:MySQL SQL线程状态" json:"replicaSqlRunning"`
-	SecondsBehindSource       int        `gorm:"column:seconds_behind_source;type:int;default:-1;comment:复制延迟秒数" json:"secondsBehindSource"`
+	SecondsBehindSource       int        `gorm:"column:seconds_behind_source;type:int;comment:复制延迟秒数，-1 表示未知" json:"secondsBehindSource"`
 	ConfiguredDelaySeconds    int        `gorm:"column:configured_delay_seconds;type:int;default:0;comment:配置延迟秒数" json:"configuredDelaySeconds"`
-	RemainingDelaySeconds     int        `gorm:"column:remaining_delay_seconds;type:int;default:-1;comment:剩余延迟秒数" json:"remainingDelaySeconds"`
+	RemainingDelaySeconds     int        `gorm:"column:remaining_delay_seconds;type:int;comment:剩余延迟秒数，-1 表示未知" json:"remainingDelaySeconds"`
 	RelayLogBytes             int64      `gorm:"column:relay_log_bytes;type:bigint;default:0;comment:relay log积压估算" json:"relayLogBytes"`
 	PGWriteLagMs              int64      `gorm:"column:pg_write_lag_ms;type:bigint;default:0;comment:PostgreSQL write lag毫秒" json:"pgWriteLagMs"`
 	PGFlushLagMs              int64      `gorm:"column:pg_flush_lag_ms;type:bigint;default:0;comment:PostgreSQL flush lag毫秒" json:"pgFlushLagMs"`
