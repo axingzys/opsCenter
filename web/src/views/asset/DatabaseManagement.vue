@@ -566,10 +566,17 @@
                           {{ row.constraintName || row.relationSourceText || '-' }}
                         </template>
                       </el-table-column>
-                      <el-table-column label="操作" width="138" fixed="right">
+                      <el-table-column label="影响" min-width="180" show-overflow-tooltip>
+                        <template #default="{ row }">
+                          <el-tag :type="relationImpactTagType(row.impactLevel)" size="small">{{ relationImpactText(row.impactLevel) }}</el-tag>
+                          <span class="relation-impact-text">{{ row.impactText || '-' }}</span>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="操作" width="176" fixed="right">
                         <template #default="{ row }">
                           <el-button link type="primary" @click.stop="handleOpenRelationTable(row)">跳转</el-button>
                           <el-button link type="primary" @click.stop="handleCopyRelationJoin(row)">JOIN</el-button>
+                          <el-button link type="primary" @click.stop="openRelationDetail(row)">详情</el-button>
                         </template>
                       </el-table-column>
                       <template #empty>
@@ -2807,7 +2814,90 @@
                     </el-button>
                   </div>
                 </div>
-                <el-tabs v-model="backupAdvancedTab" class="pitr-tabs">
+                <div class="advanced-resource-health-grid">
+                  <button
+                    v-for="item in advancedResourceHealthCards"
+                    :key="item.key"
+                    type="button"
+                    class="advanced-resource-health-card"
+                    :class="{ 'is-active': advancedResourceGroupActive(item) }"
+                    @click="openAdvancedResourceTab(item.primaryTab)"
+                  >
+                    <span class="advanced-resource-health-title">
+                      <span>{{ item.title }}</span>
+                      <el-tag size="small" :type="resourceHealthTag(item.status)">{{ item.statusText }}</el-tag>
+                    </span>
+                    <strong>{{ item.total }}</strong>
+                    <span class="advanced-resource-health-meta">
+                      {{ item.issueCount ? `${item.issueCount} 个需要处理` : '暂无异常' }} / {{ item.description }}
+                    </span>
+                  </button>
+                </div>
+
+                <div class="advanced-resource-issue-panel">
+                  <div class="advanced-resource-issue-heading">
+                    <div>
+                      <span>异常优先</span>
+                      <small>只列出影响备份、归档、恢复链路的资源问题。</small>
+                    </div>
+                    <el-tag size="small" :type="advancedResourceIssues.length ? 'danger' : 'success'">
+                      {{ advancedResourceIssues.length ? `${advancedResourceIssues.length} 项` : '正常' }}
+                    </el-tag>
+                  </div>
+                  <el-table
+                    v-if="advancedResourceIssues.length"
+                    :data="advancedResourceIssues.slice(0, 8)"
+                    stripe
+                    class="modern-table compact-resource-table"
+                  >
+                    <el-table-column label="资源组" width="130">
+                      <template #default="{ row }">{{ row.groupTitle }}</template>
+                    </el-table-column>
+                    <el-table-column label="风险" width="90" align="center">
+                      <template #default="{ row }">
+                        <el-tag size="small" :type="resourceHealthTag(row.severity)">{{ row.severityText }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="对象" min-width="180" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.target }}</template>
+                    </el-table-column>
+                    <el-table-column label="说明" min-width="320" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.message }}</template>
+                    </el-table-column>
+                    <el-table-column label="建议" min-width="180" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.actionText }}</template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="130" align="center" fixed="right">
+                      <template #default="{ row }">
+                        <el-button link type="primary" @click="handleAdvancedResourceIssue(row)">处理</el-button>
+                        <el-button link type="info" @click="openAdvancedResourceIssueDetail(row)">详情</el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                  <el-empty v-else description="当前高级资源未发现明显异常" :image-size="64" />
+                </div>
+
+                <div class="advanced-resource-layout">
+                  <aside class="advanced-resource-nav">
+                    <div v-for="group in advancedResourceNavGroups" :key="group.key" class="advanced-resource-nav-group">
+                      <div class="advanced-resource-nav-title">{{ group.title }}</div>
+                      <button
+                        v-for="item in group.items"
+                        :key="item.tab"
+                        type="button"
+                        class="advanced-resource-nav-item"
+                        :class="{ 'is-active': backupAdvancedTab === item.tab }"
+                        @click="openAdvancedResourceTab(item.tab)"
+                      >
+                        <span>{{ item.label }}</span>
+                        <el-tag v-if="item.count !== undefined" size="small" :type="item.issueCount ? 'danger' : 'info'">
+                          {{ item.issueCount || item.count }}
+                        </el-tag>
+                      </button>
+                    </div>
+                  </aside>
+                  <div class="advanced-resource-detail">
+                    <el-tabs v-model="backupAdvancedTab" class="pitr-tabs advanced-resource-tabs">
               <el-tab-pane label="备份链路 / 策略" name="backupPolicies">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
@@ -3934,9 +4024,35 @@
                 </div>
               </el-tab-pane>
             </el-tabs>
+                  </div>
+                </div>
               </el-tab-pane>
             </el-tabs>
           </div>
+
+          <el-drawer
+            v-model="advancedResourceIssueDetailVisible"
+            :title="advancedResourceIssueDetail?.title || '高级资源详情'"
+            size="520px"
+          >
+            <template v-if="advancedResourceIssueDetail">
+              <el-descriptions :column="1" border class="backup-detail-descriptions">
+                <el-descriptions-item label="资源组">{{ advancedResourceIssueDetail.groupTitle }}</el-descriptions-item>
+                <el-descriptions-item label="对象">{{ advancedResourceIssueDetail.target }}</el-descriptions-item>
+                <el-descriptions-item label="风险">
+                  <el-tag size="small" :type="resourceHealthTag(advancedResourceIssueDetail.severity)">
+                    {{ advancedResourceIssueDetail.severityText }}
+                  </el-tag>
+                </el-descriptions-item>
+                <el-descriptions-item label="说明">{{ advancedResourceIssueDetail.message }}</el-descriptions-item>
+                <el-descriptions-item label="建议">{{ advancedResourceIssueDetail.actionText }}</el-descriptions-item>
+                <el-descriptions-item label="最近时间">{{ advancedResourceIssueDetail.updatedAt || '-' }}</el-descriptions-item>
+              </el-descriptions>
+              <div class="topology-detail-actions">
+                <el-button type="primary" @click="handleAdvancedResourceIssue(advancedResourceIssueDetail)">打开资源明细</el-button>
+              </div>
+            </template>
+          </el-drawer>
 
           <el-dialog
             v-model="enableProtectionDialogVisible"
@@ -4678,6 +4794,67 @@
       </div>
       <template #footer>
         <el-button @click="ddlDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="relationDetailVisible" title="表关系详情" width="960px">
+      <div v-if="currentRelation">
+        <el-descriptions :column="2" border>
+          <el-descriptions-item label="方向">
+            <el-tag :type="relationDirectionTagType(currentRelation.direction)" size="small">
+              {{ relationDirectionText(currentRelation.direction) }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="影响">
+            <el-tag :type="relationImpactTagType(currentRelation.impactLevel)" size="small">
+              {{ relationImpactText(currentRelation.impactLevel) }}
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="来源字段">{{ relationEndpointLabel(currentRelation.schemaName, currentRelation.tableName, currentRelation.columnName) }}</el-descriptions-item>
+          <el-descriptions-item label="目标字段">{{ relationEndpointLabel(currentRelation.referencedSchemaName, currentRelation.referencedTableName, currentRelation.referencedColumnName) }}</el-descriptions-item>
+          <el-descriptions-item label="关系类型">{{ currentRelation.relationTypeText || currentRelation.relationType }}</el-descriptions-item>
+          <el-descriptions-item label="关系来源">{{ currentRelation.relationSourceText || currentRelation.relationSource }}</el-descriptions-item>
+          <el-descriptions-item label="可信度">{{ currentRelation.confidence || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="基数">{{ currentRelation.cardinalityText || currentRelation.cardinality || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="ON UPDATE">{{ currentRelation.onUpdate || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="ON DELETE">{{ currentRelation.onDelete || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="规则" :span="2">{{ currentRelation.constraintName || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="影响说明" :span="2">{{ currentRelation.impactText || '-' }}</el-descriptions-item>
+        </el-descriptions>
+
+        <div class="relation-sql-grid">
+          <div class="audit-sql-block relation-sql-block">
+            <div class="audit-sql-title">
+              <span>JOIN 片段</span>
+              <el-button link type="primary" @click="handleCopyRelationSQL(currentRelation.joinSql)">复制</el-button>
+            </div>
+            <pre>{{ currentRelation.joinSql || '-' }}</pre>
+          </div>
+          <div class="audit-sql-block relation-sql-block">
+            <div class="audit-sql-title">
+              <span>反向 JOIN</span>
+              <el-button link type="primary" @click="handleCopyRelationSQL(currentRelation.reverseJoinSql)">复制</el-button>
+            </div>
+            <pre>{{ currentRelation.reverseJoinSql || '-' }}</pre>
+          </div>
+          <div class="audit-sql-block relation-sql-block">
+            <div class="audit-sql-title">
+              <span>孤儿记录检查</span>
+              <el-button link type="primary" @click="handleCopyRelationSQL(currentRelation.orphanCheckSql)">复制</el-button>
+            </div>
+            <pre>{{ currentRelation.orphanCheckSql || '-' }}</pre>
+          </div>
+          <div class="audit-sql-block relation-sql-block">
+            <div class="audit-sql-title">
+              <span>依赖数量检查</span>
+              <el-button link type="primary" @click="handleCopyRelationSQL(currentRelation.dependencyCheckSql)">复制</el-button>
+            </div>
+            <pre>{{ currentRelation.dependencyCheckSql || '-' }}</pre>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="relationDetailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -8438,6 +8615,33 @@ const uiPermissions = ref<Record<string, boolean>>({})
 const total = ref(0)
 
 type DatabaseCapabilityKey = 'metadataEnabled' | 'queryEnabled' | 'testEnabled' | 'topologyEnabled'
+type AdvancedResourceSeverity = 'success' | 'warning' | 'danger' | 'info'
+
+interface AdvancedResourceIssue {
+  key: string
+  groupKey: string
+  groupTitle: string
+  tab: string
+  severity: AdvancedResourceSeverity
+  severityText: string
+  title: string
+  target: string
+  message: string
+  actionText: string
+  updatedAt?: string
+}
+
+interface AdvancedResourceHealthCard {
+  key: string
+  title: string
+  description: string
+  primaryTab: string
+  tabs: string[]
+  total: number
+  issueCount: number
+  status: AdvancedResourceSeverity
+  statusText: string
+}
 
 const supportedTypeMap = computed(() => {
   const result = new Map<string, DatabaseSupportedType>()
@@ -8504,6 +8708,8 @@ const tableRelations = ref<DatabaseTableRelationResult[]>([])
 const tableRelationGraph = ref<DatabaseTableRelationGraphResult>()
 const relationSourceFilter = ref('all')
 const includeInferredRelations = ref(true)
+const relationDetailVisible = ref(false)
+const currentRelation = ref<DatabaseTableRelationResult>()
 const selectedSchema = ref('')
 const selectedTable = ref<any>()
 const detailTab = ref('columns')
@@ -8851,6 +9057,8 @@ const barmanWalSyncingId = ref(0)
 const barmanBackingUpId = ref(0)
 const backupPitrTab = ref('protectionOverview')
 const backupAdvancedTab = ref('backupPolicies')
+const advancedResourceIssueDetailVisible = ref(false)
+const advancedResourceIssueDetail = ref<AdvancedResourceIssue>()
 const restoreJobLoading = ref(false)
 const restoreSubmitting = ref(false)
 const restoreDialogVisible = ref(false)
@@ -10537,6 +10745,318 @@ const runnerHostOptions = computed(() =>
     label: `${item.name}（${item.runnerTypeText || item.runnerType}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`
   }))
 )
+
+const advancedResourceGroupTitleMap: Record<string, string> = {
+  backup: '备份链路',
+  storage: '存储与保留',
+  execution: '执行资源',
+  archive: '日志归档',
+  barman: 'PostgreSQL Barman',
+  restore: '恢复编排'
+}
+
+const advancedResourceTabGroupMap: Record<string, string> = {
+  backupPolicies: 'backup',
+  storageProfiles: 'storage',
+  runnerHosts: 'execution',
+  runnerJobs: 'execution',
+  barmanServers: 'barman',
+  streams: 'archive',
+  archives: 'archive',
+  events: 'archive',
+  plans: 'restore',
+  barmanCatalog: 'barman',
+  walStatus: 'barman'
+}
+
+const makeAdvancedResourceIssue = (item: Omit<AdvancedResourceIssue, 'groupTitle'>): AdvancedResourceIssue => ({
+  ...item,
+  groupTitle: advancedResourceGroupTitleMap[item.groupKey] || item.groupKey
+})
+
+const advancedResourceIssues = computed<AdvancedResourceIssue[]>(() => {
+  const issues: AdvancedResourceIssue[] = []
+
+  backupPolicies.value.forEach(item => {
+    const status = item.chain?.status || item.status || item.lastStatus
+    if (['failed', 'degraded', 'broken', 'broken_chain'].includes(status) || item.lastError) {
+      issues.push(makeAdvancedResourceIssue({
+        key: `backup-policy-${item.id}`,
+        groupKey: 'backup',
+        tab: 'backupPolicies',
+        severity: status === 'failed' || !!item.lastError ? 'danger' : 'warning',
+        severityText: status === 'failed' || !!item.lastError ? '严重' : '需关注',
+        title: '备份链路异常',
+        target: item.name || `策略 #${item.id}`,
+        message: item.lastError || item.chain?.lastError || item.lastMessage || item.statusText || '备份策略链路状态异常',
+        actionText: '校验备份链或重新执行备份',
+        updatedAt: item.updatedAt || item.lastRunAt
+      }))
+    }
+  })
+
+  storageProfiles.value.forEach(item => {
+    if (['failed', 'warning'].includes(item.postureStatus) || item.status === 'disabled') {
+      issues.push(makeAdvancedResourceIssue({
+        key: `storage-${item.id}`,
+        groupKey: 'storage',
+        tab: 'storageProfiles',
+        severity: item.postureStatus === 'failed' ? 'danger' : 'warning',
+        severityText: item.postureStatus === 'failed' ? '严重' : '需关注',
+        title: '存储姿态异常',
+        target: item.name || `存储 #${item.id}`,
+        message: item.postureSummary || item.postureStatusText || item.statusText || '存储未通过姿态检查',
+        actionText: '重新检测存储姿态',
+        updatedAt: item.lastPostureCheckAt || item.updatedAt
+      }))
+    }
+  })
+
+  runnerHosts.value.forEach(item => {
+    if (item.enabled !== false && item.status !== 'online') {
+      issues.push(makeAdvancedResourceIssue({
+        key: `runner-${item.id}`,
+        groupKey: 'execution',
+        tab: 'runnerHosts',
+        severity: item.status === 'failed' ? 'danger' : 'warning',
+        severityText: item.status === 'failed' ? '严重' : '需关注',
+        title: 'Runner 不可用',
+        target: item.name || `Runner #${item.id}`,
+        message: item.lastError || item.statusText || 'Runner 当前不可用，备份和恢复任务可能无法执行',
+        actionText: '测试 Runner 或查看工具画像',
+        updatedAt: item.lastTestAt || item.lastHeartbeatAt || item.updatedAt
+      }))
+    }
+  })
+
+  runnerJobs.value.forEach(item => {
+    if (item.status === 'failed') {
+      issues.push(makeAdvancedResourceIssue({
+        key: `runner-job-${item.id}`,
+        groupKey: 'execution',
+        tab: 'runnerJobs',
+        severity: 'warning',
+        severityText: '需关注',
+        title: 'Runner 作业失败',
+        target: item.commandSummary || item.jobTypeText || `作业 #${item.id}`,
+        message: item.errorMessage || runnerJobOutputSummary(item) || 'Runner 作业执行失败',
+        actionText: '查看作业详情',
+        updatedAt: item.finishedAt || item.updatedAt
+      }))
+    }
+  })
+
+  barmanServers.value.forEach(item => {
+    if (['failed', 'degraded'].includes(item.status) || item.lastCheckStatus === 'failed' || item.lastError) {
+      issues.push(makeAdvancedResourceIssue({
+        key: `barman-${item.id}`,
+        groupKey: 'barman',
+        tab: 'barmanServers',
+        severity: item.status === 'failed' || item.lastCheckStatus === 'failed' ? 'danger' : 'warning',
+        severityText: item.status === 'failed' || item.lastCheckStatus === 'failed' ? '严重' : '需关注',
+        title: 'Barman 状态异常',
+        target: item.name || item.barmanServerName || `Barman #${item.id}`,
+        message: item.lastError || item.lastCheckStatusText || item.statusText || 'Barman Server 检查未通过',
+        actionText: '执行 Barman 检查或同步 WAL',
+        updatedAt: item.lastCheckAt || item.updatedAt
+      }))
+    }
+  })
+
+  logArchiveStreams.value.forEach(item => {
+    const lagTooHigh = Number(item.archiveLagSeconds || 0) > Number(item.rpoTargetSeconds || 0) && Number(item.rpoTargetSeconds || 0) > 0
+    const daemonMismatch = item.enabled && item.desiredState === 'running' && item.daemonStatus && item.daemonStatus !== 'running'
+    if (['failed', 'degraded'].includes(item.status) || lagTooHigh || daemonMismatch || item.lastError) {
+      issues.push(makeAdvancedResourceIssue({
+        key: `log-stream-${item.id}`,
+        groupKey: 'archive',
+        tab: 'streams',
+        severity: item.status === 'failed' || daemonMismatch ? 'danger' : 'warning',
+        severityText: item.status === 'failed' || daemonMismatch ? '严重' : '需关注',
+        title: '日志归档流异常',
+        target: `${item.instanceName || `#${item.instanceId}`} / ${item.archiveTypeText || item.archiveType || '日志'}`,
+        message: item.lastError || (lagTooHigh ? `归档延迟 ${item.archiveLagSeconds}s 超过 RPO ${item.rpoTargetSeconds}s` : item.statusText || '日志归档状态异常'),
+        actionText: item.archiveType === 'binlog' ? '查看事件或追平归档' : '检查 Barman/WAL 同步',
+        updatedAt: item.lastHeartbeatAt || item.updatedAt
+      }))
+    }
+  })
+
+  logArchives.value.forEach(item => {
+    if (['missing', 'checksum_failed'].includes(item.status)) {
+      issues.push(makeAdvancedResourceIssue({
+        key: `log-archive-${item.id}`,
+        groupKey: 'archive',
+        tab: 'archives',
+        severity: item.status === 'checksum_failed' ? 'danger' : 'warning',
+        severityText: item.status === 'checksum_failed' ? '严重' : '需关注',
+        title: '日志归档文件异常',
+        target: item.fileName || `归档文件 #${item.id}`,
+        message: item.statusText || '日志归档文件缺失或校验失败',
+        actionText: '查看归档文件链路',
+        updatedAt: item.updatedAt || item.archivedAt
+      }))
+    }
+  })
+
+  logArchiveEvents.value.forEach(item => {
+    if (['error', 'warning'].includes(item.level)) {
+      issues.push(makeAdvancedResourceIssue({
+        key: `log-event-${item.id}`,
+        groupKey: 'archive',
+        tab: 'events',
+        severity: item.level === 'error' ? 'danger' : 'warning',
+        severityText: item.level === 'error' ? '严重' : '需关注',
+        title: item.eventTypeText || item.eventType || '日志归档事件',
+        target: item.runnerHostName || item.runnerId || item.instanceName || `事件 #${item.id}`,
+        message: item.message || item.payloadJson || '日志归档事件异常',
+        actionText: '查看事件上下文',
+        updatedAt: item.occurredAt || item.createdAt
+      }))
+    }
+  })
+
+  restorePlans.value.forEach(item => {
+    if ([item.validationStatus, item.restoreStatus, item.backupChainStatus, item.logChainStatus, item.storageStatus, item.toolStatus].some(status => ['failed', 'missing_base', 'missing_binlog', 'missing_wal', 'broken_chain', 'timeline_gap', 'gtid_gap', 'time_range_gap', 'missing_object', 'checksum_failed', 'missing_tool'].includes(status || ''))) {
+      issues.push(makeAdvancedResourceIssue({
+        key: `restore-plan-${item.id}`,
+        groupKey: 'restore',
+        tab: 'plans',
+        severity: item.validationStatus === 'failed' || item.restoreStatus === 'failed' ? 'danger' : 'warning',
+        severityText: item.validationStatus === 'failed' || item.restoreStatus === 'failed' ? '严重' : '需关注',
+        title: '恢复计划预校验异常',
+        target: `${item.sourceInstanceName || `#${item.sourceInstanceId}`} -> ${item.targetInstanceName || item.targetInstanceId || '隔离环境'}`,
+        message: item.message || item.validationStatusText || item.restoreStatusText || '恢复计划存在阻断项',
+        actionText: '查看恢复计划详情',
+        updatedAt: item.updatedAt || item.createdAt
+      }))
+    }
+  })
+
+  return issues.sort((a, b) => {
+    const weight = (value: AdvancedResourceSeverity) => value === 'danger' ? 3 : value === 'warning' ? 2 : value === 'info' ? 1 : 0
+    if (weight(a.severity) !== weight(b.severity)) return weight(b.severity) - weight(a.severity)
+    return String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''))
+  })
+})
+
+const advancedIssueCountByTab = computed(() => {
+  const result: Record<string, number> = {}
+  advancedResourceIssues.value.forEach(item => {
+    result[item.tab] = (result[item.tab] || 0) + 1
+  })
+  return result
+})
+
+const advancedIssueCountByGroup = computed(() => {
+  const result: Record<string, number> = {}
+  advancedResourceIssues.value.forEach(item => {
+    result[item.groupKey] = (result[item.groupKey] || 0) + 1
+  })
+  return result
+})
+
+const deriveAdvancedResourceStatus = (issueCount: number): { status: AdvancedResourceSeverity; statusText: string } => {
+  if (issueCount > 0) return { status: 'danger', statusText: '异常' }
+  return { status: 'success', statusText: '正常' }
+}
+
+const advancedResourceHealthCards = computed<AdvancedResourceHealthCard[]>(() => {
+  const build = (key: string, title: string, description: string, primaryTab: string, tabs: string[], total: number): AdvancedResourceHealthCard => {
+    const issueCount = advancedIssueCountByGroup.value[key] || 0
+    const status = deriveAdvancedResourceStatus(issueCount)
+    return {
+      key,
+      title,
+      description,
+      primaryTab,
+      tabs,
+      total,
+      issueCount,
+      ...status
+    }
+  }
+  return [
+    build('backup', '备份链路', '策略、链校验、Synthetic Full', 'backupPolicies', ['backupPolicies'], backupPolicies.value.length),
+    build('execution', '执行资源', 'Runner、作业、工具画像', 'runnerHosts', ['runnerHosts', 'runnerJobs'], runnerHosts.value.length + runnerJobs.value.length),
+    build('storage', '存储与保留', '存储姿态、版本化、不可变', 'storageProfiles', ['storageProfiles'], storageProfiles.value.length),
+    build('archive', '日志归档', 'binlog/WAL 流、文件和事件', 'streams', ['streams', 'archives', 'events'], logArchiveStreams.value.length + logArchives.value.length + logArchiveEvents.value.length),
+    build('barman', 'PostgreSQL Barman', 'Barman Server、Catalog、WAL', 'barmanServers', ['barmanServers', 'barmanCatalog', 'walStatus'], barmanServers.value.length + barmanCatalogRecords.value.length + walStatusArchives.value.length),
+    build('restore', '恢复编排', '恢复计划、预校验和 Proof', 'plans', ['plans'], restorePlans.value.length)
+  ]
+})
+
+const advancedResourceNavGroups = computed(() => {
+  const issueCount = (tab: string) => advancedIssueCountByTab.value[tab] || 0
+  return [
+    {
+      key: 'backup',
+      title: '备份链路',
+      items: [
+        { label: '策略与链校验', tab: 'backupPolicies', count: backupPolicies.value.length, issueCount: issueCount('backupPolicies') }
+      ]
+    },
+    {
+      key: 'execution',
+      title: '执行资源',
+      items: [
+        { label: 'Runner 主机', tab: 'runnerHosts', count: runnerHosts.value.length, issueCount: issueCount('runnerHosts') },
+        { label: 'Runner 作业', tab: 'runnerJobs', count: runnerJobs.value.length, issueCount: issueCount('runnerJobs') }
+      ]
+    },
+    {
+      key: 'storage',
+      title: '存储与保留',
+      items: [
+        { label: '存储配置', tab: 'storageProfiles', count: storageProfiles.value.length, issueCount: issueCount('storageProfiles') }
+      ]
+    },
+    {
+      key: 'archive',
+      title: '日志归档',
+      items: [
+        { label: '归档流', tab: 'streams', count: logArchiveStreams.value.length, issueCount: issueCount('streams') },
+        { label: '归档文件', tab: 'archives', count: logArchives.value.length, issueCount: issueCount('archives') },
+        { label: '归档事件', tab: 'events', count: logArchiveEvents.value.length, issueCount: issueCount('events') }
+      ]
+    },
+    {
+      key: 'barman',
+      title: 'PostgreSQL Barman',
+      items: [
+        { label: 'Barman Server', tab: 'barmanServers', count: barmanServers.value.length, issueCount: issueCount('barmanServers') },
+        { label: 'Barman Catalog', tab: 'barmanCatalog', count: barmanCatalogRecords.value.length, issueCount: issueCount('barmanCatalog') },
+        { label: 'WAL 状态', tab: 'walStatus', count: walStatusArchives.value.length, issueCount: issueCount('walStatus') }
+      ]
+    },
+    {
+      key: 'restore',
+      title: '恢复编排',
+      items: [
+        { label: '恢复计划', tab: 'plans', count: restorePlans.value.length, issueCount: issueCount('plans') }
+      ]
+    }
+  ]
+})
+
+const openAdvancedResourceTab = (tab?: string) => {
+  if (!tab) return
+  backupPitrTab.value = 'advancedResources'
+  backupAdvancedTab.value = tab
+}
+
+const advancedResourceGroupActive = (item: AdvancedResourceHealthCard) =>
+  item.tabs.includes(backupAdvancedTab.value)
+
+const openAdvancedResourceIssueDetail = (item: AdvancedResourceIssue) => {
+  advancedResourceIssueDetail.value = item
+  advancedResourceIssueDetailVisible.value = true
+}
+
+const handleAdvancedResourceIssue = (item: AdvancedResourceIssue) => {
+  openAdvancedResourceTab(item.tab)
+  openAdvancedResourceIssueDetail(item)
+}
 
 const runnerToolRows = computed(() =>
   Object.values(runnerToolProfile.value?.tools || {}).sort((a, b) => a.name.localeCompare(b.name))
@@ -14765,6 +15285,18 @@ const relationConfidenceTagType = (confidence: number) => {
   return 'danger'
 }
 
+const relationImpactTagType = (level: string) => {
+  if (level === 'high') return 'danger'
+  if (level === 'warning') return 'warning'
+  return 'info'
+}
+
+const relationImpactText = (level: string) => {
+  if (level === 'high') return '高影响'
+  if (level === 'warning') return '需关注'
+  return '提示'
+}
+
 const relationEndpointLabel = (schemaName: string, tableName: string, columnName?: string) => {
   const table = schemaName ? `${schemaName}.${tableName}` : tableName
   return columnName ? `${table}.${columnName}` : table
@@ -14807,12 +15339,11 @@ const handleOpenRelationTable = async (row: DatabaseTableRelationResult) => {
   await loadTableDetails(nextTable)
 }
 
-const handleCopyRelationJoin = async (row: DatabaseTableRelationResult) => {
-  const text = row.joinSql || ''
+const copyRelationText = async (text: string, successMessage = '内容已复制') => {
   if (!text) return
   try {
     await navigator.clipboard.writeText(text)
-    ElMessage.success('JOIN 片段已复制')
+    ElMessage.success(successMessage)
   } catch {
     const textarea = document.createElement('textarea')
     textarea.value = text
@@ -14822,8 +15353,21 @@ const handleCopyRelationJoin = async (row: DatabaseTableRelationResult) => {
     textarea.select()
     document.execCommand('copy')
     document.body.removeChild(textarea)
-    ElMessage.success('JOIN 片段已复制')
+    ElMessage.success(successMessage)
   }
+}
+
+const handleCopyRelationJoin = async (row: DatabaseTableRelationResult) => {
+  await copyRelationText(row.joinSql || '', 'JOIN 片段已复制')
+}
+
+const handleCopyRelationSQL = async (text?: string) => {
+  await copyRelationText(text || '', 'SQL 已复制')
+}
+
+const openRelationDetail = (row: DatabaseTableRelationResult) => {
+  currentRelation.value = row
+  relationDetailVisible.value = true
 }
 
 const handleQueryInstanceChange = async () => {
@@ -16889,6 +17433,25 @@ const backupPolicyStatusTag = (status?: string) => {
   }
 }
 
+const resourceHealthTag = (status?: string) => {
+  switch (status) {
+    case 'success':
+    case 'healthy':
+    case 'normal':
+      return 'success'
+    case 'danger':
+    case 'critical':
+    case 'failed':
+    case 'error':
+      return 'danger'
+    case 'warning':
+    case 'degraded':
+      return 'warning'
+    default:
+      return 'info'
+  }
+}
+
 const backupVerifyStatusTag = (status?: string) => {
   switch (status) {
     case 'success':
@@ -17921,6 +18484,27 @@ onBeforeUnmount(() => {
   margin-top: 2px;
 }
 
+.relation-impact-text {
+  margin-left: 6px;
+  color: #4b5563;
+}
+
+.relation-sql-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.relation-sql-block {
+  margin-top: 0;
+}
+
+.relation-sql-block pre {
+  min-height: 94px;
+  max-height: 210px;
+}
+
 .query-console {
   display: flex;
   flex-direction: column;
@@ -18709,6 +19293,149 @@ onBeforeUnmount(() => {
   padding: 12px;
 }
 
+.advanced-resource-health-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.advanced-resource-health-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.advanced-resource-health-card:hover,
+.advanced-resource-health-card.is-active {
+  border-color: #93c5fd;
+  background: #f8fbff;
+}
+
+.advanced-resource-health-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.advanced-resource-health-card strong {
+  color: #111827;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.advanced-resource-health-meta {
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.advanced-resource-issue-panel {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.advanced-resource-issue-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.advanced-resource-issue-heading span {
+  display: block;
+  color: #111827;
+  font-weight: 600;
+}
+
+.advanced-resource-issue-heading small {
+  display: block;
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.advanced-resource-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.advanced-resource-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 76px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.advanced-resource-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.advanced-resource-nav-title {
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.advanced-resource-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  color: #374151;
+  font-size: 13px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.advanced-resource-nav-item:hover,
+.advanced-resource-nav-item.is-active {
+  color: #1d4ed8;
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.advanced-resource-detail {
+  min-width: 0;
+}
+
+.advanced-resource-tabs :deep(.el-tabs__header) {
+  display: none;
+}
+
+.compact-resource-table {
+  margin-top: 4px;
+}
+
 .permission-tag-list {
   display: flex;
   align-items: center;
@@ -19179,8 +19906,14 @@ onBeforeUnmount(() => {
   .table-overview-cards,
   .diagnosis-metric-cards,
   .capacity-summary-cards,
-  .backup-overview-summary {
+  .backup-overview-summary,
+  .advanced-resource-health-grid,
+  .advanced-resource-layout {
     grid-template-columns: 1fr;
+  }
+
+  .advanced-resource-nav {
+    position: static;
   }
 
   .backup-summary-metric {

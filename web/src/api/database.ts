@@ -1848,6 +1848,11 @@ export interface DatabaseTableRelationResult {
   comment: string
   direction: string
   joinSql: string
+  reverseJoinSql: string
+  orphanCheckSql: string
+  dependencyCheckSql: string
+  impactLevel: string
+  impactText: string
   lastSyncAt?: string
 }
 

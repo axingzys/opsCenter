@@ -47,6 +47,13 @@
 7. 支持复制基础 JOIN 片段。
 8. 明确区分“真实外键”和“推断关系”，避免误导。
 
+第三阶段目标：
+
+1. 在已有关系识别基础上，补齐“当前关系对变更、删除、恢复的影响说明”。
+2. 为每条关系生成可复制的 SQL 辅助片段，但不自动执行。
+3. 支持查看关系详情，包括字段、规则、可信度、ON UPDATE / ON DELETE、影响等级和检查 SQL。
+4. 让结构浏览不仅能“看见关系”，还能辅助判断“这条关系下一步该怎么查”。
+
 ## 非目标
 
 第一阶段和第二阶段暂不做：
@@ -57,6 +64,13 @@
 4. 不做自动 DDL 变更或外键创建。
 5. 不对 Redis、MongoDB、Elasticsearch / OpenSearch 做关系推断。
 6. 不把推断关系用于安全控制或自动恢复决策。
+
+第三阶段仍然不做：
+
+1. 不自动执行检查 SQL。
+2. 不基于推断关系生成或执行 DDL。
+3. 不提供在线编辑、确认、删除推断关系。
+4. 不把影响等级作为拦截策略，只作为结构浏览提示。
 
 ## 数据模型
 
@@ -81,11 +95,17 @@
 15. `comment`：解释说明。
 16. `last_sync_at`：最近同步时间。
 
-唯一键建议：
+唯一键实现：
 
 ```text
-instance_id + schema_name + table_name + column_name + referenced_schema_name + referenced_table_name + referenced_column_name + relation_type + relation_source
+instance_id + relation_key
 ```
+
+说明：
+
+1. `relation_key` 由来源表、来源字段、目标表、目标字段、关系类型和关系来源计算 SHA-256。
+2. 不直接把所有长字段放入唯一索引，避免 MySQL utf8mb4 下超过 3072 bytes 索引长度。
+3. `schema_name/table_name` 和 `referenced_schema_name/referenced_table_name` 分别保留普通索引，便于查询出向和入向关系。
 
 ## 第一阶段：真实外键关系
 
@@ -230,6 +250,96 @@ GET /api/v1/databases/instances/:id/table-relations
 6. 点击节点切换选中表。
 
 第一阶段和第二阶段可以先实现“关系列表 + 简单图”，后续再优化布局和复杂交互。
+
+## 第三阶段：影响分析与 SQL 辅助
+
+### 设计动机
+
+第一阶段和第二阶段解决了“有没有关系”和“关系怎么连”的问题，但实际使用时还会遇到三个问题：
+
+1. 做误删恢复时，需要知道当前表是否被其他表引用，以及应该先查哪些子表。
+2. 做 DDL 或字段清理时，需要快速检查是否存在孤儿记录或依赖记录。
+3. 编写查询 SQL 时，复制一个裸 JOIN 片段还不够，需要更具体的检查 SQL 模板。
+
+第三阶段建议把关系页签从“展示型信息”增强为“只读分析型信息”，核心是详情面板和 SQL 辅助。
+
+### 后端增强
+
+`DatabaseTableRelationVO` 增加字段：
+
+1. `reverseJoinSql`：反向 JOIN 片段，用于从目标表回查来源表。
+2. `orphanCheckSql`：孤儿记录检查 SQL，用于查来源表中找不到目标表的记录。
+3. `dependencyCheckSql`：依赖数量检查 SQL，用于估算当前关系下的依赖行数。
+4. `impactLevel`：`high` / `warning` / `info`。
+5. `impactText`：面向操作者的影响说明。
+
+SQL 生成规则：
+
+1. MySQL / MariaDB / TiDB / OceanBase 使用反引号。
+2. PostgreSQL / openGauss / Kingbase / Oracle 使用双引号。
+3. SQL Server 使用方括号。
+4. JOIN SQL 使用固定别名，避免 `schema.table.column` 在不同数据库中的兼容问题：
+
+```sql
+LEFT JOIN <target_table> ref ON src.<source_column> = ref.<target_column>
+```
+
+5. 孤儿检查 SQL 示例：
+
+```sql
+SELECT src.*
+FROM <source_table> src
+LEFT JOIN <target_table> ref ON src.<source_column> = ref.<target_column>
+WHERE src.<source_column> IS NOT NULL
+  AND ref.<target_column> IS NULL
+LIMIT 100
+```
+
+6. SQL Server 使用 `TOP (100)`，Oracle 使用 `FETCH FIRST 100 ROWS ONLY`。
+
+影响等级建议：
+
+1. 真实外键 + 当前表被引用：`high`，删除或修改当前表主键 / 唯一键前必须先检查子表依赖。
+2. 真实外键 + 当前表引用外部表：`warning`，写入或变更来源字段前应避免孤儿记录。
+3. 推断关系 + 可信度大于等于 80：`warning`，建议人工确认后用于排查。
+4. 推断关系 + 可信度低于 80：`info`，仅作为线索。
+
+### 前端增强
+
+关系页签增加：
+
+1. “影响”列：展示 `impactLevel` 和 `impactText` 摘要。
+2. “详情”操作：打开关系详情弹窗。
+3. 详情弹窗展示：
+   - 来源字段。
+   - 目标字段。
+   - 关系类型和来源。
+   - 可信度。
+   - ON UPDATE / ON DELETE。
+   - 影响说明。
+   - JOIN 片段。
+   - 反向 JOIN 片段。
+   - 孤儿检查 SQL。
+   - 依赖数量检查 SQL。
+4. 每段 SQL 都提供复制按钮。
+
+### 用户使用路径
+
+1. 在结构浏览中选中一张表。
+2. 进入“关系”页签。
+3. 根据“影响”列判断当前表是依赖别人，还是被别人依赖。
+4. 点“详情”查看检查 SQL。
+5. 复制 SQL 到 SQL 控制台，人工确认后再执行。
+
+### 验收标准
+
+1. 关系接口返回新增的 SQL 辅助字段和影响字段。
+2. 关系表格能展示影响等级。
+3. 点击详情能看到完整关系信息和 SQL 模板。
+4. SQL 模板按数据库类型正确引用标识符。
+5. 前端复制 JOIN、孤儿检查、依赖检查均可用。
+6. 所有 SQL 只展示和复制，不自动执行。
+7. 后端测试、前端类型检查和生产构建通过。
 
 ## 安全与权限
 

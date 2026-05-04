@@ -843,6 +843,11 @@ type DatabaseTableRelationVO struct {
 	Comment              string `json:"comment"`
 	Direction            string `json:"direction"`
 	JoinSQL              string `json:"joinSql"`
+	ReverseJoinSQL       string `json:"reverseJoinSql"`
+	OrphanCheckSQL       string `json:"orphanCheckSql"`
+	DependencyCheckSQL   string `json:"dependencyCheckSql"`
+	ImpactLevel          string `json:"impactLevel"`
+	ImpactText           string `json:"impactText"`
 	LastSyncAt           string `json:"lastSyncAt,omitempty"`
 }
 

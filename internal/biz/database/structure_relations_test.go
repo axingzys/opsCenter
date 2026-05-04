@@ -1,6 +1,9 @@
 package database
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildInferredTableRelationsInfersUserID(t *testing.T) {
 	tables := []*DatabaseTable{
@@ -57,4 +60,64 @@ func TestBuildInferredTableRelationsSkipsExistingForeignKey(t *testing.T) {
 	if len(relations) != 0 {
 		t.Fatalf("expected existing foreign key to suppress inferred relation, got %d", len(relations))
 	}
+}
+
+func TestBuildTableRelationSQLSnippetsUseDatabaseQuoting(t *testing.T) {
+	relation := &DatabaseTableRelation{
+		SchemaName:           "app",
+		Table:                "orders",
+		ColumnName:           "user_id",
+		ReferencedSchemaName: "app",
+		ReferencedTableName:  "users",
+		ReferencedColumnName: "id",
+	}
+
+	mysqlJoin := buildTableRelationJoinSQL(relation, DBTypeMySQL)
+	if mysqlJoin != "LEFT JOIN `app`.`users` ref ON src.`user_id` = ref.`id`" {
+		t.Fatalf("unexpected mysql join sql: %s", mysqlJoin)
+	}
+
+	postgresOrphan := buildTableRelationOrphanCheckSQL(relation, DBTypePostgreSQL)
+	if !containsAll(postgresOrphan, `"app"."orders" src`, `"app"."users" ref`, `LIMIT 100`) {
+		t.Fatalf("unexpected postgres orphan sql: %s", postgresOrphan)
+	}
+
+	sqlServerOrphan := buildTableRelationOrphanCheckSQL(relation, DBTypeSQLServer)
+	if !containsAll(sqlServerOrphan, `SELECT TOP (100) src.*`, `[app].[orders] src`, `[app].[users] ref`) {
+		t.Fatalf("unexpected sqlserver orphan sql: %s", sqlServerOrphan)
+	}
+}
+
+func TestBuildTableRelationImpact(t *testing.T) {
+	relation := &DatabaseTableRelation{
+		SchemaName:           "app",
+		Table:                "orders",
+		ColumnName:           "user_id",
+		ReferencedSchemaName: "app",
+		ReferencedTableName:  "users",
+		ReferencedColumnName: "id",
+		RelationType:         DatabaseTableRelationTypeForeignKey,
+		Confidence:           100,
+	}
+
+	level, text := buildTableRelationImpact(relation, "incoming")
+	if level != "high" || text == "" {
+		t.Fatalf("expected high incoming impact, got level=%s text=%s", level, text)
+	}
+
+	relation.RelationType = DatabaseTableRelationTypeInferred
+	relation.Confidence = 70
+	level, text = buildTableRelationImpact(relation, "outgoing")
+	if level != "info" || text == "" {
+		t.Fatalf("expected info low-confidence outgoing impact, got level=%s text=%s", level, text)
+	}
+}
+
+func containsAll(value string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(value, part) {
+			return false
+		}
+	}
+	return true
 }

@@ -40,16 +40,17 @@ func (uc *UseCase) ListTableRelations(ctx context.Context, req *DatabaseTableRel
 	}
 	relations := make([]*DatabaseTableRelationVO, 0, len(items))
 	for _, item := range items {
-		relations = append(relations, uc.toTableRelationVO(item, req))
+		relations = append(relations, uc.toTableRelationVO(item, req, instance.DBType))
 	}
 	return buildTableRelationGraph(relations, req), nil
 }
 
-func (uc *UseCase) toTableRelationVO(item *DatabaseTableRelation, req *DatabaseTableRelationListRequest) *DatabaseTableRelationVO {
+func (uc *UseCase) toTableRelationVO(item *DatabaseTableRelation, req *DatabaseTableRelationListRequest, dbType string) *DatabaseTableRelationVO {
 	if item == nil {
 		return nil
 	}
 	direction := resolveTableRelationDirection(item, req)
+	impactLevel, impactText := buildTableRelationImpact(item, direction)
 	return &DatabaseTableRelationVO{
 		ID:                   item.ID,
 		InstanceID:           item.InstanceID,
@@ -71,7 +72,12 @@ func (uc *UseCase) toTableRelationVO(item *DatabaseTableRelation, req *DatabaseT
 		CardinalityText:      TableRelationCardinalityText(item.Cardinality),
 		Comment:              item.Comment,
 		Direction:            direction,
-		JoinSQL:              buildTableRelationJoinSQL(item),
+		JoinSQL:              buildTableRelationJoinSQL(item, dbType),
+		ReverseJoinSQL:       buildTableRelationReverseJoinSQL(item, dbType),
+		OrphanCheckSQL:       buildTableRelationOrphanCheckSQL(item, dbType),
+		DependencyCheckSQL:   buildTableRelationDependencyCheckSQL(item, dbType),
+		ImpactLevel:          impactLevel,
+		ImpactText:           impactText,
 		LastSyncAt:           formatTime(item.LastSyncAt),
 	}
 }
@@ -499,20 +505,143 @@ func resolveTableRelationDirection(item *DatabaseTableRelation, req *DatabaseTab
 	return "related"
 }
 
-func buildTableRelationJoinSQL(item *DatabaseTableRelation) string {
+func buildTableRelationJoinSQL(item *DatabaseTableRelation, dbType string) string {
 	if item == nil {
 		return ""
 	}
+	target := tableRelationQualifiedTable(dbType, item.ReferencedSchemaName, item.ReferencedTableName)
+	return fmt.Sprintf(
+		"LEFT JOIN %s ref ON src.%s = ref.%s",
+		target,
+		tableRelationQuoteIdentifier(dbType, item.ColumnName),
+		tableRelationQuoteIdentifier(dbType, item.ReferencedColumnName),
+	)
+}
+
+func buildTableRelationReverseJoinSQL(item *DatabaseTableRelation, dbType string) string {
+	if item == nil {
+		return ""
+	}
+	source := tableRelationQualifiedTable(dbType, item.SchemaName, item.Table)
+	return fmt.Sprintf(
+		"LEFT JOIN %s child ON child.%s = parent.%s",
+		source,
+		tableRelationQuoteIdentifier(dbType, item.ColumnName),
+		tableRelationQuoteIdentifier(dbType, item.ReferencedColumnName),
+	)
+}
+
+func buildTableRelationOrphanCheckSQL(item *DatabaseTableRelation, dbType string) string {
+	if item == nil {
+		return ""
+	}
+	source := tableRelationQualifiedTable(dbType, item.SchemaName, item.Table)
+	target := tableRelationQualifiedTable(dbType, item.ReferencedSchemaName, item.ReferencedTableName)
+	selectPrefix := "SELECT src.*"
+	limitSuffix := tableRelationLimitSuffix(dbType, 100)
+	if normalizeDBType(dbType) == DBTypeSQLServer {
+		selectPrefix = "SELECT TOP (100) src.*"
+		limitSuffix = ""
+	}
+	sql := fmt.Sprintf(
+		"%s\nFROM %s src\nLEFT JOIN %s ref ON src.%s = ref.%s\nWHERE src.%s IS NOT NULL\n  AND ref.%s IS NULL",
+		selectPrefix,
+		source,
+		target,
+		tableRelationQuoteIdentifier(dbType, item.ColumnName),
+		tableRelationQuoteIdentifier(dbType, item.ReferencedColumnName),
+		tableRelationQuoteIdentifier(dbType, item.ColumnName),
+		tableRelationQuoteIdentifier(dbType, item.ReferencedColumnName),
+	)
+	if limitSuffix != "" {
+		sql += "\n" + limitSuffix
+	}
+	return sql
+}
+
+func buildTableRelationDependencyCheckSQL(item *DatabaseTableRelation, dbType string) string {
+	if item == nil {
+		return ""
+	}
+	source := tableRelationQualifiedTable(dbType, item.SchemaName, item.Table)
+	target := tableRelationQualifiedTable(dbType, item.ReferencedSchemaName, item.ReferencedTableName)
+	return fmt.Sprintf(
+		"SELECT COUNT(*) AS dependent_rows\nFROM %s child\nJOIN %s parent ON child.%s = parent.%s",
+		source,
+		target,
+		tableRelationQuoteIdentifier(dbType, item.ColumnName),
+		tableRelationQuoteIdentifier(dbType, item.ReferencedColumnName),
+	)
+}
+
+func buildTableRelationImpact(item *DatabaseTableRelation, direction string) (string, string) {
+	if item == nil {
+		return "info", ""
+	}
 	source := tableRelationNodeLabel(item.SchemaName, item.Table)
 	target := tableRelationNodeLabel(item.ReferencedSchemaName, item.ReferencedTableName)
-	return fmt.Sprintf(
-		"LEFT JOIN %s ON %s.%s = %s.%s",
-		target,
-		source,
-		item.ColumnName,
-		target,
-		item.ReferencedColumnName,
-	)
+	isForeignKey := item.RelationType == DatabaseTableRelationTypeForeignKey
+	if direction == "incoming" {
+		if isForeignKey {
+			return "high", fmt.Sprintf("当前表被 %s.%s 真实外键引用，删除或修改 %s.%s 前应先检查依赖行。", source, item.ColumnName, target, item.ReferencedColumnName)
+		}
+		if item.Confidence >= 80 {
+			return "warning", fmt.Sprintf("当前表可能被 %s.%s 引用，推断可信度 %d，建议人工确认后再评估影响。", source, item.ColumnName, item.Confidence)
+		}
+		return "info", fmt.Sprintf("当前表可能被 %s.%s 引用，推断可信度较低，仅作为排查线索。", source, item.ColumnName)
+	}
+	if direction == "outgoing" {
+		if isForeignKey {
+			return "warning", fmt.Sprintf("当前表通过 %s.%s 依赖 %s.%s，写入或清理来源字段前应避免孤儿记录。", source, item.ColumnName, target, item.ReferencedColumnName)
+		}
+		if item.Confidence >= 80 {
+			return "warning", fmt.Sprintf("当前表可能通过 %s.%s 依赖 %s.%s，推断可信度 %d。", source, item.ColumnName, target, item.ReferencedColumnName, item.Confidence)
+		}
+		return "info", fmt.Sprintf("当前表可能通过 %s.%s 依赖 %s.%s，推断可信度较低。", source, item.ColumnName, target, item.ReferencedColumnName)
+	}
+	if isForeignKey {
+		return "warning", "该关系来自数据库外键约束，变更前建议检查双向依赖。"
+	}
+	return "info", "该关系来自命名和唯一键推断，仅作为结构排查线索。"
+}
+
+func tableRelationQualifiedTable(dbType, schemaName, tableName string) string {
+	schemaName = strings.TrimSpace(schemaName)
+	tableName = strings.TrimSpace(tableName)
+	quotedTable := tableRelationQuoteIdentifier(dbType, tableName)
+	if schemaName == "" {
+		return quotedTable
+	}
+	return tableRelationQuoteIdentifier(dbType, schemaName) + "." + quotedTable
+}
+
+func tableRelationQuoteIdentifier(dbType, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
+	}
+	switch normalizeDBType(dbType) {
+	case DBTypePostgreSQL, DBTypeOpenGauss, DBTypeKingbase, DBTypeOracle:
+		return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+	case DBTypeSQLServer:
+		return `[` + strings.ReplaceAll(value, `]`, `]]`) + `]`
+	default:
+		return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+	}
+}
+
+func tableRelationLimitSuffix(dbType string, limit int) string {
+	if limit <= 0 {
+		limit = 100
+	}
+	switch normalizeDBType(dbType) {
+	case DBTypeOracle:
+		return fmt.Sprintf("FETCH FIRST %d ROWS ONLY", limit)
+	case DBTypeSQLServer:
+		return ""
+	default:
+		return fmt.Sprintf("LIMIT %d", limit)
+	}
 }
 
 func TableRelationTypeText(value string) string {
