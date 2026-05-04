@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +81,7 @@ func (uc *AgentUseCase) List(ctx context.Context, page, pageSize int, keyword, s
 		return nil, 0, err
 	}
 
+	monitorSnapshot := uc.loadAgentMonitorSnapshot(ctx)
 	list := make([]*AgentListItemVO, 0, len(agents))
 	for _, agentModel := range agents {
 		host, err := uc.hostRepo.GetByID(ctx, agentModel.HostID)
@@ -109,10 +114,148 @@ func (uc *AgentUseCase) List(ctx context.Context, page, pageSize int, keyword, s
 		if agentModel.LastReportAt != nil {
 			item.LastReportAt = agentModel.LastReportAt.Format("2006-01-02 15:04:05")
 		}
+		applyAgentMonitorStatus(host, item, monitorSnapshot)
 		list = append(list, item)
 	}
 
 	return list, total, nil
+}
+
+type agentMonitorSnapshot struct {
+	Enabled    bool
+	QueryError error
+	Targets    map[uint]agentPrometheusTargetHealth
+}
+
+type agentPrometheusTargetHealth struct {
+	Health     string
+	LastError  string
+	ScrapeURL  string
+	LastScrape string
+}
+
+type agentPrometheusTargetsResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error"`
+	Data   struct {
+		ActiveTargets []struct {
+			Labels     map[string]string `json:"labels"`
+			ScrapeURL  string            `json:"scrapeUrl"`
+			Health     string            `json:"health"`
+			LastError  string            `json:"lastError"`
+			LastScrape string            `json:"lastScrape"`
+		} `json:"activeTargets"`
+	} `json:"data"`
+}
+
+func (uc *AgentUseCase) loadAgentMonitorSnapshot(ctx context.Context) agentMonitorSnapshot {
+	if !uc.promCfg.Enabled && strings.TrimSpace(uc.promCfg.BaseURL) == "" {
+		return agentMonitorSnapshot{}
+	}
+
+	targets, err := uc.queryAgentPrometheusTargets(ctx)
+	return agentMonitorSnapshot{
+		Enabled:    true,
+		QueryError: err,
+		Targets:    targets,
+	}
+}
+
+func (uc *AgentUseCase) queryAgentPrometheusTargets(ctx context.Context) (map[uint]agentPrometheusTargetHealth, error) {
+	baseURL := uc.promCfg.GetBaseURL()
+	values := url.Values{}
+	values.Set("state", "active")
+
+	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(uc.promCfg.GetQueryTimeoutSeconds())*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(queryCtx, http.MethodGet, baseURL+"/api/v1/targets?"+values.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 Prometheus targets 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Prometheus targets 返回异常状态 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result agentPrometheusTargetsResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("解析 Prometheus targets 响应失败: %w", err)
+	}
+	if result.Status != "success" {
+		errText := strings.TrimSpace(result.Error)
+		if errText == "" {
+			errText = "unknown error"
+		}
+		return nil, fmt.Errorf("Prometheus targets 查询失败: %s", errText)
+	}
+
+	targets := make(map[uint]agentPrometheusTargetHealth)
+	for _, target := range result.Data.ActiveTargets {
+		if !strings.EqualFold(strings.TrimSpace(target.Labels["job"]), "opshub_agent") {
+			continue
+		}
+		hostID, err := strconv.ParseUint(strings.TrimSpace(target.Labels["host_id"]), 10, 32)
+		if err != nil || hostID == 0 {
+			continue
+		}
+		targets[uint(hostID)] = agentPrometheusTargetHealth{
+			Health:     strings.TrimSpace(target.Health),
+			LastError:  strings.TrimSpace(target.LastError),
+			ScrapeURL:  strings.TrimSpace(target.ScrapeURL),
+			LastScrape: strings.TrimSpace(target.LastScrape),
+		}
+	}
+
+	return targets, nil
+}
+
+func applyAgentMonitorStatus(host *Host, item *AgentListItemVO, snapshot agentMonitorSnapshot) {
+	if host == nil || item == nil || !snapshot.Enabled {
+		return
+	}
+	if item.Status != AgentStatusRunning {
+		return
+	}
+	if !shouldSyncPrometheusTarget(host, item.Version) {
+		return
+	}
+
+	if snapshot.QueryError != nil {
+		markAgentMonitorError(item, fmt.Sprintf("Prometheus 查询失败: %v", snapshot.QueryError))
+		return
+	}
+
+	target, ok := snapshot.Targets[host.ID]
+	if !ok {
+		markAgentMonitorError(item, "Prometheus 未发现该 Agent 抓取目标")
+		return
+	}
+	if !strings.EqualFold(target.Health, "up") {
+		message := strings.TrimSpace(target.LastError)
+		if message == "" {
+			message = fmt.Sprintf("target health=%s", defaultString(target.Health, "unknown"))
+		}
+		markAgentMonitorError(item, "Prometheus 抓取失败: "+message)
+		return
+	}
+}
+
+func markAgentMonitorError(item *AgentListItemVO, message string) {
+	item.Status = AgentStatusError
+	item.StatusText = AgentStatusText(AgentStatusError)
+	item.HealthStatus = "degraded"
+	item.LastError = strings.TrimSpace(message)
 }
 
 func (uc *AgentUseCase) GetInventory(ctx context.Context, hostID uint) (*HostInventoryVO, error) {

@@ -269,7 +269,8 @@ func runAgent(ctx context.Context, cfg *agentConfig) error {
 		databaseArchiverProcessStarts: map[uint]int{},
 	}
 
-	if err := app.serveMetrics(ctx); err != nil {
+	metricsErrCh, err := app.serveMetrics(ctx)
+	if err != nil {
 		return fmt.Errorf("serve metrics: %w", err)
 	}
 	if archiverCfg, err := resolveDatabaseArchiverConfig(cfg); err != nil {
@@ -278,8 +279,23 @@ func runAgent(ctx context.Context, cfg *agentConfig) error {
 		go app.runDatabaseArchiver(ctx, archiverCfg)
 	}
 
-	app.run(ctx)
-	return nil
+	runDone := make(chan struct{})
+	go func() {
+		app.run(ctx)
+		close(runDone)
+	}()
+
+	select {
+	case err, ok := <-metricsErrCh:
+		if ok && err != nil {
+			return fmt.Errorf("metrics server stopped: %w", err)
+		}
+		return nil
+	case <-runDone:
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 func loadConfig(path string) (*agentConfig, error) {
@@ -427,18 +443,24 @@ func newAgentMetrics() *agentMetrics {
 	return items
 }
 
-func (a *agentApp) serveMetrics(ctx context.Context) error {
+func (a *agentApp) serveMetrics(ctx context.Context) (<-chan error, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/files", a.requireAgentAuth(a.handleFiles))
 	mux.HandleFunc("/files/upload", a.requireAgentAuth(a.handleFileUpload))
 	mux.HandleFunc("/files/download", a.requireAgentAuth(a.handleFileDownload))
 
+	listener, err := net.Listen("tcp", a.cfg.ListenAddr)
+	if err != nil {
+		return nil, err
+	}
+
 	server := &http.Server{
 		Addr:              a.cfg.ListenAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	errCh := make(chan error, 1)
 
 	go func() {
 		<-ctx.Done()
@@ -448,12 +470,13 @@ func (a *agentApp) serveMetrics(ctx context.Context) error {
 	}()
 
 	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("metrics server stopped: %v", err)
+		defer close(errCh)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
 		}
 	}()
 
-	return nil
+	return errCh, nil
 }
 
 func (a *agentApp) requireAgentAuth(next http.HandlerFunc) http.HandlerFunc {

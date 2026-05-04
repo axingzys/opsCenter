@@ -187,3 +187,63 @@ func TestBuildRevokedAgentID(t *testing.T) {
 		t.Fatalf("buildRevokedAgentID() = %q, want revoked prefix", got)
 	}
 }
+
+func TestApplyAgentMonitorStatusMarksRunningAgentErrorOnPrometheusDown(t *testing.T) {
+	item := &AgentListItemVO{
+		HostID:       1,
+		Status:       AgentStatusRunning,
+		StatusText:   AgentStatusText(AgentStatusRunning),
+		HealthStatus: "healthy",
+		Version:      agentVersionMVP,
+	}
+
+	host := &Host{OSType: OSTypeLinux}
+	host.ID = 1
+
+	applyAgentMonitorStatus(host, item, agentMonitorSnapshot{
+		Enabled: true,
+		Targets: map[uint]agentPrometheusTargetHealth{
+			1: {
+				Health:    "down",
+				LastError: "connect: connection refused",
+			},
+		},
+	})
+
+	if item.Status != AgentStatusError {
+		t.Fatalf("status = %q, want %q", item.Status, AgentStatusError)
+	}
+	if item.HealthStatus != "degraded" {
+		t.Fatalf("health = %q, want degraded", item.HealthStatus)
+	}
+	if !strings.Contains(item.LastError, "connect: connection refused") {
+		t.Fatalf("last error = %q, want Prometheus scrape error", item.LastError)
+	}
+}
+
+func TestApplyAgentMonitorStatusKeepsRunningAgentWhenPrometheusUp(t *testing.T) {
+	item := &AgentListItemVO{
+		HostID:       1,
+		Status:       AgentStatusRunning,
+		StatusText:   AgentStatusText(AgentStatusRunning),
+		HealthStatus: "healthy",
+		Version:      agentVersionMVP,
+	}
+
+	host := &Host{OSType: OSTypeLinux}
+	host.ID = 1
+
+	applyAgentMonitorStatus(host, item, agentMonitorSnapshot{
+		Enabled: true,
+		Targets: map[uint]agentPrometheusTargetHealth{
+			1: {Health: "up"},
+		},
+	})
+
+	if item.Status != AgentStatusRunning {
+		t.Fatalf("status = %q, want %q", item.Status, AgentStatusRunning)
+	}
+	if item.LastError != "" {
+		t.Fatalf("last error = %q, want empty", item.LastError)
+	}
+}
