@@ -1780,8 +1780,23 @@ export interface DatabaseTopologyNode {
 export interface DatabaseTopologyLink {
   source: string
   target: string
+  sourceName?: string
+  targetName?: string
   label: string
   state: string
+  lagText?: string
+  message?: string
+  metrics?: Record<string, string>
+}
+
+export interface DatabaseTopologyFinding {
+  level: string
+  category: string
+  title: string
+  description: string
+  suggestion: string
+  nodeId?: string
+  linkId?: string
 }
 
 export interface DatabaseShard {
@@ -1807,6 +1822,7 @@ export interface DatabaseTopologyResult {
   nodes: DatabaseTopologyNode[]
   links: DatabaseTopologyLink[]
   shards: DatabaseShard[]
+  findings?: DatabaseTopologyFinding[]
   message: string
 }
 

@@ -1,7 +1,9 @@
 package database
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -106,5 +108,100 @@ func TestSearchEndpointAllowsExplicitInsecureSkipVerify(t *testing.T) {
 	}
 	if !insecureSkipVerify {
 		t.Fatalf("expected explicit insecureSkipVerify=true to be honored")
+	}
+}
+
+func TestBuildReplicationTopologyLinkForMySQLDelayedReplica(t *testing.T) {
+	primary := &DatabaseTopologyNodeVO{ID: "instance:1", Name: "mysql-primary"}
+	replicaNode := &DatabaseTopologyNodeVO{ID: "instance:2", Name: "mysql-replica"}
+	replica := &DatabaseInstanceReplica{
+		Engine:                 DBTypeMySQL,
+		ReplicaRole:            DatabaseReplicaRoleDelayed,
+		ConfiguredDelaySeconds: 3600,
+	}
+	check := &DatabaseReplicationCheck{
+		Engine:                 DBTypeMySQL,
+		RoleDetected:           DatabaseReplicationRoleReplica,
+		HealthStatus:           DatabaseReplicaHealthWarning,
+		ReplicaIORunning:       "Yes",
+		ReplicaSQLRunning:      "Yes",
+		SecondsBehindSource:    12,
+		ConfiguredDelaySeconds: 3600,
+		RemainingDelaySeconds:  0,
+	}
+	link := buildReplicationTopologyLink(primary, replicaNode, replica, check)
+	if link.Source != primary.ID || link.Target != replicaNode.ID {
+		t.Fatalf("unexpected link endpoints: %#v", link)
+	}
+	if link.Label != "delayed replication" {
+		t.Fatalf("label = %q, want delayed replication", link.Label)
+	}
+	if link.LagText != "12s" {
+		t.Fatalf("lag = %q, want 12s", link.LagText)
+	}
+	if link.Metrics["io"] != "Yes" || link.Metrics["sql"] != "Yes" {
+		t.Fatalf("missing mysql thread metrics: %#v", link.Metrics)
+	}
+}
+
+func TestAppendTopologyFindingsForCheck(t *testing.T) {
+	raw, _ := json.Marshal([]string{"SQL apply 线程异常", "来源主库未匹配"})
+	check := &DatabaseReplicationCheck{
+		HealthStatus:  DatabaseReplicaHealthCritical,
+		RiskFlagsJSON: string(raw),
+	}
+	var findings []*DatabaseTopologyFindingVO
+	appendTopologyFindingsForCheck(&findings, "instance:2", check, nil)
+	if len(findings) != 2 {
+		t.Fatalf("findings len = %d, want 2", len(findings))
+	}
+	if findings[0].Level != DatabaseReplicaHealthCritical || findings[0].NodeID != "instance:2" {
+		t.Fatalf("unexpected finding: %#v", findings[0])
+	}
+	if findings[1].Suggestion == "" {
+		t.Fatalf("expected suggestion for unmatched source")
+	}
+}
+
+func TestAppendPostgreSQLPrimaryRuntimeTopology(t *testing.T) {
+	now := time.Now()
+	raw := marshalReplicaJSON(map[string]any{
+		"role": "primary",
+		"pg_stat_replication": []map[string]string{
+			{
+				"application_name": "standby-01",
+				"client_addr":      "10.0.0.2",
+				"state":            "streaming",
+				"sync_state":       "async",
+				"replay_lag":       "2s",
+			},
+		},
+	})
+	check := &DatabaseReplicationCheck{
+		Engine:        DBTypePostgreSQL,
+		RoleDetected:  DatabaseReplicationRolePrimary,
+		HealthStatus:  DatabaseReplicaHealthHealthy,
+		CheckedAt:     &now,
+		RawStatusJSON: raw,
+	}
+	primary := &DatabaseTopologyNodeVO{ID: "instance:1", Name: "pg-primary"}
+	nodes := map[string]*DatabaseTopologyNodeVO{primary.ID: primary}
+	links := map[string]*DatabaseTopologyLinkVO{}
+	uc := &UseCase{}
+	uc.appendPostgreSQLPrimaryRuntimeTopology(nodes, links, primary, check)
+	if len(nodes) != 2 {
+		t.Fatalf("nodes len = %d, want 2", len(nodes))
+	}
+	if len(links) != 1 {
+		t.Fatalf("links len = %d, want 1", len(links))
+	}
+	var standby *DatabaseTopologyNodeVO
+	for _, node := range nodes {
+		if node.ID != primary.ID {
+			standby = node
+		}
+	}
+	if standby == nil || standby.Name != "standby-01" || standby.LagText != "2s" {
+		t.Fatalf("unexpected standby node: %#v", standby)
 	}
 }

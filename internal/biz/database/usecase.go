@@ -1200,9 +1200,9 @@ type DatabaseQueryAuditVO struct {
 
 func (uc *UseCase) SupportedTypes() []*SupportedTypeVO {
 	return []*SupportedTypeVO{
-		{Type: DBTypeMySQL, Name: "MySQL", DefaultPort: 3306, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase1"},
-		{Type: DBTypeMariaDB, Name: "MariaDB", DefaultPort: 3306, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase1"},
-		{Type: DBTypePostgreSQL, Name: "PostgreSQL", DefaultPort: 5432, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase1"},
+		{Type: DBTypeMySQL, Name: "MySQL", DefaultPort: 3306, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, TopologyEnabled: true, Phase: "phase1"},
+		{Type: DBTypeMariaDB, Name: "MariaDB", DefaultPort: 3306, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, TopologyEnabled: true, Phase: "phase1"},
+		{Type: DBTypePostgreSQL, Name: "PostgreSQL", DefaultPort: 5432, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, TopologyEnabled: true, Phase: "phase1"},
 		{Type: DBTypeSQLServer, Name: "SQL Server", DefaultPort: 1433, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase2"},
 		{Type: DBTypeClickHouse, Name: "ClickHouse", DefaultPort: 9000, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase2"},
 		{Type: DBTypeOracle, Name: "Oracle", DefaultPort: 1521, MetadataEnabled: true, QueryEnabled: true, TestEnabled: true, Phase: "phase2-research"},

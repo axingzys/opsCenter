@@ -1301,7 +1301,7 @@
       <el-tab-pane label="拓扑" name="topology">
         <div class="topology-panel">
           <el-alert
-            title="四期第 1 批支持 Redis Cluster / MongoDB ReplicaSet / Elasticsearch / OpenSearch 的只读拓扑查询，并写入统一审计。"
+            title="拓扑支持 Redis、MongoDB、Elasticsearch / OpenSearch 以及 MySQL / PostgreSQL 主从关系的只读采集，所有查询写入统一审计。"
             type="info"
             show-icon
             :closable="false"
@@ -1334,7 +1334,7 @@
           </div>
 
           <div v-if="!topologyInstanceId" class="metadata-empty">
-            <el-empty description="请先选择 Redis、MongoDB、Elasticsearch 或 OpenSearch 实例" :image-size="82" />
+            <el-empty description="请选择已开通拓扑权限和拓扑能力的数据库实例" :image-size="82" />
           </div>
           <div v-else class="topology-content" v-loading="topologyLoading">
             <el-empty v-if="!topologyResult" description="点击刷新拓扑后查看结果" :image-size="82" />
@@ -1355,6 +1355,31 @@
                 :closable="false"
                 class="topology-message"
               />
+
+              <div v-if="topologyResult.findings?.length" class="topology-section topology-findings-section">
+                <div class="panel-title">
+                  <span>拓扑风险</span>
+                  <el-tag size="small" type="warning">{{ topologyResult.findings.length }}</el-tag>
+                </div>
+                <div class="topology-findings">
+                  <div v-for="item in topologyResult.findings" :key="`${item.level}-${item.category}-${item.title}-${item.nodeId || item.linkId || ''}`" class="topology-finding-item">
+                    <el-tag size="small" :type="topologyFindingTag(item.level)">{{ topologyFindingLevelText(item.level) }}</el-tag>
+                    <div class="topology-finding-body">
+                      <strong>{{ item.title }}</strong>
+                      <span>{{ item.description || '-' }}</span>
+                      <span class="muted-text">{{ item.suggestion || '-' }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="topologyResult.nodes?.length" class="topology-section topology-graph-section">
+                <div class="panel-title">
+                  <span>关系图</span>
+                  <el-tag size="small" type="info">{{ topologyResult.topologyTypeText || topologyResult.topologyType || '-' }}</el-tag>
+                </div>
+                <div ref="topologyChartRef" class="topology-chart"></div>
+              </div>
 
               <div class="topology-grid">
                 <div class="topology-section">
@@ -1397,13 +1422,25 @@
                     <el-tag size="small" type="info">{{ topologyResult.links?.length || 0 }}</el-tag>
                   </div>
                   <el-table :data="topologyResult.links || []" stripe height="360" class="modern-table">
-                    <el-table-column label="源节点" prop="source" min-width="160" show-overflow-tooltip />
-                    <el-table-column label="目标节点" prop="target" min-width="160" show-overflow-tooltip />
-                    <el-table-column label="关系" width="120">
+                    <el-table-column label="源节点" min-width="160" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.sourceName || topologyNodeName(row.source) || row.source || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="目标节点" min-width="160" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.targetName || topologyNodeName(row.target) || row.target || '-' }}</template>
+                    </el-table-column>
+                    <el-table-column label="关系" min-width="150" show-overflow-tooltip>
                       <template #default="{ row }">{{ row.label || '-' }}</template>
                     </el-table-column>
+                    <el-table-column label="延迟" width="110" align="right">
+                      <template #default="{ row }">{{ row.lagText || '-' }}</template>
+                    </el-table-column>
                     <el-table-column label="状态" width="120">
-                      <template #default="{ row }">{{ row.state || '-' }}</template>
+                      <template #default="{ row }">
+                        <el-tag size="small" :type="topologyStateTag(row.state)">{{ row.state || '-' }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="备注" min-width="160" show-overflow-tooltip>
+                      <template #default="{ row }">{{ row.message || '-' }}</template>
                     </el-table-column>
                   </el-table>
                 </div>
@@ -7843,6 +7880,8 @@ import {
   type DatabaseStorageProfilePostureCheckPayload,
   type DatabaseStorageProfileResult,
   type DatabaseSupportedType,
+  type DatabaseTopologyLink,
+  type DatabaseTopologyNode,
   type DatabaseTopologyResult,
   type DatabaseWriteExecuteResult,
   type DatabaseWriteValidateResult,
@@ -8023,6 +8062,7 @@ const capacityCollecting = ref(false)
 const capacityRange = ref('7d')
 const capacityTrend = ref<DatabaseCapacityTrendResult>()
 const capacityChartRef = ref<HTMLElement>()
+const topologyChartRef = ref<HTMLElement>()
 const topologyInstanceId = ref<number>()
 const topologyLoading = ref(false)
 const topologyResult = ref<DatabaseTopologyResult>()
@@ -9309,6 +9349,7 @@ const capacityTrendPoints = computed(() =>
 )
 
 let capacityChart: echarts.ECharts | null = null
+let topologyChart: echarts.ECharts | null = null
 let diagnosisRequestSeq = 0
 let capacityTrendRequestSeq = 0
 
@@ -14700,6 +14741,217 @@ const renderCapacityChart = async () => {
 
 const resizeCapacityChart = () => {
   capacityChart?.resize()
+  topologyChart?.resize()
+}
+
+const topologyNodeName = (nodeId?: string) =>
+  topologyResult.value?.nodes?.find(item => item.id === nodeId)?.name || ''
+
+const topologyFindingTag = (level?: string) => {
+  switch (String(level || '').toLowerCase()) {
+    case 'critical':
+      return 'danger'
+    case 'warning':
+      return 'warning'
+    case 'healthy':
+      return 'success'
+    default:
+      return 'info'
+  }
+}
+
+const topologyFindingLevelText = (level?: string) => {
+  switch (String(level || '').toLowerCase()) {
+    case 'critical':
+      return '异常'
+    case 'warning':
+      return '警告'
+    case 'healthy':
+      return '健康'
+    default:
+      return '提示'
+  }
+}
+
+const topologyGraphStateColor = (state?: string) => {
+  switch (String(state || '').toLowerCase()) {
+    case 'healthy':
+    case 'ok':
+    case 'online':
+    case 'connected':
+    case 'green':
+      return '#16a34a'
+    case 'warning':
+    case 'yellow':
+    case 'recovering':
+    case 'initializing':
+    case 'relocating':
+      return '#d97706'
+    case 'critical':
+    case 'unhealthy':
+    case 'fail':
+    case 'failed':
+    case 'red':
+    case 'disconnected':
+    case 'down':
+      return '#dc2626'
+    default:
+      return '#94a3b8'
+  }
+}
+
+const topologyGraphRoleColor = (node: DatabaseTopologyNode) => {
+  const role = String(node.role || '').toLowerCase()
+  if (['primary', 'master'].includes(role)) return '#15803d'
+  if (['delayed_replica', 'delayed_standby'].includes(role)) return '#ea580c'
+  if (['replica', 'slave', 'secondary', 'standby'].includes(role)) return '#2563eb'
+  if (['sentinel', 'arbiter'].includes(role)) return '#ca8a04'
+  return '#64748b'
+}
+
+const topologyGraphSymbol = (node: DatabaseTopologyNode) => {
+  const role = String(node.role || '').toLowerCase()
+  if (['primary', 'master'].includes(role)) return 'roundRect'
+  if (['delayed_replica', 'delayed_standby'].includes(role)) return 'diamond'
+  if (['sentinel', 'arbiter'].includes(role)) return 'triangle'
+  return 'circle'
+}
+
+const topologyGraphTooltip = (params: any) => {
+  const data = params?.data || {}
+  if (params?.dataType === 'edge') {
+    return [
+      `<strong>${data.sourceName || topologyNodeName(data.source) || data.source}</strong> -> <strong>${data.targetName || topologyNodeName(data.target) || data.target}</strong>`,
+      data.label ? `关系：${data.label}` : '',
+      data.state ? `状态：${data.state}` : '',
+      data.lagText ? `延迟：${data.lagText}` : '',
+      data.message ? `说明：${data.message}` : ''
+    ].filter(Boolean).join('<br/>')
+  }
+  return [
+    `<strong>${data.displayName || data.name}</strong>`,
+    data.roleText ? `角色：${data.roleText}` : '',
+    data.address ? `地址：${data.address}` : '',
+    data.state ? `状态：${data.state}` : '',
+    data.lagText ? `延迟：${data.lagText}` : '',
+    data.message ? `说明：${data.message}` : ''
+  ].filter(Boolean).join('<br/>')
+}
+
+const renderTopologyChart = async () => {
+  await nextTick()
+  if (activeTab.value !== 'topology' || !topologyChartRef.value) {
+    topologyChart?.dispose()
+    topologyChart = null
+    return
+  }
+  const result = topologyResult.value
+  const nodes = result?.nodes || []
+  if (!nodes.length) {
+    topologyChart?.clear()
+    return
+  }
+  if (topologyChart && topologyChart.getDom() !== topologyChartRef.value) {
+    topologyChart.dispose()
+    topologyChart = null
+  }
+  if (!topologyChart) {
+    topologyChart = echarts.init(topologyChartRef.value)
+  }
+  const graphNodes = nodes.map((node) => {
+    const stateColor = topologyGraphStateColor(node.state)
+    return {
+      name: node.id,
+      displayName: node.name || node.id,
+      roleText: node.roleText || node.role,
+      address: node.address,
+      state: node.state,
+      lagText: node.lagText,
+      message: node.message,
+      symbol: topologyGraphSymbol(node),
+      symbolSize: ['primary', 'master'].includes(String(node.role || '').toLowerCase()) ? 72 : 58,
+      itemStyle: {
+        color: topologyGraphRoleColor(node),
+        borderColor: stateColor,
+        borderWidth: ['warning', 'critical'].includes(String(node.state || '').toLowerCase()) ? 4 : 2
+      },
+      label: {
+        show: true,
+        formatter: () => `${node.name || node.id}\n${node.roleText || node.role || '-'}`,
+        color: '#0f172a',
+        fontSize: 12,
+        lineHeight: 16
+      }
+    }
+  })
+  const graphLinks = (result?.links || []).map((link: DatabaseTopologyLink) => ({
+    source: link.source,
+    target: link.target,
+    sourceName: link.sourceName,
+    targetName: link.targetName,
+    label: link.label,
+    state: link.state,
+    lagText: link.lagText,
+    message: link.message,
+    lineStyle: {
+      color: topologyGraphStateColor(link.state),
+      width: String(link.state || '').toLowerCase() === 'critical' ? 3 : 2,
+      curveness: 0.16
+    },
+    labelLayout: {
+      hideOverlap: true
+    }
+  }))
+  topologyChart.setOption({
+    animationDuration: 320,
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(15, 23, 42, 0.92)',
+      borderWidth: 0,
+      padding: [10, 12],
+      textStyle: {
+        color: '#f8fafc'
+      },
+      formatter: topologyGraphTooltip
+    },
+    series: [
+      {
+        type: 'graph',
+        layout: 'force',
+        roam: true,
+        draggable: true,
+        edgeSymbol: ['none', 'arrow'],
+        edgeSymbolSize: [0, 9],
+        data: graphNodes,
+        links: graphLinks,
+        force: {
+          repulsion: 460,
+          edgeLength: [120, 220],
+          gravity: 0.08
+        },
+        lineStyle: {
+          opacity: 0.86
+        },
+        edgeLabel: {
+          show: true,
+          color: '#475569',
+          fontSize: 11,
+          formatter: (params: any) => params.data?.lagText || params.data?.label || ''
+        },
+        emphasis: {
+          focus: 'adjacency',
+          lineStyle: {
+            width: 4
+          }
+        }
+      }
+    ]
+  }, { notMerge: true })
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      topologyChart?.resize()
+    })
+  })
 }
 
 const openAuditDetail = (row: any) => {
@@ -15174,7 +15426,8 @@ const dbTypeTag = (dbType: string) => {
 const topologyRoleTag = (role: string) => {
   const normalized = String(role || '').toLowerCase()
   if (['master', 'primary'].includes(normalized)) return 'success'
-  if (['replica', 'slave', 'secondary'].includes(normalized)) return 'primary'
+  if (['replica', 'slave', 'secondary', 'standby'].includes(normalized)) return 'primary'
+  if (['delayed_replica', 'delayed_standby'].includes(normalized)) return 'warning'
   if (normalized === 'arbiter') return 'warning'
   return 'info'
 }
@@ -15182,8 +15435,8 @@ const topologyRoleTag = (role: string) => {
 const topologyStateTag = (state: string) => {
   const normalized = String(state || '').toLowerCase()
   if (['ok', 'online', 'connected', 'healthy', 'started', 'green'].includes(normalized)) return 'success'
-  if (['yellow', 'recovering', 'initializing', 'relocating'].includes(normalized)) return 'warning'
-  if (['unhealthy', 'fail', 'failed', 'red', 'disconnected', 'down'].includes(normalized)) return 'danger'
+  if (['warning', 'yellow', 'recovering', 'initializing', 'relocating'].includes(normalized)) return 'warning'
+  if (['critical', 'unhealthy', 'fail', 'failed', 'red', 'disconnected', 'down'].includes(normalized)) return 'danger'
   return 'info'
 }
 
@@ -15906,6 +16159,23 @@ watch(
   { flush: 'post' }
 )
 
+watch(
+  () => [
+    topologyInstanceId.value,
+    topologyResult.value?.collectedAt || '',
+    topologyResult.value?.nodes?.length || 0,
+    topologyResult.value?.links?.length || 0,
+    topologyLoading.value,
+    activeTab.value
+  ],
+  () => {
+    if (!topologyLoading.value) {
+      renderTopologyChart()
+    }
+  },
+  { flush: 'post' }
+)
+
 onMounted(async () => {
   window.addEventListener('resize', resizeCapacityChart)
   document.addEventListener('click', handleDocumentClick)
@@ -15919,6 +16189,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick)
   capacityChart?.dispose()
   capacityChart = null
+  topologyChart?.dispose()
+  topologyChart = null
 })
 </script>
 
@@ -16793,6 +17065,57 @@ onBeforeUnmount(() => {
   background: #ffffff;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
+}
+
+.topology-graph-section {
+  min-height: 390px;
+}
+
+.topology-chart {
+  width: 100%;
+  height: 340px;
+  margin-top: 10px;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+
+.topology-findings-section {
+  border-color: #fed7aa;
+  background: #fffaf3;
+}
+
+.topology-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.topology-finding-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #ffffff;
+  border: 1px solid #fde7c7;
+  border-radius: 8px;
+}
+
+.topology-finding-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.topology-finding-body strong {
+  color: #111827;
+  font-size: 13px;
 }
 
 .topology-message {

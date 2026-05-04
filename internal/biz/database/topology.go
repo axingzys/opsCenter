@@ -46,10 +46,25 @@ type DatabaseTopologyNodeVO struct {
 }
 
 type DatabaseTopologyLinkVO struct {
-	Source string `json:"source"`
-	Target string `json:"target"`
-	Label  string `json:"label"`
-	State  string `json:"state"`
+	Source     string            `json:"source"`
+	Target     string            `json:"target"`
+	SourceName string            `json:"sourceName,omitempty"`
+	TargetName string            `json:"targetName,omitempty"`
+	Label      string            `json:"label"`
+	State      string            `json:"state"`
+	LagText    string            `json:"lagText,omitempty"`
+	Message    string            `json:"message,omitempty"`
+	Metrics    map[string]string `json:"metrics,omitempty"`
+}
+
+type DatabaseTopologyFindingVO struct {
+	Level       string `json:"level"`
+	Category    string `json:"category"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Suggestion  string `json:"suggestion"`
+	NodeID      string `json:"nodeId,omitempty"`
+	LinkID      string `json:"linkId,omitempty"`
 }
 
 type DatabaseShardVO struct {
@@ -64,18 +79,19 @@ type DatabaseShardVO struct {
 }
 
 type DatabaseTopologyVO struct {
-	InstanceID       uint                      `json:"instanceId"`
-	InstanceName     string                    `json:"instanceName"`
-	DBType           string                    `json:"dbType"`
-	DBTypeText       string                    `json:"dbTypeText"`
-	TopologyType     string                    `json:"topologyType"`
-	TopologyTypeText string                    `json:"topologyTypeText"`
-	CollectedAt      string                    `json:"collectedAt"`
-	Cards            []*DatabaseTopologyCardVO `json:"cards"`
-	Nodes            []*DatabaseTopologyNodeVO `json:"nodes"`
-	Links            []*DatabaseTopologyLinkVO `json:"links"`
-	Shards           []*DatabaseShardVO        `json:"shards"`
-	Message          string                    `json:"message"`
+	InstanceID       uint                         `json:"instanceId"`
+	InstanceName     string                       `json:"instanceName"`
+	DBType           string                       `json:"dbType"`
+	DBTypeText       string                       `json:"dbTypeText"`
+	TopologyType     string                       `json:"topologyType"`
+	TopologyTypeText string                       `json:"topologyTypeText"`
+	CollectedAt      string                       `json:"collectedAt"`
+	Cards            []*DatabaseTopologyCardVO    `json:"cards"`
+	Nodes            []*DatabaseTopologyNodeVO    `json:"nodes"`
+	Links            []*DatabaseTopologyLinkVO    `json:"links"`
+	Shards           []*DatabaseShardVO           `json:"shards"`
+	Findings         []*DatabaseTopologyFindingVO `json:"findings,omitempty"`
+	Message          string                       `json:"message"`
 }
 
 func (uc *UseCase) GetTopology(ctx context.Context, instanceID uint, operator QueryOperator) (*DatabaseTopologyVO, error) {
@@ -91,7 +107,7 @@ func (uc *UseCase) GetTopology(ctx context.Context, instanceID uint, operator Qu
 	}
 
 	start := time.Now()
-	result, err := collectDatabaseTopology(ctx, item, credential)
+	result, err := uc.collectDatabaseTopology(ctx, item, credential)
 	duration := time.Since(start).Milliseconds()
 	if err != nil {
 		uc.finishQueryAudit(ctx, audit, DatabaseQueryStatusFailed, 0, duration, err.Error())
@@ -125,8 +141,10 @@ func (uc *UseCase) startTopologyAudit(ctx context.Context, item *DatabaseInstanc
 	return audit
 }
 
-func collectDatabaseTopology(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (*DatabaseTopologyVO, error) {
+func (uc *UseCase) collectDatabaseTopology(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (*DatabaseTopologyVO, error) {
 	switch normalizeDBType(item.DBType) {
+	case DBTypeMySQL, DBTypeMariaDB, DBTypePostgreSQL:
+		return uc.collectRelationalReplicationTopology(ctx, item, credential)
 	case DBTypeRedis:
 		return collectRedisTopology(ctx, item, credential)
 	case DBTypeMongoDB:
@@ -136,6 +154,912 @@ func collectDatabaseTopology(ctx context.Context, item *DatabaseInstance, creden
 	default:
 		return nil, fmt.Errorf("%s 拓扑视图将在四期后续批次接入", DBTypeText(item.DBType))
 	}
+}
+
+func (uc *UseCase) collectRelationalReplicationTopology(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (*DatabaseTopologyVO, error) {
+	engine := normalizeDBType(item.DBType)
+	now := time.Now()
+	checkCtx, cancel := context.WithTimeout(ctx, replicationCheckTimeout)
+	defer cancel()
+
+	var (
+		currentCheck *DatabaseReplicationCheck
+		collectErr   error
+	)
+	switch engine {
+	case DBTypeMySQL, DBTypeMariaDB:
+		currentCheck, collectErr = uc.collectMySQLReplicationStatus(checkCtx, item, credential, now)
+	case DBTypePostgreSQL:
+		currentCheck, collectErr = uc.collectPostgreSQLReplicationStatus(checkCtx, item, credential, now)
+	default:
+		return nil, fmt.Errorf("%s 拓扑视图将在后续批次接入", DBTypeText(item.DBType))
+	}
+	if currentCheck == nil {
+		currentCheck = &DatabaseReplicationCheck{
+			InstanceID:    item.ID,
+			Engine:        engine,
+			RoleDetected:  DatabaseReplicationRoleUnknown,
+			HealthStatus:  DatabaseReplicaHealthUnknown,
+			CheckedAt:     &now,
+			ErrorMessage:  trimText(errorText(collectErr), 1000),
+			RawStatusJSON: marshalReplicaJSON(map[string]any{"error": errorText(collectErr)}),
+		}
+	}
+
+	instances := map[uint]*DatabaseInstance{item.ID: item}
+	replicas := uc.relatedTopologyReplicas(ctx, item, engine)
+	checks := uc.latestTopologyChecks(ctx, item.ID, replicas, currentCheck)
+	nodesByID := make(map[string]*DatabaseTopologyNodeVO)
+	linksByID := make(map[string]*DatabaseTopologyLinkVO)
+	findings := make([]*DatabaseTopologyFindingVO, 0)
+
+	currentNode := uc.ensureReplicationTopologyNode(ctx, nodesByID, instances, item.ID, "", currentCheck, nil)
+	appendTopologyFindingsForCheck(&findings, currentNode.ID, currentCheck, collectErr)
+
+	for _, replica := range replicas {
+		if replica == nil {
+			continue
+		}
+		primaryNode := uc.ensureReplicationPrimaryNode(ctx, nodesByID, instances, replica, checks[replica.PrimaryInstanceID])
+		replicaCheck := checks[replica.ReplicaInstanceID]
+		replicaNode := uc.ensureReplicationTopologyNode(ctx, nodesByID, instances, replica.ReplicaInstanceID, replica.ReplicaRole, replicaCheck, replica)
+		link := buildReplicationTopologyLink(primaryNode, replicaNode, replica, replicaCheck)
+		linksByID[replicationTopologyLinkID(link.Source, link.Target)] = link
+		appendTopologyFindingsForCheck(&findings, replicaNode.ID, replicaCheck, nil)
+		appendTopologyFindingsForReplica(&findings, replicaNode.ID, replica)
+	}
+
+	if isReplicaDetected(currentCheck.RoleDetected) {
+		replica := uc.buildReplicaRelationFromCheck(ctx, item, currentCheck)
+		if replica != nil {
+			primaryNode := uc.ensureReplicationPrimaryNode(ctx, nodesByID, instances, replica, checks[replica.PrimaryInstanceID])
+			replicaNode := uc.ensureReplicationTopologyNode(ctx, nodesByID, instances, item.ID, replica.ReplicaRole, currentCheck, replica)
+			link := buildReplicationTopologyLink(primaryNode, replicaNode, replica, currentCheck)
+			linksByID[replicationTopologyLinkID(link.Source, link.Target)] = link
+		}
+	}
+
+	if currentCheck.RoleDetected == DatabaseReplicationRolePrimary && engine == DBTypePostgreSQL {
+		uc.appendPostgreSQLPrimaryRuntimeTopology(nodesByID, linksByID, currentNode, currentCheck)
+	}
+
+	nodes := topologyNodeMapValues(nodesByID)
+	links := topologyLinkMapValues(linksByID)
+	cards := buildReplicationTopologyCards(item, currentCheck, nodes, links)
+	message := DBTypeText(item.DBType) + " 主从拓扑读取成功"
+	if collectErr != nil {
+		message = "拓扑已基于最近副本关系返回，实时采集存在异常: " + collectErr.Error()
+	}
+
+	return &DatabaseTopologyVO{
+		InstanceID:       item.ID,
+		InstanceName:     item.Name,
+		DBType:           item.DBType,
+		DBTypeText:       DBTypeText(item.DBType),
+		TopologyType:     replicationTopologyType(engine),
+		TopologyTypeText: replicationTopologyTypeText(engine),
+		CollectedAt:      now.Format("2006-01-02 15:04:05"),
+		Cards:            cards,
+		Nodes:            nodes,
+		Links:            links,
+		Findings:         dedupeTopologyFindings(findings),
+		Message:          message,
+	}, nil
+}
+
+func (uc *UseCase) relatedTopologyReplicas(ctx context.Context, item *DatabaseInstance, engine string) []*DatabaseInstanceReplica {
+	if uc == nil || uc.instanceReplicaRepo == nil || item == nil {
+		return nil
+	}
+	result := make([]*DatabaseInstanceReplica, 0)
+	seen := make(map[uint]struct{})
+	add := func(list []*DatabaseInstanceReplica) {
+		for _, replica := range list {
+			if replica == nil {
+				continue
+			}
+			if _, ok := seen[replica.ID]; ok {
+				continue
+			}
+			seen[replica.ID] = struct{}{}
+			result = append(result, replica)
+		}
+	}
+	base, _, err := uc.instanceReplicaRepo.List(ctx, &DatabaseInstanceReplicaListRequest{
+		Page:       1,
+		PageSize:   10000,
+		InstanceID: item.ID,
+		Engine:     engine,
+	})
+	if err == nil {
+		add(base)
+	}
+	for _, replica := range append([]*DatabaseInstanceReplica{}, result...) {
+		if replica.PrimaryInstanceID == 0 || replica.PrimaryInstanceID == item.ID {
+			continue
+		}
+		siblings, _, err := uc.instanceReplicaRepo.List(ctx, &DatabaseInstanceReplicaListRequest{
+			Page:              1,
+			PageSize:          10000,
+			PrimaryInstanceID: replica.PrimaryInstanceID,
+			Engine:            engine,
+		})
+		if err == nil {
+			add(siblings)
+		}
+	}
+	return result
+}
+
+func (uc *UseCase) latestTopologyChecks(ctx context.Context, currentInstanceID uint, replicas []*DatabaseInstanceReplica, currentCheck *DatabaseReplicationCheck) map[uint]*DatabaseReplicationCheck {
+	checks := make(map[uint]*DatabaseReplicationCheck)
+	if currentCheck != nil && currentInstanceID > 0 {
+		checks[currentInstanceID] = currentCheck
+	}
+	for _, replica := range replicas {
+		if replica == nil {
+			continue
+		}
+		if replica.PrimaryInstanceID > 0 {
+			if _, ok := checks[replica.PrimaryInstanceID]; !ok {
+				checks[replica.PrimaryInstanceID] = latestReplicationCheck(ctx, uc.replicationCheckRepo, replica.PrimaryInstanceID)
+			}
+		}
+		if replica.ReplicaInstanceID > 0 {
+			if _, ok := checks[replica.ReplicaInstanceID]; !ok {
+				checks[replica.ReplicaInstanceID] = latestReplicationCheck(ctx, uc.replicationCheckRepo, replica.ReplicaInstanceID)
+			}
+		}
+	}
+	return checks
+}
+
+func (uc *UseCase) ensureReplicationPrimaryNode(
+	ctx context.Context,
+	nodes map[string]*DatabaseTopologyNodeVO,
+	instances map[uint]*DatabaseInstance,
+	replica *DatabaseInstanceReplica,
+	check *DatabaseReplicationCheck,
+) *DatabaseTopologyNodeVO {
+	if replica == nil {
+		return unknownTopologySourceNode(nodes, "", 0)
+	}
+	if replica.PrimaryInstanceID > 0 {
+		return uc.ensureReplicationTopologyNode(ctx, nodes, instances, replica.PrimaryInstanceID, DatabaseReplicationRolePrimary, check, nil)
+	}
+	return unknownTopologySourceNode(nodes, replica.SourceHost, replica.SourcePort)
+}
+
+func (uc *UseCase) ensureReplicationTopologyNode(
+	ctx context.Context,
+	nodes map[string]*DatabaseTopologyNodeVO,
+	instances map[uint]*DatabaseInstance,
+	instanceID uint,
+	fallbackRole string,
+	check *DatabaseReplicationCheck,
+	replica *DatabaseInstanceReplica,
+) *DatabaseTopologyNodeVO {
+	if instanceID == 0 {
+		return unknownTopologySourceNode(nodes, "", 0)
+	}
+	id := topologyInstanceNodeID(instanceID)
+	if existing := nodes[id]; existing != nil {
+		mergeReplicationTopologyNode(existing, check, replica, fallbackRole)
+		return existing
+	}
+	item := instances[instanceID]
+	if item == nil && uc != nil && uc.instanceRepo != nil {
+		if loaded, err := uc.instanceRepo.GetByID(ctx, instanceID); err == nil && loaded != nil {
+			item = loaded
+			instances[instanceID] = loaded
+		}
+	}
+	name := fmt.Sprintf("#%d", instanceID)
+	address := "-"
+	version := ""
+	if item != nil {
+		name = item.Name
+		address = net.JoinHostPort(strings.TrimSpace(item.Host), fmt.Sprintf("%d", item.Port))
+		version = item.Version
+	}
+	role := replicationTopologyRole(check, replica, fallbackRole)
+	state := replicationTopologyState(check, replica)
+	node := &DatabaseTopologyNodeVO{
+		ID:        id,
+		Name:      name,
+		Role:      role,
+		RoleText:  replicationTopologyRoleText(role),
+		Address:   address,
+		State:     state,
+		Version:   version,
+		LagText:   replicationTopologyLagText(check),
+		Message:   replicationTopologyMessage(check, replica),
+		Metrics:   replicationTopologyMetrics(check, replica),
+		UpdatedAt: replicationTopologyUpdatedAt(check, replica),
+	}
+	nodes[id] = node
+	return node
+}
+
+func mergeReplicationTopologyNode(node *DatabaseTopologyNodeVO, check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica, fallbackRole string) {
+	if node == nil {
+		return
+	}
+	if role := replicationTopologyRole(check, replica, fallbackRole); role != "" && role != DatabaseReplicationRoleUnknown {
+		node.Role = role
+		node.RoleText = replicationTopologyRoleText(role)
+	}
+	if state := replicationTopologyState(check, replica); state != DatabaseReplicaHealthUnknown {
+		node.State = state
+	}
+	if lag := replicationTopologyLagText(check); lag != "" {
+		node.LagText = lag
+	}
+	if message := replicationTopologyMessage(check, replica); message != "" {
+		node.Message = message
+	}
+	if updatedAt := replicationTopologyUpdatedAt(check, replica); updatedAt != "" {
+		node.UpdatedAt = updatedAt
+	}
+	if node.Metrics == nil {
+		node.Metrics = map[string]string{}
+	}
+	for key, value := range replicationTopologyMetrics(check, replica) {
+		node.Metrics[key] = value
+	}
+}
+
+func unknownTopologySourceNode(nodes map[string]*DatabaseTopologyNodeVO, host string, port int) *DatabaseTopologyNodeVO {
+	address := strings.TrimSpace(host)
+	if address == "" {
+		address = "unknown-source"
+	} else if port > 0 {
+		address = net.JoinHostPort(address, fmt.Sprintf("%d", port))
+	}
+	id := "source:" + address
+	if existing := nodes[id]; existing != nil {
+		return existing
+	}
+	node := &DatabaseTopologyNodeVO{
+		ID:       id,
+		Name:     "来源未匹配",
+		Role:     DatabaseReplicationRolePrimary,
+		RoleText: "来源主库",
+		Address:  address,
+		State:    DatabaseReplicaHealthUnknown,
+		Message:  "未匹配到 OpsHub 已纳管实例",
+		Metrics: map[string]string{
+			"matched": "false",
+		},
+		UpdatedAt: time.Now().Format("2006-01-02 15:04:05"),
+	}
+	nodes[id] = node
+	return node
+}
+
+func buildReplicationTopologyLink(primaryNode, replicaNode *DatabaseTopologyNodeVO, replica *DatabaseInstanceReplica, check *DatabaseReplicationCheck) *DatabaseTopologyLinkVO {
+	if primaryNode == nil {
+		primaryNode = &DatabaseTopologyNodeVO{ID: "source:unknown", Name: "来源未匹配"}
+	}
+	if replicaNode == nil {
+		replicaNode = &DatabaseTopologyNodeVO{ID: "replica:unknown", Name: "未知副本"}
+	}
+	metrics := map[string]string{}
+	if replica != nil {
+		metrics["replica_id"] = strconv.FormatUint(uint64(replica.ID), 10)
+		metrics["configured_delay_seconds"] = strconv.Itoa(replica.ConfiguredDelaySeconds)
+	}
+	if check != nil {
+		metrics["health"] = check.HealthStatus
+		metrics["seconds_behind_source"] = strconv.Itoa(check.SecondsBehindSource)
+		metrics["remaining_delay_seconds"] = strconv.Itoa(check.RemainingDelaySeconds)
+		if check.ReplicaIORunning != "" {
+			metrics["io"] = check.ReplicaIORunning
+		}
+		if check.ReplicaSQLRunning != "" {
+			metrics["sql"] = check.ReplicaSQLRunning
+		}
+		if check.PGReplayLagMs > 0 {
+			metrics["pg_replay_lag_ms"] = strconv.FormatInt(check.PGReplayLagMs, 10)
+		}
+	}
+	return &DatabaseTopologyLinkVO{
+		Source:     primaryNode.ID,
+		Target:     replicaNode.ID,
+		SourceName: primaryNode.Name,
+		TargetName: replicaNode.Name,
+		Label:      replicationTopologyLinkLabel(check, replica),
+		State:      replicationTopologyState(check, replica),
+		LagText:    replicationTopologyLagText(check),
+		Message:    replicationTopologyMessage(check, replica),
+		Metrics:    metrics,
+	}
+}
+
+func (uc *UseCase) appendPostgreSQLPrimaryRuntimeTopology(
+	nodes map[string]*DatabaseTopologyNodeVO,
+	links map[string]*DatabaseTopologyLinkVO,
+	primaryNode *DatabaseTopologyNodeVO,
+	check *DatabaseReplicationCheck,
+) {
+	if primaryNode == nil || check == nil {
+		return
+	}
+	rows := topologyRawRows(decodeReplicaRawMap(check.RawStatusJSON)["pg_stat_replication"])
+	for _, row := range rows {
+		client := valueOrDefault(toString(row["client_addr"]), "unknown-client")
+		appName := valueOrDefault(toString(row["application_name"]), "standby")
+		nodeID := "pg-standby:" + client + ":" + appName
+		state := topologyStateFromPostgreSQLReplicationRow(row)
+		lagText := firstNonEmpty(toString(row["replay_lag"]), toString(row["flush_lag"]), toString(row["write_lag"]))
+		metrics := map[string]string{
+			"application_name": appName,
+			"client_addr":      client,
+			"state":            toString(row["state"]),
+			"sync_state":       toString(row["sync_state"]),
+			"write_lag":        toString(row["write_lag"]),
+			"flush_lag":        toString(row["flush_lag"]),
+			"replay_lag":       toString(row["replay_lag"]),
+		}
+		if existing := findTopologyNodeByAddress(nodes, client); existing != nil {
+			nodeID = existing.ID
+			existing.State = worseReplicaHealth(existing.State, state)
+			if lagText != "" {
+				existing.LagText = lagText
+			}
+			if existing.Metrics == nil {
+				existing.Metrics = map[string]string{}
+			}
+			for key, value := range metrics {
+				existing.Metrics[key] = value
+			}
+		} else if nodes[nodeID] == nil {
+			nodes[nodeID] = &DatabaseTopologyNodeVO{
+				ID:        nodeID,
+				Name:      appName,
+				Role:      DatabaseReplicationRoleStandby,
+				RoleText:  replicationTopologyRoleText(DatabaseReplicationRoleStandby),
+				Address:   client,
+				State:     state,
+				LagText:   lagText,
+				Message:   firstNonEmpty(toString(row["state"]), "-"),
+				Metrics:   metrics,
+				UpdatedAt: replicationTopologyUpdatedAt(check, nil),
+			}
+		}
+		link := &DatabaseTopologyLinkVO{
+			Source:     primaryNode.ID,
+			Target:     nodeID,
+			SourceName: primaryNode.Name,
+			TargetName: nodes[nodeID].Name,
+			Label:      strings.TrimSpace("streaming " + toString(row["sync_state"])),
+			State:      nodes[nodeID].State,
+			LagText:    nodes[nodeID].LagText,
+			Message:    toString(row["state"]),
+			Metrics:    nodes[nodeID].Metrics,
+		}
+		links[replicationTopologyLinkID(link.Source, link.Target)] = link
+	}
+}
+
+func findTopologyNodeByAddress(nodes map[string]*DatabaseTopologyNodeVO, address string) *DatabaseTopologyNodeVO {
+	address = strings.TrimSpace(address)
+	if address == "" || address == "unknown-client" {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		host := strings.TrimSpace(node.Address)
+		if host == address {
+			return node
+		}
+		if parsedHost, _, err := net.SplitHostPort(host); err == nil && parsedHost == address {
+			return node
+		}
+	}
+	return nil
+}
+
+func topologyRawRows(value any) []map[string]any {
+	rows, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		switch typed := row.(type) {
+		case map[string]any:
+			result = append(result, typed)
+		case map[string]string:
+			item := make(map[string]any, len(typed))
+			for key, value := range typed {
+				item[key] = value
+			}
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func topologyStateFromPostgreSQLReplicationRow(row map[string]any) string {
+	state := strings.ToLower(strings.TrimSpace(toString(row["state"])))
+	if state == "" || state == "streaming" {
+		return DatabaseReplicaHealthHealthy
+	}
+	if strings.Contains(state, "catch") || strings.Contains(state, "backup") {
+		return DatabaseReplicaHealthWarning
+	}
+	return DatabaseReplicaHealthCritical
+}
+
+func buildReplicationTopologyCards(item *DatabaseInstance, currentCheck *DatabaseReplicationCheck, nodes []*DatabaseTopologyNodeVO, links []*DatabaseTopologyLinkVO) []*DatabaseTopologyCardVO {
+	replicaCount := 0
+	maxLagMs := int64(0)
+	health := DatabaseReplicaHealthHealthy
+	remainingWindow := ""
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if isReplicationReplicaRole(node.Role) {
+			replicaCount++
+		}
+		health = worseReplicaHealth(health, node.State)
+	}
+	for _, link := range links {
+		if link == nil {
+			continue
+		}
+		health = worseReplicaHealth(health, link.State)
+		if value := parseMetricInt64(link.Metrics, "pg_replay_lag_ms"); value > maxLagMs {
+			maxLagMs = value
+		}
+		if value := parseMetricInt64(link.Metrics, "seconds_behind_source"); value*1000 > maxLagMs {
+			maxLagMs = value * 1000
+		}
+	}
+	if currentCheck != nil && currentCheck.ConfiguredDelaySeconds > 0 && currentCheck.RemainingDelaySeconds >= 0 {
+		remainingWindow = formatSeconds(int64(currentCheck.RemainingDelaySeconds))
+	}
+	maxLagText := "-"
+	if maxLagMs > 0 {
+		maxLagText = formatTopologyMillis(maxLagMs)
+	}
+	return []*DatabaseTopologyCardVO{
+		{Key: "topology_type", Label: "拓扑类型", Value: replicationTopologyTypeText(normalizeDBType(item.DBType)), Description: "当前实例的复制拓扑类型"},
+		{Key: "role", Label: "当前角色", Value: replicationTopologyRoleText(replicationTopologyRole(currentCheck, nil, "")), Description: "实时采集识别出的当前实例角色"},
+		{Key: "replicas", Label: "副本数量", Value: strconv.Itoa(replicaCount), Description: "拓扑中已识别的副本节点数量"},
+		{Key: "health", Label: "复制健康", Value: ReplicaHealthText(health), Description: "根据节点和链路风险汇总出的健康状态"},
+		{Key: "max_lag", Label: "最大延迟", Value: maxLagText, Description: "拓扑中可识别的最大复制延迟"},
+		{Key: "protection_window", Label: "保护窗口", Value: valueOrDefault(remainingWindow, "-"), Description: "延迟副本剩余保护窗口，仅在可识别时展示"},
+	}
+}
+
+func replicationTopologyType(engine string) string {
+	switch normalizeDBType(engine) {
+	case DBTypePostgreSQL:
+		return "postgresql_streaming_replication"
+	case DBTypeMariaDB:
+		return "mariadb_replication"
+	default:
+		return "mysql_replication"
+	}
+}
+
+func replicationTopologyTypeText(engine string) string {
+	switch normalizeDBType(engine) {
+	case DBTypePostgreSQL:
+		return "PostgreSQL Streaming Replication"
+	case DBTypeMariaDB:
+		return "MariaDB Replication"
+	default:
+		return "MySQL Replication"
+	}
+}
+
+func topologyInstanceNodeID(instanceID uint) string {
+	return fmt.Sprintf("instance:%d", instanceID)
+}
+
+func replicationTopologyLinkID(source, target string) string {
+	return source + "->" + target
+}
+
+func replicationTopologyRole(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica, fallback string) string {
+	if check != nil {
+		switch check.RoleDetected {
+		case DatabaseReplicationRoleReplica:
+			if check.ConfiguredDelaySeconds > 0 {
+				return DatabaseReplicaRoleDelayed
+			}
+			return DatabaseReplicationRoleReplica
+		case DatabaseReplicationRoleStandby:
+			if check.ConfiguredDelaySeconds > 0 {
+				return "delayed_standby"
+			}
+			return DatabaseReplicationRoleStandby
+		case DatabaseReplicationRolePrimary:
+			return DatabaseReplicationRolePrimary
+		}
+	}
+	if replica != nil {
+		switch replica.ReplicaRole {
+		case DatabaseReplicaRoleDelayed:
+			if normalizeDBType(replica.Engine) == DBTypePostgreSQL {
+				return "delayed_standby"
+			}
+			return DatabaseReplicaRoleDelayed
+		case DatabaseReplicaRoleStandby:
+			return DatabaseReplicationRoleStandby
+		case DatabaseReplicaRoleRealtime:
+			return DatabaseReplicationRoleReplica
+		}
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return DatabaseReplicationRoleUnknown
+}
+
+func replicationTopologyRoleText(role string) string {
+	switch strings.TrimSpace(role) {
+	case DatabaseReplicationRolePrimary:
+		return "主库"
+	case DatabaseReplicationRoleReplica:
+		return "从库"
+	case DatabaseReplicaRoleDelayed:
+		return "延迟副本"
+	case DatabaseReplicationRoleStandby:
+		return "Standby"
+	case "delayed_standby":
+		return "延迟 Standby"
+	default:
+		return "未知"
+	}
+}
+
+func replicationTopologyState(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) string {
+	if check != nil && strings.TrimSpace(check.HealthStatus) != "" {
+		return check.HealthStatus
+	}
+	if replica != nil && strings.TrimSpace(replica.Status) != "" {
+		return replica.Status
+	}
+	return DatabaseReplicaHealthUnknown
+}
+
+func replicationTopologyLagText(check *DatabaseReplicationCheck) string {
+	if check == nil {
+		return ""
+	}
+	if normalizeDBType(check.Engine) == DBTypePostgreSQL {
+		if check.PGReplayLagMs > 0 {
+			return formatTopologyMillis(check.PGReplayLagMs)
+		}
+		if check.PGFlushLagMs > 0 {
+			return formatTopologyMillis(check.PGFlushLagMs)
+		}
+		if check.PGWriteLagMs > 0 {
+			return formatTopologyMillis(check.PGWriteLagMs)
+		}
+		return ""
+	}
+	if check.SecondsBehindSource >= 0 {
+		return formatSeconds(int64(check.SecondsBehindSource))
+	}
+	return ""
+}
+
+func replicationTopologyMessage(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) string {
+	if check != nil && strings.TrimSpace(check.ErrorMessage) != "" {
+		return strings.TrimSpace(check.ErrorMessage)
+	}
+	if replica != nil && strings.TrimSpace(replica.LastError) != "" {
+		return strings.TrimSpace(replica.LastError)
+	}
+	if check != nil && check.RoleDetected == DatabaseReplicationRoleReplica {
+		return strings.TrimSpace(fmt.Sprintf("IO %s / SQL %s", valueOrDefault(check.ReplicaIORunning, "-"), valueOrDefault(check.ReplicaSQLRunning, "-")))
+	}
+	return ""
+}
+
+func replicationTopologyMetrics(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) map[string]string {
+	metrics := make(map[string]string)
+	if replica != nil {
+		metrics["replica_id"] = strconv.FormatUint(uint64(replica.ID), 10)
+		metrics["primary_instance_id"] = strconv.FormatUint(uint64(replica.PrimaryInstanceID), 10)
+		metrics["replica_instance_id"] = strconv.FormatUint(uint64(replica.ReplicaInstanceID), 10)
+		metrics["replica_role"] = replica.ReplicaRole
+		metrics["discovery_source"] = replica.DiscoverySource
+		metrics["configured_delay_seconds"] = strconv.Itoa(replica.ConfiguredDelaySeconds)
+		if replica.SourceHost != "" {
+			metrics["source_host"] = replica.SourceHost
+		}
+		if replica.SourcePort > 0 {
+			metrics["source_port"] = strconv.Itoa(replica.SourcePort)
+		}
+	}
+	if check != nil {
+		metrics["check_id"] = strconv.FormatUint(uint64(check.ID), 10)
+		metrics["role_detected"] = check.RoleDetected
+		metrics["health_status"] = check.HealthStatus
+		metrics["seconds_behind_source"] = strconv.Itoa(check.SecondsBehindSource)
+		metrics["remaining_delay_seconds"] = strconv.Itoa(check.RemainingDelaySeconds)
+		metrics["configured_delay_seconds"] = strconv.Itoa(check.ConfiguredDelaySeconds)
+		if check.ReplicaIORunning != "" {
+			metrics["replica_io_running"] = check.ReplicaIORunning
+		}
+		if check.ReplicaSQLRunning != "" {
+			metrics["replica_sql_running"] = check.ReplicaSQLRunning
+		}
+		if check.PGWriteLagMs > 0 {
+			metrics["pg_write_lag_ms"] = strconv.FormatInt(check.PGWriteLagMs, 10)
+		}
+		if check.PGFlushLagMs > 0 {
+			metrics["pg_flush_lag_ms"] = strconv.FormatInt(check.PGFlushLagMs, 10)
+		}
+		if check.PGReplayLagMs > 0 {
+			metrics["pg_replay_lag_ms"] = strconv.FormatInt(check.PGReplayLagMs, 10)
+		}
+		if check.PGLastWALReplayLSN != "" {
+			metrics["pg_last_wal_replay_lsn"] = check.PGLastWALReplayLSN
+		}
+		raw := decodeReplicaRawMap(check.RawStatusJSON)
+		if receiver, ok := raw["pg_stat_wal_receiver"].(map[string]any); ok {
+			metrics["wal_receiver_status"] = toString(receiver["status"])
+			metrics["received_lsn"] = toString(receiver["received_lsn"])
+			metrics["flushed_lsn"] = toString(receiver["flushed_lsn"])
+			metrics["latest_end_lsn"] = toString(receiver["latest_end_lsn"])
+		}
+		if value := toString(raw["pg_is_wal_replay_paused"]); value != "" {
+			metrics["pg_is_wal_replay_paused"] = value
+		}
+		if value := toString(raw["recovery_min_apply_delay"]); value != "" {
+			metrics["recovery_min_apply_delay"] = value
+		}
+	}
+	return metrics
+}
+
+func replicationTopologyUpdatedAt(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) string {
+	if check != nil && check.CheckedAt != nil {
+		return formatTime(check.CheckedAt)
+	}
+	if replica != nil && replica.LastCheckedAt != nil {
+		return formatTime(replica.LastCheckedAt)
+	}
+	return time.Now().Format("2006-01-02 15:04:05")
+}
+
+func replicationTopologyLinkLabel(check *DatabaseReplicationCheck, replica *DatabaseInstanceReplica) string {
+	engine := ""
+	if check != nil {
+		engine = check.Engine
+	} else if replica != nil {
+		engine = replica.Engine
+	}
+	if normalizeDBType(engine) == DBTypePostgreSQL {
+		return "streaming replication"
+	}
+	if replica != nil && replica.ConfiguredDelaySeconds > 0 {
+		return "delayed replication"
+	}
+	if check != nil && check.ConfiguredDelaySeconds > 0 {
+		return "delayed replication"
+	}
+	return "async replication"
+}
+
+func topologyNodeMapValues(nodes map[string]*DatabaseTopologyNodeVO) []*DatabaseTopologyNodeVO {
+	result := make([]*DatabaseTopologyNodeVO, 0, len(nodes))
+	for _, node := range nodes {
+		result = append(result, node)
+	}
+	sortTopologyNodes(result)
+	return result
+}
+
+func topologyLinkMapValues(links map[string]*DatabaseTopologyLinkVO) []*DatabaseTopologyLinkVO {
+	result := make([]*DatabaseTopologyLinkVO, 0, len(links))
+	for _, link := range links {
+		result = append(result, link)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Source == result[j].Source {
+			return result[i].Target < result[j].Target
+		}
+		return result[i].Source < result[j].Source
+	})
+	return result
+}
+
+func appendTopologyFindingsForCheck(findings *[]*DatabaseTopologyFindingVO, nodeID string, check *DatabaseReplicationCheck, collectErr error) {
+	if findings == nil {
+		return
+	}
+	if collectErr != nil {
+		*findings = append(*findings, &DatabaseTopologyFindingVO{
+			Level:       DatabaseReplicaHealthWarning,
+			Category:    "collection",
+			Title:       "实时拓扑采集异常",
+			Description: trimText(collectErr.Error(), 300),
+			Suggestion:  "确认账号是否具备复制状态查询权限，并检查实例连接状态。",
+			NodeID:      nodeID,
+		})
+	}
+	if check == nil {
+		return
+	}
+	flags := decodeTopologyRiskFlags(check.RiskFlagsJSON)
+	if len(flags) == 0 && strings.TrimSpace(check.ErrorMessage) != "" {
+		flags = strings.FieldsFunc(check.ErrorMessage, func(r rune) bool {
+			return r == '；' || r == ';' || r == '\n'
+		})
+	}
+	for _, flag := range flags {
+		flag = strings.TrimSpace(flag)
+		if flag == "" {
+			continue
+		}
+		*findings = append(*findings, &DatabaseTopologyFindingVO{
+			Level:       topologyFindingLevel(check.HealthStatus, flag),
+			Category:    "replication",
+			Title:       flag,
+			Description: topologyFindingDescription(flag),
+			Suggestion:  topologyFindingSuggestion(flag),
+			NodeID:      nodeID,
+		})
+	}
+}
+
+func appendTopologyFindingsForReplica(findings *[]*DatabaseTopologyFindingVO, nodeID string, replica *DatabaseInstanceReplica) {
+	if findings == nil || replica == nil || strings.TrimSpace(replica.LastError) == "" {
+		return
+	}
+	*findings = append(*findings, &DatabaseTopologyFindingVO{
+		Level:       topologyFindingLevel(replica.Status, replica.LastError),
+		Category:    "replica_relation",
+		Title:       trimText(replica.LastError, 80),
+		Description: trimText(replica.LastError, 300),
+		Suggestion:  "进入副本治理查看最近采集详情，并确认复制链路是否需要处理。",
+		NodeID:      nodeID,
+	})
+}
+
+func decodeTopologyRiskFlags(raw string) []string {
+	var flags []string
+	if err := json.Unmarshal([]byte(raw), &flags); err != nil {
+		return nil
+	}
+	return flags
+}
+
+func topologyFindingLevel(status, text string) string {
+	if strings.TrimSpace(status) == DatabaseReplicaHealthCritical {
+		return DatabaseReplicaHealthCritical
+	}
+	lower := strings.ToLower(text)
+	if strings.Contains(text, "异常") || strings.Contains(text, "失败") || strings.Contains(lower, "failed") {
+		return DatabaseReplicaHealthCritical
+	}
+	if strings.TrimSpace(status) == DatabaseReplicaHealthHealthy {
+		return "info"
+	}
+	return DatabaseReplicaHealthWarning
+}
+
+func topologyFindingDescription(flag string) string {
+	switch {
+	case strings.Contains(flag, "来源主库未匹配"):
+		return "副本状态中能看到来源地址，但未匹配到 OpsHub 已纳管的主库实例。"
+	case strings.Contains(flag, "IO 线程异常"):
+		return "MySQL / MariaDB 复制 IO 线程未处于 Yes 状态。"
+	case strings.Contains(flag, "SQL apply 线程异常"):
+		return "MySQL / MariaDB 复制 SQL apply 线程未处于 Yes 状态。"
+	case strings.Contains(flag, "复制延迟过大"):
+		return "当前复制延迟超过默认预警阈值。"
+	case strings.Contains(flag, "延迟副本已追上"):
+		return "延迟副本剩余延迟为 0，当前没有可用于误操作截停的保护窗口。"
+	case strings.Contains(flag, "WAL replay 已暂停"):
+		return "PostgreSQL standby 当前 WAL replay 处于暂停状态。"
+	case strings.Contains(flag, "WAL receiver"):
+		return "PostgreSQL standby 的 WAL receiver 状态异常或无法读取。"
+	default:
+		return flag
+	}
+}
+
+func topologyFindingSuggestion(flag string) string {
+	switch {
+	case strings.Contains(flag, "来源主库未匹配"):
+		return "确认主库实例已纳管，或检查 source host / primary_conninfo 是否与实例地址一致。"
+	case strings.Contains(flag, "IO 线程异常"), strings.Contains(flag, "SQL apply 线程异常"):
+		return "进入副本治理查看原始采集结果，确认复制错误后再决定是否恢复 apply。"
+	case strings.Contains(flag, "复制延迟过大"):
+		return "检查主从网络、从库负载和长事务，必要时查看慢 SQL 与容量趋势。"
+	case strings.Contains(flag, "延迟副本已追上"):
+		return "确认延迟副本配置是否符合误操作保护目标，必要时重新配置延迟窗口。"
+	case strings.Contains(flag, "WAL replay 已暂停"):
+		return "确认是否为计划内暂停；若非计划内，进入副本治理执行恢复流程。"
+	case strings.Contains(flag, "WAL receiver"):
+		return "检查 primary_conninfo、复制槽、网络连通性和 PostgreSQL 日志。"
+	default:
+		return "进入副本治理查看最近采集和原始状态。"
+	}
+}
+
+func dedupeTopologyFindings(items []*DatabaseTopologyFindingVO) []*DatabaseTopologyFindingVO {
+	result := make([]*DatabaseTopologyFindingVO, 0, len(items))
+	seen := make(map[string]struct{})
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		key := item.Level + "|" + item.Category + "|" + item.Title + "|" + item.NodeID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, item)
+	}
+	return result
+}
+
+func isReplicationReplicaRole(role string) bool {
+	switch strings.TrimSpace(role) {
+	case DatabaseReplicationRoleReplica, DatabaseReplicaRoleDelayed, DatabaseReplicationRoleStandby, "delayed_standby":
+		return true
+	default:
+		return false
+	}
+}
+
+func worseReplicaHealth(left, right string) string {
+	score := func(value string) int {
+		switch strings.TrimSpace(value) {
+		case DatabaseReplicaHealthCritical:
+			return 3
+		case DatabaseReplicaHealthWarning:
+			return 2
+		case DatabaseReplicaHealthUnknown:
+			return 1
+		case DatabaseReplicaHealthHealthy:
+			return 0
+		default:
+			return 1
+		}
+	}
+	if score(right) > score(left) {
+		return right
+	}
+	return left
+}
+
+func parseMetricInt64(metrics map[string]string, key string) int64 {
+	if metrics == nil {
+		return 0
+	}
+	value, _ := strconv.ParseInt(strings.TrimSpace(metrics[key]), 10, 64)
+	return value
+}
+
+func formatTopologyMillis(value int64) string {
+	if value <= 0 {
+		return "0 ms"
+	}
+	if value < 1000 {
+		return fmt.Sprintf("%d ms", value)
+	}
+	return formatSeconds(value / 1000)
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func testSearchConnection(ctx context.Context, item *DatabaseInstance, credential *ConnectionCredential) (string, error) {
