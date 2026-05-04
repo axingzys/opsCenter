@@ -559,6 +559,15 @@
                 </div>
               </div>
 
+              <el-alert
+                v-if="isProductionQueryInstance"
+                :title="queryConsoleMode === 'read' ? '当前连接生产实例，请确认查询范围和返回行数。' : '当前连接生产实例，写入或 DDL 操作必须确认影响范围、原因和回滚方案。'"
+                type="error"
+                show-icon
+                :closable="false"
+                class="query-prod-alert"
+              />
+
               <div class="query-action-bar">
                 <template v-if="isRedisQueryInstance || queryConsoleMode === 'read'">
                   <el-button type="primary" :loading="queryRunning" :disabled="!queryInstanceId || !canUseDatabaseFeature(currentQueryInstance, DATABASE_PERMISSION.QUERY, 'queryEnabled')" @click="executeQuery()">
@@ -602,6 +611,9 @@
                 </template>
                 <el-button type="primary" plain :loading="queryHistoryLoading" @click="openQueryHistory">
                   最近历史
+                </el-button>
+                <el-button plain :disabled="!querySQL.trim()" @click="saveCurrentQueryFavorite">
+                  收藏 SQL
                 </el-button>
                 <el-button @click="resetQueryConsole">清空</el-button>
               </div>
@@ -724,6 +736,43 @@
                   </div>
                 </div>
               </div>
+
+              <div class="query-side-card">
+                <div class="query-side-header">
+                  <div class="query-side-title">收藏 SQL</div>
+                  <el-button link type="primary" :disabled="!querySQL.trim()" @click="saveCurrentQueryFavorite">收藏当前</el-button>
+                </div>
+                <div v-if="queryFavorites.length" class="query-side-list">
+                  <div v-for="item in queryFavorites.slice(0, 5)" :key="item.id" class="query-side-list-item">
+                    <div class="query-side-item-main" @click="applyQueryFavorite(item)">
+                      <strong>{{ item.title }}</strong>
+                      <span>{{ item.sqlText }}</span>
+                    </div>
+                    <el-button link type="danger" @click.stop="removeQueryFavorite(item.id)">删除</el-button>
+                  </div>
+                </div>
+                <el-empty v-else description="暂无收藏" :image-size="48" />
+              </div>
+
+              <div class="query-side-card">
+                <div class="query-side-header">
+                  <div class="query-side-title">最近 SQL</div>
+                  <div>
+                    <el-button link type="primary" :loading="queryHistoryLoading" @click="loadQueryHistory">刷新</el-button>
+                    <el-button link type="primary" :loading="queryHistoryLoading" @click="openQueryHistory">更多</el-button>
+                  </div>
+                </div>
+                <div v-if="queryHistoryItems.length" v-loading="queryHistoryLoading" class="query-side-list">
+                  <div v-for="item in queryHistoryItems.slice(0, 5)" :key="`${item.id || item.auditId || item.createdAt}-${item.sqlText}`" class="query-side-list-item">
+                    <div class="query-side-item-main" @click="applyHistoryQuery(item)">
+                      <strong>{{ item.sqlType || '-' }} / {{ item.statusText || item.status || '-' }}</strong>
+                      <span>{{ item.sqlSummary || item.sqlText || '-' }}</span>
+                    </div>
+                    <el-button link type="primary" @click.stop="saveHistoryQueryFavorite(item)">收藏</el-button>
+                  </div>
+                </div>
+                <el-empty v-else description="暂无历史" :image-size="48" />
+              </div>
             </aside>
           </div>
 
@@ -743,11 +792,11 @@
             </div>
 
             <div v-if="writeResult" class="query-result">
-	            <div class="result-summary">
-	              <div class="summary-card">
-	                <span class="summary-label">{{ isDDLWriteResult ? '结构变更' : '影响行数' }}</span>
-	                <strong>{{ isDDLWriteResult ? '已执行' : writeResult.rowsAffected }}</strong>
-	              </div>
+              <div class="result-summary">
+                <div class="summary-card">
+                  <span class="summary-label">{{ isDDLWriteResult ? '结构变更' : '影响行数' }}</span>
+                  <strong>{{ isDDLWriteResult ? '已执行' : writeResult.rowsAffected }}</strong>
+                </div>
               <div class="summary-card">
                 <span class="summary-label">耗时</span>
                 <strong>{{ writeResult.durationMs }} ms</strong>
@@ -764,39 +813,50 @@
                 <span class="summary-label">审计 ID</span>
                 <strong>{{ writeResult.auditId }}</strong>
               </div>
-	              <div class="summary-card">
-	                <span class="summary-label">{{ isDDLWriteResult ? '执行通道' : '影响阈值' }}</span>
-	                <strong>{{ isDDLWriteResult ? 'DDL' : writeResult.rowsAffectedLimit }}</strong>
-	              </div>
-	            </div>
-	            <el-alert
-	              :title="writeResult.message || (isDDLWriteResult ? 'DDL 结构变更执行完成' : '写操作执行完成')"
-	              type="success"
-              show-icon
-              :closable="false"
-            />
-            <el-alert
-              v-if="writeResult.executedSql"
-              :title="`实际执行 SQL：${writeResult.executedSql}`"
-              type="warning"
-              show-icon
-              :closable="false"
-              class="executed-sql-alert"
-            />
-            <div class="write-meta-tags">
-              <el-tag :type="riskLevelTag(writeResult.riskLevel)">{{ writeResult.riskLevelText }}</el-tag>
-              <el-tag v-if="writeResult.reason" type="info">原因：{{ writeResult.reason }}</el-tag>
-              <el-tag v-if="writeResult.confirmRequired" :type="writeResult.confirmed ? 'success' : 'warning'">
-                {{ writeResult.confirmed ? '已确认执行' : '未确认' }}
-              </el-tag>
+                <div class="summary-card">
+                  <span class="summary-label">{{ isDDLWriteResult ? '执行通道' : '影响阈值' }}</span>
+                  <strong>{{ isDDLWriteResult ? 'DDL' : writeResult.rowsAffectedLimit }}</strong>
+                </div>
+              </div>
+              <el-alert
+                :title="writeResult.message || (isDDLWriteResult ? 'DDL 结构变更执行完成' : '写操作执行完成')"
+                type="success"
+                show-icon
+                :closable="false"
+              />
+              <el-tabs v-model="queryResultTab" class="query-result-tabs">
+                <el-tab-pane v-if="writeResult.executedSql" label="实际执行 SQL" name="sql">
+                  <div class="audit-sql-block">
+                    <div class="audit-sql-title">
+                      <span>实际执行 SQL</span>
+                      <el-button link type="primary" @click="copyText(writeResult.executedSql || '', '实际执行 SQL')">复制</el-button>
+                    </div>
+                    <pre>{{ writeResult.executedSql }}</pre>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="审计信息" name="audit">
+                  <el-descriptions :column="3" border class="query-audit-descriptions">
+                    <el-descriptions-item label="审计 ID">{{ writeResult.auditId }}</el-descriptions-item>
+                    <el-descriptions-item label="SQL 类型">{{ writeResult.sqlType }}</el-descriptions-item>
+                    <el-descriptions-item label="风险等级">{{ writeResult.riskLevelText }}</el-descriptions-item>
+                    <el-descriptions-item label="耗时">{{ writeResult.durationMs }} ms</el-descriptions-item>
+                    <el-descriptions-item label="原因">{{ writeResult.reason || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="确认状态">{{ writeResult.confirmRequired ? (writeResult.confirmed ? '已确认' : '未确认') : '无需确认' }}</el-descriptions-item>
+                  </el-descriptions>
+                </el-tab-pane>
+                <el-tab-pane v-if="writeResult.rollbackSql" label="回滚提示" name="rollback">
+                  <div class="audit-sql-block">
+                    <div class="audit-sql-title">
+                      <span>回滚 SQL / 恢复提示</span>
+                      <el-button link type="primary" @click="copyText(writeResult.rollbackSql || '', '回滚提示')">复制</el-button>
+                    </div>
+                    <pre>{{ writeResult.rollbackSql }}</pre>
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
             </div>
-            <div v-if="writeResult.rollbackSql" class="audit-sql-block">
-              <div class="audit-sql-title">回滚 SQL / 恢复提示</div>
-              <pre>{{ writeResult.rollbackSql }}</pre>
-            </div>
-          </div>
-          <div v-else-if="ddlCheckResult" class="query-result">
-            <div class="result-summary">
+            <div v-else-if="ddlCheckResult" class="query-result">
+              <div class="result-summary">
               <div class="summary-card">
                 <span class="summary-label">DDL 检查</span>
                 <strong>{{ ddlCheckResult.allowed ? '通过' : '未通过' }}</strong>
@@ -820,19 +880,42 @@
               show-icon
               :closable="false"
             />
-            <div class="write-meta-tags">
-              <el-tag :type="riskLevelTag(ddlCheckResult.riskLevel)">{{ ddlCheckResult.riskLevelText }}</el-tag>
-              <el-tag :type="ddlCheckResult.reasonRequired ? 'warning' : 'info'">
-                {{ ddlCheckResult.reasonRequired ? '执行时必须填写原因' : '原因非必填' }}
-              </el-tag>
-              <el-tag :type="ddlCheckResult.confirmRequired ? 'danger' : 'success'">
-                {{ ddlCheckResult.confirmRequired ? '执行前需二次确认' : '无需二次确认' }}
-              </el-tag>
-              <el-tag v-if="ddlCheckResult.backupRequired" type="warning">建议先确认备份</el-tag>
+              <el-tabs v-model="queryResultTab" class="query-result-tabs">
+                <el-tab-pane label="检查详情" name="check">
+                  <div class="write-meta-tags">
+                    <el-tag :type="riskLevelTag(ddlCheckResult.riskLevel)">{{ ddlCheckResult.riskLevelText }}</el-tag>
+                    <el-tag :type="ddlCheckResult.reasonRequired ? 'warning' : 'info'">
+                      {{ ddlCheckResult.reasonRequired ? '执行时必须填写原因' : '原因非必填' }}
+                    </el-tag>
+                    <el-tag :type="ddlCheckResult.confirmRequired ? 'danger' : 'success'">
+                      {{ ddlCheckResult.confirmRequired ? '执行前需二次确认' : '无需二次确认' }}
+                    </el-tag>
+                    <el-tag v-if="ddlCheckResult.backupRequired" type="warning">建议先确认备份</el-tag>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="待执行 SQL" name="sql">
+                  <div class="audit-sql-block">
+                    <div class="audit-sql-title">
+                      <span>待执行 DDL</span>
+                      <el-button link type="primary" @click="copyText(querySQL, '待执行 DDL')">复制</el-button>
+                    </div>
+                    <pre>{{ querySQL }}</pre>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="审计信息" name="audit">
+                  <el-descriptions :column="3" border class="query-audit-descriptions">
+                    <el-descriptions-item label="实例">{{ ddlCheckResult.instanceName || currentQueryInstance?.name || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="Schema">{{ ddlCheckResult.schemaName || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="SQL 类型">{{ ddlCheckResult.sqlType || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="风险等级">{{ ddlCheckResult.riskLevelText || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="备份提示">{{ ddlCheckResult.backupRequired ? '建议确认备份' : '不要求' }}</el-descriptions-item>
+                    <el-descriptions-item label="确认要求">{{ ddlCheckResult.confirmRequired ? '需要二次确认' : '无需二次确认' }}</el-descriptions-item>
+                  </el-descriptions>
+                </el-tab-pane>
+              </el-tabs>
             </div>
-          </div>
-          <div v-else-if="writeCheckResult" class="query-result">
-            <div class="result-summary">
+            <div v-else-if="writeCheckResult" class="query-result">
+              <div class="result-summary">
               <div class="summary-card">
                 <span class="summary-label">预检查结果</span>
                 <strong>{{ writeCheckResult.allowed ? '通过' : '未通过' }}</strong>
@@ -856,18 +939,41 @@
               show-icon
               :closable="false"
             />
-            <div class="write-meta-tags">
-              <el-tag :type="riskLevelTag(writeCheckResult.riskLevel)">{{ writeCheckResult.riskLevelText }}</el-tag>
-              <el-tag :type="writeCheckResult.reasonRequired ? 'warning' : 'info'">
-                {{ writeCheckResult.reasonRequired ? '执行时必须填写原因' : '原因非必填' }}
-              </el-tag>
-              <el-tag :type="writeCheckResult.confirmRequired ? 'danger' : 'success'">
-                {{ writeCheckResult.confirmRequired ? '执行前需二次确认' : '无需二次确认' }}
-              </el-tag>
+              <el-tabs v-model="queryResultTab" class="query-result-tabs">
+                <el-tab-pane label="检查详情" name="check">
+                  <div class="write-meta-tags">
+                    <el-tag :type="riskLevelTag(writeCheckResult.riskLevel)">{{ writeCheckResult.riskLevelText }}</el-tag>
+                    <el-tag :type="writeCheckResult.reasonRequired ? 'warning' : 'info'">
+                      {{ writeCheckResult.reasonRequired ? '执行时必须填写原因' : '原因非必填' }}
+                    </el-tag>
+                    <el-tag :type="writeCheckResult.confirmRequired ? 'danger' : 'success'">
+                      {{ writeCheckResult.confirmRequired ? '执行前需二次确认' : '无需二次确认' }}
+                    </el-tag>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="待执行 SQL" name="sql">
+                  <div class="audit-sql-block">
+                    <div class="audit-sql-title">
+                      <span>待执行 SQL</span>
+                      <el-button link type="primary" @click="copyText(querySQL, '待执行 SQL')">复制</el-button>
+                    </div>
+                    <pre>{{ querySQL }}</pre>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="审计信息" name="audit">
+                  <el-descriptions :column="3" border class="query-audit-descriptions">
+                    <el-descriptions-item label="实例">{{ writeCheckResult.instanceName || currentQueryInstance?.name || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="Schema">{{ writeCheckResult.schemaName || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="SQL 类型">{{ writeCheckResult.sqlType || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="风险等级">{{ writeCheckResult.riskLevelText || '-' }}</el-descriptions-item>
+                    <el-descriptions-item label="影响阈值">{{ writeCheckResult.rowsAffectedLimit }}</el-descriptions-item>
+                    <el-descriptions-item label="确认要求">{{ writeCheckResult.confirmRequired ? '需要二次确认' : '无需二次确认' }}</el-descriptions-item>
+                  </el-descriptions>
+                </el-tab-pane>
+              </el-tabs>
             </div>
-          </div>
-          <div v-else-if="queryResult" class="query-result">
-            <div class="result-summary">
+            <div v-else-if="queryResult" class="query-result">
+              <div class="result-summary">
               <div class="summary-card">
                 <span class="summary-label">返回行数</span>
                 <strong>{{ queryResult.rowsReturned }}</strong>
@@ -890,29 +996,48 @@
               <el-tag v-if="queryResult.cellsMasked" type="info">敏感字段已脱敏</el-tag>
               <el-tag v-if="queryResult.binaryPreviewed" type="info">二进制已预览</el-tag>
             </div>
-            <el-alert
-              v-if="queryResult.executedSql"
-              :title="`${isRedisQueryInstance ? '实际执行命令' : '实际执行 SQL'}：${queryResult.executedSql}`"
-              type="success"
-              show-icon
-              :closable="false"
-              class="executed-sql-alert"
-            />
-            <el-table :data="queryResult.rows || []" border stripe height="420" class="query-result-table">
-              <el-table-column
-                v-for="column in queryResult.columns || []"
-                :key="column"
-                :prop="column"
-                :label="column"
-                min-width="150"
-                show-overflow-tooltip
-              >
-                <template #default="{ row }">
-                  <span class="query-cell">{{ formatQueryCell(row[column]) }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
-          </div>
+              <el-tabs v-model="queryResultTab" class="query-result-tabs">
+                <el-tab-pane label="结果集" name="result">
+                  <div class="query-result-toolbar">
+                    <span>{{ queryResult.columns?.length || 0 }} 列 / {{ queryResult.rowsReturned || 0 }} 行</span>
+                    <span>点击单元格可复制内容</span>
+                  </div>
+                  <el-table :data="queryResult.rows || []" border stripe height="420" class="query-result-table">
+                    <el-table-column
+                      v-for="column in queryResult.columns || []"
+                      :key="column"
+                      :prop="column"
+                      :label="column"
+                      min-width="150"
+                      show-overflow-tooltip
+                    >
+                      <template #default="{ row }">
+                        <span class="query-cell query-cell-copyable" @click="copyQueryCell(row[column], column)">{{ formatQueryCell(row[column]) }}</span>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </el-tab-pane>
+                <el-tab-pane v-if="queryResult.executedSql" :label="isRedisQueryInstance ? '实际执行命令' : '实际执行 SQL'" name="sql">
+                  <div class="audit-sql-block">
+                    <div class="audit-sql-title">
+                      <span>{{ isRedisQueryInstance ? '实际执行命令' : '实际执行 SQL' }}</span>
+                      <el-button link type="primary" @click="copyText(queryResult.executedSql || '', isRedisQueryInstance ? '实际执行命令' : '实际执行 SQL')">复制</el-button>
+                    </div>
+                    <pre>{{ queryResult.executedSql }}</pre>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="审计信息" name="audit">
+                  <el-descriptions :column="3" border class="query-audit-descriptions">
+                    <el-descriptions-item label="审计 ID">{{ queryResult.auditId }}</el-descriptions-item>
+                    <el-descriptions-item :label="isRedisQueryInstance ? '命令类型' : 'SQL 类型'">{{ queryResult.sqlType }}</el-descriptions-item>
+                    <el-descriptions-item label="耗时">{{ queryResult.durationMs }} ms</el-descriptions-item>
+                    <el-descriptions-item label="返回行数">{{ queryResult.rowsReturned }}</el-descriptions-item>
+                    <el-descriptions-item label="截断">{{ queryResult.truncated ? '是' : '否' }}</el-descriptions-item>
+                    <el-descriptions-item label="导出上限">{{ formatNumber(queryExportLimit) }} 行</el-descriptions-item>
+                  </el-descriptions>
+                </el-tab-pane>
+              </el-tabs>
+            </div>
             <el-empty v-else :description="isRedisQueryInstance ? '执行 Redis 只读命令后查看结果' : '执行查询、预检查或受控操作后查看结果'" :image-size="72" />
           </div>
         </div>
@@ -7823,6 +7948,18 @@ const querySchemas = ref<any[]>([])
 const querySQL = ref('SELECT 1')
 type QueryConsoleMode = 'read' | 'write' | 'ddl'
 const queryConsoleMode = ref<QueryConsoleMode>('read')
+type QueryResultTab = 'result' | 'sql' | 'audit' | 'rollback' | 'check'
+const queryResultTab = ref<QueryResultTab>('result')
+interface QuerySQLFavorite {
+  id: string
+  title: string
+  sqlText: string
+  schemaName: string
+  dbType: string
+  createdAt: string
+}
+const queryFavorites = ref<QuerySQLFavorite[]>([])
+const queryFavoriteStorageKey = 'opshub.database.query.favorites'
 const queryLimit = ref(500)
 const queryUnlimitedRows = ref(false)
 const queryTimeoutSeconds = ref(30)
@@ -9145,6 +9282,10 @@ const queryConsoleModeTagType = computed(() => {
   return 'primary'
 })
 
+const isProductionQueryInstance = computed(() =>
+  currentQueryInstance.value?.environment === 'prod'
+)
+
 const currentDiagnosisInstance = computed(() =>
   instanceOptions.value.find(item => item.id === diagnosisInstanceId.value)
 )
@@ -10276,6 +10417,7 @@ const ensureQueryInstance = async () => {
   }
   if (queryInstanceId.value) {
     await loadQuerySchemas()
+    await loadQueryHistory()
   }
 }
 
@@ -10320,6 +10462,7 @@ const clearWriteConsoleState = () => {
 const clearQueryConsoleState = () => {
   clearReadOnlyConsoleState()
   clearWriteConsoleState()
+  queryResultTab.value = 'result'
 }
 
 const resetDiagnosisState = () => {
@@ -13075,6 +13218,85 @@ const copyText = async (value: string, label: string) => {
   ElMessage.success(`${label}已复制`)
 }
 
+const loadQueryFavorites = () => {
+  try {
+    const raw = window.localStorage.getItem(queryFavoriteStorageKey)
+    const parsed = raw ? JSON.parse(raw) : []
+    queryFavorites.value = Array.isArray(parsed) ? parsed.slice(0, 20) : []
+  } catch {
+    queryFavorites.value = []
+  }
+}
+
+const persistQueryFavorites = () => {
+  try {
+    window.localStorage.setItem(queryFavoriteStorageKey, JSON.stringify(queryFavorites.value.slice(0, 20)))
+  } catch {
+    ElMessage.warning('浏览器本地存储不可用，收藏未持久化')
+  }
+}
+
+const buildQueryFavoriteTitle = (sqlText: string) => {
+  const normalized = sqlText.replace(/\s+/g, ' ').trim()
+  return normalized.length > 36 ? `${normalized.slice(0, 36)}...` : normalized
+}
+
+const addQueryFavorite = (sqlText: string, schemaName = querySchemaName.value) => {
+  const normalizedSQL = sqlText.trim()
+  if (!normalizedSQL) {
+    ElMessage.warning('请输入 SQL')
+    return
+  }
+  const duplicatedIndex = queryFavorites.value.findIndex(item =>
+    item.sqlText === normalizedSQL &&
+    item.schemaName === (schemaName || '') &&
+    item.dbType === (currentQueryInstance.value?.dbType || '')
+  )
+  const favorite: QuerySQLFavorite = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    title: buildQueryFavoriteTitle(normalizedSQL),
+    sqlText: normalizedSQL,
+    schemaName: schemaName || '',
+    dbType: currentQueryInstance.value?.dbType || '',
+    createdAt: new Date().toISOString()
+  }
+  if (duplicatedIndex >= 0) {
+    queryFavorites.value.splice(duplicatedIndex, 1)
+  }
+  queryFavorites.value.unshift(favorite)
+  queryFavorites.value = queryFavorites.value.slice(0, 20)
+  persistQueryFavorites()
+  ElMessage.success('SQL 已收藏')
+}
+
+const saveCurrentQueryFavorite = () => {
+  addQueryFavorite(querySQL.value)
+}
+
+const saveHistoryQueryFavorite = (row: any) => {
+  if (!row?.sqlText) return
+  addQueryFavorite(row.sqlText, row.schemaName || querySchemaName.value)
+}
+
+const applyQueryFavorite = (item: QuerySQLFavorite) => {
+  querySQL.value = item.sqlText
+  if (item.schemaName) {
+    querySchemaName.value = item.schemaName
+  }
+  clearQueryConsoleState()
+  ElMessage.success('已填入 SQL 编辑器')
+}
+
+const removeQueryFavorite = (id: string) => {
+  queryFavorites.value = queryFavorites.value.filter(item => item.id !== id)
+  persistQueryFavorites()
+  ElMessage.success('收藏已删除')
+}
+
+const copyQueryCell = (value: any, column: string) => {
+  copyText(formatQueryCell(value), `字段 ${column}`)
+}
+
 const openLogArchiveEventsForStream = async (row: DatabaseLogArchiveStreamResult) => {
   backupPitrTab.value = 'advancedResources'
   backupAdvancedTab.value = 'events'
@@ -13530,6 +13752,7 @@ const handleQueryInstanceChange = async () => {
   queryUnlimitedRows.value = false
   clearQueryConsoleState()
   await loadQuerySchemas()
+  await loadQueryHistory()
 }
 
 const handleDiagnosisInstanceChange = async () => {
@@ -13620,6 +13843,7 @@ const executeQuery = async (options?: { skipUnlimitedConfirm?: boolean }) => {
     queryResult.value = await executeDatabaseQuery(queryInstanceId.value, buildQueryPayload(queryLimit.value, {
       unlimitedRows: queryUnlimitedRows.value
     }))
+    queryResultTab.value = 'result'
     ElMessage.success(
       isRedisQueryInstance.value
         ? `命令执行成功，返回 ${queryResult.value?.rowsReturned || 0} 行`
@@ -13740,6 +13964,7 @@ const handleValidateWriteQuery = async () => {
     writeResult.value = undefined
     ddlCheckResult.value = undefined
     writeCheckResult.value = await validateDatabaseWriteQuery(queryInstanceId.value, buildWriteValidatePayload())
+    queryResultTab.value = 'check'
     if (writeCheckResult.value?.allowed) {
       ElMessage.success(writeCheckResult.value.message || '写操作预检查通过')
       return
@@ -13770,6 +13995,7 @@ const handlePrepareWriteExecute = async () => {
     ddlCheckResult.value = undefined
     const result = await validateDatabaseWriteQuery(queryInstanceId.value, buildWriteValidatePayload())
     writeCheckResult.value = result
+    queryResultTab.value = 'check'
     if (!result?.allowed) {
       ElMessage.warning(result?.message || '写操作预检查未通过')
       return
@@ -13812,6 +14038,7 @@ const handleExecuteWrite = async () => {
       confirmed: writeConfirmForm.confirmed,
       timeoutSeconds: queryTimeoutSeconds.value
     })
+    queryResultTab.value = writeResult.value?.executedSql ? 'sql' : 'audit'
     writeConfirmVisible.value = false
     await loadQueryAudits()
     ElMessage.success(writeResult.value?.message || '写操作执行成功')
@@ -13839,6 +14066,7 @@ const handleValidateDDLQuery = async () => {
     writeCheckResult.value = undefined
     writeResult.value = undefined
     ddlCheckResult.value = await validateDatabaseDDLQuery(queryInstanceId.value, buildWriteValidatePayload())
+    queryResultTab.value = 'check'
     if (ddlCheckResult.value?.allowed) {
       ElMessage.success(ddlCheckResult.value.message || 'DDL 结构变更检查通过')
       return
@@ -13873,6 +14101,7 @@ const handlePrepareDDLExecute = async () => {
     writeResult.value = undefined
     const result = await validateDatabaseDDLQuery(queryInstanceId.value, buildWriteValidatePayload())
     ddlCheckResult.value = result
+    queryResultTab.value = 'check'
     if (!result?.allowed) {
       ElMessage.warning(result?.message || 'DDL 结构变更检查未通过')
       return
@@ -13915,6 +14144,7 @@ const handleExecuteDDL = async () => {
       confirmed: ddlConfirmForm.confirmed,
       timeoutSeconds: queryTimeoutSeconds.value
     })
+    queryResultTab.value = writeResult.value?.executedSql ? 'sql' : 'audit'
     ddlConfirmVisible.value = false
     ddlCheckResult.value = undefined
     await loadQueryAudits()
@@ -15662,6 +15892,7 @@ watch(
 onMounted(async () => {
   window.addEventListener('resize', resizeCapacityChart)
   document.addEventListener('click', handleDocumentClick)
+  loadQueryFavorites()
   await Promise.all([loadSupportedTypes(), loadCredentials(), loadRoles(), loadUIPermissions(), loadDatabaseWriteConfig()])
   await Promise.all([loadInstances(), loadInstanceOptions()])
 })
@@ -16166,6 +16397,10 @@ onBeforeUnmount(() => {
   border-radius: 8px;
 }
 
+.query-prod-alert {
+  margin-bottom: 12px;
+}
+
 .query-number {
   width: 130px;
 }
@@ -16205,6 +16440,13 @@ onBeforeUnmount(() => {
   color: #111827;
   font-size: 14px;
   font-weight: 650;
+}
+
+.query-side-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .query-param-list,
@@ -16247,6 +16489,50 @@ onBeforeUnmount(() => {
   padding-top: 2px;
 }
 
+.query-side-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.query-side-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.query-side-item-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.query-side-item-main strong,
+.query-side-item-main span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.query-side-item-main strong {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.query-side-item-main span {
+  margin-top: 4px;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
 .query-result-panel {
   min-height: 180px;
 }
@@ -16262,6 +16548,25 @@ onBeforeUnmount(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.query-result-tabs {
+  margin-top: 2px;
+}
+
+.query-result-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.query-audit-descriptions {
+  width: 100%;
 }
 
 .explain-summary {
@@ -16305,6 +16610,14 @@ onBeforeUnmount(() => {
 
 .query-cell {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.query-cell-copyable {
+  cursor: pointer;
+}
+
+.query-cell-copyable:hover {
+  color: #2563eb;
 }
 
 .query-history-toolbar {
@@ -16680,6 +16993,10 @@ onBeforeUnmount(() => {
 }
 
 .audit-sql-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 8px;
   font-size: 14px;
   font-weight: 700;
