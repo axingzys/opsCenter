@@ -98,12 +98,19 @@ type DatabaseProtectionProfileVO struct {
 	LogChainStatusText      string                       `json:"logChainStatusText"`
 	ReplicaProtectionStatus string                       `json:"replicaProtectionStatus"`
 	ReplicaProtectionText   string                       `json:"replicaProtectionText"`
+	PGSystemIdentifier      string                       `json:"pgSystemIdentifier"`
+	TimelineID              string                       `json:"timelineId"`
+	WALStart                string                       `json:"walStart"`
+	WALEnd                  string                       `json:"walEnd"`
+	WALGapCount             int                          `json:"walGapCount"`
+	TimelineMismatch        bool                         `json:"timelineMismatch"`
 	BackupPolicy            *DatabaseBackupPolicyVO      `json:"backupPolicy,omitempty"`
 	LogicalTask             *DatabaseBackupTaskVO        `json:"logicalTask,omitempty"`
 	LatestBackupRecord      *DatabaseBackupRecordVO      `json:"latestBackupRecord,omitempty"`
 	LatestLogArchive        *DatabaseLogArchiveVO        `json:"latestLogArchive,omitempty"`
 	LatestRestoreJob        *DatabaseRestoreJobVO        `json:"latestRestoreJob,omitempty"`
 	LogArchiveStream        *DatabaseLogArchiveStreamVO  `json:"logArchiveStream,omitempty"`
+	BarmanServer            *DatabaseBarmanServerVO      `json:"barmanServer,omitempty"`
 	RunnerHost              *DatabaseRunnerHostVO        `json:"runnerHost,omitempty"`
 	StorageProfile          *DatabaseStorageProfileVO    `json:"storageProfile,omitempty"`
 	ReplicaProtection       *DatabaseReplicaProtectionVO `json:"replicaProtection,omitempty"`
@@ -279,6 +286,29 @@ func (uc *UseCase) buildProtectionProfile(ctx context.Context, instance *Databas
 		profile.LastFullAt = firstNonEmpty(profile.LastFullAt, latestBackupRecordTime(latestRecord, DatabaseBackupLevelFull))
 		profile.RecoverableFrom = firstNonEmpty(profile.RecoverableFrom, formatTime(latestRecord.RecoverableFrom), formatTime(latestRecord.StartedAt))
 		profile.RecoverableUntil = firstNonEmpty(profile.RecoverableUntil, formatTime(latestRecord.RecoverableUntil), formatTime(latestRecord.FinishedAt))
+		if engine == DBTypePostgreSQL && isPostgreSQLPhysicalProtectionRecord(latestRecord) {
+			if profile.ProtectionMode == DatabaseProtectionModeNone {
+				profile.ProtectionMode = postgresProtectionModeFromBackupEngine(latestRecord.BackupEngine)
+			}
+			if profile.BackupChainStatus == DatabaseBackupChainStatusMissingBase && isPostgreSQLBackupBaselineAvailable(latestRecord) {
+				profile.BackupChainStatus = DatabaseBackupChainStatusComplete
+				profile.BackupChainStatusText = BackupChainStatusText(profile.BackupChainStatus)
+			}
+			profile.PGSystemIdentifier = firstNonEmpty(profile.PGSystemIdentifier, latestRecord.PGSystemIdentifier)
+			profile.TimelineID = firstNonEmpty(profile.TimelineID, latestRecord.TimelineID)
+			profile.WALStart = firstNonEmpty(profile.WALStart, latestRecord.WALStart)
+			profile.WALEnd = firstNonEmpty(profile.WALEnd, latestRecord.WALEnd)
+		}
+	}
+
+	if engine == DBTypePostgreSQL {
+		if server := uc.selectProtectionBarmanServer(ctx, instance.ID, profile.LatestBackupRecord); server != nil {
+			profile.BarmanServer = uc.toBarmanServerVO(ctx, server)
+			if profile.ProtectionMode == DatabaseProtectionModeNone {
+				profile.ProtectionMode = DatabaseProtectionModePostgresBarmanPITR
+			}
+			profile.PGSystemIdentifier = firstNonEmpty(profile.PGSystemIdentifier, server.PGSystemIdentifier)
+		}
 	}
 
 	stream := uc.selectProtectionLogArchiveStream(ctx, instance.ID, engine, profile.BackupPolicy)
@@ -299,9 +329,31 @@ func (uc *UseCase) buildProtectionProfile(ctx context.Context, instance *Databas
 		if profile.RecoverableUntil == "" && latestArchive.LastEventTime != nil {
 			profile.RecoverableUntil = formatTime(latestArchive.LastEventTime)
 		}
+		if engine == DBTypePostgreSQL {
+			profile.PGSystemIdentifier = firstNonEmpty(profile.PGSystemIdentifier, latestArchive.PGSystemIdentifier)
+			profile.TimelineID = firstNonEmpty(profile.TimelineID, latestArchive.TimelineID)
+			if profile.WALEnd == "" {
+				profile.WALEnd = latestArchive.FileName
+			}
+		}
+	}
+
+	if engine == DBTypePostgreSQL {
+		status, gapCount, timelineMismatch := uc.postgresProtectionWALStatus(ctx, instance.ID, stream, latestRecord, profile.BarmanServer)
+		if status != "" && status != DatabaseLogChainStatusUnsupported {
+			profile.LogChainStatus = status
+			profile.LogChainStatusText = LogChainStatusText(status)
+		}
+		profile.WALGapCount = gapCount
+		profile.TimelineMismatch = timelineMismatch
 	}
 
 	profile.RunnerHost = uc.resolveProtectionRunner(ctx, profile.BackupPolicy, profile.LogArchiveStream)
+	if profile.RunnerHost == nil && profile.BarmanServer != nil && profile.BarmanServer.RunnerHostID > 0 && uc.runnerHostRepo != nil {
+		if host, err := uc.runnerHostRepo.GetByID(ctx, profile.BarmanServer.RunnerHostID); err == nil && host != nil {
+			profile.RunnerHost = toRunnerHostVO(host)
+		}
+	}
 	if profile.RunnerHost != nil {
 		profile.RunnerStatus = profile.RunnerHost.Status
 		profile.RunnerStatusText = profile.RunnerHost.StatusText
@@ -380,6 +432,42 @@ func (profile *DatabaseProtectionProfileVO) applyProtectionAssessment(now time.T
 		high = true
 		risks = append(risks, "最近一次逻辑备份失败")
 		actions = append(actions, protectionAction(DatabaseQueryRiskHigh, "inspect_logical_backup_failure", "检查逻辑备份任务失败原因", true))
+	}
+	if profile.ProtectionMode == DatabaseProtectionModePostgresBarmanPITR {
+		if profile.BarmanServer == nil {
+			high = true
+			risks = append(risks, "未纳管 PostgreSQL Barman Server")
+			actions = append(actions, protectionAction(DatabaseQueryRiskHigh, "configure_barman_server", "通过 PostgreSQL Barman 向导登记 Barman Server", true))
+		} else {
+			switch profile.BarmanServer.Status {
+			case DatabaseBarmanServerStatusFailed:
+				critical = true
+				risks = append(risks, "Barman Server 检查失败")
+				actions = append(actions, protectionAction(DatabaseQueryRiskCritical, "check_barman_server", "执行 Barman check 并查看错误", true))
+			case DatabaseBarmanServerStatusDegraded:
+				high = true
+				risks = append(risks, "Barman Server 处于降级状态")
+				actions = append(actions, protectionAction(DatabaseQueryRiskHigh, "sync_barman_catalog", "同步 Barman catalog 和 WAL 状态", true))
+			case DatabaseBarmanServerStatusDisabled:
+				high = true
+				risks = append(risks, "Barman Server 已禁用")
+			}
+			if strings.TrimSpace(profile.BarmanServer.LastCheckStatus) == DatabaseRunnerJobStatusFailed {
+				high = true
+				risks = append(risks, "最近一次 Barman check 失败")
+				actions = append(actions, protectionAction(DatabaseQueryRiskHigh, "check_barman_server", "重新执行 Barman check", true))
+			}
+		}
+		if profile.TimelineMismatch {
+			critical = true
+			risks = append(risks, "PostgreSQL timeline 与 WAL 链不匹配")
+			actions = append(actions, protectionAction(DatabaseQueryRiskCritical, "sync_barman_wal", "同步 WAL 状态并检查 timeline history", true))
+		}
+		if profile.WALGapCount > 0 {
+			critical = true
+			risks = append(risks, fmt.Sprintf("PostgreSQL WAL 链存在 %d 处缺口", profile.WALGapCount))
+			actions = append(actions, protectionAction(DatabaseQueryRiskCritical, "sync_barman_wal", "同步 WAL 状态并补齐缺失 segment", true))
+		}
 	}
 	if pitrCandidate {
 		if profile.LogArchiveStream == nil {
@@ -511,6 +599,9 @@ func (profile *DatabaseProtectionProfileVO) deriveProtectionLevel() string {
 		(profile.BackupPolicy.Chain.Status == "" ||
 			profile.BackupPolicy.Chain.Status == DatabaseBackupChainStateHealthy ||
 			profile.BackupPolicy.Chain.Status == DatabaseBackupChainStateConsolidating)
+	if !chainOK && profile.Engine == DBTypePostgreSQL && profile.LatestBackupRecord != nil && isPostgreSQLPhysicalBackupEngine(profile.LatestBackupRecord.BackupEngine) {
+		chainOK = profile.BackupChainStatus == DatabaseBackupChainStatusComplete
+	}
 	logOK := profile.LogArchiveStream != nil &&
 		profile.LogArchiveStream.Enabled &&
 		profile.LogArchiveStream.Status != DatabaseLogArchiveStreamStatusFailed &&
@@ -720,6 +811,120 @@ func (uc *UseCase) protectionReplicaStatus(ctx context.Context, instanceID uint,
 	return list[0]
 }
 
+func (uc *UseCase) selectProtectionBarmanServer(ctx context.Context, instanceID uint, latestRecord *DatabaseBackupRecordVO) *DatabaseBarmanServer {
+	if uc == nil || uc.barmanServerRepo == nil || instanceID == 0 {
+		return nil
+	}
+	items, _, err := uc.barmanServerRepo.List(ctx, &DatabaseBarmanServerListRequest{Page: 1, PageSize: 100, SourceInstanceID: instanceID})
+	if err != nil {
+		return nil
+	}
+	externalName := ""
+	if latestRecord != nil && strings.TrimSpace(latestRecord.BackupEngine) == "barman" {
+		externalName = strings.TrimSpace(latestRecord.ExternalServerName)
+	}
+	var selected *DatabaseBarmanServer
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if externalName != "" && strings.TrimSpace(item.BarmanServerName) == externalName {
+			return item
+		}
+		if selected == nil {
+			selected = item
+			continue
+		}
+		if barmanServerProtectionRank(item) > barmanServerProtectionRank(selected) {
+			selected = item
+		}
+	}
+	return selected
+}
+
+func barmanServerProtectionRank(item *DatabaseBarmanServer) int {
+	if item == nil {
+		return 0
+	}
+	switch normalizeBarmanServerStatus(item.Status) {
+	case DatabaseBarmanServerStatusHealthy:
+		return 5
+	case DatabaseBarmanServerStatusDegraded:
+		return 4
+	case DatabaseBarmanServerStatusPending:
+		return 3
+	case DatabaseBarmanServerStatusFailed:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func (uc *UseCase) postgresProtectionWALStatus(ctx context.Context, instanceID uint, stream *DatabaseLogArchiveStream, latestRecord *DatabaseBackupRecord, serverVO *DatabaseBarmanServerVO) (string, int, bool) {
+	if uc == nil || uc.logArchiveRepo == nil || instanceID == 0 {
+		return "", 0, false
+	}
+	req := &DatabaseLogArchiveListRequest{Page: 1, PageSize: 500, InstanceID: instanceID, ArchiveType: DatabaseArchiveTypeWAL}
+	if stream != nil && stream.ID > 0 {
+		req.StreamID = stream.ID
+	}
+	items, _, err := uc.logArchiveRepo.List(ctx, req)
+	if err != nil || len(items) == 0 {
+		if stream != nil {
+			return DatabaseLogChainStatusMissingWAL, 1, false
+		}
+		return "", 0, false
+	}
+	expectedTimeline := ""
+	expectedSystemID := ""
+	if latestRecord != nil {
+		expectedTimeline = latestRecord.TimelineID
+		expectedSystemID = latestRecord.PGSystemIdentifier
+	}
+	if serverVO != nil {
+		expectedSystemID = firstNonEmpty(expectedSystemID, serverVO.PGSystemIdentifier)
+	}
+	status := DatabaseLogChainStatusComplete
+	gaps := 0
+	timelineMismatch := false
+	filtered := make([]*DatabaseLogArchive, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if expectedSystemID != "" && item.PGSystemIdentifier != "" && item.PGSystemIdentifier != expectedSystemID {
+			return DatabaseLogChainStatusSystemIdentifierMismatch, gaps + 1, false
+		}
+		if expectedTimeline != "" && item.TimelineID != "" && item.TimelineID != expectedTimeline && !strings.Contains(strings.ToUpper(item.FileName), ".HISTORY") {
+			timelineMismatch = true
+		}
+		if item.Status == DatabaseLogArchiveStatusMissing || item.Status == DatabaseLogArchiveStatusChecksumFailed {
+			gaps++
+		}
+		filtered = append(filtered, item)
+	}
+	if continuityStatus, _ := validatePostgreSQLWALContinuity(filtered, expectedTimeline); continuityStatus != DatabaseLogChainStatusComplete {
+		status = continuityStatus
+		if continuityStatus == DatabaseLogChainStatusTimelineMismatch {
+			timelineMismatch = true
+		}
+		gaps++
+	}
+	if timelineStatus, _ := validatePostgreSQLTimelineHistory(filtered, expectedTimeline); timelineStatus != DatabaseLogChainStatusComplete {
+		if status == DatabaseLogChainStatusComplete {
+			status = timelineStatus
+		}
+		gaps++
+	}
+	if timelineMismatch && status == DatabaseLogChainStatusComplete {
+		status = DatabaseLogChainStatusTimelineMismatch
+	}
+	if gaps > 0 && status == DatabaseLogChainStatusComplete {
+		status = DatabaseLogChainStatusMissingWAL
+	}
+	return status, gaps, timelineMismatch
+}
+
 func normalizeProtectionProfileListRequest(req *DatabaseProtectionProfileListRequest) {
 	if req == nil {
 		return
@@ -808,6 +1013,41 @@ func protectionModeForPolicy(engine string, policy *DatabaseBackupPolicyConfig) 
 			return DatabaseProtectionModeExternalPITR
 		}
 		return DatabaseProtectionModeExternalPITR
+	}
+}
+
+func postgresProtectionModeFromBackupEngine(value string) string {
+	switch normalizePostgreSQLPhysicalBackupEngine(value) {
+	case "barman":
+		return DatabaseProtectionModePostgresBarmanPITR
+	case BackupEnginePgBaseBackup:
+		return DatabaseProtectionModePostgresPgBaseBackupPITR
+	default:
+		return DatabaseProtectionModeExternalPITR
+	}
+}
+
+func isPostgreSQLPhysicalProtectionRecord(record *DatabaseBackupRecord) bool {
+	if record == nil {
+		return false
+	}
+	return isPostgreSQLPhysicalBackupEngine(record.BackupEngine) && normalizeBackupMethod(record.BackupMethod) == DatabaseBackupMethodPhysical
+}
+
+func isPostgreSQLBackupBaselineAvailable(record *DatabaseBackupRecord) bool {
+	if record == nil || record.Status != DatabaseBackupStatusSuccess {
+		return false
+	}
+	level := normalizeBackupLevel(record.BackupLevel)
+	return level == DatabaseBackupLevelFull || record.BaseRecordID > 0 || record.BackupOrigin == DatabaseBackupOriginSyntheticFull
+}
+
+func isPostgreSQLPhysicalBackupEngine(value string) bool {
+	switch normalizePostgreSQLPhysicalBackupEngine(value) {
+	case "barman", BackupEnginePgBaseBackup, BackupEngineWALG, BackupEnginePgBackRest:
+		return true
+	default:
+		return false
 	}
 }
 

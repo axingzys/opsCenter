@@ -499,12 +499,19 @@ export interface DatabaseProtectionProfileResult {
   logChainStatusText: string
   replicaProtectionStatus: string
   replicaProtectionText: string
+  pgSystemIdentifier?: string
+  timelineId?: string
+  walStart?: string
+  walEnd?: string
+  walGapCount?: number
+  timelineMismatch?: boolean
   backupPolicy?: DatabaseBackupPolicyResult
   logicalTask?: DatabaseBackupTaskResult
   latestBackupRecord?: DatabaseBackupRecordResult
   latestLogArchive?: DatabaseLogArchiveResult
   latestRestoreJob?: DatabaseRestoreJobResult
   logArchiveStream?: DatabaseLogArchiveStreamResult
+  barmanServer?: DatabaseBarmanServerResult
   runnerHost?: DatabaseRunnerHostResult
   storageProfile?: DatabaseStorageProfileResult
   replicaProtection?: DatabaseReplicaProtectionResult
@@ -588,6 +595,80 @@ export interface DatabaseMySQLPITRWizardResult {
   backupPolicy?: DatabaseBackupPolicyResult
   initialFullRun?: DatabaseBackupPolicyRunResult
   profile?: DatabaseProtectionProfileResult
+}
+
+export interface DatabasePostgresBarmanPITRWizardPayload {
+  instanceId: number
+  runnerHostId: number
+  reuseBarmanServerId?: number
+  name?: string
+  barmanServerName?: string
+  barmanHome?: string
+  configPath?: string
+  retentionPolicy?: string
+  backupMethod?: string
+  streamingArchiverEnabled?: boolean
+  archiverEnabled?: boolean
+  slotName?: string
+  configJson?: string
+  runCheckNow?: boolean
+  syncCatalogNow?: boolean
+  syncWalNow?: boolean
+  runInitialBackupNow?: boolean
+}
+
+export interface DatabasePostgresBarmanPITRWizardResult {
+  templateKey: string
+  templateName: string
+  instanceId: number
+  instanceName: string
+  engine: string
+  engineText: string
+  version: string
+  runnerHostId: number
+  runnerHostName: string
+  barmanServerName: string
+  canApply: boolean
+  blockingReasons: string[]
+  warnings: string[]
+  messages: string[]
+  actions: DatabaseProtectionWizardActionResult[]
+  barmanServer?: DatabaseBarmanServerResult
+  logArchiveStream?: DatabaseLogArchiveStreamResult
+  checkJob?: DatabaseRunnerJobResult
+  catalogSyncJob?: DatabaseRunnerJobResult
+  walSyncJob?: DatabaseRunnerJobResult
+  initialBackupJob?: DatabaseRunnerJobResult
+  profile?: DatabaseProtectionProfileResult
+}
+
+export interface DatabaseProtectionRiskResult {
+  id: string
+  profileId: string
+  instanceId: number
+  instanceName: string
+  engine: string
+  engineText: string
+  endpoint: string
+  environment: string
+  businessSystem: string
+  owner: string
+  protectionMode: string
+  protectionModeText: string
+  protectionLevel: string
+  protectionLevelText: string
+  riskLevel: string
+  riskLevelText: string
+  issueType: string
+  issueTypeText: string
+  message: string
+  action: string
+  actionText: string
+  blocking: boolean
+  recoverableUntil: string
+  lastFullAt: string
+  lastLogArchiveAt: string
+  checkedAt: string
 }
 
 export interface DatabaseProtectionRestoreDrillPayload {
@@ -1837,6 +1918,17 @@ export const listDatabaseProtectionProfiles = (params?: {
   riskLevel?: string
 }) => request.get('/api/v1/databases/protection-profiles', { params })
 
+export const listDatabaseProtectionRisks = (params?: {
+  page?: number
+  pageSize?: number
+  keyword?: string
+  instanceId?: number
+  engine?: string
+  riskLevel?: string
+  issueType?: string
+  productionOnly?: string
+}) => request.get('/api/v1/databases/protection-risks', { params })
+
 export const getDatabaseProtectionProfile = (id: string) =>
   request.get(`/api/v1/databases/protection-profiles/${id}`)
 
@@ -1848,6 +1940,12 @@ export const previewDatabaseMySQLPITRWizard = (data: DatabaseMySQLPITRWizardPayl
 
 export const applyDatabaseMySQLPITRWizard = (data: DatabaseMySQLPITRWizardPayload) =>
   request.post('/api/v1/databases/protection-wizards/mysql-pitr/apply', data)
+
+export const previewDatabasePostgresBarmanPITRWizard = (data: DatabasePostgresBarmanPITRWizardPayload) =>
+  request.post('/api/v1/databases/protection-wizards/postgresql-barman/preview', data)
+
+export const applyDatabasePostgresBarmanPITRWizard = (data: DatabasePostgresBarmanPITRWizardPayload) =>
+  request.post('/api/v1/databases/protection-wizards/postgresql-barman/apply', data)
 
 export const runDatabaseProtectionRestoreDrill = (id: string, data: DatabaseProtectionRestoreDrillPayload) =>
   request.post(`/api/v1/databases/protection-profiles/${id}/run-restore-drill`, data)

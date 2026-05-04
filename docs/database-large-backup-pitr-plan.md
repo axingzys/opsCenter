@@ -8236,6 +8236,75 @@ archive_lag_high
 1. 能一眼看到所有未受保护或保护降级的生产库。
 2. 每个风险能跳到对应底层资源或向导修复。
 
+##### P5.5 / P5.6 落地记录（2026-05-04）
+
+已落地：
+
+1. 后端新增 PostgreSQL Barman PITR 保护向导接口：
+   - `POST /api/v1/databases/protection-wizards/postgresql-barman/preview`
+   - `POST /api/v1/databases/protection-wizards/postgresql-barman/apply`
+2. PostgreSQL Barman 向导统一编排现有 P3 能力：
+   - 创建或复用 `database_barman_servers`。
+   - 预检 PostgreSQL 实例类型、SSH Runner 可用性、Barman server name 格式和安全配置 JSON。
+   - 可选下发 `barman check`。
+   - 可选下发 `barman list/show` catalog 同步，把 Barman backup 同步为 OpsHub 备份记录。
+   - 可选下发 Barman WAL 同步，自动创建或复用 `archive_type=wal`、`archive_engine=barman` 的日志归档流。
+   - 可选立即下发一次 Barman cluster 级 backup Runner Job。
+3. PostgreSQL 保护 profile 已增强：
+   - 聚合 Barman Server 状态。
+   - 聚合最近 PostgreSQL 物理备份记录中的 `pg_system_identifier`、`timeline_id`、`wal_start`、`wal_end`。
+   - 聚合最近 WAL archive 中的 timeline 和 WAL 文件信息。
+   - 当 WAL segment 不连续、timeline history 缺失、timeline 不匹配或 system identifier 不一致时，直接在 profile 风险中展示。
+   - 对 Barman Server failed/degraded、最近 check 失败、WAL 缺口、timeline mismatch 生成可操作风险。
+4. PostgreSQL Barman profile 的保护等级计算已支持“无 MySQL 备份策略但有 Barman/pg_basebackup 物理记录”的场景：
+   - 有成功物理 base backup 记录时，可作为 cluster 级基线。
+   - WAL 归档流可用时可进入 `pitr_capable`。
+   - 恢复演练成功后仍由现有 restore proof 聚合升级为 `pitr_verified`。
+5. 前端保护概览已增强：
+   - 新增“PostgreSQL Barman 向导”入口。
+   - PostgreSQL profile 行展示 timeline 和 WAL 缺口数量。
+   - PostgreSQL profile 的“修复”会自动进入 Barman 向导，而不是 MySQL/MariaDB 向导。
+   - PostgreSQL profile 的“详情”优先跳转到高级资源中的 Barman Server / WAL 状态相关视图。
+6. 前端新增 PostgreSQL Barman 向导弹窗：
+   - 选择 PostgreSQL 实例和 SSH Runner。
+   - 填写或复用 Barman server。
+   - 配置 Barman home、config path、retention policy、backup method、slot、archive/streaming 开关。
+   - 选择是否立即下发 check、catalog sync、WAL sync、initial backup。
+   - 预览会展示将创建、复用、更新和下发的动作。
+7. 后端新增保护风险中心接口：
+   - `GET /api/v1/databases/protection-risks`
+8. 风险中心不新增持久表，第一版直接从 protection profile 实时展开风险：
+   - `missing_full_backup`
+   - `incremental_chain_broken`
+   - `log_chain_gap`
+   - `runner_offline`
+   - `runner_tool_missing`
+   - `storage_posture_failed`
+   - `restore_drill_missing`
+   - `restore_drill_failed`
+   - `replica_delay_unavailable`
+   - `archive_lag_high`
+9. 风险中心支持过滤：
+   - 实例
+   - 引擎
+   - 风险级别
+   - 问题类型
+   - 关键词
+10. 风险中心每条风险提供“查看/修复”入口：
+    - 缺少基线：进入 MySQL/MariaDB 或 PostgreSQL Barman 向导。
+    - 恢复演练缺失/失败：进入 profile 级恢复演练。
+    - 日志链缺口或归档延迟：跳转到归档流、日志归档或 WAL 状态。
+    - Runner 风险：跳转 Runner 主机。
+    - 存储风险：跳转存储配置。
+    - 延迟副本风险：跳转副本治理保护窗口。
+
+当前边界：
+
+1. PostgreSQL Barman 向导只编排和下发已有 Barman Runner Job；Barman 的安装、权限、`barman.conf`、replication slot、`archive_command`/streaming 配置仍由 Runner 工具安装和数据库侧配置负责。
+2. 风险中心第一版是 profile 的实时聚合视图，不保存风险快照；后续如果需要日报、趋势、关闭/认领风险，再增加风险快照表。
+3. 风险中心的“修复”入口只做跳转或打开向导，不自动执行高风险数据库命令。
+4. WAL gap 的精确恢复仍以恢复计划预校验为准；profile 中的 WAL gap 是面向日常巡检的快速风险提示。
+
 #### P5 对现有页面的具体调整
 
 当前 `PITR 链路与恢复计划` 工具条：

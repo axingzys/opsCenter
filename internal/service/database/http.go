@@ -241,6 +241,9 @@ func applyAllowedInstanceScope(req interface{}, scope *databasePermissionScope) 
 	case *dbbiz.DatabaseProtectionProfileListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
+	case *dbbiz.DatabaseProtectionRiskListRequest:
+		item.RestrictToAllowed = true
+		item.AllowedInstanceIDs = scope.allowedIDs
 	case *dbbiz.DatabaseRestoreJobListRequest:
 		item.RestrictToAllowed = true
 		item.AllowedInstanceIDs = scope.allowedIDs
@@ -823,6 +826,30 @@ func (s *Service) ListProtectionProfiles(c *gin.Context) {
 	})
 }
 
+func (s *Service) ListProtectionRisks(c *gin.Context) {
+	var req dbbiz.DatabaseProtectionRiskListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	scope, ok := s.databasePermissionScope(c, dbbiz.DatabasePermissionBackup)
+	if !ok {
+		return
+	}
+	applyAllowedInstanceScope(&req, scope)
+	list, total, err := s.useCase.ListProtectionRisks(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "查询失败: ", err)
+		return
+	}
+	response.Success(c, gin.H{
+		"list":     list,
+		"total":    total,
+		"page":     req.Page,
+		"pageSize": req.PageSize,
+	})
+}
+
 func (s *Service) GetProtectionProfile(c *gin.Context) {
 	profileID := c.Param("id")
 	instanceID, err := dbbiz.ProtectionProfileInstanceID(profileID)
@@ -892,6 +919,44 @@ func (s *Service) ApplyMySQLPITRWizard(c *gin.Context) {
 		return
 	}
 	item, err := s.useCase.ApplyMySQLPITRWizard(c.Request.Context(), &req, dbbiz.QueryOperator{
+		ID:       rbacservice.GetUserID(c),
+		Username: rbacservice.GetUsername(c),
+		ClientIP: c.ClientIP(),
+	})
+	if err != nil {
+		writeDatabaseError(c, "启用失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) PreviewPostgresBarmanPITRWizard(c *gin.Context) {
+	var req dbbiz.DatabasePostgresBarmanPITRWizardRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.PreviewPostgresBarmanPITRWizard(c.Request.Context(), &req)
+	if err != nil {
+		writeDatabaseError(c, "预览失败: ", err)
+		return
+	}
+	response.Success(c, item)
+}
+
+func (s *Service) ApplyPostgresBarmanPITRWizard(c *gin.Context) {
+	var req dbbiz.DatabasePostgresBarmanPITRWizardRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+	if !s.ensureInstancePermission(c, req.InstanceID, dbbiz.DatabasePermissionBackup) {
+		return
+	}
+	item, err := s.useCase.ApplyPostgresBarmanPITRWizard(c.Request.Context(), &req, dbbiz.QueryOperator{
 		ID:       rbacservice.GetUserID(c),
 		Username: rbacservice.GetUsername(c),
 		ClientIP: c.ClientIP(),

@@ -2093,18 +2093,118 @@
                 <el-button type="success" plain @click="openProtectionWizardDialog()">
                   保护向导
                 </el-button>
+                <el-button type="primary" plain @click="openPostgresBarmanWizardDialog()">
+                  PostgreSQL Barman 向导
+                </el-button>
                 <el-button type="warning" plain @click="openRestorePlanDialog">
                   恢复演练
                 </el-button>
               </div>
               <div class="backup-toolbar-group">
-                <el-button :loading="protectionProfileLoading || storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || backupPolicyLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
+                <el-button :loading="protectionProfileLoading || protectionRiskLoading || storageProfileLoading || runnerHostLoading || runnerJobLoading || barmanServerLoading || backupPolicyLoading || logArchiveStreamLoading || logArchiveLoading || logArchiveEventLoading || restorePlanLoading" @click="refreshPITRState">
                   刷新保护状态
                 </el-button>
               </div>
             </div>
 
             <el-tabs v-model="backupPitrTab" class="pitr-tabs">
+              <el-tab-pane label="风险中心" name="protectionRisks">
+                <div class="backup-toolbar pitr-sub-toolbar">
+                  <div class="backup-toolbar-group">
+                    <el-input
+                      v-model="protectionRiskQuery.keyword"
+                      placeholder="搜索实例、主机、负责人"
+                      clearable
+                      class="audit-search-input"
+                      @keyup.enter="loadProtectionRisks"
+                      @clear="loadProtectionRisks"
+                    />
+                    <el-select v-model="protectionRiskQuery.instanceId" placeholder="实例" clearable filterable class="audit-select" @change="loadProtectionRisks">
+                      <el-option v-for="item in pitrBackupInstances" :key="item.id" :label="`${item.name}（${item.dbTypeText || item.dbType}）`" :value="item.id" />
+                    </el-select>
+                    <el-select v-model="protectionRiskQuery.engine" placeholder="引擎" clearable class="audit-select" @change="loadProtectionRisks">
+                      <el-option label="MySQL" value="mysql" />
+                      <el-option label="MariaDB" value="mariadb" />
+                      <el-option label="PostgreSQL" value="postgresql" />
+                    </el-select>
+                    <el-select v-model="protectionRiskQuery.riskLevel" placeholder="风险" clearable class="audit-select" @change="loadProtectionRisks">
+                      <el-option label="中" value="medium" />
+                      <el-option label="高" value="high" />
+                      <el-option label="严重" value="critical" />
+                    </el-select>
+                    <el-select v-model="protectionRiskQuery.issueType" placeholder="问题类型" clearable class="audit-search-input" @change="loadProtectionRisks">
+                      <el-option label="缺少全量基线" value="missing_full_backup" />
+                      <el-option label="增量链异常" value="incremental_chain_broken" />
+                      <el-option label="日志链缺口" value="log_chain_gap" />
+                      <el-option label="Runner 不可用" value="runner_offline" />
+                      <el-option label="Runner 工具异常" value="runner_tool_missing" />
+                      <el-option label="存储姿态异常" value="storage_posture_failed" />
+                      <el-option label="缺少恢复演练" value="restore_drill_missing" />
+                      <el-option label="恢复演练失败" value="restore_drill_failed" />
+                      <el-option label="延迟副本不可用" value="replica_delay_unavailable" />
+                      <el-option label="归档延迟过高" value="archive_lag_high" />
+                    </el-select>
+                  </div>
+                  <div class="backup-toolbar-group">
+                    <el-button @click="resetProtectionRiskQuery">重置</el-button>
+                    <el-button type="primary" plain :loading="protectionRiskLoading" @click="loadProtectionRisks">刷新</el-button>
+                  </div>
+                </div>
+                <el-table :data="protectionRisks" v-loading="protectionRiskLoading" stripe class="modern-table">
+                  <el-table-column label="实例" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div class="backup-name-cell">
+                        <span class="backup-name">{{ row.instanceName || `#${row.instanceId}` }}</span>
+                        <el-tag size="small" :type="dbTypeTag(row.engine)">{{ row.engineText || row.engine || '-' }}</el-tag>
+                      </div>
+                      <div class="muted-text">{{ row.endpoint || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="风险" min-width="180">
+                    <template #default="{ row }">
+                      <div class="pitr-state-stack">
+                        <el-tag size="small" :type="riskLevelTag(row.riskLevel)">{{ row.riskLevelText || row.riskLevel || '-' }}</el-tag>
+                        <el-tag size="small" type="warning">{{ row.issueTypeText || row.issueType || '-' }}</el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="说明" min-width="320" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.message || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="保护状态" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>{{ row.protectionModeText || row.protectionMode || '-' }}</div>
+                      <div class="muted-text">{{ row.protectionLevelText || row.protectionLevel || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最近证明" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <div>Full：{{ row.lastFullAt || '-' }}</div>
+                      <div class="muted-text">日志：{{ row.lastLogArchiveAt || '-' }}</div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="建议动作" min-width="220" show-overflow-tooltip>
+                    <template #default="{ row }">{{ row.actionText || row.action || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="140" align="center" fixed="right">
+                    <template #default="{ row }">
+                      <el-button link type="primary" @click="handleOpenProtectionRisk(row)">查看/修复</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <div class="pagination-container">
+                  <el-pagination
+                    v-model:current-page="protectionRiskQuery.page"
+                    v-model:page-size="protectionRiskQuery.pageSize"
+                    :page-sizes="[10, 20, 50, 100]"
+                    :total="protectionRiskTotal"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="loadProtectionRisks"
+                    @current-change="loadProtectionRisks"
+                  />
+                </div>
+              </el-tab-pane>
+
               <el-tab-pane label="保护概览" name="protectionOverview">
                 <div class="backup-toolbar pitr-sub-toolbar">
                   <div class="backup-toolbar-group">
@@ -2181,6 +2281,9 @@
                     <template #default="{ row }">
                       <div>{{ row.lastLogArchiveAt || '-' }}</div>
                       <div class="muted-text">RPO：{{ protectionRPOText(row) }} / {{ row.logChainStatusText || '-' }}</div>
+                      <div v-if="row.engine === 'postgresql'" class="muted-text">
+                        TL：{{ row.timelineId || '-' }} / WAL缺口：{{ row.walGapCount || 0 }}
+                      </div>
                     </template>
                   </el-table-column>
                   <el-table-column label="Runner / 存储" min-width="220" show-overflow-tooltip>
@@ -5622,6 +5725,181 @@
     </el-dialog>
 
     <el-dialog
+      v-model="postgresBarmanWizardDialogVisible"
+      title="启用 PostgreSQL Barman PITR 保护"
+      width="900px"
+      @close="resetPostgresBarmanWizardForm"
+    >
+      <el-alert
+        title="向导会登记或复用 Barman Server，并可同时下发 check、catalog sync、WAL sync 和可选 cluster 级备份；不会在 backend 容器内直接执行 Barman。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="backup-dialog-alert"
+      />
+      <el-form ref="postgresBarmanWizardFormRef" :model="postgresBarmanWizardForm" :rules="postgresBarmanWizardRules" label-width="145px">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="PostgreSQL 实例" prop="instanceId">
+              <el-select v-model="postgresBarmanWizardForm.instanceId" placeholder="请选择 PostgreSQL 实例" filterable style="width: 100%;" @change="handlePostgresBarmanWizardInstanceChange">
+                <el-option
+                  v-for="item in postgresqlBackupInstances"
+                  :key="item.id"
+                  :label="`${item.name}（${item.endpoint || `${item.host}:${item.port}`}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Runner 主机" prop="runnerHostId">
+              <el-select v-model="postgresBarmanWizardForm.runnerHostId" placeholder="请选择 SSH Runner" filterable style="width: 100%;">
+                <el-option
+                  v-for="item in runnerHosts.filter(host => host.runnerType === 'ssh' && host.enabled !== false)"
+                  :key="item.id"
+                  :label="`${item.name}（${item.statusText || item.status}${item.host ? ` / ${item.host}:${item.port || 22}` : ''}）`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="显示名称">
+              <el-input v-model="postgresBarmanWizardForm.name" placeholder="如 pg-prod-Barman-PITR保护" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Barman server" prop="barmanServerName">
+              <el-input v-model="postgresBarmanWizardForm.barmanServerName" placeholder="barman.conf 中的 server name" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="复用 Server">
+              <el-select v-model="postgresBarmanWizardForm.reuseBarmanServerId" placeholder="可选；自动匹配当前实例" clearable filterable style="width: 100%;">
+                <el-option
+                  v-for="item in barmanServers.filter(server => !postgresBarmanWizardForm.instanceId || server.sourceInstanceId === postgresBarmanWizardForm.instanceId)"
+                  :key="item.id"
+                  :label="`${item.name} / ${item.barmanServerName}`"
+                  :value="item.id"
+                />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="保留策略">
+              <el-input v-model="postgresBarmanWizardForm.retentionPolicy" placeholder="RECOVERY WINDOW OF 30 DAYS" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="Barman home">
+              <el-input v-model="postgresBarmanWizardForm.barmanHome" placeholder="/var/lib/barman，可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="配置文件">
+              <el-input v-model="postgresBarmanWizardForm.configPath" placeholder="/etc/barman.conf，可选" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="备份方法">
+              <el-input v-model="postgresBarmanWizardForm.backupMethod" placeholder="postgres / rsync" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="archive">
+              <el-switch v-model="postgresBarmanWizardForm.archiverEnabled" active-text="启用" inactive-text="关闭" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="streaming">
+              <el-switch v-model="postgresBarmanWizardForm.streamingArchiverEnabled" active-text="启用" inactive-text="关闭" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="slot">
+              <el-input v-model="postgresBarmanWizardForm.slotName" placeholder="可选" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="6">
+            <el-form-item label="Barman check">
+              <el-switch v-model="postgresBarmanWizardForm.runCheckNow" active-text="下发" inactive-text="跳过" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="Catalog sync">
+              <el-switch v-model="postgresBarmanWizardForm.syncCatalogNow" active-text="下发" inactive-text="跳过" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="WAL sync">
+              <el-switch v-model="postgresBarmanWizardForm.syncWalNow" active-text="下发" inactive-text="跳过" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="6">
+            <el-form-item label="立即备份">
+              <el-switch v-model="postgresBarmanWizardForm.runInitialBackupNow" active-text="下发" inactive-text="跳过" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="配置 JSON">
+          <el-input
+            v-model="postgresBarmanWizardForm.configJson"
+            type="textarea"
+            :rows="3"
+            placeholder="可选；只保存非敏感摘要，密钥仍走 Runner/凭据配置"
+          />
+        </el-form-item>
+      </el-form>
+      <div v-if="postgresBarmanWizardPreview" class="wizard-preview">
+        <el-alert
+          v-if="postgresBarmanWizardPreview.blockingReasons?.length"
+          :title="postgresBarmanWizardPreview.blockingReasons.join('；')"
+          type="error"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
+        <el-alert
+          v-else-if="postgresBarmanWizardPreview.warnings?.length"
+          :title="postgresBarmanWizardPreview.warnings.join('；')"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="backup-dialog-alert"
+        />
+        <el-table :data="postgresBarmanWizardPreview.actions || []" size="small" stripe>
+          <el-table-column label="动作" width="100">
+            <template #default="{ row }">{{ row.action }}</template>
+          </el-table-column>
+          <el-table-column label="资源" min-width="160">
+            <template #default="{ row }">{{ row.resourceType }}<span v-if="row.resourceId"> #{{ row.resourceId }}</span></template>
+          </el-table-column>
+          <el-table-column label="名称" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.name || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="260" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.message || '-' }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="postgresBarmanWizardDialogVisible = false">取消</el-button>
+        <el-button :loading="postgresBarmanWizardPreviewing" @click="previewPostgresBarmanWizard">预览</el-button>
+        <el-button type="primary" :disabled="!!postgresBarmanWizardPreview && !postgresBarmanWizardPreview.canApply" :loading="postgresBarmanWizardSubmitting" @click="applyPostgresBarmanWizard">确认启用</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="protectionRestoreDrillDialogVisible"
       :title="`恢复演练${protectionRestoreDrillProfile ? ` - ${protectionRestoreDrillProfile.instanceName}` : ''}`"
       width="800px"
@@ -7182,11 +7460,13 @@ import {
 	  generateDatabaseRunnerAgentConfigSnippet,
 	  generateDatabaseRunnerToolInstallScript,
 	  getDatabaseRunnerAgentLogs,
-	  installDatabaseRunnerTools,
-	  installDatabaseRunnerAgent,
+  installDatabaseRunnerTools,
+  installDatabaseRunnerAgent,
+  applyDatabasePostgresBarmanPITRWizard,
   previewDatabaseBackupPolicyPurge,
   previewDatabaseBackupPolicySyntheticFull,
   previewDatabaseMySQLPITRWizard,
+  previewDatabasePostgresBarmanPITRWizard,
   getDatabaseCapacityTrend,
   getDatabaseDiagnosisMetrics,
   getDatabaseInspectionReport,
@@ -7203,6 +7483,7 @@ import {
   listDatabaseBackupRecords,
   listDatabaseBackupPolicies,
   listDatabaseProtectionProfiles,
+  listDatabaseProtectionRisks,
   listDatabaseBackupTasks,
   listDatabaseBarmanServers,
   listDatabaseDiagnosisSessions,
@@ -7277,7 +7558,10 @@ import {
   type DatabaseBackupPolicyResult,
   type DatabaseMySQLPITRWizardPayload,
   type DatabaseMySQLPITRWizardResult,
+  type DatabasePostgresBarmanPITRWizardPayload,
+  type DatabasePostgresBarmanPITRWizardResult,
   type DatabaseProtectionProfileResult,
+  type DatabaseProtectionRiskResult,
   type DatabaseProtectionRestoreDrillPayload,
   type DatabaseProtectionRestoreDrillResult,
   type DatabaseBackupRunResult,
@@ -7545,6 +7829,11 @@ const protectionWizardSubmitting = ref(false)
 const protectionWizardPreviewing = ref(false)
 const protectionWizardPreview = ref<DatabaseMySQLPITRWizardResult>()
 const protectionWizardFormRef = ref<FormInstance>()
+const postgresBarmanWizardDialogVisible = ref(false)
+const postgresBarmanWizardSubmitting = ref(false)
+const postgresBarmanWizardPreviewing = ref(false)
+const postgresBarmanWizardPreview = ref<DatabasePostgresBarmanPITRWizardResult>()
+const postgresBarmanWizardFormRef = ref<FormInstance>()
 const protectionRestoreDrillDialogVisible = ref(false)
 const protectionRestoreDrillSubmitting = ref(false)
 const protectionRestoreDrillFormRef = ref<FormInstance>()
@@ -7552,6 +7841,9 @@ const protectionRestoreDrillProfile = ref<DatabaseProtectionProfileResult>()
 const protectionRestoreDrillResult = ref<DatabaseProtectionRestoreDrillResult>()
 const protectionProfiles = ref<DatabaseProtectionProfileResult[]>([])
 const protectionProfileTotal = ref(0)
+const protectionRiskLoading = ref(false)
+const protectionRisks = ref<DatabaseProtectionRiskResult[]>([])
+const protectionRiskTotal = ref(0)
 const backupPolicyLoading = ref(false)
 const backupPolicySubmitting = ref(false)
 const backupPolicyDialogVisible = ref(false)
@@ -7832,6 +8124,17 @@ const protectionProfileQuery = reactive({
   riskLevel: ''
 })
 
+const protectionRiskQuery = reactive({
+  page: 1,
+  pageSize: 10,
+  keyword: '',
+  instanceId: undefined as number | undefined,
+  engine: '',
+  riskLevel: '',
+  issueType: '',
+  productionOnly: ''
+})
+
 const protectionWizardForm = reactive<DatabaseMySQLPITRWizardPayload>({
   instanceId: 0,
   sourceInstanceId: undefined,
@@ -7869,6 +8172,26 @@ const protectionWizardForm = reactive<DatabaseMySQLPITRWizardPayload>({
   retentionBinlogKeepDays: 45,
   retentionNeverDeleteWithoutProof: true,
   archiveConfigJson: ''
+})
+
+const postgresBarmanWizardForm = reactive<DatabasePostgresBarmanPITRWizardPayload>({
+  instanceId: 0,
+  runnerHostId: 0,
+  reuseBarmanServerId: undefined,
+  name: '',
+  barmanServerName: '',
+  barmanHome: '',
+  configPath: '',
+  retentionPolicy: 'RECOVERY WINDOW OF 30 DAYS',
+  backupMethod: 'postgres',
+  streamingArchiverEnabled: true,
+  archiverEnabled: true,
+  slotName: '',
+  configJson: '',
+  runCheckNow: true,
+  syncCatalogNow: true,
+  syncWalNow: true,
+  runInitialBackupNow: false
 })
 
 const protectionRestoreDrillForm = reactive<DatabaseProtectionRestoreDrillPayload & { validationSqlText?: string; confirmIsolated?: boolean }>({
@@ -8431,6 +8754,26 @@ const protectionWizardRules: FormRules = {
   runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
   backupEngine: [{ required: true, message: '请选择物理备份工具', trigger: 'change' }],
   incrementalSchedule: [{ required: true, message: '请输入增量 Cron', trigger: 'blur' }]
+}
+
+const postgresBarmanWizardRules: FormRules = {
+  instanceId: [{ required: true, message: '请选择 PostgreSQL 实例', trigger: 'change' }],
+  runnerHostId: [{ required: true, message: '请选择 Runner 主机', trigger: 'change' }],
+  barmanServerName: [{
+    validator: (_rule: any, value: any, callback: (error?: Error) => void) => {
+      const text = String(value || '').trim()
+      if (!text) {
+        callback(new Error('请输入 Barman server name'))
+        return
+      }
+      if (!/^[A-Za-z0-9_.:-]+$/.test(text)) {
+        callback(new Error('只能包含字母、数字、下划线、点、冒号和短横线'))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur'
+  }]
 }
 
 const protectionRestoreDrillRules: FormRules = {
@@ -10239,6 +10582,19 @@ const loadProtectionProfiles = async () => {
   }
 }
 
+const loadProtectionRisks = async () => {
+  protectionRiskLoading.value = true
+  try {
+    const res: any = await listDatabaseProtectionRisks(protectionRiskQuery)
+    protectionRisks.value = res.list || []
+    protectionRiskTotal.value = res.total || 0
+    if (res.page) protectionRiskQuery.page = res.page
+    if (res.pageSize) protectionRiskQuery.pageSize = res.pageSize
+  } finally {
+    protectionRiskLoading.value = false
+  }
+}
+
 const loadBackupPolicies = async () => {
   backupPolicyLoading.value = true
   try {
@@ -10399,7 +10755,7 @@ const loadBarmanServers = async () => {
 }
 
 const refreshPITRState = async () => {
-  await Promise.all([loadProtectionProfiles(), loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
+  await Promise.all([loadProtectionProfiles(), loadProtectionRisks(), loadStorageProfiles(), loadRunnerHosts(), loadRunnerJobs(), loadBarmanServers(), loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadLogArchiveEvents(), loadRestorePlans(), loadRestoreJobs(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
 }
 
 const loadRestoreJobs = async () => {
@@ -10679,6 +11035,35 @@ const resetProtectionWizardForm = () => {
   protectionWizardForm.archiveConfigJson = ''
   protectionWizardPreview.value = undefined
   protectionWizardFormRef.value?.clearValidate()
+}
+
+const defaultPostgresBarmanServerName = (instanceId?: number) => {
+  const instance = instanceOptions.value.find(item => item.id === instanceId)
+  const name = String(instance?.name || 'postgres').toLowerCase().replace(/[^a-z0-9_.:-]+/g, '_').replace(/^[_ .:-]+|[_ .:-]+$/g, '')
+  return `pg_${instanceId || 'server'}_${name || 'postgres'}`.slice(0, 120)
+}
+
+const resetPostgresBarmanWizardForm = () => {
+  const firstInstanceId = postgresqlBackupInstances.value[0]?.id || 0
+  postgresBarmanWizardForm.instanceId = firstInstanceId
+  postgresBarmanWizardForm.runnerHostId = defaultEnabledRunnerHostId()
+  postgresBarmanWizardForm.reuseBarmanServerId = undefined
+  postgresBarmanWizardForm.name = firstInstanceId ? `${postgresqlBackupInstances.value.find(item => item.id === firstInstanceId)?.name || 'PostgreSQL'}-Barman-PITR保护` : ''
+  postgresBarmanWizardForm.barmanServerName = defaultPostgresBarmanServerName(firstInstanceId)
+  postgresBarmanWizardForm.barmanHome = ''
+  postgresBarmanWizardForm.configPath = ''
+  postgresBarmanWizardForm.retentionPolicy = 'RECOVERY WINDOW OF 30 DAYS'
+  postgresBarmanWizardForm.backupMethod = 'postgres'
+  postgresBarmanWizardForm.streamingArchiverEnabled = true
+  postgresBarmanWizardForm.archiverEnabled = true
+  postgresBarmanWizardForm.slotName = ''
+  postgresBarmanWizardForm.configJson = ''
+  postgresBarmanWizardForm.runCheckNow = true
+  postgresBarmanWizardForm.syncCatalogNow = true
+  postgresBarmanWizardForm.syncWalNow = true
+  postgresBarmanWizardForm.runInitialBackupNow = false
+  postgresBarmanWizardPreview.value = undefined
+  postgresBarmanWizardFormRef.value?.clearValidate()
 }
 
 const resetProtectionRestoreDrillForm = () => {
@@ -11291,6 +11676,10 @@ const handleProtectionWizardInstanceChange = () => {
 }
 
 const openProtectionWizardDialog = async (row?: DatabaseProtectionProfileResult) => {
+  if (row?.engine === 'postgresql') {
+    await openPostgresBarmanWizardDialog(row)
+    return
+  }
   if (!runnerHosts.value.length) {
     await loadRunnerHosts()
   }
@@ -11332,6 +11721,104 @@ const openProtectionWizardDialog = async (row?: DatabaseProtectionProfileResult)
     parseProtectionWizardRetention(policy?.retentionJson)
   }
   protectionWizardDialogVisible.value = true
+}
+
+const handlePostgresBarmanWizardInstanceChange = () => {
+  const instance = postgresqlBackupInstances.value.find(item => item.id === postgresBarmanWizardForm.instanceId)
+  postgresBarmanWizardForm.reuseBarmanServerId = undefined
+  postgresBarmanWizardForm.name = instance?.name ? `${instance.name}-Barman-PITR保护` : ''
+  postgresBarmanWizardForm.barmanServerName = defaultPostgresBarmanServerName(postgresBarmanWizardForm.instanceId)
+  postgresBarmanWizardPreview.value = undefined
+}
+
+const openPostgresBarmanWizardDialog = async (row?: DatabaseProtectionProfileResult) => {
+  if (!runnerHosts.value.length) {
+    await loadRunnerHosts()
+  }
+  if (!barmanServers.value.length) {
+    await loadBarmanServers()
+  }
+  resetPostgresBarmanWizardForm()
+  if (row?.instanceId) {
+    const server = row.barmanServer || barmanServers.value.find(item => item.sourceInstanceId === row.instanceId)
+    postgresBarmanWizardForm.instanceId = row.instanceId
+    postgresBarmanWizardForm.runnerHostId = server?.runnerHostId || row.runnerHost?.id || defaultEnabledRunnerHostId()
+    postgresBarmanWizardForm.reuseBarmanServerId = server?.id || undefined
+    postgresBarmanWizardForm.name = server?.name || `${row.instanceName}-Barman-PITR保护`
+    postgresBarmanWizardForm.barmanServerName = server?.barmanServerName || defaultPostgresBarmanServerName(row.instanceId)
+    postgresBarmanWizardForm.barmanHome = server?.barmanHome || ''
+    postgresBarmanWizardForm.configPath = server?.configPath || ''
+    postgresBarmanWizardForm.retentionPolicy = server?.retentionPolicy || 'RECOVERY WINDOW OF 30 DAYS'
+    postgresBarmanWizardForm.backupMethod = server?.backupMethod || 'postgres'
+    postgresBarmanWizardForm.streamingArchiverEnabled = server?.streamingArchiverEnabled !== false
+    postgresBarmanWizardForm.archiverEnabled = server?.archiverEnabled !== false
+    postgresBarmanWizardForm.slotName = server?.slotName || ''
+    postgresBarmanWizardForm.configJson = server?.configJson || ''
+  }
+  postgresBarmanWizardDialogVisible.value = true
+}
+
+const buildPostgresBarmanWizardPayload = (): DatabasePostgresBarmanPITRWizardPayload => ({
+  instanceId: postgresBarmanWizardForm.instanceId,
+  runnerHostId: postgresBarmanWizardForm.runnerHostId,
+  reuseBarmanServerId: postgresBarmanWizardForm.reuseBarmanServerId || undefined,
+  name: postgresBarmanWizardForm.name?.trim() || undefined,
+  barmanServerName: postgresBarmanWizardForm.barmanServerName?.trim() || undefined,
+  barmanHome: postgresBarmanWizardForm.barmanHome?.trim() || undefined,
+  configPath: postgresBarmanWizardForm.configPath?.trim() || undefined,
+  retentionPolicy: postgresBarmanWizardForm.retentionPolicy?.trim() || undefined,
+  backupMethod: postgresBarmanWizardForm.backupMethod?.trim() || undefined,
+  streamingArchiverEnabled: postgresBarmanWizardForm.streamingArchiverEnabled !== false,
+  archiverEnabled: postgresBarmanWizardForm.archiverEnabled !== false,
+  slotName: postgresBarmanWizardForm.slotName?.trim() || undefined,
+  configJson: postgresBarmanWizardForm.configJson?.trim() || undefined,
+  runCheckNow: postgresBarmanWizardForm.runCheckNow !== false,
+  syncCatalogNow: postgresBarmanWizardForm.syncCatalogNow !== false,
+  syncWalNow: postgresBarmanWizardForm.syncWalNow !== false,
+  runInitialBackupNow: postgresBarmanWizardForm.runInitialBackupNow === true
+})
+
+const previewPostgresBarmanWizard = async () => {
+  if (!postgresBarmanWizardFormRef.value) return
+  await postgresBarmanWizardFormRef.value.validate()
+  postgresBarmanWizardPreviewing.value = true
+  try {
+    const res = await previewDatabasePostgresBarmanPITRWizard(buildPostgresBarmanWizardPayload()) as DatabasePostgresBarmanPITRWizardResult
+    postgresBarmanWizardPreview.value = res
+    if (res.blockingReasons?.length) {
+      ElMessage.error(res.blockingReasons[0] || 'PostgreSQL Barman 向导预检未通过')
+    } else if (res.warnings?.length) {
+      ElMessage.warning(res.warnings[0] || 'PostgreSQL Barman 向导预检有提醒')
+    } else {
+      ElMessage.success('PostgreSQL Barman 向导预检通过')
+    }
+  } finally {
+    postgresBarmanWizardPreviewing.value = false
+  }
+}
+
+const applyPostgresBarmanWizard = async () => {
+  if (!postgresBarmanWizardFormRef.value) return
+  await postgresBarmanWizardFormRef.value.validate()
+  if (postgresBarmanWizardPreview.value && !postgresBarmanWizardPreview.value.canApply) {
+    ElMessage.error(postgresBarmanWizardPreview.value.blockingReasons?.[0] || 'PostgreSQL Barman 向导预检未通过')
+    return
+  }
+  postgresBarmanWizardSubmitting.value = true
+  try {
+    const res = await applyDatabasePostgresBarmanPITRWizard(buildPostgresBarmanWizardPayload()) as DatabasePostgresBarmanPITRWizardResult
+    postgresBarmanWizardPreview.value = res
+    const jobs = [res.checkJob, res.catalogSyncJob, res.walSyncJob, res.initialBackupJob].filter(Boolean).length
+    if (res.warnings?.length) {
+      ElMessage.warning(`${res.warnings[0]}${jobs ? `；已下发 ${jobs} 个 Runner Job` : ''}`)
+    } else {
+      ElMessage.success(`PostgreSQL Barman PITR 保护已启用${jobs ? `，已下发 ${jobs} 个 Runner Job` : ''}`)
+    }
+    postgresBarmanWizardDialogVisible.value = false
+    await Promise.all([loadProtectionProfiles(), loadProtectionRisks(), loadBarmanServers(), loadBarmanCatalogRecords(), loadWalStatusArchives(), loadLogArchiveStreams(), loadRunnerJobs()])
+  } finally {
+    postgresBarmanWizardSubmitting.value = false
+  }
 }
 
 const buildProtectionWizardPayload = (): DatabaseMySQLPITRWizardPayload => ({
@@ -13401,6 +13888,18 @@ const resetProtectionProfileQuery = () => {
   loadProtectionProfiles()
 }
 
+const resetProtectionRiskQuery = () => {
+  protectionRiskQuery.page = 1
+  protectionRiskQuery.pageSize = 10
+  protectionRiskQuery.keyword = ''
+  protectionRiskQuery.instanceId = undefined
+  protectionRiskQuery.engine = ''
+  protectionRiskQuery.riskLevel = ''
+  protectionRiskQuery.issueType = ''
+  protectionRiskQuery.productionOnly = ''
+  loadProtectionRisks()
+}
+
 const resetBackupPolicyQuery = () => {
   backupPolicyQuery.page = 1
   backupPolicyQuery.pageSize = 10
@@ -13944,12 +14443,109 @@ const handleRunProtectionProfileBackup = async (row: DatabaseProtectionProfileRe
 
 const openProtectionProfileResources = async (row: DatabaseProtectionProfileResult) => {
   backupPitrTab.value = 'advancedResources'
-  backupAdvancedTab.value = row.backupPolicy ? 'backupPolicies' : 'streams'
+  backupAdvancedTab.value = row.engine === 'postgresql' ? 'barmanServers' : row.backupPolicy ? 'backupPolicies' : 'streams'
   backupPolicyQuery.instanceId = row.instanceId
   logArchiveStreamQuery.instanceId = row.instanceId
   logArchiveQuery.instanceId = row.instanceId
+  barmanServerQuery.sourceInstanceId = row.engine === 'postgresql' ? row.instanceId : undefined
+  barmanCatalogQuery.instanceId = row.engine === 'postgresql' ? row.instanceId : undefined
+  walStatusQuery.instanceId = row.engine === 'postgresql' ? row.instanceId : undefined
   restorePlanQuery.sourceInstanceId = row.instanceId
-  await Promise.all([loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadRestorePlans()])
+  await Promise.all([loadBackupPolicies(), loadLogArchiveStreams(), loadLogArchives(), loadRestorePlans(), loadBarmanServers(), loadBarmanCatalogRecords(), loadWalStatusArchives()])
+}
+
+const protectionProfileFromRisk = async (row: DatabaseProtectionRiskResult): Promise<DatabaseProtectionProfileResult> => {
+  let profile = protectionProfiles.value.find(item => item.profileId === row.profileId || item.instanceId === row.instanceId)
+  if (!profile) {
+    protectionProfileQuery.instanceId = row.instanceId
+    await loadProtectionProfiles()
+    profile = protectionProfiles.value.find(item => item.profileId === row.profileId || item.instanceId === row.instanceId)
+  }
+  return profile || ({
+    profileId: row.profileId,
+    instanceId: row.instanceId,
+    instanceName: row.instanceName,
+    engine: row.engine,
+    engineText: row.engineText,
+    version: '',
+    endpoint: row.endpoint,
+    environment: row.environment,
+    businessSystem: row.businessSystem,
+    owner: row.owner,
+    protectionMode: row.protectionMode,
+    protectionModeText: row.protectionModeText,
+    protectionLevel: row.protectionLevel,
+    protectionLevelText: row.protectionLevelText,
+    healthStatus: '',
+    healthStatusText: '',
+    riskLevel: row.riskLevel,
+    riskLevelText: row.riskLevelText,
+    riskMessages: [row.message],
+    recoverableFrom: '',
+    recoverableUntil: row.recoverableUntil,
+    rpoLagSeconds: -1,
+    lastFullAt: row.lastFullAt,
+    lastIncrementalAt: '',
+    lastSyntheticAt: '',
+    lastLogArchiveAt: row.lastLogArchiveAt,
+    lastRestoreDrillAt: '',
+    restoreDrillStatus: '',
+    restoreDrillStatusText: '',
+    runnerStatus: '',
+    runnerStatusText: '',
+    storageStatus: '',
+    storageStatusText: '',
+    backupChainStatus: '',
+    backupChainStatusText: '',
+    logChainStatus: '',
+    logChainStatusText: '',
+    replicaProtectionStatus: '',
+    replicaProtectionText: '',
+    recommendedActions: [],
+    validatedAt: row.checkedAt
+  } as DatabaseProtectionProfileResult)
+}
+
+const handleOpenProtectionRisk = async (row: DatabaseProtectionRiskResult) => {
+  const profile = await protectionProfileFromRisk(row)
+  switch (row.issueType) {
+    case 'missing_full_backup':
+      if (profile.engine === 'postgresql') await openPostgresBarmanWizardDialog(profile)
+      else await openProtectionWizardDialog(profile)
+      return
+    case 'restore_drill_missing':
+    case 'restore_drill_failed':
+      openProtectionRestoreDrillDialog(profile)
+      return
+    case 'runner_offline':
+    case 'runner_tool_missing':
+      backupPitrTab.value = 'advancedResources'
+      backupAdvancedTab.value = 'runnerHosts'
+      runnerHostQuery.keyword = profile.runnerHost?.name || ''
+      await loadRunnerHosts()
+      return
+    case 'storage_posture_failed':
+      backupPitrTab.value = 'advancedResources'
+      backupAdvancedTab.value = 'storageProfiles'
+      await loadStorageProfiles()
+      return
+    case 'log_chain_gap':
+    case 'archive_lag_high':
+      backupPitrTab.value = 'advancedResources'
+      backupAdvancedTab.value = profile.engine === 'postgresql' ? 'walStatus' : 'streams'
+      logArchiveStreamQuery.instanceId = row.instanceId
+      logArchiveQuery.instanceId = row.instanceId
+      walStatusQuery.instanceId = row.instanceId
+      await Promise.all([loadLogArchiveStreams(), loadLogArchives(), loadWalStatusArchives()])
+      return
+    case 'replica_delay_unavailable':
+      activeTab.value = 'replication'
+      replicationProtectionQuery.instanceId = row.instanceId
+      await loadReplicationProtections()
+      return
+    default:
+      await openProtectionProfileResources(profile)
+  }
 }
 
 const openProtectionProfileRestorePlan = (row: DatabaseProtectionProfileResult) => {
