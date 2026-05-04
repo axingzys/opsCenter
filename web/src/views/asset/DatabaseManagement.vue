@@ -16318,10 +16318,9 @@ onBeforeUnmount(() => {
 }
 
 .query-workbench {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 16px;
-  align-items: start;
+  position: relative;
+  display: block;
+  padding-right: 336px;
 }
 
 .query-editor-panel,
@@ -16338,9 +16337,13 @@ onBeforeUnmount(() => {
 }
 
 .query-side-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: flex;
   flex-direction: column;
   gap: 14px;
+  width: 320px;
 }
 
 .query-side-card {
@@ -16534,6 +16537,7 @@ onBeforeUnmount(() => {
 }
 
 .query-result-panel {
+  margin-right: 336px;
   min-height: 180px;
 }
 
@@ -17217,7 +17221,17 @@ onBeforeUnmount(() => {
   }
 
   .query-workbench {
-    grid-template-columns: 1fr;
+    padding-right: 0;
+  }
+
+  .query-side-panel {
+    position: static;
+    width: 100%;
+    margin-top: 16px;
+  }
+
+  .query-result-panel {
+    margin-right: 0;
   }
 
   .query-context-panel,
