@@ -57,6 +57,8 @@
 <table>
   <tr>
     <td><img src="./docs/images/opscenter.png" alt="Opscenter 功能总览"/></td>
+  </tr>
+  <tr>
     <td><img src="./docs/images/opscenter-mysql.png" alt="Opscenter 数据库模块"/></td>
   </tr>
   <tr>
