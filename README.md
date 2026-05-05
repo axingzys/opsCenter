@@ -55,6 +55,10 @@ OpsHub 是一个功能强大的**插件化运维管理平台**，采用前后端
 ### 📜 项目演示图
   <table>
     <tr>
+      <td><img src="./docs/images/opscenter.png" alt="opscenter功能"/></td>
+      <td><img src="./docs/images/opscenter-mysql.png" alt="opscenter数据库模块"/></td>
+    </tr>
+    <tr>
       <td><img src="./docs/images/login.png" alt="登录页面"/></td>
       <td><img src="./docs/images/dashboard.png" alt="首页概览"/></td>
     </tr>
@@ -67,8 +71,10 @@ OpsHub 是一个功能强大的**插件化运维管理平台**，采用前后端
       <td><img src="./docs/images/workloads.png" alt="节点管理"/></td>
     </tr>
     <tr>
-      <td><img src="./docs/images/health.png" alt="应用诊断"/></td>
-      <td><img src="./docs/images/flame.png" alt="火焰图"/></td>
+      <td><img src="./docs/images/beifenhuifu.png" alt="备份恢复"/></td>
+      <td><img src="./docs/images/zhenduan.png" alt="数据库诊断"/></td>
+      <td><img src="./docs/images/sql.png" alt="sql管理"/></td>
+      <td><img src="./docs/images/mysql-biao.png" alt="表管理"/></td>
     </tr>
     <tr>
       <td><img src="./docs/images/xj.png" alt="集群巡检"/></td>
