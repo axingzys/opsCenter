@@ -1,0 +1,59 @@
+# MySQL replica node for OpsHub.
+#
+# This file is intended to run on a different host from the current
+# opshub-mysql primary. Copy this directory to the replica host, adjust
+# the environment values below, then initialize data and run
+# CHANGE REPLICATION SOURCE TO manually after the seed restore.
+#
+# Common overrides:
+#   MYSQL_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/mysql:8.0.44
+#   MYSQL_ROOT_PASSWORD=change-me
+#   MYSQL_REPLICA_PORT=23307
+#   MYSQL_REPLICA_SERVER_ID=2
+#   MYSQL_REPLICA_REPORT_HOST=<replica-host-ip-or-dns>
+#   MYSQL_REPLICA_READ_ONLY=ON
+#   MYSQL_REPLICA_SUPER_READ_ONLY=ON
+#   TZ=Asia/Shanghai
+
+services:
+  mysql-replica:
+    image: ${MYSQL_IMAGE:-mysql:8.0.44}
+    container_name: opshub-mysql-replica
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${MYSQL_REPLICA_PORT:-23307}:3306"
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --server-id=${MYSQL_REPLICA_SERVER_ID:-2}
+      - --log-bin=opshub-mysql-replica-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --log-replica-updates=ON
+      - --relay-log=opshub-mysql-replica-relay-bin
+      - --relay-log-recovery=ON
+      - --report-host=${MYSQL_REPLICA_REPORT_HOST:-opshub-mysql-replica}
+      - --report-port=${MYSQL_REPLICA_REPORT_PORT:-3306}
+      - --read-only=${MYSQL_REPLICA_READ_ONLY:-OFF}
+      - --super-read-only=${MYSQL_REPLICA_SUPER_READ_ONLY:-OFF}
+      - --skip-host-cache
+      - --skip-name-resolve
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+      - ./conf.d:/etc/mysql/conf.d:ro
+    networks:
+      - mysql-replica-network
+
+networks:
+  mysql-replica-network:
+    driver: bridge
