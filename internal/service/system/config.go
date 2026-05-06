@@ -167,6 +167,24 @@ func (s *ConfigService) GetMonitoringConfig(c *gin.Context) {
 	response.Success(c, config)
 }
 
+// GetAuditLogConfig 获取操作日志策略配置
+// @Summary 获取操作日志策略配置
+// @Description 获取操作日志记录、保留和排除路径策略
+// @Tags 系统配置
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Success 200 {object} response.Response{} "获取成功"
+// @Router /api/v1/system/config/audit-log [get]
+func (s *ConfigService) GetAuditLogConfig(c *gin.Context) {
+	config, err := s.configUseCase.GetAuditLogConfig(c.Request.Context())
+	if err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "获取日志策略失败: "+err.Error())
+		return
+	}
+	response.Success(c, config)
+}
+
 // GetDatabaseConfig 获取数据库配置
 // @Summary 获取数据库配置
 // @Description 获取数据库写开关、确认策略和备份默认参数
@@ -202,6 +220,14 @@ type SaveSecurityConfigRequest struct {
 // SaveMonitoringConfigRequest 保存监控配置请求
 type SaveMonitoringConfigRequest struct {
 	PrometheusRetentionDays int `json:"prometheusRetentionDays"`
+}
+
+// SaveAuditLogConfigRequest 保存操作日志策略配置请求
+type SaveAuditLogConfigRequest struct {
+	Enabled              bool     `json:"enabled"`
+	RetentionDays        int      `json:"retentionDays"`
+	AutoCleanupEnabled   bool     `json:"autoCleanupEnabled"`
+	ExcludedPathPrefixes []string `json:"excludedPathPrefixes"`
 }
 
 // SaveDatabaseConfigRequest 保存数据库配置请求
@@ -299,6 +325,58 @@ func (s *ConfigService) SaveMonitoringConfig(c *gin.Context) {
 	}
 
 	response.SuccessWithMessage(c, "监控配置保存成功，Prometheus 侧需同步应用后生效", nil)
+}
+
+// SaveAuditLogConfig 保存操作日志策略配置
+// @Summary 保存操作日志策略配置
+// @Description 保存操作日志记录、保留和排除路径策略
+// @Tags 系统配置
+// @Accept json
+// @Produce json
+// @Security Bearer
+// @Param body body SaveAuditLogConfigRequest true "操作日志策略配置"
+// @Success 200 {object} response.Response "保存成功"
+// @Router /api/v1/system/config/audit-log [put]
+func (s *ConfigService) SaveAuditLogConfig(c *gin.Context) {
+	var req SaveAuditLogConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorCode(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	if req.RetentionDays < 1 || req.RetentionDays > 3650 {
+		response.ErrorCode(c, http.StatusBadRequest, "操作日志保留天数必须在1-3650之间")
+		return
+	}
+	prefixes := make([]string, 0, len(req.ExcludedPathPrefixes))
+	for _, prefix := range req.ExcludedPathPrefixes {
+		item := strings.TrimSpace(prefix)
+		if item == "" {
+			continue
+		}
+		if !strings.HasPrefix(item, "/") {
+			response.ErrorCode(c, http.StatusBadRequest, "排除路径前缀必须以 / 开头")
+			return
+		}
+		if len(item) > 200 {
+			response.ErrorCode(c, http.StatusBadRequest, "排除路径前缀长度不能超过200")
+			return
+		}
+		prefixes = append(prefixes, item)
+	}
+
+	config := &system.AuditLogConfig{
+		Enabled:              req.Enabled,
+		RetentionDays:        req.RetentionDays,
+		AutoCleanupEnabled:   req.AutoCleanupEnabled,
+		ExcludedPathPrefixes: prefixes,
+	}
+	if err := s.configUseCase.SaveAuditLogConfig(c.Request.Context(), config); err != nil {
+		response.ErrorCode(c, http.StatusInternalServerError, "保存日志策略失败: "+err.Error())
+		return
+	}
+
+	response.SuccessWithMessage(c, "日志策略保存成功", nil)
 }
 
 // SaveDatabaseConfig 保存数据库配置

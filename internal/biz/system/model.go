@@ -83,6 +83,12 @@ const (
 	// 监控配置
 	ConfigKeyPrometheusRetentionDays = "prometheus_retention_days"
 
+	// 日志策略配置
+	ConfigKeyAuditLogEnabled              = "audit_log_enabled"
+	ConfigKeyAuditLogRetentionDays        = "audit_log_retention_days"
+	ConfigKeyAuditLogAutoCleanupEnabled   = "audit_log_auto_cleanup_enabled"
+	ConfigKeyAuditLogExcludedPathPrefixes = "audit_log_excluded_path_prefixes"
+
 	// 数据库配置
 	ConfigKeyDatabaseWriteEnabled               = "database_write_enabled"
 	ConfigKeyDatabaseWriteExplainEnabled        = "database_write_explain_enabled"
@@ -109,9 +115,12 @@ const (
 	ConfigGroupSecurity     = "security"
 	ConfigGroupLDAP         = "ldap"
 	ConfigGroupMonitoring   = "monitoring"
+	ConfigGroupAuditLog     = "audit_log"
 	ConfigGroupDatabase     = "database"
 	ConfigGroupMessageQueue = "messagequeue"
 )
+
+const defaultAuditLogExcludedPathPrefixesJSON = `["/metrics","/api/v1/public/agents/report","/api/v1/public/agents/echo-ip","/api/v1/public/databases/runner-agents/"]`
 
 // DefaultConfigs 默认配置
 var DefaultConfigs = map[string]SysConfig{
@@ -212,6 +221,34 @@ var DefaultConfigs = map[string]SysConfig{
 		Type:   "int",
 		Group:  ConfigGroupMonitoring,
 		Remark: "Prometheus监控数据目标保留天数",
+	},
+	ConfigKeyAuditLogEnabled: {
+		Key:    ConfigKeyAuditLogEnabled,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupAuditLog,
+		Remark: "操作日志记录开关",
+	},
+	ConfigKeyAuditLogRetentionDays: {
+		Key:    ConfigKeyAuditLogRetentionDays,
+		Value:  "30",
+		Type:   "int",
+		Group:  ConfigGroupAuditLog,
+		Remark: "操作日志保留天数",
+	},
+	ConfigKeyAuditLogAutoCleanupEnabled: {
+		Key:    ConfigKeyAuditLogAutoCleanupEnabled,
+		Value:  "true",
+		Type:   "bool",
+		Group:  ConfigGroupAuditLog,
+		Remark: "操作日志自动清理开关",
+	},
+	ConfigKeyAuditLogExcludedPathPrefixes: {
+		Key:    ConfigKeyAuditLogExcludedPathPrefixes,
+		Value:  defaultAuditLogExcludedPathPrefixesJSON,
+		Type:   "json",
+		Group:  ConfigGroupAuditLog,
+		Remark: "操作日志排除路径前缀(JSON数组)",
 	},
 	ConfigKeyDatabaseWriteEnabled: {
 		Key:    ConfigKeyDatabaseWriteEnabled,
@@ -348,6 +385,14 @@ type MonitoringConfig struct {
 	CurrentPrometheusRetention string `json:"currentPrometheusRetention,omitempty"`
 }
 
+// AuditLogConfig 操作日志策略配置响应结构
+type AuditLogConfig struct {
+	Enabled              bool     `json:"enabled"`
+	RetentionDays        int      `json:"retentionDays"`
+	AutoCleanupEnabled   bool     `json:"autoCleanupEnabled"`
+	ExcludedPathPrefixes []string `json:"excludedPathPrefixes"`
+}
+
 // DatabaseConfig 数据库配置响应结构
 type DatabaseConfig struct {
 	WriteEnabled               bool   `json:"writeEnabled"`
@@ -404,6 +449,7 @@ type AllConfig struct {
 	Basic      BasicConfig      `json:"basic"`
 	Security   SecurityConfig   `json:"security"`
 	Monitoring MonitoringConfig `json:"monitoring"`
+	AuditLog   AuditLogConfig   `json:"auditLog"`
 	Database   DatabaseConfig   `json:"database"`
 	LDAP       *LDAPConfig      `json:"ldap,omitempty"`
 }

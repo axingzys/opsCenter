@@ -293,8 +293,55 @@
           </el-form>
         </div>
 
-        <!-- LDAP 配置 -->
+        <!-- 日志策略 -->
         <div v-show="activeNav === 4" class="config-section">
+          <div class="section-header">
+            <el-icon class="section-icon"><Document /></el-icon>
+            <span>日志策略</span>
+          </div>
+          <el-form :model="auditLogConfig" label-width="180px" class="config-form">
+            <el-form-item label="操作日志记录">
+              <el-switch
+                v-model="auditLogConfig.enabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">关闭后不再写入操作日志。</span>
+            </el-form-item>
+            <el-form-item label="自动清理">
+              <el-switch
+                v-model="auditLogConfig.autoCleanupEnabled"
+                active-text="开启"
+                inactive-text="关闭"
+              />
+              <span class="form-tip">开启后后台定期清理超过保留期的操作日志。</span>
+            </el-form-item>
+            <el-form-item label="操作日志保留天数">
+              <el-input-number v-model="auditLogConfig.retentionDays" :min="1" :max="3650" />
+              <span class="form-tip">默认保留 30 天。</span>
+            </el-form-item>
+            <el-form-item label="排除路径前缀">
+              <el-input
+                v-model="auditExcludedPrefixesText"
+                type="textarea"
+                :rows="8"
+                placeholder="/metrics"
+              />
+              <span class="form-tip">每行一个路径前缀，命中后不写入操作日志。</span>
+            </el-form-item>
+            <el-form-item>
+              <el-alert
+                title="建议排除 Prometheus、Agent 心跳、Runner checkpoint 等高频机器接口，避免操作日志表快速膨胀。"
+                type="info"
+                :closable="false"
+                show-icon
+              />
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <!-- LDAP 配置 -->
+        <div v-show="activeNav === 5" class="config-section">
           <div class="section-header">
             <el-icon class="section-icon"><Connection /></el-icon>
             <span>LDAP 配置</span>
@@ -421,13 +468,15 @@ import { ElMessage } from 'element-plus'
 import {
   Setting, Check, HomeFilled, Lock,
   Edit, Plus, Delete, Connection, Monitor,
-  CircleCheckFilled, CircleCloseFilled, Key, DataLine
+  CircleCheckFilled, CircleCloseFilled, Key, DataLine, Document
 } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 import {
   getAllConfig,
+  getAuditLogConfig,
   getDatabaseConfig,
   getMonitoringConfig,
+  saveAuditLogConfig,
   saveBasicConfig,
   saveDatabaseConfig,
   saveMonitoringConfig,
@@ -436,6 +485,7 @@ import {
   getLDAPConfig,
   saveLDAPConfig,
   testLDAPConnection,
+  type AuditLogConfig,
   type DatabaseConfig,
   type LDAPConfig,
   type MonitoringConfig
@@ -451,6 +501,7 @@ const navItems = [
   { label: '安全配置', icon: 'Lock' },
   { label: '监控配置', icon: 'Monitor' },
   { label: '数据库配置', icon: 'DataLine' },
+  { label: '日志策略', icon: 'Document' },
   { label: 'LDAP 配置', icon: 'Connection' }
 ]
 
@@ -478,6 +529,33 @@ const monitoringConfig = reactive<MonitoringConfig>({
   prometheusRetentionDays: 15,
   prometheusBaseUrl: '',
   currentPrometheusRetention: ''
+})
+
+const auditLogConfig = reactive<AuditLogConfig>({
+  enabled: true,
+  retentionDays: 30,
+  autoCleanupEnabled: true,
+  excludedPathPrefixes: [
+    '/metrics',
+    '/api/v1/public/agents/report',
+    '/api/v1/public/agents/echo-ip',
+    '/api/v1/public/databases/runner-agents/'
+  ]
+})
+
+const auditExcludedPrefixesText = computed({
+  get: () => auditLogConfig.excludedPathPrefixes.join('\n'),
+  set: (value: string) => {
+    const seen = new Set<string>()
+    auditLogConfig.excludedPathPrefixes = value
+      .split(/\r?\n|,/)
+      .map(item => item.trim())
+      .filter(item => {
+        if (!item || seen.has(item)) return false
+        seen.add(item)
+        return true
+      })
+  }
 })
 
 const databaseConfig = reactive<DatabaseConfig>({
@@ -598,6 +676,20 @@ const loadMonitoringConfig = async () => {
   }
 }
 
+const loadAuditLogConfig = async () => {
+  try {
+    const res: any = await getAuditLogConfig()
+    if (res) {
+      auditLogConfig.enabled = res.enabled !== false
+      auditLogConfig.retentionDays = res.retentionDays || 30
+      auditLogConfig.autoCleanupEnabled = res.autoCleanupEnabled !== false
+      auditLogConfig.excludedPathPrefixes = Array.isArray(res.excludedPathPrefixes) ? res.excludedPathPrefixes : []
+    }
+  } catch (error) {
+    console.error('加载日志策略失败', error)
+  }
+}
+
 const loadDatabaseConfig = async () => {
   try {
     const res: any = await getDatabaseConfig()
@@ -673,6 +765,12 @@ const loadConfig = async () => {
       if (res.monitoring) {
         monitoringConfig.prometheusRetentionDays = res.monitoring.prometheusRetentionDays || 15
       }
+      if (res.auditLog) {
+        auditLogConfig.enabled = res.auditLog.enabled !== false
+        auditLogConfig.retentionDays = res.auditLog.retentionDays || 30
+        auditLogConfig.autoCleanupEnabled = res.auditLog.autoCleanupEnabled !== false
+        auditLogConfig.excludedPathPrefixes = Array.isArray(res.auditLog.excludedPathPrefixes) ? res.auditLog.excludedPathPrefixes : []
+      }
       if (res.database) {
         databaseConfig.writeEnabled = !!res.database.writeEnabled
         databaseConfig.writeExplainEnabled = !!res.database.writeExplainEnabled
@@ -732,6 +830,9 @@ const handleSave = async () => {
       await saveDatabaseConfig({ ...databaseConfig })
       await loadDatabaseConfig()
     } else if (activeNav.value === 4) {
+      await saveAuditLogConfig({ ...auditLogConfig })
+      await loadAuditLogConfig()
+    } else if (activeNav.value === 5) {
       // 保存LDAP配置
       await saveLDAPConfig({ ...ldapConfig })
     }
@@ -779,6 +880,7 @@ const removeLogo = () => {
 onMounted(() => {
   loadConfig()
   loadMonitoringConfig()
+  loadAuditLogConfig()
   loadDatabaseConfig()
   loadLDAPConfig()
   loadRolesAndDepts()

@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -79,13 +80,9 @@ func (uc *UseCase) CollectCapacitySnapshot(ctx context.Context, instanceID uint)
 	if normalizeDBType(instance.DBType) == DBTypeRedis {
 		return uc.collectRedisCapacitySnapshot(ctx, instance)
 	}
-	schemas, err := uc.schemaRepo.ListByInstanceID(ctx, instance.ID)
+	schemas, tables, err := uc.collectSQLCapacityObjects(ctx, instance)
 	if err != nil {
-		return nil, fmt.Errorf("读取 Schema 元数据失败: %w", err)
-	}
-	tables, err := uc.tableRepo.List(ctx, instance.ID, "")
-	if err != nil {
-		return nil, fmt.Errorf("读取表元数据失败: %w", err)
+		return nil, err
 	}
 
 	collectedAt := time.Now()
@@ -123,6 +120,77 @@ func (uc *UseCase) CollectCapacitySnapshotForUser(ctx context.Context, instanceI
 	}
 	uc.finishQueryAudit(ctx, audit, DatabaseQueryStatusSuccess, result.SnapshotsCount, duration, "")
 	return result, nil
+}
+
+func (uc *UseCase) collectSQLCapacityObjects(ctx context.Context, instance *DatabaseInstance) ([]*DatabaseSchema, []*DatabaseTable, error) {
+	if uc.credentialResolver == nil {
+		return nil, nil, fmt.Errorf("连接凭据解析器未配置")
+	}
+	credential, err := uc.credentialResolver(ctx, instance.CredentialID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("凭据不存在")
+	}
+
+	var db *sql.DB
+	var collectSchemas func(context.Context, *sql.DB) ([]*DatabaseSchema, error)
+	var collectTables func(context.Context, *sql.DB) ([]*DatabaseTable, error)
+
+	switch normalizeDBType(instance.DBType) {
+	case DBTypeMySQL, DBTypeMariaDB, DBTypeTiDB, DBTypeOceanBase:
+		db, err = openMySQLDB(instance, credential)
+		collectSchemas = collectMySQLSchemas
+		collectTables = collectMySQLTables
+	case DBTypePostgreSQL, DBTypeOpenGauss, DBTypeKingbase:
+		db, err = openPostgreSQLDB(instance, credential)
+		collectSchemas = collectPostgreSQLSchemas
+		collectTables = collectPostgreSQLTables
+	case DBTypeSQLServer:
+		db, err = openSQLServerDB(instance, credential, "")
+		collectSchemas = collectSQLServerSchemas
+		collectTables = collectSQLServerTables
+	case DBTypeClickHouse:
+		db, err = openClickHouseDB(instance, credential, "")
+		collectSchemas = collectClickHouseSchemas
+		collectTables = collectClickHouseTables
+	case DBTypeOracle:
+		db, err = openOracleDB(instance, credential)
+		collectSchemas = collectOracleSchemas
+		collectTables = collectOracleTables
+	default:
+		return nil, nil, fmt.Errorf("%s 容量采集将在后续批次接入", DBTypeText(instance.DBType))
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	defer db.Close()
+
+	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := db.PingContext(queryCtx); err != nil {
+		return nil, nil, fmt.Errorf("连接数据库失败: %w", err)
+	}
+	schemas, err := collectSchemas(queryCtx, db)
+	if err != nil {
+		return nil, nil, fmt.Errorf("实时读取 Schema 容量失败: %w", err)
+	}
+	tables, err := collectTables(queryCtx, db)
+	if err != nil {
+		return nil, nil, fmt.Errorf("实时读取表容量失败: %w", err)
+	}
+	now := time.Now()
+	for _, schema := range schemas {
+		if schema != nil {
+			schema.InstanceID = instance.ID
+			schema.LastSyncAt = &now
+		}
+	}
+	for _, table := range tables {
+		if table != nil {
+			table.InstanceID = instance.ID
+			table.LastSyncAt = &now
+		}
+	}
+	return schemas, tables, nil
 }
 
 func (uc *UseCase) CollectCapacitySnapshots(ctx context.Context) (int, error) {

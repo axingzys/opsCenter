@@ -1888,6 +1888,11 @@ VALUES
   ('mfa_enforced', 'false', 'bool', 'security', '是否强制所有用户启用MFA', NOW(), NOW()),
   ('mfa_type', 'totp', 'string', 'security', 'MFA类型(totp)', NOW(), NOW()),
   ('mfa_skip_duration', '2592000', 'int', 'security', 'MFA记住设备时长(秒)', NOW(), NOW()),
+  -- 日志策略配置
+  ('audit_log_enabled', 'true', 'bool', 'audit_log', '操作日志记录开关', NOW(), NOW()),
+  ('audit_log_retention_days', '30', 'int', 'audit_log', '操作日志保留天数', NOW(), NOW()),
+  ('audit_log_auto_cleanup_enabled', 'true', 'bool', 'audit_log', '操作日志自动清理开关', NOW(), NOW()),
+  ('audit_log_excluded_path_prefixes', '["/metrics","/api/v1/public/agents/report","/api/v1/public/agents/echo-ip","/api/v1/public/databases/runner-agents/"]', 'json', 'audit_log', '操作日志排除路径前缀(JSON数组)', NOW(), NOW()),
   -- 消息队列配置
   ('messageQueueHighRiskEnabled', 'false', 'bool', 'messagequeue', 'MQ高危操作总开关', NOW(), NOW()),
   ('messageQueueOperationReasonRequired', 'true', 'bool', 'messagequeue', 'MQ高危操作是否要求填写原因', NOW(), NOW()),

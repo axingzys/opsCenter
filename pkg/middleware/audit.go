@@ -21,9 +21,12 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,9 +37,61 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	auditLogConfigKeyEnabled              = "audit_log_enabled"
+	auditLogConfigKeyRetentionDays        = "audit_log_retention_days"
+	auditLogConfigKeyAutoCleanupEnabled   = "audit_log_auto_cleanup_enabled"
+	auditLogConfigKeyExcludedPathPrefixes = "audit_log_excluded_path_prefixes"
+
+	auditLogConfigCacheTTL = time.Minute
+	auditLogCleanupBatch   = 5000
+)
+
+var hardSkipLogPathPrefixes = []string{
+	"/health",
+	"/swagger",
+	"/uploads",
+	"/assets",
+	"/api/v1/captcha",
+}
+
+var defaultAuditLogExcludedPathPrefixes = []string{
+	"/metrics",
+	"/api/v1/public/agents/report",
+	"/api/v1/public/agents/echo-ip",
+	"/api/v1/public/databases/runner-agents/",
+}
+
+type auditLogRuntimeConfig struct {
+	Enabled              bool
+	RetentionDays        int
+	AutoCleanupEnabled   bool
+	ExcludedPathPrefixes []string
+}
+
+type auditLogConfigCache struct {
+	db *gorm.DB
+
+	mu        sync.RWMutex
+	cfg       auditLogRuntimeConfig
+	expiresAt time.Time
+}
+
+type sysConfigRecord struct {
+	Key   string `gorm:"column:key"`
+	Value string `gorm:"column:value"`
+}
+
 // AuditLogOperation 操作审计日志中间件
 func AuditLogOperation(db *gorm.DB) gin.HandlerFunc {
+	configCache := newAuditLogConfigCache(db)
 	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if shouldSkipLog(path, configCache.Get()) {
+			c.Next()
+			return
+		}
+
 		// 开始时间
 		start := time.Now()
 
@@ -60,12 +115,6 @@ func AuditLogOperation(db *gorm.DB) gin.HandlerFunc {
 
 		// 计算耗时
 		costTime := time.Since(start).Milliseconds()
-
-		// 跳过某些不需要记录的路径
-		path := c.Request.URL.Path
-		if shouldSkipLog(path) {
-			return
-		}
 
 		// 获取用户信息
 		userID, username, realName := getUserInfo(c)
@@ -112,23 +161,227 @@ func AuditLogOperation(db *gorm.DB) gin.HandlerFunc {
 }
 
 // shouldSkipLog 判断是否跳过记录日志
-func shouldSkipLog(path string) bool {
-	// 跳过健康检查、静态资源等
-	skipPaths := []string{
-		"/health",
-		"/swagger",
-		"/uploads",
-		"/assets",
-		"/api/v1/captcha",
+func shouldSkipLog(path string, cfg auditLogRuntimeConfig) bool {
+	if !cfg.Enabled {
+		return true
 	}
-
-	for _, skip := range skipPaths {
+	for _, skip := range hardSkipLogPathPrefixes {
 		if strings.HasPrefix(path, skip) {
 			return true
 		}
 	}
-
+	for _, skip := range cfg.ExcludedPathPrefixes {
+		if strings.HasPrefix(path, skip) {
+			return true
+		}
+	}
 	return false
+}
+
+func newAuditLogConfigCache(db *gorm.DB) *auditLogConfigCache {
+	return &auditLogConfigCache{
+		db:  db,
+		cfg: defaultAuditLogRuntimeConfig(),
+	}
+}
+
+func (c *auditLogConfigCache) Get() auditLogRuntimeConfig {
+	if c == nil || c.db == nil {
+		return defaultAuditLogRuntimeConfig()
+	}
+	now := time.Now()
+	c.mu.RLock()
+	if now.Before(c.expiresAt) {
+		cfg := c.cfg
+		c.mu.RUnlock()
+		return cfg
+	}
+	c.mu.RUnlock()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if now.Before(c.expiresAt) {
+		return c.cfg
+	}
+	cfg := loadAuditLogRuntimeConfig(c.db)
+	c.cfg = cfg
+	c.expiresAt = now.Add(auditLogConfigCacheTTL)
+	return cfg
+}
+
+func defaultAuditLogRuntimeConfig() auditLogRuntimeConfig {
+	return auditLogRuntimeConfig{
+		Enabled:              true,
+		RetentionDays:        30,
+		AutoCleanupEnabled:   true,
+		ExcludedPathPrefixes: append([]string(nil), defaultAuditLogExcludedPathPrefixes...),
+	}
+}
+
+func loadAuditLogRuntimeConfig(db *gorm.DB) auditLogRuntimeConfig {
+	cfg := defaultAuditLogRuntimeConfig()
+	if db == nil {
+		return cfg
+	}
+	keys := []string{
+		auditLogConfigKeyEnabled,
+		auditLogConfigKeyRetentionDays,
+		auditLogConfigKeyAutoCleanupEnabled,
+		auditLogConfigKeyExcludedPathPrefixes,
+	}
+	var rows []sysConfigRecord
+	if err := db.Table("sys_config").
+		Select("`key`, `value`").
+		Where("`key` IN ?", keys).
+		Where("deleted_at IS NULL").
+		Find(&rows).Error; err != nil {
+		appLogger.Warn("读取操作日志策略失败，使用默认策略", zap.Error(err))
+		return cfg
+	}
+
+	values := make(map[string]string, len(rows))
+	for _, row := range rows {
+		values[row.Key] = row.Value
+	}
+	if value, ok := values[auditLogConfigKeyEnabled]; ok {
+		cfg.Enabled = parseAuditLogBool(value, true)
+	}
+	if value, ok := values[auditLogConfigKeyRetentionDays]; ok {
+		cfg.RetentionDays = normalizeAuditLogRetentionDays(parseAuditLogInt(value, 30))
+	}
+	if value, ok := values[auditLogConfigKeyAutoCleanupEnabled]; ok {
+		cfg.AutoCleanupEnabled = parseAuditLogBool(value, true)
+	}
+	if value, ok := values[auditLogConfigKeyExcludedPathPrefixes]; ok {
+		cfg.ExcludedPathPrefixes = parseAuditLogPathPrefixes(value, defaultAuditLogExcludedPathPrefixes)
+	}
+	return cfg
+}
+
+func parseAuditLogBool(value string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func parseAuditLogInt(value string, fallback int) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func normalizeAuditLogRetentionDays(days int) int {
+	if days < 1 {
+		return 30
+	}
+	if days > 3650 {
+		return 3650
+	}
+	return days
+}
+
+func parseAuditLogPathPrefixes(value string, fallback []string) []string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return normalizeAuditLogPathPrefixes(fallback)
+	}
+	var items []string
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		items = strings.FieldsFunc(raw, func(r rune) bool {
+			return r == '\n' || r == '\r' || r == ','
+		})
+	}
+	return normalizeAuditLogPathPrefixes(items)
+}
+
+func normalizeAuditLogPathPrefixes(items []string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		prefix := strings.TrimSpace(item)
+		if prefix == "" {
+			continue
+		}
+		prefix = "/" + strings.TrimLeft(prefix, "/")
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		result = append(result, prefix)
+	}
+	return result
+}
+
+// StartAuditLogCleanup 启动操作日志清理任务。
+func StartAuditLogCleanup(ctx context.Context, db *gorm.DB) {
+	if db == nil {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(2 * time.Minute)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				runAuditLogCleanup(ctx, db)
+				timer.Reset(24 * time.Hour)
+			}
+		}
+	}()
+}
+
+func runAuditLogCleanup(ctx context.Context, db *gorm.DB) {
+	cfg := loadAuditLogRuntimeConfig(db)
+	if !cfg.AutoCleanupEnabled || cfg.RetentionDays < 1 {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+	total := int64(0)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		var ids []uint
+		if err := db.WithContext(ctx).
+			Table("sys_operation_log").
+			Select("id").
+			Where("created_at < ?", cutoff).
+			Order("id ASC").
+			Limit(auditLogCleanupBatch).
+			Pluck("id", &ids).Error; err != nil {
+			appLogger.Warn("查询待清理操作日志失败", zap.Error(err))
+			return
+		}
+		if len(ids) == 0 {
+			if total > 0 {
+				appLogger.Info("操作日志清理完成", zap.Int64("deleted", total), zap.Time("cutoff", cutoff))
+			}
+			return
+		}
+		res := db.WithContext(ctx).Exec("DELETE FROM sys_operation_log WHERE id IN ?", ids)
+		if res.Error != nil {
+			appLogger.Warn("清理操作日志失败", zap.Error(res.Error))
+			return
+		}
+		total += res.RowsAffected
+		if len(ids) < auditLogCleanupBatch {
+			appLogger.Info("操作日志清理完成", zap.Int64("deleted", total), zap.Time("cutoff", cutoff))
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // getUserInfo 从上下文中获取用户信息

@@ -46,6 +46,13 @@ export interface MonitoringConfig {
   currentPrometheusRetention?: string
 }
 
+export interface AuditLogConfig {
+  enabled: boolean
+  retentionDays: number
+  autoCleanupEnabled: boolean
+  excludedPathPrefixes: string[]
+}
+
 export interface DatabaseConfig {
   writeEnabled: boolean
   writeExplainEnabled: boolean
@@ -67,6 +74,14 @@ export const getMonitoringConfig = () => {
 
 export const saveMonitoringConfig = (data: MonitoringConfig) => {
   return request.put('/api/v1/system/config/monitoring', data)
+}
+
+export const getAuditLogConfig = () => {
+  return request.get('/api/v1/system/config/audit-log')
+}
+
+export const saveAuditLogConfig = (data: AuditLogConfig) => {
+  return request.put('/api/v1/system/config/audit-log', data)
 }
 
 export const getDatabaseConfig = () => {

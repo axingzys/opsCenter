@@ -98,6 +98,12 @@ func (uc *ConfigUseCase) GetAllConfig(ctx context.Context) (*AllConfig, error) {
 		Monitoring: MonitoringConfig{
 			PrometheusRetentionDays: getIntValue(configMap, ConfigKeyPrometheusRetentionDays, 15),
 		},
+		AuditLog: AuditLogConfig{
+			Enabled:              getBoolValue(configMap, ConfigKeyAuditLogEnabled, true),
+			RetentionDays:        normalizeAuditLogRetentionDays(getIntValue(configMap, ConfigKeyAuditLogRetentionDays, 30)),
+			AutoCleanupEnabled:   getBoolValue(configMap, ConfigKeyAuditLogAutoCleanupEnabled, true),
+			ExcludedPathPrefixes: parseAuditLogExcludedPathPrefixes(configMap),
+		},
 		Database: DatabaseConfig{
 			WriteEnabled:               getBoolValue(configMap, ConfigKeyDatabaseWriteEnabled, false),
 			WriteExplainEnabled:        getBoolValue(configMap, ConfigKeyDatabaseWriteExplainEnabled, false),
@@ -132,6 +138,26 @@ func (uc *ConfigUseCase) GetMonitoringConfig(ctx context.Context) (*MonitoringCo
 
 	return &MonitoringConfig{
 		PrometheusRetentionDays: getIntValue(configMap, ConfigKeyPrometheusRetentionDays, 15),
+	}, nil
+}
+
+// GetAuditLogConfig 获取操作日志策略配置
+func (uc *ConfigUseCase) GetAuditLogConfig(ctx context.Context) (*AuditLogConfig, error) {
+	configs, err := uc.configRepo.GetByGroup(ctx, ConfigGroupAuditLog)
+	if err != nil {
+		return nil, err
+	}
+
+	configMap := make(map[string]string)
+	for _, c := range configs {
+		configMap[c.Key] = c.Value
+	}
+
+	return &AuditLogConfig{
+		Enabled:              getBoolValue(configMap, ConfigKeyAuditLogEnabled, true),
+		RetentionDays:        normalizeAuditLogRetentionDays(getIntValue(configMap, ConfigKeyAuditLogRetentionDays, 30)),
+		AutoCleanupEnabled:   getBoolValue(configMap, ConfigKeyAuditLogAutoCleanupEnabled, true),
+		ExcludedPathPrefixes: parseAuditLogExcludedPathPrefixes(configMap),
 	}, nil
 }
 
@@ -243,6 +269,22 @@ func (uc *ConfigUseCase) SaveMonitoringConfig(ctx context.Context, config *Monit
 	return uc.configRepo.BatchSaveOrUpdate(ctx, configs)
 }
 
+// SaveAuditLogConfig 保存操作日志策略配置
+func (uc *ConfigUseCase) SaveAuditLogConfig(ctx context.Context, config *AuditLogConfig) error {
+	prefixes := normalizeAuditLogExcludedPathPrefixes(config.ExcludedPathPrefixes)
+	data, err := json.Marshal(prefixes)
+	if err != nil {
+		return err
+	}
+	configs := map[string]string{
+		ConfigKeyAuditLogEnabled:              strconv.FormatBool(config.Enabled),
+		ConfigKeyAuditLogRetentionDays:        strconv.Itoa(normalizeAuditLogRetentionDays(config.RetentionDays)),
+		ConfigKeyAuditLogAutoCleanupEnabled:   strconv.FormatBool(config.AutoCleanupEnabled),
+		ConfigKeyAuditLogExcludedPathPrefixes: string(data),
+	}
+	return uc.configRepo.BatchSaveOrUpdate(ctx, configs)
+}
+
 // SaveDatabaseConfig 保存数据库配置
 func (uc *ConfigUseCase) SaveDatabaseConfig(ctx context.Context, config *DatabaseConfig) error {
 	configs := map[string]string{
@@ -269,6 +311,59 @@ func normalizeDatabaseInstancePermissionMode(mode string) string {
 	default:
 		return "compat"
 	}
+}
+
+func normalizeAuditLogRetentionDays(days int) int {
+	if days < 1 {
+		return 30
+	}
+	if days > 3650 {
+		return 3650
+	}
+	return days
+}
+
+func parseAuditLogExcludedPathPrefixes(configMap map[string]string) []string {
+	value, ok := configMap[ConfigKeyAuditLogExcludedPathPrefixes]
+	if !ok || strings.TrimSpace(value) == "" {
+		value = defaultAuditLogExcludedPathPrefixesJSON
+	}
+	var prefixes []string
+	if err := json.Unmarshal([]byte(value), &prefixes); err != nil {
+		return normalizeAuditLogExcludedPathPrefixes(defaultAuditLogExcludedPathPrefixes())
+	}
+	return normalizeAuditLogExcludedPathPrefixes(prefixes)
+}
+
+func defaultAuditLogExcludedPathPrefixes() []string {
+	var prefixes []string
+	if err := json.Unmarshal([]byte(defaultAuditLogExcludedPathPrefixesJSON), &prefixes); err != nil {
+		return []string{
+			"/metrics",
+			"/api/v1/public/agents/report",
+			"/api/v1/public/agents/echo-ip",
+			"/api/v1/public/databases/runner-agents/",
+		}
+	}
+	return prefixes
+}
+
+func normalizeAuditLogExcludedPathPrefixes(prefixes []string) []string {
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		item := strings.TrimSpace(prefix)
+		if item == "" {
+			continue
+		}
+		item = "/" + strings.TrimLeft(item, "/")
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	return result
 }
 
 // GetConfigByKey 根据Key获取配置值

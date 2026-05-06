@@ -1298,7 +1298,12 @@
                     <template v-else>
                       <el-table-column label="Schema" prop="schemaName" min-width="140" show-overflow-tooltip />
                       <el-table-column label="表" prop="tableName" min-width="180" show-overflow-tooltip />
-                      <el-table-column label="行数" width="120" align="right">
+                      <el-table-column label="估算行数" width="120" align="right">
+                        <template #header>
+                          <el-tooltip content="MySQL/InnoDB 行数来自 information_schema.TABLES.TABLE_ROWS，为估算值。" placement="top">
+                            <span>估算行数</span>
+                          </el-tooltip>
+                        </template>
                         <template #default="{ row }">{{ formatNumber(row.rowCount) }}</template>
                       </el-table-column>
                       <el-table-column label="数据容量" width="130" align="right">
@@ -12424,7 +12429,7 @@ const handleCollectCapacity = async () => {
     const res = await collectDatabaseCapacitySnapshot(instanceId) as DatabaseCapacityCollectResult
     ElMessage.success(`${res.instanceName || instanceName} ${res.message || `容量快照已采集：${res.snapshotsCount || 0} 条`}`)
     if (diagnosisInstanceId.value === instanceId) {
-      await loadCapacityTrend(instanceId)
+      await loadDiagnosisData()
     }
   } finally {
     capacityCollecting.value = false

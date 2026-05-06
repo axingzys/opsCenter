@@ -66,6 +66,7 @@ type HTTPServer struct {
 	database     *databaseserver.HTTPServer
 	messageQueue *messagequeueserver.HTTPServer
 	asset        *assetserver.HTTPServer
+	auditCancel  context.CancelFunc
 }
 
 // NewHTTPServer 创建HTTP服务器
@@ -463,6 +464,11 @@ func (s *HTTPServer) disablePlugin(c *gin.Context) {
 
 // Start 启动服务器
 func (s *HTTPServer) Start() error {
+	if s.auditCancel == nil {
+		auditCtx, cancel := context.WithCancel(context.Background())
+		s.auditCancel = cancel
+		middleware.StartAuditLogCleanup(auditCtx, s.db)
+	}
 	if s.database != nil {
 		s.database.StartBackground(context.Background())
 	}
@@ -494,6 +500,10 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 		if err := s.asset.StopBackground(ctx); err != nil {
 			return fmt.Errorf("资产后台调度器停止失败: %w", err)
 		}
+	}
+	if s.auditCancel != nil {
+		s.auditCancel()
+		s.auditCancel = nil
 	}
 	if err := s.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("HTTP服务器停止失败: %w", err)
